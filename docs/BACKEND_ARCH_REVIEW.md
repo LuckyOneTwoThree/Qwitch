@@ -6,7 +6,7 @@
 
 ## 一、审查范围与总体结论
 
-* **审查范围**：[src-tauri/src/](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src) 全部模块（`adapter/`、`commands/`、`domain/`、`platform/`、`scheduler/`、`storage/`、`lib.rs`）及 [tauri.conf.json](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/tauri.conf.json)。
+* **审查范围**：[src-tauri/src/](../src-tauri/src) 全部模块（`adapter/`、`commands/`、`domain/`、`platform/`、`scheduler/`、`storage/`、`lib.rs`）及 [tauri.conf.json](../src-tauri/tauri.conf.json)。
 * **现有安全与工程基线优点**：
   * 核心层分层清晰（`PlatformHost` / `ToolAdapter` / `AntiRiskScheduler` / `QwitchDatabase`）；
   * SQLite 读写主路径采用参数化绑定（无字符串拼接注入），业务凭据经 **AES-256-GCM**（随机 12 字节 Nonce）加密落盘；
@@ -21,9 +21,9 @@
 经逐行源码核对，原《代码与架构审查》中的 **P1-1 ~ P1-4、P2-5 ~ P2-10 及 P3** 全部核验属实，其中针对 **P2-10（SQLite 明文范围）** 作如下精确补充与细化：
 
 1. **P2-10 关于 SQLite 账号信息明文范围的细化**：
-   * 核验 [storage/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/mod.rs#L52-L90) 与 [crypto.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/crypto.rs#L57-L86) 可知，`accounts` 表中的 `uid_masked`（如 `u_8f****1c`）与 `email_masked`（如 `al***@example.com`）已做前置脱敏，完整明文 UID 与邮箱仅存于 AES-256-GCM 加密的 `encrypted_credential` BLOB 中；此举是为避免每次列表渲染全表解密。
+   * 核验 [storage/mod.rs](../src-tauri/src/storage/mod.rs#L52-L90) 与 [crypto.rs](../src-tauri/src/storage/crypto.rs#L57-L86) 可知，`accounts` 表中的 `uid_masked`（如 `u_8f****1c`）与 `email_masked`（如 `al***@example.com`）已做前置脱敏，完整明文 UID 与邮箱仅存于 AES-256-GCM 加密的 `encrypted_credential` BLOB 中；此举是为避免每次列表渲染全表解密。
    * **仍需加固的点**：
-     * [tauri.conf.json](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/tauri.conf.json#L38) 将 `"csp"` 设为 `null`，削弱了对 XSS / 脚本注入的纵深防御；
+     * [tauri.conf.json](../src-tauri/tauri.conf.json#L38) 将 `"csp"` 设为 `null`，削弱了对 XSS / 脚本注入的纵深防御；
      * `uid_hash` 目前采用无盐 `SHA-256(tool_id + ":" + uid)`，若改为由主密钥派生的 `HMAC-SHA256` 可消除离线彩虹表撞库风险；
      * 账号备注 `label` 与脱敏操作日志 `action_logs` 仍为明文，如追求极高本地隐私需评估 SQLCipher 或字段级加密。
 
@@ -35,23 +35,23 @@
 
 ### B-1（P1）｜`custom_client_paths` 配置链路在适配器与进程管理层断裂
 * **源码依据**：
-  * [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L27-L44) 的 `resolve_client_executable` 读取了 `settings.custom_client_paths`，但仅作用于 `detect_client_status` 与 `switch_desktop_account` 的重启步骤；
-  * [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L1003-L1011) 在 `inspect_quota` 和 `claim_daily` 中直接实例化了无状态的 `NativePlatformHost`，通过 `host.detect_client_executable("workbuddy")` 寻找 `ELECTRON_RUN_AS_NODE` 解密运行时，**完全绕过了 `settings.custom_client_paths`**；
-  * [platform/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/platform/mod.rs#L290-L407) 的 `is_client_running` 与 `terminate_client_gracefully` 仅依赖硬编码 `client_spec` 进程名。
+  * [commands/mod.rs](../src-tauri/src/commands/mod.rs#L27-L44) 的 `resolve_client_executable` 读取了 `settings.custom_client_paths`，但仅作用于 `detect_client_status` 与 `switch_desktop_account` 的重启步骤；
+  * [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L1003-L1011) 在 `inspect_quota` 和 `claim_daily` 中直接实例化了无状态的 `NativePlatformHost`，通过 `host.detect_client_executable("workbuddy")` 寻找 `ELECTRON_RUN_AS_NODE` 解密运行时，**完全绕过了 `settings.custom_client_paths`**；
+  * [platform/mod.rs](../src-tauri/src/platform/mod.rs#L290-L407) 的 `is_client_running` 与 `terminate_client_gracefully` 仅依赖硬编码 `client_spec` 进程名。
 * **后果**：用户将 WorkBuddy 安装在自定义目录并在设置页配置覆盖路径后，查额与签到解密加密信封仍报错 `CLIENT_NOT_FOUND`；若客户修改二进制名称或独立目录运行，运行态检测与退出逻辑也无法适配。
 
 ### B-2（P1）｜批量刷新额度未纳入 `AntiRiskScheduler` 防风控串行队列
-* **源码依据**：[commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L306-L360) 仅暴露单账号 `refresh_account_quota`，后端无 `refresh_quota_batch` 命令；前端 [QwitchContext.tsx](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src/context/QwitchContext.tsx#L426-L441) 只能以 `0ms` 间隔循环连续发出请求，且不经过 `AntiRiskScheduler::queue_lock`。
-* **后果**：与 [架构文档](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/docs/ARCHITECTURE.md) 倡导的「单队列串行 + 错峰 Jitter + 防风控」背道而驰，多账号点击「刷新全部额度」时并发/连发易触发 `429 RATE_LIMITED` 或 `RISK_TRIGGERED`。
+* **源码依据**：[commands/mod.rs](../src-tauri/src/commands/mod.rs#L306-L360) 仅暴露单账号 `refresh_account_quota`，后端无 `refresh_quota_batch` 命令；前端 [QwitchContext.tsx](../src/context/QwitchContext.tsx#L426-L441) 只能以 `0ms` 间隔循环连续发出请求，且不经过 `AntiRiskScheduler::queue_lock`。
+* **后果**：与 [架构文档](../docs/ARCHITECTURE.md) 倡导的「单队列串行 + 错峰 Jitter + 防风控」背道而驰，多账号点击「刷新全部额度」时并发/连发易触发 `429 RATE_LIMITED` 或 `RISK_TRIGGERED`。
 
 ### B-3（P1）｜`delete_account` 与 `update_account_status` 缺少跨窗口事件广播与日志审计
-* **源码依据**：[commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L453-L471) 中，`delete_account` 和 `update_account_status` 直接操作数据库后即返回，**既未调用 `app.emit("qwitch://account-updated", ...)`，也未写入 `action_logs`**。
+* **源码依据**：[commands/mod.rs](../src-tauri/src/commands/mod.rs#L453-L471) 中，`delete_account` 和 `update_account_status` 直接操作数据库后即返回，**既未调用 `app.emit("qwitch://account-updated", ...)`，也未写入 `action_logs`**。
 * **后果**：在 `main` + `tray` 双窗口架构下，主窗口删除账号或变更状态后，托盘窗口依然保留陈旧账号数据，点击切换会直接报错 `Record not found`，且操作审计不完整。
 
 ### B-4（P2）｜SQLite 未开启 `WAL` / `busy_timeout`，且同步 `std::process::Command` 阻塞异步运行时
 * **源码依据**：
-  * [storage/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/mod.rs#L46-L50) 初始化 SQLite 仅执行了 `PRAGMA foreign_keys = ON;`，未开启 `PRAGMA journal_mode = WAL;`、`PRAGMA synchronous = NORMAL;` 与 `PRAGMA busy_timeout = 5000;`（但 [platform/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/platform/mod.rs#L138-L143) 的旧版迁移代码已考虑 `-wal`/`-shm`）；
-  * [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L220-L239)（Node 解密子进程）、[qoder.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/qoder.rs#L104-L107)（Windows PowerShell DPAPI 解密）及 [platform/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/platform/mod.rs#L298-L320)（`pgrep`/`tasklist`/`osascript`/`taskkill`）均在 `async fn` 中同步阻塞调用 `std::process::Command`，未移交 `tokio::task::spawn_blocking` 或使用 `tokio::process::Command`。
+  * [storage/mod.rs](../src-tauri/src/storage/mod.rs#L46-L50) 初始化 SQLite 仅执行了 `PRAGMA foreign_keys = ON;`，未开启 `PRAGMA journal_mode = WAL;`、`PRAGMA synchronous = NORMAL;` 与 `PRAGMA busy_timeout = 5000;`（但 [platform/mod.rs](../src-tauri/src/platform/mod.rs#L138-L143) 的旧版迁移代码已考虑 `-wal`/`-shm`）；
+  * [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L220-L239)（Node 解密子进程）、[qoder.rs](../src-tauri/src/adapter/qoder.rs#L104-L107)（Windows PowerShell DPAPI 解密）及 [platform/mod.rs](../src-tauri/src/platform/mod.rs#L298-L320)（`pgrep`/`tasklist`/`osascript`/`taskkill`）均在 `async fn` 中同步阻塞调用 `std::process::Command`，未移交 `tokio::task::spawn_blocking` 或使用 `tokio::process::Command`。
 
 ---
 
@@ -61,32 +61,32 @@
 
 | 编号 | 问题 | 核心源码定位 |
 |---|---|---|
-| **BE-P1-1** | WorkBuddy 凭据中的 `auth.endpoint` / `extra.endpoint` 未校验 HTTPS 与官方域名白名单，存在 Bearer Token 任意地址外泄（SSRF / 凭据窃取）风险 | [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L519-L525), [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L569-L595) |
-| **BE-P1-2** | OS Keychain 中的 256-bit 主密钥同时被明文镜像写入同目录 `master.key`（Windows 无 ACL 限制），削弱离线加密库隔离 | [platform/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/platform/mod.rs#L427-L518) |
-| **BE-P1-3** | Trae OAuth WebView 回调仅检查 `host == qwitch.local`，缺少一次性 `state/nonce` 绑定与路径校验，且将完整 Token 放入 URL Query | [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L793), [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L1091-L1139) |
-| **BE-P1-4** | 签到状态解析「失败开放（Fail-Open）」：字段缺失默认 `Available` 且 `scheduler` 放行 `Unknown`；领取响应解析失败时默认成功并虚报 100 积分 | [trae.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/trae.rs#L523-L545), [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L668-L675), [scheduler/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/scheduler/mod.rs#L155-L189), [qoder.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/qoder.rs#L779-L796) |
-| **B-1** | `custom_client_paths` 未贯穿至 `WorkBuddyAdapter` 运行时解密及进程检测/退出逻辑 | [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L1003-L1011), [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L27-L44) |
-| **B-2** | 批量查额缺少后端串行 Jitter 调度入口，前端 0ms 连发绕过防风控保护 | [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L306-L360), [scheduler/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/scheduler/mod.rs) |
-| **B-3** | `delete_account` 与 `update_account_status` 未发送 `qwitch://account-updated` 事件且未写入审计日志 | [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L453-L471) |
+| **BE-P1-1** | WorkBuddy 凭据中的 `auth.endpoint` / `extra.endpoint` 未校验 HTTPS 与官方域名白名单，存在 Bearer Token 任意地址外泄（SSRF / 凭据窃取）风险 | [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L519-L525), [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L569-L595) |
+| **BE-P1-2** | OS Keychain 中的 256-bit 主密钥同时被明文镜像写入同目录 `master.key`（Windows 无 ACL 限制），削弱离线加密库隔离 | [platform/mod.rs](../src-tauri/src/platform/mod.rs#L427-L518) |
+| **BE-P1-3** | Trae OAuth WebView 回调仅检查 `host == qwitch.local`，缺少一次性 `state/nonce` 绑定与路径校验，且将完整 Token 放入 URL Query | [commands/mod.rs](../src-tauri/src/commands/mod.rs#L793), [commands/mod.rs](../src-tauri/src/commands/mod.rs#L1091-L1139) |
+| **BE-P1-4** | 签到状态解析「失败开放（Fail-Open）」：字段缺失默认 `Available` 且 `scheduler` 放行 `Unknown`；领取响应解析失败时默认成功并虚报 100 积分 | [trae.rs](../src-tauri/src/adapter/trae.rs#L523-L545), [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L668-L675), [scheduler/mod.rs](../src-tauri/src/scheduler/mod.rs#L155-L189), [qoder.rs](../src-tauri/src/adapter/qoder.rs#L779-L796) |
+| **B-1** | `custom_client_paths` 未贯穿至 `WorkBuddyAdapter` 运行时解密及进程检测/退出逻辑 | [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L1003-L1011), [commands/mod.rs](../src-tauri/src/commands/mod.rs#L27-L44) |
+| **B-2** | 批量查额缺少后端串行 Jitter 调度入口，前端 0ms 连发绕过防风控保护 | [commands/mod.rs](../src-tauri/src/commands/mod.rs#L306-L360), [scheduler/mod.rs](../src-tauri/src/scheduler/mod.rs) |
+| **B-3** | `delete_account` 与 `update_account_status` 未发送 `qwitch://account-updated` 事件且未写入审计日志 | [commands/mod.rs](../src-tauri/src/commands/mod.rs#L453-L471) |
 
 ### 4.2 P2 — 可靠性、性能与隔离加固（共 7 项）
 
 | 编号 | 问题 | 核心源码定位 |
 |---|---|---|
-| **BE-P2-5** | 切号在客户端启动前提交活跃状态且忽略未找到/启动失败；Trae 写 `state.vscdb` 吞掉 SQL 错误导致状态不一致 | [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L416-L433), [trae.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/trae.rs#L359-L386) |
-| **BE-P2-6** | OAuth 轮询仅判断窗口 label `oauth-login` 是否存在，重开授权窗口时旧轮询继续执行并可能串绑或误关新窗口 | [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs#L1010-L1221) |
-| **BE-P2-7** | 批量同步事件放大与 `list_accounts` N+1 SQL 查询；WorkBuddy/Qoder 轮询每轮新建 `reqwest::Client` | [storage/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/mod.rs#L300-L333), [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L355), [qoder.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/qoder.rs#L389) |
-| **BE-P2-8** | `quota_snapshots` 只插不删无清理/上限策略，长期运行数据库持续膨胀 | [storage/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/mod.rs#L428-L451) |
-| **BE-P2-9** | 外部适配器自动扫描无信任启用确认、无 `timeout_ms` 上限、无 stdout/stderr 读取大小限制 | [external.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/external.rs#L107-L182), [external.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/external.rs#L299-L334) |
-| **BE-P2-10** | `tauri.conf.json` 将 `csp` 设为 `null`；`uid_hash` 未加密钥盐；非凭据表字段为明文 | [tauri.conf.json](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/tauri.conf.json#L38), [crypto.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/crypto.rs#L57-L63) |
-| **B-4** | SQLite 缺 `WAL` + `busy_timeout`；异步上下文中同步调用 `std::process::Command` 阻塞 Tokio 线程 | [storage/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/mod.rs#L48), [workbuddy.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/workbuddy.rs#L220), [qoder.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/adapter/qoder.rs#L104) |
+| **BE-P2-5** | 切号在客户端启动前提交活跃状态且忽略未找到/启动失败；Trae 写 `state.vscdb` 吞掉 SQL 错误导致状态不一致 | [commands/mod.rs](../src-tauri/src/commands/mod.rs#L416-L433), [trae.rs](../src-tauri/src/adapter/trae.rs#L359-L386) |
+| **BE-P2-6** | OAuth 轮询仅判断窗口 label `oauth-login` 是否存在，重开授权窗口时旧轮询继续执行并可能串绑或误关新窗口 | [commands/mod.rs](../src-tauri/src/commands/mod.rs#L1010-L1221) |
+| **BE-P2-7** | 批量同步事件放大与 `list_accounts` N+1 SQL 查询；WorkBuddy/Qoder 轮询每轮新建 `reqwest::Client` | [storage/mod.rs](../src-tauri/src/storage/mod.rs#L300-L333), [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L355), [qoder.rs](../src-tauri/src/adapter/qoder.rs#L389) |
+| **BE-P2-8** | `quota_snapshots` 只插不删无清理/上限策略，长期运行数据库持续膨胀 | [storage/mod.rs](../src-tauri/src/storage/mod.rs#L428-L451) |
+| **BE-P2-9** | 外部适配器自动扫描无信任启用确认、无 `timeout_ms` 上限、无 stdout/stderr 读取大小限制 | [external.rs](../src-tauri/src/adapter/external.rs#L107-L182), [external.rs](../src-tauri/src/adapter/external.rs#L299-L334) |
+| **BE-P2-10** | `tauri.conf.json` 将 `csp` 设为 `null`；`uid_hash` 未加密钥盐；非凭据表字段为明文 | [tauri.conf.json](../src-tauri/tauri.conf.json#L38), [crypto.rs](../src-tauri/src/storage/crypto.rs#L57-L63) |
+| **B-4** | SQLite 缺 `WAL` + `busy_timeout`；异步上下文中同步调用 `std::process::Command` 阻塞 Tokio 线程 | [storage/mod.rs](../src-tauri/src/storage/mod.rs#L48), [workbuddy.rs](../src-tauri/src/adapter/workbuddy.rs#L220), [qoder.rs](../src-tauri/src/adapter/qoder.rs#L104) |
 
 ### 4.3 P3 — 可维护性与测试覆盖（共 2 项）
 
 | 编号 | 问题 | 核心源码定位 |
 |---|---|---|
-| **BE-P3-1** | 关键业务测试缺失：目前仅 5 个 Rust 单测（集中在 domain/crypto/storage），适配器解析、调度器熔断、切号回滚与 OAuth 取消均零测试 | [domain/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/domain/mod.rs#L366), [crypto.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/crypto.rs#L88), [storage/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/storage/mod.rs#L828) |
-| **BE-P3-2** | [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs)（1225 行）职责过重，耦合了账户/设置/日志/切号/OAuth 注入脚本；三个适配器存在重复的 HTTP 状态映射与 UID Hash 逻辑 | [commands/mod.rs](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/src-tauri/src/commands/mod.rs), `adapter/*.rs` |
+| **BE-P3-1** | 关键业务测试缺失：目前仅 5 个 Rust 单测（集中在 domain/crypto/storage），适配器解析、调度器熔断、切号回滚与 OAuth 取消均零测试 | [domain/mod.rs](../src-tauri/src/domain/mod.rs#L366), [crypto.rs](../src-tauri/src/storage/crypto.rs#L88), [storage/mod.rs](../src-tauri/src/storage/mod.rs#L828) |
+| **BE-P3-2** | [commands/mod.rs](../src-tauri/src/commands/mod.rs)（1225 行）职责过重，耦合了账户/设置/日志/切号/OAuth 注入脚本；三个适配器存在重复的 HTTP 状态映射与 UID Hash 逻辑 | [commands/mod.rs](../src-tauri/src/commands/mod.rs), `adapter/*.rs` |
 
 ---
 

@@ -119,7 +119,9 @@ pub struct ExternalAdapterInfo {
 }
 
 #[tauri::command]
-pub fn list_external_adapters(state: State<'_, AppState>) -> Result<Vec<ExternalAdapterInfo>, String> {
+pub fn list_external_adapters(
+    state: State<'_, AppState>,
+) -> Result<Vec<ExternalAdapterInfo>, String> {
     let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
     let settings = load_app_settings(&state.db);
     let mut list: Vec<ExternalAdapterInfo> =
@@ -180,9 +182,10 @@ pub fn save_app_settings(
         .db
         .set_setting(SETTINGS_KEY, &json)
         .map_err(|e| e.to_string())?;
-    let _ = state
-        .db
-        .apply_log_retention(settings.log_archive_after_days, settings.log_max_active_count);
+    let _ = state.db.apply_log_retention(
+        settings.log_archive_after_days,
+        settings.log_max_active_count,
+    );
     apply_runtime_app_policy(&app, &settings);
     let _ = app.emit("qwitch://settings-updated", &settings);
     let _ = app.emit("qwitch://logs-updated", ());
@@ -231,8 +234,7 @@ fn is_valid_oauth_uid(uid: &str) -> bool {
     if s.len() < 2 || s.len() > 128 {
         return false;
     }
-    if s
-        .chars()
+    if s.chars()
         .any(|c| c.is_whitespace() || matches!(c, ',' | '[' | ']' | '{' | '}' | '"' | '\''))
     {
         return false;
@@ -314,12 +316,15 @@ pub async fn import_local_account(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    record_import_quota_check(&state.db, &adapter, &summary, &cred_for_quota).await;
+    record_import_quota_check(&state.db, adapter, &summary, &cred_for_quota).await;
 
     let _ = state.db.set_active_on_client(&tool_id, &summary.id);
 
     let log_msg = if target_id.is_some() {
-        format!("补充/更新本机快照 {} ({})", summary.label, summary.uid_masked)
+        format!(
+            "补充/更新本机快照 {} ({})",
+            summary.label, summary.uid_masked
+        )
     } else {
         format!("从本机导入 {} ({})", summary.label, summary.uid_masked)
     };
@@ -378,12 +383,15 @@ pub async fn add_account_by_token(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    record_import_quota_check(&state.db, &adapter, &summary, &cred_for_quota).await;
+    record_import_quota_check(&state.db, adapter, &summary, &cred_for_quota).await;
 
     let log_msg = if target_id.is_some() {
         format!("补充/更新凭据 {} ({})", summary.label, summary.uid_masked)
     } else {
-        format!("通过手动凭据添加 {} ({})", summary.label, summary.uid_masked)
+        format!(
+            "通过手动凭据添加 {} ({})",
+            summary.label, summary.uid_masked
+        )
     };
     let _ = state.db.append_action_log(
         Some(&summary.id),
@@ -422,14 +430,20 @@ pub async fn refresh_account_quota(
 
     match adapter.inspect_quota(&cred).await {
         Ok(snapshot) => {
-            let _ = state.db.save_quota_snapshot(&summary.id, &snapshot);
+            state
+                .db
+                .save_quota_snapshot(&summary.id, &snapshot)
+                .map_err(|e| format!("额度已查询但落盘失败: {e}"))?;
             let _ = state.db.append_action_log(
                 Some(&summary.id),
                 &summary.tool_id,
                 "query",
                 "success",
                 None,
-                &format!("已刷新 {} ({}) 的最新额度", summary.label, summary.uid_masked),
+                &format!(
+                    "已刷新 {} ({}) 的最新额度",
+                    summary.label, summary.uid_masked
+                ),
             );
             let _ = app.emit("qwitch://account-updated", &summary.id);
             let _ = app.emit("qwitch://logs-updated", ());
@@ -593,7 +607,10 @@ pub async fn switch_desktop_account(
         "switch",
         "success",
         None,
-        &format!("已将本机客户端切换至 {} ({})", summary.label, summary.uid_masked),
+        &format!(
+            "已将本机客户端切换至 {} ({})",
+            summary.label, summary.uid_masked
+        ),
     );
     let _ = app.emit(
         "qwitch://switch-progress",
@@ -694,7 +711,10 @@ pub fn rename_account(
         "import",
         "success",
         None,
-        &format!("已将账号 ({}) 备注重命名为 {}", summary.uid_masked, summary.label),
+        &format!(
+            "已将账号 ({}) 备注重命名为 {}",
+            summary.uid_masked, summary.label
+        ),
     );
     let _ = app.emit("qwitch://account-updated", &summary.id);
     let _ = app.emit("qwitch://logs-updated", ());
@@ -728,14 +748,7 @@ pub async fn refresh_quota_batch(
     tokio::spawn(async move {
         let _guard = guard;
         let _ = scheduler
-            .run_quota_refresh_batch(
-                &app,
-                &db,
-                &master_key,
-                &adapters,
-                account_ids,
-                jitter,
-            )
+            .run_quota_refresh_batch(&app, &db, &master_key, &adapters, account_ids, jitter)
             .await;
     });
 
@@ -768,14 +781,7 @@ pub async fn claim_daily_batch(
     tokio::spawn(async move {
         let _guard = guard;
         let _ = scheduler
-            .run_daily_claim_batch(
-                &app,
-                &db,
-                &master_key,
-                &adapters,
-                account_ids,
-                jitter,
-            )
+            .run_daily_claim_batch(&app, &db, &master_key, &adapters, account_ids, jitter)
             .await;
     });
 
@@ -862,10 +868,7 @@ pub fn export_action_logs(
         return Err("当前视图没有可导出的操作日志".into());
     }
 
-    let data_dir = state
-        .host
-        .qwitch_data_dir()
-        .map_err(|e| e.to_string())?;
+    let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
     let archive_dir = data_dir.join("archives");
     std::fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
 
@@ -1209,6 +1212,7 @@ const POPUP_REDIRECT_JS: &str = r#"
 })();
 "#;
 
+#[allow(clippy::too_many_arguments)]
 async fn persist_oauth_envelope(
     app: &AppHandle,
     db: &Arc<QwitchDatabase>,
@@ -1236,9 +1240,7 @@ async fn persist_oauth_envelope(
 
     let mut matched_local = false;
     let envelope_to_save = match adapter.import_from_local(host.as_ref()).await {
-        Ok(local_env)
-            if !local_env.uid.trim().is_empty() && local_env.uid == envelope.uid =>
-        {
+        Ok(local_env) if !local_env.uid.trim().is_empty() && local_env.uid == envelope.uid => {
             matched_local = true;
             local_env.merge_from(&envelope)
         }
@@ -1319,7 +1321,9 @@ pub async fn start_webview_oauth(
 
     enum OAuthMode {
         TraeCapture,
-        WorkBuddyPoll { state_token: String },
+        WorkBuddyPoll {
+            state_token: String,
+        },
         QoderPkcePoll {
             nonce: String,
             verifier: String,
@@ -1328,7 +1332,10 @@ pub async fn start_webview_oauth(
     }
 
     let (login_url, mode) = match tool_id.as_str() {
-        "trae_cn" => ("https://www.trae.cn/login".to_string(), OAuthMode::TraeCapture),
+        "trae_cn" => (
+            "https://www.trae.cn/login".to_string(),
+            OAuthMode::TraeCapture,
+        ),
         "workbuddy" => {
             let (state_token, auth_url) = WorkBuddyAdapter::create_oauth_session().await?;
             (auth_url, OAuthMode::WorkBuddyPoll { state_token })
@@ -1360,7 +1367,9 @@ pub async fn start_webview_oauth(
         _ => vec![],
     };
 
-    let parsed_url: tauri::Url = login_url.parse().map_err(|e| format!("URL 解析失败: {e}"))?;
+    let parsed_url: tauri::Url = login_url
+        .parse()
+        .map_err(|e| format!("URL 解析失败: {e}"))?;
     let adapter = state
         .adapters
         .get(&tool_id)
@@ -1473,10 +1482,8 @@ pub async fn start_webview_oauth(
                                 .await;
                             }
                             Err(e) => {
-                                let _ = app_clone.emit(
-                                    "qwitch://oauth-error",
-                                    format!("解析授权凭据失败: {e}"),
-                                );
+                                let _ = app_clone
+                                    .emit("qwitch://oauth-error", format!("解析授权凭据失败: {e}"));
                                 if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
                                     if let Some(win) = app_clone.get_webview_window("oauth-login") {
                                         let _ = win.close();
@@ -1565,7 +1572,8 @@ pub async fn start_webview_oauth(
                     {
                         break;
                     }
-                    match QoderAdapter::poll_pkce_device_token(&nonce, &verifier, &machine_id).await {
+                    match QoderAdapter::poll_pkce_device_token(&nonce, &verifier, &machine_id).await
+                    {
                         Ok(Some(envelope)) => {
                             persist_oauth_envelope(
                                 &app_handle,
@@ -1629,6 +1637,7 @@ mod tests {
         assert!(SwitchFlagGuard::try_acquire(Arc::clone(&flag)).is_err());
         drop(first);
         assert!(!flag.load(Ordering::SeqCst), "持有者结束后释放互斥");
-        let _second = SwitchFlagGuard::try_acquire(Arc::clone(&flag)).expect("second acquires after release");
+        let _second =
+            SwitchFlagGuard::try_acquire(Arc::clone(&flag)).expect("second acquires after release");
     }
 }

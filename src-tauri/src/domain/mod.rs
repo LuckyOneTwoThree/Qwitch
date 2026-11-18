@@ -259,7 +259,8 @@ impl CredentialEnvelope {
         let Ok(bytes) = BASE64.decode(b64) else {
             return false;
         };
-        let Ok(entries) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
+        let Ok(entries) =
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
         else {
             return false;
         };

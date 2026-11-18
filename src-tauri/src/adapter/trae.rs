@@ -55,10 +55,7 @@ impl TraeAdapter {
                 version: "0.1.0".to_string(),
                 is_builtin: true,
                 capabilities: AdapterCapabilities {
-                    auth_methods: vec![
-                        AuthMethod::LocalImport,
-                        AuthMethod::WebviewOauth,
-                    ],
+                    auth_methods: vec![AuthMethod::LocalImport, AuthMethod::WebviewOauth],
                     supports_quota_query: true,
                     supports_daily_claim: is_cn,
                     supports_client_switch: true,
@@ -94,16 +91,16 @@ impl TraeAdapter {
 
     fn tc_mask_a(is_private: bool) -> [u8; 64] {
         const OPE: [u8; 64] = [
-            82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251, 124, 227,
-            57, 130, 155, 47, 255, 135, 52, 142, 67, 68, 196, 222, 233, 203, 84, 123, 148, 50,
-            166, 194, 35, 61, 238, 76, 149, 11, 66, 250, 195, 78, 8, 46, 161, 102, 40, 217, 36,
-            178, 118, 91, 162, 73, 109, 139, 209, 37,
+            82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251, 124, 227, 57,
+            130, 155, 47, 255, 135, 52, 142, 67, 68, 196, 222, 233, 203, 84, 123, 148, 50, 166,
+            194, 35, 61, 238, 76, 149, 11, 66, 250, 195, 78, 8, 46, 161, 102, 40, 217, 36, 178,
+            118, 91, 162, 73, 109, 139, 209, 37,
         ];
         const APE: [u8; 64] = [
-            31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 95, 96, 81, 127,
-            169, 25, 181, 74, 13, 45, 229, 122, 159, 147, 201, 156, 239, 160, 224, 59, 77, 174,
-            42, 245, 176, 200, 235, 187, 60, 131, 83, 153, 97, 23, 43, 4, 126, 186, 119, 214,
-            38, 225, 105, 20, 99, 85, 33, 12, 125,
+            31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 95, 96, 81, 127, 169,
+            25, 181, 74, 13, 45, 229, 122, 159, 147, 201, 156, 239, 160, 224, 59, 77, 174, 42, 245,
+            176, 200, 235, 187, 60, 131, 83, 153, 97, 23, 43, 4, 126, 186, 119, 214, 38, 225, 105,
+            20, 99, 85, 33, 12, 125,
         ];
         const RPE: [u8; 64] = [
             191, 192, 216, 250, 122, 246, 220, 97, 31, 254, 98, 27, 8, 72, 71, 176, 135, 99, 96,
@@ -135,9 +132,21 @@ impl TraeAdapter {
         if raw.len() <= 6 + 32 + 64 {
             return None;
         }
-        let is_private = if raw[0] == 18 && raw[1] == 57 && raw[2] == 32 && raw[3] == 32 && raw[4] == 2 && raw[5] == 3 {
+        let is_private = if raw[0] == 18
+            && raw[1] == 57
+            && raw[2] == 32
+            && raw[3] == 32
+            && raw[4] == 2
+            && raw[5] == 3
+        {
             true
-        } else if raw[0] == 116 && raw[1] == 99 && raw[2] == 5 && raw[3] == 16 && raw[4] == 0 && raw[5] == 0 {
+        } else if raw[0] == 116
+            && raw[1] == 99
+            && raw[2] == 5
+            && raw[3] == 16
+            && raw[4] == 0
+            && raw[5] == 0
+        {
             false
         } else {
             return None;
@@ -152,8 +161,8 @@ impl TraeAdapter {
         let o = Sha512::digest(seed);
         let a = Self::tc_mask_a(is_private);
         let mut hasher = Sha512::new();
-        hasher.update(&o);
-        hasher.update(&a);
+        hasher.update(o);
+        hasher.update(a);
         let c = hasher.finalize();
 
         let aes_key = &c[0..16];
@@ -162,7 +171,7 @@ impl TraeAdapter {
 
         let mut dec = Vec::with_capacity(ct.len());
         let mut prev = iv;
-        for chunk in ct.chunks_exact(16) {
+        for chunk in ct.as_chunks::<16>().0 {
             let mut block = [0u8; 16];
             block.copy_from_slice(chunk);
             cipher.decrypt_block(GenericArray::from_mut_slice(&mut block));
@@ -197,11 +206,11 @@ impl TraeAdapter {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
 
-        let o = Sha512::digest(&seed);
+        let o = Sha512::digest(seed);
         let a = Self::tc_mask_a(false);
         let mut hasher = Sha512::new();
-        hasher.update(&o);
-        hasher.update(&a);
+        hasher.update(o);
+        hasher.update(a);
         let c = hasher.finalize();
 
         let aes_key = &c[0..16];
@@ -222,7 +231,7 @@ impl TraeAdapter {
 
         let mut prev = [0u8; 16];
         prev.copy_from_slice(iv);
-        for chunk in plain.chunks_exact(16) {
+        for chunk in plain.as_chunks::<16>().0 {
             let mut block = [0u8; 16];
             for i in 0..16 {
                 block[i] = chunk[i] ^ prev[i];
@@ -235,11 +244,15 @@ impl TraeAdapter {
         Some(BASE64.encode(out))
     }
 
-    fn parse_auth_entries_from_storage(storage_val: &Value) -> Result<Map<String, Value>, AdapterError> {
-        let obj = storage_val.as_object().ok_or_else(|| AdapterError::Unified {
-            code: UnifiedErrorCode::InvalidCredential,
-            message: "storage.json 根节点不是 JSON 对象".into(),
-        })?;
+    fn parse_auth_entries_from_storage(
+        storage_val: &Value,
+    ) -> Result<Map<String, Value>, AdapterError> {
+        let obj = storage_val
+            .as_object()
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "storage.json 根节点不是 JSON 对象".into(),
+            })?;
 
         let mut auth_entries = Map::new();
         for (k, v) in obj {
@@ -320,7 +333,12 @@ impl TraeAdapter {
         }
 
         let serialized = serde_json::to_string(entries).unwrap_or_default();
-        (Self::hash_fallback_uid(tool_id, &serialized), None, None, None)
+        (
+            Self::hash_fallback_uid(tool_id, &serialized),
+            None,
+            None,
+            None,
+        )
     }
 
     fn read_vscdb_auth_entries(vscdb_path: &std::path::Path) -> Option<Map<String, Value>> {
@@ -363,19 +381,23 @@ impl TraeAdapter {
         if !vscdb_path.is_file() {
             return Ok(());
         }
-        let mut conn = rusqlite::Connection::open(vscdb_path).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("打开 Trae state.vscdb 失败: {e}"),
-        })?;
+        let mut conn =
+            rusqlite::Connection::open(vscdb_path).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("打开 Trae state.vscdb 失败: {e}"),
+            })?;
         let tx = conn.transaction().map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
             message: format!("开启 Trae state.vscdb 事务失败: {e}"),
         })?;
-        tx.execute("DELETE FROM ItemTable WHERE key LIKE 'iCubeAuthInfo://%'", [])
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("清理 Trae state.vscdb 旧登录态失败: {e}"),
-            })?;
+        tx.execute(
+            "DELETE FROM ItemTable WHERE key LIKE 'iCubeAuthInfo://%'",
+            [],
+        )
+        .map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("清理 Trae state.vscdb 旧登录态失败: {e}"),
+        })?;
         for (k, v) in entries {
             let val_str = match v {
                 Value::String(s) => s.clone(),
@@ -533,12 +555,18 @@ impl TraeAdapter {
         Ok((claim_status, credits))
     }
 
-    async fn fetch_checkin_status(&self, token: &str) -> Result<(ClaimStatus, Option<i64>), AdapterError> {
+    async fn fetch_checkin_status(
+        &self,
+        token: &str,
+    ) -> Result<(ClaimStatus, Option<i64>), AdapterError> {
         if !self.is_cn {
             return Ok((ClaimStatus::Unsupported, None));
         }
 
-        let url = format!("{}/trae/api/v2/ug/checkin_credits/status", self.base_api_url());
+        let url = format!(
+            "{}/trae/api/v2/ug/checkin_credits/status",
+            self.base_api_url()
+        );
         let headers = self.build_api_headers(token)?;
         let resp = self
             .http
@@ -605,7 +633,8 @@ impl TraeAdapter {
 
         if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
             if code != 0 {
-                if let Some(err) = crate::adapter::common::map_business_code(code, "查询 Trae 额度") {
+                if let Some(err) = crate::adapter::common::map_business_code(code, "查询 Trae 额度")
+                {
                     return Err(err);
                 }
                 return Err(AdapterError::Unified {
@@ -652,7 +681,9 @@ impl TraeAdapter {
                     if plan_name.is_none() {
                         plan_name = pack
                             .get("display_desc")
-                            .or_else(|| pack.pointer("/entitlement_base_info/product_extra/package_name"))
+                            .or_else(|| {
+                                pack.pointer("/entitlement_base_info/product_extra/package_name")
+                            })
                             .or_else(|| pack.pointer("/entitlement_base_info/package_name"))
                             .or_else(|| pack.pointer("/entitlement_base_info/product_name"))
                             .and_then(|v| v.as_str())
@@ -665,7 +696,11 @@ impl TraeAdapter {
                             .or_else(|| pack.get("expire_time"))
                             .and_then(|v| v.as_i64())
                         {
-                            let secs = if end_ts > 1_000_000_000_000 { end_ts / 1000 } else { end_ts };
+                            let secs = if end_ts > 1_000_000_000_000 {
+                                end_ts / 1000
+                            } else {
+                                end_ts
+                            };
                             if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
                                 reset_at = Some(dt.to_rfc3339());
                             }
@@ -709,7 +744,11 @@ impl TraeAdapter {
                         .or_else(|| pack.get("expire_time"))
                         .and_then(|v| v.as_i64())
                     {
-                        let secs = if end_ts > 1_000_000_000_000 { end_ts / 1000 } else { end_ts };
+                        let secs = if end_ts > 1_000_000_000_000 {
+                            end_ts / 1000
+                        } else {
+                            end_ts
+                        };
                         if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
                             reset_at = Some(dt.to_rfc3339());
                         }
@@ -764,12 +803,12 @@ impl ToolAdapter for TraeAdapter {
         &self,
         host: &dyn PlatformHost,
     ) -> Result<CredentialEnvelope, AdapterError> {
-        let config_dir = host
-            .client_config_dir(self.tool_id())
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: e.to_string(),
-            })?;
+        let config_dir =
+            host.client_config_dir(self.tool_id())
+                .map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: e.to_string(),
+                })?;
         let storage_path = config_dir.join(STORAGE_JSON);
         if !storage_path.is_file() {
             return Err(AdapterError::Unified {
@@ -801,7 +840,10 @@ impl ToolAdapter for TraeAdapter {
         let mut files = HashMap::new();
         files.insert(SNAPSHOT_AUTH_KEY.to_string(), BASE64.encode(entries_bytes));
         if let Some(tok) = token_opt {
-            files.insert(DECRYPTED_TOKEN_FILE.to_string(), BASE64.encode(tok.as_bytes()));
+            files.insert(
+                DECRYPTED_TOKEN_FILE.to_string(),
+                BASE64.encode(tok.as_bytes()),
+            );
         }
 
         let vscdb_path = config_dir.join(STATE_VSCDB);
@@ -822,7 +864,10 @@ impl ToolAdapter for TraeAdapter {
         })
     }
 
-    async fn parse_manual_token(&self, raw_input: &str) -> Result<CredentialEnvelope, AdapterError> {
+    async fn parse_manual_token(
+        &self,
+        raw_input: &str,
+    ) -> Result<CredentialEnvelope, AdapterError> {
         let trimmed = raw_input.trim();
         if trimmed.is_empty() {
             return Err(AdapterError::Unified {
@@ -832,11 +877,10 @@ impl ToolAdapter for TraeAdapter {
         }
 
         if trimmed.starts_with('{') {
-            let val: Value =
-                serde_json::from_str(trimmed).map_err(|e| AdapterError::Unified {
-                    code: UnifiedErrorCode::InvalidCredential,
-                    message: format!("JSON 格式无效: {e}"),
-                })?;
+            let val: Value = serde_json::from_str(trimmed).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!("JSON 格式无效: {e}"),
+            })?;
 
             if let Some(obj) = val.as_object() {
                 if obj.keys().any(|k| k.starts_with("iCubeAuthInfo://")) {
@@ -851,7 +895,10 @@ impl ToolAdapter for TraeAdapter {
                     let mut files = HashMap::new();
                     files.insert(SNAPSHOT_AUTH_KEY.to_string(), BASE64.encode(entries_bytes));
                     if let Some(tok) = token_opt {
-                        files.insert(DECRYPTED_TOKEN_FILE.to_string(), BASE64.encode(tok.as_bytes()));
+                        files.insert(
+                            DECRYPTED_TOKEN_FILE.to_string(),
+                            BASE64.encode(tok.as_bytes()),
+                        );
                     }
                     return Ok(CredentialEnvelope {
                         tool_id: self.tool_id().to_string(),
@@ -987,7 +1034,10 @@ impl ToolAdapter for TraeAdapter {
         })
     }
 
-    async fn inspect_quota(&self, cred: &CredentialEnvelope) -> Result<QuotaSnapshot, AdapterError> {
+    async fn inspect_quota(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<QuotaSnapshot, AdapterError> {
         let (token_opt, is_encrypted_local) = self.extract_token_from_cred(cred);
 
         if let Some(token) = token_opt {
@@ -1006,7 +1056,12 @@ impl ToolAdapter for TraeAdapter {
             if self.is_cn {
                 match self.fetch_checkin_status(&token).await {
                     Ok((cs, _)) => quota.claim_status = cs,
-                    Err(e @ AdapterError::Unified { code: UnifiedErrorCode::AuthExpired, .. }) => {
+                    Err(
+                        e @ AdapterError::Unified {
+                            code: UnifiedErrorCode::AuthExpired,
+                            ..
+                        },
+                    ) => {
                         return Err(e);
                     }
                     Err(
@@ -1092,7 +1147,10 @@ impl ToolAdapter for TraeAdapter {
             });
         }
 
-        let url = format!("{}/trae/api/v2/ug/checkin_credits/claim", self.base_api_url());
+        let url = format!(
+            "{}/trae/api/v2/ug/checkin_credits/claim",
+            self.base_api_url()
+        );
         let headers = self.build_api_headers(&token)?;
         let resp = self
             .http
@@ -1174,10 +1232,12 @@ impl ToolAdapter for TraeAdapter {
     ) -> Result<(), AdapterError> {
         let auth_entries: Map<String, Value> = match &cred.payload {
             CredentialPayload::LocalSnapshot { files } => {
-                let b64 = files.get(SNAPSHOT_AUTH_KEY).ok_or_else(|| AdapterError::Unified {
-                    code: UnifiedErrorCode::InvalidCredential,
-                    message: "快照中缺少 Trae 认证条目".into(),
-                })?;
+                let b64 = files
+                    .get(SNAPSHOT_AUTH_KEY)
+                    .ok_or_else(|| AdapterError::Unified {
+                        code: UnifiedErrorCode::InvalidCredential,
+                        message: "快照中缺少 Trae 认证条目".into(),
+                    })?;
                 let bytes = BASE64.decode(b64).map_err(|e| AdapterError::Unified {
                     code: UnifiedErrorCode::InvalidCredential,
                     message: format!("快照解码失败: {e}"),
@@ -1220,12 +1280,12 @@ impl ToolAdapter for TraeAdapter {
             }
         };
 
-        let config_dir = host
-            .client_config_dir(self.tool_id())
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: e.to_string(),
-            })?;
+        let config_dir =
+            host.client_config_dir(self.tool_id())
+                .map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: e.to_string(),
+                })?;
         std::fs::create_dir_all(&config_dir).map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
             message: format!("创建 Trae 配置目录失败: {e}"),
@@ -1248,13 +1308,12 @@ impl ToolAdapter for TraeAdapter {
             root_obj.insert(k.clone(), v.clone());
         }
 
-        let serialized =
-            serde_json::to_vec_pretty(&Value::Object(root_obj)).map_err(|e| {
-                AdapterError::Unified {
-                    code: UnifiedErrorCode::InternalError,
-                    message: e.to_string(),
-                }
-            })?;
+        let serialized = serde_json::to_vec_pretty(&Value::Object(root_obj)).map_err(|e| {
+            AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: e.to_string(),
+            }
+        })?;
 
         let tmp_path = config_dir.join(".storage.json.tmp");
         std::fs::write(&tmp_path, serialized).map_err(|e| AdapterError::Unified {
@@ -1284,12 +1343,12 @@ impl ToolAdapter for TraeAdapter {
         &self,
         host: &dyn PlatformHost,
     ) -> Result<crate::adapter::SessionBackup, AdapterError> {
-        let config_dir = host
-            .client_config_dir(self.tool_id())
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: e.to_string(),
-            })?;
+        let config_dir =
+            host.client_config_dir(self.tool_id())
+                .map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: e.to_string(),
+                })?;
         Ok(crate::adapter::backup_files(&[
             config_dir.join(STORAGE_JSON),
             config_dir.join(STATE_VSCDB),

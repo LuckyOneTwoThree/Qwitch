@@ -62,10 +62,7 @@ impl QoderAdapter {
                 version: "0.1.0".to_string(),
                 is_builtin: true,
                 capabilities: AdapterCapabilities {
-                    auth_methods: vec![
-                        AuthMethod::LocalImport,
-                        AuthMethod::WebviewOauth,
-                    ],
+                    auth_methods: vec![AuthMethod::LocalImport, AuthMethod::WebviewOauth],
                     supports_quota_query: true,
                     supports_daily_claim: true,
                     supports_client_switch: true,
@@ -84,10 +81,7 @@ impl QoderAdapter {
     }
 
     #[cfg(target_os = "windows")]
-    fn try_decrypt_windows_auth_dat(
-        config_dir: &std::path::Path,
-        raw_dat: &[u8],
-    ) -> Option<Value> {
+    fn try_decrypt_windows_auth_dat(config_dir: &std::path::Path, raw_dat: &[u8]) -> Option<Value> {
         use aes_gcm::{
             aead::{Aead, KeyInit},
             Aes256Gcm, Nonce,
@@ -274,8 +268,18 @@ impl QoderAdapter {
             if row.get("actionType").and_then(|v| v.as_str()) != Some("CLAIM_BENEFIT") {
                 continue;
             }
-            let normalize_ts = |ts: f64| if ts > 1_000_000_000_000.0 { ts / 1000.0 } else { ts };
-            if let Some(start) = row.get("startAt").and_then(|v| v.as_f64()).map(normalize_ts) {
+            let normalize_ts = |ts: f64| {
+                if ts > 1_000_000_000_000.0 {
+                    ts / 1000.0
+                } else {
+                    ts
+                }
+            };
+            if let Some(start) = row
+                .get("startAt")
+                .and_then(|v| v.as_f64())
+                .map(normalize_ts)
+            {
                 if now < start {
                     continue;
                 }
@@ -437,7 +441,10 @@ impl QoderAdapter {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!("Qoder 授权轮询返回 HTTP {}", resp.status().as_u16()));
+            return Err(format!(
+                "Qoder 授权轮询返回 HTTP {}",
+                resp.status().as_u16()
+            ));
         }
 
         let body: Value = resp
@@ -584,6 +591,12 @@ impl QoderAdapter {
     }
 }
 
+impl Default for QoderAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl ToolAdapter for QoderAdapter {
     fn manifest(&self) -> &AdapterManifest {
@@ -700,7 +713,10 @@ impl ToolAdapter for QoderAdapter {
         })
     }
 
-    async fn parse_manual_token(&self, raw_input: &str) -> Result<CredentialEnvelope, AdapterError> {
+    async fn parse_manual_token(
+        &self,
+        raw_input: &str,
+    ) -> Result<CredentialEnvelope, AdapterError> {
         let trimmed = raw_input.trim();
         if trimmed.is_empty() {
             return Err(AdapterError::Unified {
@@ -710,11 +726,10 @@ impl ToolAdapter for QoderAdapter {
         }
 
         let (token, uid_opt, email_opt, name_opt) = if trimmed.starts_with('{') {
-            let val: Value =
-                serde_json::from_str(trimmed).map_err(|e| AdapterError::Unified {
-                    code: UnifiedErrorCode::InvalidCredential,
-                    message: format!("JSON 格式无效: {e}"),
-                })?;
+            let val: Value = serde_json::from_str(trimmed).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!("JSON 格式无效: {e}"),
+            })?;
             let tok = val
                 .get("token")
                 .or_else(|| val.get("accessToken"))
@@ -772,7 +787,10 @@ impl ToolAdapter for QoderAdapter {
         })
     }
 
-    async fn inspect_quota(&self, cred: &CredentialEnvelope) -> Result<QuotaSnapshot, AdapterError> {
+    async fn inspect_quota(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<QuotaSnapshot, AdapterError> {
         let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
         let headers = Self::build_headers(&token, machine_id.as_deref())?;
         let payload = self.fetch_campaigns(&headers).await?;
@@ -869,7 +887,9 @@ impl ToolAdapter for QoderAdapter {
                 .and_then(|v| v.as_str());
             let api_code = body.get("code").and_then(|v| v.as_i64());
             if let Some(c) = api_code {
-                if let Some(err) = crate::adapter::common::map_business_code(c, "领取 Qoder CN Credits") {
+                if let Some(err) =
+                    crate::adapter::common::map_business_code(c, "领取 Qoder CN Credits")
+                {
                     return Err(err);
                 }
             }
@@ -916,10 +936,12 @@ impl ToolAdapter for QoderAdapter {
             });
         };
 
-        let dat_b64 = files.get(AUTH_DAT_FILE).ok_or_else(|| AdapterError::Unified {
-            code: UnifiedErrorCode::InvalidCredential,
-            message: "快照中缺少 auth.v1.dat".into(),
-        })?;
+        let dat_b64 = files
+            .get(AUTH_DAT_FILE)
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "快照中缺少 auth.v1.dat".into(),
+            })?;
         let dat_bytes = BASE64.decode(dat_b64).map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InvalidCredential,
             message: format!("auth.v1.dat 解码失败: {e}"),
@@ -948,7 +970,9 @@ impl ToolAdapter for QoderAdapter {
         })?;
 
         if let Some(status_b64) = files.get(APP_STATUS_SNAPSHOT_KEY) {
-            if let (Ok(status_bytes), Some(dot_dir)) = (BASE64.decode(status_b64), Self::qoder_dot_dir()) {
+            if let (Ok(status_bytes), Some(dot_dir)) =
+                (BASE64.decode(status_b64), Self::qoder_dot_dir())
+            {
                 let _ = std::fs::create_dir_all(&dot_dir);
                 let status_target = dot_dir.join(".qoder-app-status.json");
                 let status_tmp = dot_dir.join(".qoder-app-status.json.tmp");

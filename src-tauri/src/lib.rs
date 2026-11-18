@@ -33,16 +33,16 @@ pub fn run() {
             let host: Arc<dyn PlatformHost> = Arc::new(NativePlatformHost);
             let data_dir = host
                 .qwitch_data_dir()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             let master_key = host
                 .get_or_create_master_key()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             let db = Arc::new(
                 QwitchDatabase::open(&data_dir.join("qwitch.db"))
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
+                    .map_err(|e| std::io::Error::other(e.to_string()))?,
             );
             db.verify_or_init_key_fingerprint(&data_dir, &master_key)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             let startup_settings = commands::load_app_settings(&db);
             let _ = db.apply_log_retention(
                 startup_settings.log_archive_after_days,
@@ -63,7 +63,10 @@ pub fn run() {
                 db,
                 master_key,
                 host,
-                adapters: Arc::new(create_all_adapters(&data_dir, &startup_settings.trusted_adapters)),
+                adapters: Arc::new(create_all_adapters(
+                    &data_dir,
+                    &startup_settings.trusted_adapters,
+                )),
                 scheduler: Arc::new(AntiRiskScheduler::new()),
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
                 switching_in_progress: Arc::new(AtomicBool::new(false)),
@@ -125,8 +128,8 @@ pub fn run() {
                                     let mon_x = mon.position().x as f64;
                                     let mon_w = mon.size().width as f64;
                                     let margin = 4.0 * scale;
-                                    let max_x =
-                                        (mon_x + mon_w - (size.width as f64) - margin).max(mon_x + margin);
+                                    let max_x = (mon_x + mon_w - (size.width as f64) - margin)
+                                        .max(mon_x + margin);
                                     raw_x.clamp(mon_x + margin, max_x) as i32
                                 } else {
                                     raw_x.max(8.0) as i32
@@ -146,7 +149,8 @@ pub fn run() {
                                         as i32
                                 };
 
-                                let _ = win.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+                                let _ = win
+                                    .set_position(Position::Physical(PhysicalPosition::new(x, y)));
                                 let _ = win.show();
                                 let _ = win.set_focus();
                             }

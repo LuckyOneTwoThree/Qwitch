@@ -24,15 +24,24 @@ mod tests {
     fn business_codes_map_to_circuit_breaker_errors() {
         assert!(matches!(
             map_business_code(401, "ctx"),
-            Some(AdapterError::Unified { code: UnifiedErrorCode::AuthExpired, .. })
+            Some(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            })
         ));
         assert!(matches!(
             map_business_code(403, "ctx"),
-            Some(AdapterError::Unified { code: UnifiedErrorCode::RiskTriggered, .. })
+            Some(AdapterError::Unified {
+                code: UnifiedErrorCode::RiskTriggered,
+                ..
+            })
         ));
         assert!(matches!(
             map_business_code(429, "ctx"),
-            Some(AdapterError::Unified { code: UnifiedErrorCode::RateLimited, .. })
+            Some(AdapterError::Unified {
+                code: UnifiedErrorCode::RateLimited,
+                ..
+            })
         ));
         assert!(map_business_code(0, "ctx").is_none());
         assert!(map_business_code(500, "ctx").is_none());

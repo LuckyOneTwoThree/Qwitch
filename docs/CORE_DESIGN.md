@@ -336,3 +336,37 @@ CREATE INDEX IF NOT EXISTS idx_logs_created ON action_logs(created_at DESC);
 ### 5.2 核心 Events（后端推送前端，同步主窗口与托盘）
 * `qwitch://batch-progress`：推送串行领取队列进度（当前执行账号、随机抖动等待状态、单条结果）。
 * `qwitch://account-updated`：账号状态、额度或本机活跃标记变更时触发，主窗口与托盘同步刷新。
+
+---
+
+## 6. 实现增补（2026-11-18，以代码为准）
+
+本节记录契约文档首发后已落地的接口与 Schema 变更，修复批次见 git 历史。
+
+### 6.1 新增/调整 Commands
+
+| Command | 参数 | 返回 | 说明 |
+| --- | --- | --- | --- |
+| `refresh_quota_batch` | `accountIds: string[]`（≤200） | `()` | 防风控批量查额，与批量领取共用单队列锁；重入直接报错 |
+| `claim_daily_batch` | `accountIds: string[]`（≤200） | `()` | 串行领取；重入直接报错；工具级风控熔断 |
+| `rename_account` | `accountId, label` | `AccountSummary` | 修改备注，广播 account-updated |
+| `update_account_status` | `accountId, status` | `AccountSummary` | 停用/启用/恢复，广播 account-updated |
+| `quit_app` | — | `()` | 主窗口显式退出 |
+| `list_external_adapters` | — | `ExternalAdapterInfo[]` | 外部插件清单（含 trusted/reserved 标记，仅解析 manifest 不执行） |
+| `export_action_logs` | `scope, archiveAfterExport` | `ExportLogsResult` | 上限 10,000 条 |
+
+### 6.2 Schema 增补
+
+* `accounts` 增加 `has_local_snapshot`、`has_api_token` 能力标记列；`label` 重复导入默认不覆盖用户自定义备注；`disabled`/`risk_paused` 状态不被重复导入复活。
+* `action_logs` 增加 `archived_at` 归档列；删除请求未指定 scope 时默认仅活跃日志。
+* 数据目录新增 `key_id` 主密钥指纹文件（SHA-256 前 16 字节），启动时校验，不匹配拒绝启动。
+
+### 6.3 适配器 trait 变更
+
+* `claim_daily(cred, precheck: Option<&QuotaSnapshot>)`：调度器前置快照复用，避免重复查状态。
+* 新增 `backup_session` / `restore_session`：切号写入前备份、失败回滚（Trae/Qoder/WorkBuddy 已实现）。
+* 外部适配器 RPC `claim_daily` 请求体新增可选 `precheck` 字段；信任门禁由 `trustedAdapters` 设置控制，保留 ID 禁止冒名。
+
+### 6.4 设置契约增补
+
+`AppSettingsDto` 新增 `trustedAdapters: string[]`；`autoRefreshOnStartup` 默认 `false`、`autoRefreshIntervalMinutes` 默认 `0`（关闭）；Jitter 后端强制下限 500ms。

@@ -1,6 +1,8 @@
 # Qwitch 综合优化计划与任务排期总表
 
-> 本路线图拉通 [前端体验与交互审计报告](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/docs/FRONTEND_UX_AUDIT.md) 与 [代码安全与架构审查报告](file:///Users/lucky/Desktop/HelloWorld/Git_Project/Qwitch/docs/BACKEND_ARCH_REVIEW.md)，将前端与后端的协同改造编排为 **4 个可独立交付的 Sprint**，优先消除数据丢失与安全红线风险，再推进体验闭环、设计系统与底层架构演进。
+> **完成度状态（2026-11-18）**：Sprint 1（止血与安全红线）与 Sprint 2（口径收口/切号可靠性/调度闭环）已随 commit `7d45cd2`、`43de677` 及后续修复批次落地；Sprint 3 大部分落地（设计令牌/无障碍/toolRegistry/退出按钮/外部适配器信任门禁/CSP 基础加固），`uid_hash` HMAC 升级仍为待评估项；Sprint 4 部分落地（WAL/单 SQL/快照清理/CI 测试门禁/Vitest 基线），Context 四拆与 `get_account_summary` 增量同步仍待排期。详见各批次 commit 说明。
+
+> 本路线图拉通 [前端体验与交互审计报告](../docs/FRONTEND_UX_AUDIT.md) 与 [代码安全与架构审查报告](../docs/BACKEND_ARCH_REVIEW.md)，将前端与后端的协同改造编排为 **4 个可独立交付的 Sprint**，优先消除数据丢失与安全红线风险，再推进体验闭环、设计系统与底层架构演进。
 
 ---
 

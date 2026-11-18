@@ -1,6 +1,8 @@
 # Qwitch 内置适配器存储路径与接口参考规范
 
 > 本文档归档首批接入工具（**Trae / Trae CN**、**WorkBuddy**、**Qoder / Qoder CN**）在 macOS 与 Windows 上的本地会话存储路径、凭据加密格式、服务端接口及冷切换要点。
+>
+> **实现状态（2026-11-18）**：当前仅注册国内版内置适配器 `trae_cn` / `workbuddy` / `qoder_cn`；Trae/Qoder 国际版条目为格式参考归档，尚未注册实现。`trae` / `qoder` 等历史 ID 已被保留，禁止外部插件冒名。
 
 ---
 

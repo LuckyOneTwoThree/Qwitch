@@ -251,10 +251,8 @@ impl NativePlatformHost {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &tmp_key,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ =
+                        std::fs::set_permissions(&tmp_key, std::fs::Permissions::from_mode(0o600));
                 }
                 let _ = std::fs::rename(&tmp_key, &new_key);
             } else {
@@ -297,14 +295,14 @@ impl NativePlatformHost {
 
         // 仅当钥匙串真正跨进程持久化时才信任其中的密钥（mock/进程级存储重启即空）
         if keyring_persistent {
-            if let Some(key) = keyring_hex.and_then(&read_hex_key) {
+            if let Some(key) = keyring_hex.and_then(read_hex_key) {
                 return Ok((key, KeySource::Keyring));
             }
         }
-        if let Some(key) = legacy_hex.and_then(&read_hex_key) {
+        if let Some(key) = legacy_hex.and_then(read_hex_key) {
             return Ok((key, KeySource::LegacyKeyring));
         }
-        if let Some(key) = file_hex.and_then(&read_hex_key) {
+        if let Some(key) = file_hex.and_then(read_hex_key) {
             return Ok((key, KeySource::File));
         }
         if db_exists {
@@ -703,8 +701,8 @@ impl PlatformHost for NativePlatformHost {
             let agents_dir = home.join("Library").join("LaunchAgents");
             let plist_path = agents_dir.join("dev.qwitch.app.plist");
             if enabled {
-                let exe = std::env::current_exe()
-                    .map_err(|e| format!("无法获取当前程序路径: {e}"))?;
+                let exe =
+                    std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {e}"))?;
                 std::fs::create_dir_all(&agents_dir)
                     .map_err(|e| format!("创建 LaunchAgents 目录失败: {e}"))?;
                 let plist = render_macos_launch_agent_plist(&exe);
@@ -714,18 +712,20 @@ impl PlatformHost for NativePlatformHost {
                 std::fs::remove_file(&plist_path)
                     .map_err(|e| format!("移除开机自启配置失败: {e}"))?;
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(target_os = "windows")]
         {
             const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
             if enabled {
-                let exe = std::env::current_exe()
-                    .map_err(|e| format!("无法获取当前程序路径: {e}"))?;
+                let exe =
+                    std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {e}"))?;
                 let value = format!("\"{}\" --autostart", exe.to_string_lossy());
                 let output = Command::new("reg")
-                    .args(["add", RUN_KEY, "/v", "Qwitch", "/t", "REG_SZ", "/d", &value, "/f"])
+                    .args([
+                        "add", RUN_KEY, "/v", "Qwitch", "/t", "REG_SZ", "/d", &value, "/f",
+                    ])
                     .output()
                     .map_err(|e| format!("执行 reg add 失败: {e}"))?;
                 if !output.status.success() {
@@ -753,8 +753,8 @@ impl PlatformHost for NativePlatformHost {
             let autostart_dir = base.join("autostart");
             let desktop_path = autostart_dir.join("dev.qwitch.app.desktop");
             if enabled {
-                let exe = std::env::current_exe()
-                    .map_err(|e| format!("无法获取当前程序路径: {e}"))?;
+                let exe =
+                    std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {e}"))?;
                 std::fs::create_dir_all(&autostart_dir)
                     .map_err(|e| format!("创建 autostart 目录失败: {e}"))?;
                 let content = format!(
@@ -847,7 +847,9 @@ mod tests {
         let exe = PathBuf::from("/Applications/Qwitch & Tools.app/Contents/MacOS/qwitch");
         let plist = render_macos_launch_agent_plist(&exe);
         assert!(plist.contains("<string>dev.qwitch.app</string>"));
-        assert!(plist.contains("<string>/Applications/Qwitch &amp; Tools.app/Contents/MacOS/qwitch</string>"));
+        assert!(plist.contains(
+            "<string>/Applications/Qwitch &amp; Tools.app/Contents/MacOS/qwitch</string>"
+        ));
         assert!(plist.contains("<string>--autostart</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
     }
@@ -856,7 +858,11 @@ mod tests {
     fn master_key_resolution_decision_matrix() {
         let key = [9u8; 32];
         let hex_key = hex::encode(key);
-        let resolve = |kr: Option<&str>, legacy: Option<&str>, file: Option<&str>, db: bool, persistent: bool| {
+        let resolve = |kr: Option<&str>,
+                       legacy: Option<&str>,
+                       file: Option<&str>,
+                       db: bool,
+                       persistent: bool| {
             NativePlatformHost::resolve_master_key_logic(kr, legacy, file, db, persistent)
         };
 
@@ -968,8 +974,12 @@ mod tests {
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
 
         let dir = temp_data_dir("mock");
-        let key1 = NativePlatformHost::get_or_create_master_key_with(&dir, false).expect("first boot");
-        assert!(dir.join("master.key").exists(), "mock 环境必须保留明文密钥文件");
+        let key1 =
+            NativePlatformHost::get_or_create_master_key_with(&dir, false).expect("first boot");
+        assert!(
+            dir.join("master.key").exists(),
+            "mock 环境必须保留明文密钥文件"
+        );
 
         // 模拟已有数据库
         std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
@@ -991,7 +1001,8 @@ mod tests {
         keyring::set_default_credential_builder(Box::new(FakePersistentBuilder));
 
         let dir = temp_data_dir("persistent");
-        let key1 = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("first boot");
+        let key1 =
+            NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("first boot");
         assert!(!dir.join("master.key").exists(), "持久化钥匙串不应落明文");
         let key2 = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("restart");
         assert_eq!(key1, key2);
@@ -1006,7 +1017,8 @@ mod tests {
         let key = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("migrate");
         assert_eq!(key, legacy_key);
         assert!(!dir.join("master.key").exists(), "迁移成功后清理明文");
-        let key_again = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("restart");
+        let key_again =
+            NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("restart");
         assert_eq!(key_again, legacy_key);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1019,7 +1031,8 @@ mod tests {
             hex::encode(quiver_key),
         );
         std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
-        let key = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("quiver migrate");
+        let key =
+            NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("quiver migrate");
         assert_eq!(key, quiver_key);
         let stored = fake_store()
             .lock()

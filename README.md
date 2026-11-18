@@ -54,6 +54,28 @@
 
 ---
 
+## 运行与开发
+
+**前置条件**：Node.js ≥ 22、Rust stable（含 `clippy` / `rustfmt` 组件）、macOS 或 Windows 桌面环境（Tauri v2 依赖系统 WebView）。
+
+```bash
+npm install          # 安装前端依赖
+npm run tauri dev    # 启动桌面应用（开发模式）
+npm run build        # 前端类型检查 + 生产构建
+npm test             # 前端单元测试（Vitest）
+cd src-tauri && cargo test   # 后端单元/回归测试
+```
+
+CI（GitHub Actions，macOS + Windows 双平台）执行：生产依赖审计、前端构建与测试、`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`。
+
+> 开发链依赖中 picomatch 存在上游尚未发布修复版的 ReDoS 公告（仅影响 dev server/测试运行器，不进生产产物），生产依赖审计为 0 漏洞。
+
+## 许可证
+
+[MIT](LICENSE)
+
+---
+
 ## 免责声明
 
 本项目仅用于辅助个人管理本人合法持有的多账号本地会话与额度信息，严禁用于批量注册、自动化薅羊毛、绕过计费或任何违反目标平台用户协议的行为。使用本工具所产生的账号异常或合规风险由使用者自行承担。

@@ -72,7 +72,14 @@ pub fn mask_uid(uid: &str) -> String {
         return "***".to_string();
     }
     let prefix: String = chars.iter().take(4).collect();
-    let suffix: String = chars.iter().rev().take(2).collect::<Vec<_>>().into_iter().rev().collect();
+    let suffix: String = chars
+        .iter()
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("{prefix}****{suffix}")
 }
 
@@ -82,7 +89,14 @@ pub fn mask_phone(phone: &str) -> String {
         return "***".to_string();
     }
     let prefix: String = digits.iter().take(3).collect();
-    let suffix: String = digits.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let suffix: String = digits
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("{prefix}****{suffix}")
 }
 
@@ -195,6 +209,9 @@ mod tests {
         assert!(sanitized.contains("al***@example.com"));
         assert!(sanitized.contains("138****5678"));
         // 普通文本不受影响
-        assert_eq!(sanitize_log_message("已导入账号 Qoder 主力"), "已导入账号 Qoder 主力");
+        assert_eq!(
+            sanitize_log_message("已导入账号 Qoder 主力"),
+            "已导入账号 Qoder 主力"
+        );
     }
 }

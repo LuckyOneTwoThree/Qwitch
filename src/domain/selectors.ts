@@ -155,7 +155,7 @@ export function selectScopedStats(
     }
 
     const adapter = adapters.find((a) => a.id === acc.toolId);
-    const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : true;
+    const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : false;
 
     if (supportsClaim && acc.status === "active") {
       if (acc.hasApiToken === false) {

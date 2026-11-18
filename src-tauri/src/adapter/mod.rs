@@ -102,9 +102,11 @@ pub trait ToolAdapter: Send + Sync {
         host: &dyn PlatformHost,
     ) -> Result<CredentialEnvelope, AdapterError>;
 
-    async fn parse_manual_token(&self, raw_input: &str) -> Result<CredentialEnvelope, AdapterError>;
+    async fn parse_manual_token(&self, raw_input: &str)
+        -> Result<CredentialEnvelope, AdapterError>;
 
-    async fn inspect_quota(&self, cred: &CredentialEnvelope) -> Result<QuotaSnapshot, AdapterError>;
+    async fn inspect_quota(&self, cred: &CredentialEnvelope)
+        -> Result<QuotaSnapshot, AdapterError>;
 
     async fn claim_daily(
         &self,
@@ -135,7 +137,10 @@ pub trait ToolAdapter: Send + Sync {
     }
 }
 
-pub fn create_all_adapters(data_dir: &Path, trusted_adapters: &[String]) -> HashMap<String, Arc<dyn ToolAdapter>> {
+pub fn create_all_adapters(
+    data_dir: &Path,
+    trusted_adapters: &[String],
+) -> HashMap<String, Arc<dyn ToolAdapter>> {
     let mut map: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
     // 优先注册国内版内置适配器（Trae 国际版无每日积分签到，暂不纳入）
     let builtins: Vec<Arc<dyn ToolAdapter>> = vec![
@@ -211,14 +216,18 @@ mod tests {
 
     #[test]
     fn session_backup_restore_roundtrip_and_missing_file_removal() {
-        let root = std::env::temp_dir().join(format!("qwitch_backup_test_{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("qwitch_backup_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let existing = root.join("storage.json");
         let absent = root.join("state.vscdb");
         std::fs::write(&existing, b"original-session").unwrap();
 
         let backup = backup_files(&[existing.clone(), absent.clone()]);
-        assert_eq!(backup.files[0].1.as_deref(), Some(b"original-session".as_slice()));
+        assert_eq!(
+            backup.files[0].1.as_deref(),
+            Some(b"original-session".as_slice())
+        );
         assert!(backup.files[1].1.is_none());
 
         // 模拟切号写入

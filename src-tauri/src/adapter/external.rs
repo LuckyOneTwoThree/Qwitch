@@ -16,9 +16,7 @@ const MAX_ADAPTER_TIMEOUT_MS: u64 = 60_000; // 60s 上限
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
 };
-use crate::domain::{
-    AuthMethod, CredentialEnvelope, QuotaSnapshot, UnifiedErrorCode,
-};
+use crate::domain::{AuthMethod, CredentialEnvelope, QuotaSnapshot, UnifiedErrorCode};
 use crate::platform::PlatformHost;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,10 +85,7 @@ pub struct ExternalAdapter {
 }
 
 impl ExternalAdapter {
-    pub fn from_manifest_file(
-        adapter_dir: PathBuf,
-        raw: ExternalManifestFile,
-    ) -> Self {
+    pub fn from_manifest_file(adapter_dir: PathBuf, raw: ExternalManifestFile) -> Self {
         Self {
             manifest: AdapterManifest {
                 id: raw.id,
@@ -192,7 +187,10 @@ impl ExternalAdapter {
         .await
         .map_err(|_| AdapterError::Unified {
             code: UnifiedErrorCode::NetworkError,
-            message: format!("外部适配器 {} 执行超时 ({}ms)", self.manifest.id, self.timeout_ms),
+            message: format!(
+                "外部适配器 {} 执行超时 ({}ms)",
+                self.manifest.id, self.timeout_ms
+            ),
         })?
         .map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
@@ -261,7 +259,10 @@ impl ToolAdapter for ExternalAdapter {
         })
     }
 
-    async fn parse_manual_token(&self, raw_input: &str) -> Result<CredentialEnvelope, AdapterError> {
+    async fn parse_manual_token(
+        &self,
+        raw_input: &str,
+    ) -> Result<CredentialEnvelope, AdapterError> {
         let res = self
             .call_rpc(
                 "parse_manual_token",
@@ -274,12 +275,12 @@ impl ToolAdapter for ExternalAdapter {
         })
     }
 
-    async fn inspect_quota(&self, cred: &CredentialEnvelope) -> Result<QuotaSnapshot, AdapterError> {
+    async fn inspect_quota(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<QuotaSnapshot, AdapterError> {
         let res = self
-            .call_rpc(
-                "inspect_quota",
-                serde_json::json!({ "credential": cred }),
-            )
+            .call_rpc("inspect_quota", serde_json::json!({ "credential": cred }))
             .await?;
         serde_json::from_value(res).map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
@@ -363,7 +364,8 @@ pub fn discover_external_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn To
         .filter(|(_, m)| m.platforms.is_empty() || m.platforms.iter().any(|p| p == current_os))
         .map(|(dir, m)| {
             let id = m.id.clone();
-            let adapter: Arc<dyn ToolAdapter> = Arc::new(ExternalAdapter::from_manifest_file(dir, m));
+            let adapter: Arc<dyn ToolAdapter> =
+                Arc::new(ExternalAdapter::from_manifest_file(dir, m));
             (id, adapter)
         })
         .collect()

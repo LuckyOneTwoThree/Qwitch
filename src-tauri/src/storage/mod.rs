@@ -135,10 +135,7 @@ impl QwitchDatabase {
             "ALTER TABLE accounts ADD COLUMN has_api_token INTEGER NOT NULL DEFAULT 1",
             [],
         );
-        let _ = conn.execute(
-            "ALTER TABLE action_logs ADD COLUMN archived_at TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE action_logs ADD COLUMN archived_at TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_archived_id ON action_logs(archived_at, id DESC)",
             [],
@@ -263,10 +260,10 @@ impl QwitchDatabase {
         let old_env = crypto::decrypt_credential(master_key, &old_blob)?;
 
         // 双方均为真实 UID 且不一致 → 凭据属于另一个账号，拒绝串号绑定
-        let old_uid_real = !old_env.uid.trim().is_empty()
-            && !CredentialEnvelope::is_fallback_uid(&old_env.uid);
-        let incoming_uid_real = !incoming.uid.trim().is_empty()
-            && !CredentialEnvelope::is_fallback_uid(&incoming.uid);
+        let old_uid_real =
+            !old_env.uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(&old_env.uid);
+        let incoming_uid_real =
+            !incoming.uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(&incoming.uid);
         if old_uid_real && incoming_uid_real && old_env.uid != incoming.uid {
             return Err(StorageError::Crypto(format!(
                 "凭据归属不匹配：目标账号 {}，实际授权账号 {}。已拒绝绑定，请在对应账号卡片上操作或导入为新账号。",
@@ -346,7 +343,10 @@ impl QwitchDatabase {
             .ok_or_else(|| StorageError::NotFound(account_id.to_string()))
     }
 
-    pub fn list_accounts(&self, tool_id: Option<&str>) -> Result<Vec<AccountSummary>, StorageError> {
+    pub fn list_accounts(
+        &self,
+        tool_id: Option<&str>,
+    ) -> Result<Vec<AccountSummary>, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let mut results = Vec::new();
 
@@ -711,14 +711,15 @@ impl QwitchDatabase {
     ) -> Result<usize, StorageError> {
         let mut normalized = req.clone();
         normalized.scope = Some(req.scope.unwrap_or(LogScope::Archived));
-        self.execute_log_mutation("UPDATE action_logs SET archived_at = NULL", None, &normalized)
+        self.execute_log_mutation(
+            "UPDATE action_logs SET archived_at = NULL",
+            None,
+            &normalized,
+        )
     }
 
     /// 按筛选条件永久删除操作日志（未指定 scope 时默认仅活跃日志，防止空请求清空全部）
-    pub fn delete_action_logs(
-        &self,
-        req: &ActionLogCleanupRequest,
-    ) -> Result<usize, StorageError> {
+    pub fn delete_action_logs(&self, req: &ActionLogCleanupRequest) -> Result<usize, StorageError> {
         let mut normalized = req.clone();
         normalized.scope = Some(req.scope.unwrap_or(LogScope::Active));
         self.execute_log_mutation("DELETE FROM action_logs", None, &normalized)
@@ -927,7 +928,13 @@ pub fn normalize_daily_claim_status(
     tool_id: &str,
 ) -> ClaimStatus {
     let today_cst = Utc::now().with_timezone(&cst_offset()).date_naive();
-    normalize_daily_claim_status_on_date(raw_status, fetched_at, last_claimed_at, today_cst, tool_id)
+    normalize_daily_claim_status_on_date(
+        raw_status,
+        fetched_at,
+        last_claimed_at,
+        today_cst,
+        tool_id,
+    )
 }
 
 fn normalize_daily_claim_status_on_date(
@@ -1095,7 +1102,9 @@ mod tests {
             display_email: None,
             payload: CredentialPayload::LocalSnapshot { files: files2 },
         };
-        let acc2 = db.upsert_account(&master_key, Some("Qoder 副号"), &snap2).expect("acc2");
+        let acc2 = db
+            .upsert_account(&master_key, Some("Qoder 副号"), &snap2)
+            .expect("acc2");
         let bind_tok = CredentialEnvelope {
             tool_id: "qoder_cn".to_string(),
             uid: "real_uid_9999".to_string(),
@@ -1116,17 +1125,26 @@ mod tests {
         assert_eq!(bound.label, "Qoder 副号");
 
         // set_active_on_client 互斥切换
-        db.set_active_on_client("qoder_cn", &created.id).expect("set active 1");
-        db.set_active_on_client("qoder_cn", &acc2.id).expect("set active 2");
+        db.set_active_on_client("qoder_cn", &created.id)
+            .expect("set active 1");
+        db.set_active_on_client("qoder_cn", &acc2.id)
+            .expect("set active 2");
         let all = db.list_accounts(Some("qoder_cn")).expect("list");
         assert_eq!(all.iter().filter(|a| a.is_active_on_client).count(), 1);
-        assert!(all.iter().find(|a| a.id == acc2.id).unwrap().is_active_on_client);
+        assert!(
+            all.iter()
+                .find(|a| a.id == acc2.id)
+                .unwrap()
+                .is_active_on_client
+        );
 
         // app_settings 读写
         db.set_setting("app.settings", r#"{"jitterMinMs":2000}"#)
             .expect("set setting");
         assert_eq!(
-            db.get_setting("app.settings").expect("get setting").as_deref(),
+            db.get_setting("app.settings")
+                .expect("get setting")
+                .as_deref(),
             Some(r#"{"jitterMinMs":2000}"#)
         );
 
@@ -1178,8 +1196,16 @@ mod tests {
         // 按最大活跃条数策略保留最新 1 条，将较旧的 1 条自动归档
         let retained = db.apply_log_retention(0, 1).unwrap();
         assert_eq!(retained, 1);
-        assert_eq!(db.list_action_logs(LogScope::Active, 50, 0).unwrap().len(), 1);
-        assert_eq!(db.list_action_logs(LogScope::Archived, 50, 0).unwrap().len(), 3);
+        assert_eq!(
+            db.list_action_logs(LogScope::Active, 50, 0).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            db.list_action_logs(LogScope::Archived, 50, 0)
+                .unwrap()
+                .len(),
+            3
+        );
 
         // 从归档恢复单条并彻底清空剩余已归档日志
         let restore_id = archived[0].id;
@@ -1190,7 +1216,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored, 1);
-        assert_eq!(db.list_action_logs(LogScope::Active, 50, 0).unwrap().len(), 2);
+        assert_eq!(
+            db.list_action_logs(LogScope::Active, 50, 0).unwrap().len(),
+            2
+        );
 
         let deleted = db
             .delete_action_logs(&ActionLogCleanupRequest {
@@ -1199,7 +1228,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(deleted, 2);
-        assert_eq!(db.list_action_logs(LogScope::Archived, 50, 0).unwrap().len(), 0);
+        assert_eq!(
+            db.list_action_logs(LogScope::Archived, 50, 0)
+                .unwrap()
+                .len(),
+            0
+        );
 
         let _ = std::fs::remove_file(&db_path);
     }
@@ -1222,7 +1256,9 @@ mod tests {
                 extra: HashMap::new(),
             },
         };
-        let acc = db.upsert_account(&master_key, Some("初始名称"), &env).unwrap();
+        let acc = db
+            .upsert_account(&master_key, Some("初始名称"), &env)
+            .unwrap();
 
         let renamed = db.update_account_label(&acc.id, "新备注名").unwrap();
         assert_eq!(renamed.label, "新备注名");
@@ -1248,7 +1284,10 @@ mod tests {
         let listed = db.list_accounts(Some("trae_cn")).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(
-            listed[0].latest_quota.as_ref().and_then(|q| q.plan_name.as_deref()),
+            listed[0]
+                .latest_quota
+                .as_ref()
+                .and_then(|q| q.plan_name.as_deref()),
             Some("Plan-24")
         );
 
@@ -1284,7 +1323,9 @@ mod tests {
                 extra: HashMap::new(),
             },
         };
-        let acc = db.upsert_account(&master_key, Some("跨天账号"), &env).unwrap();
+        let acc = db
+            .upsert_account(&master_key, Some("跨天账号"), &env)
+            .unwrap();
 
         // 保存一条昨天 UTC+8 的已签到快照，经过数据库读取后今日应归零为 Unknown
         let yesterday_snap = QuotaSnapshot {
@@ -1296,7 +1337,10 @@ mod tests {
         db.save_quota_snapshot(&acc.id, &yesterday_snap).unwrap();
         let loaded_yesterday = db.get_account_summary(&acc.id).unwrap();
         assert_eq!(
-            loaded_yesterday.latest_quota.as_ref().map(|q| &q.claim_status),
+            loaded_yesterday
+                .latest_quota
+                .as_ref()
+                .map(|q| &q.claim_status),
             Some(&ClaimStatus::Unknown)
         );
 
@@ -1395,29 +1439,41 @@ mod tests {
         let key_b = [2u8; 32];
 
         // 空库：首次写入指纹，重复校验通过
-        db.verify_or_init_key_fingerprint(&dir, &key_a).expect("init empty");
+        db.verify_or_init_key_fingerprint(&dir, &key_a)
+            .expect("init empty");
         assert!(dir.join("key_id").exists());
-        db.verify_or_init_key_fingerprint(&dir, &key_a).expect("same key");
+        db.verify_or_init_key_fingerprint(&dir, &key_a)
+            .expect("same key");
 
         // 指纹不匹配 → 拒绝
         assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
 
         // 解密失败不再静默标记 Expired
-        let acc = db.upsert_account(&key_a, Some("指纹测试"), &token_envelope("fp_user_1")).expect("insert");
-        let err = db.get_account_credential(&key_b, &acc.id).expect_err("wrong key must fail");
+        let acc = db
+            .upsert_account(&key_a, Some("指纹测试"), &token_envelope("fp_user_1"))
+            .expect("insert");
+        let err = db
+            .get_account_credential(&key_b, &acc.id)
+            .expect_err("wrong key must fail");
         assert!(matches!(err, StorageError::Crypto(_)));
         let summary = db.get_account_summary(&acc.id).expect("summary");
-        assert_eq!(summary.status, AccountStatus::Active, "解密失败不得改写账号状态");
+        assert_eq!(
+            summary.status,
+            AccountStatus::Active,
+            "解密失败不得改写账号状态"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
 
         // 已有账号但无指纹记录：错误密钥不得被"祝福"写入指纹
         let dir = temp_data_dir("nobless");
         let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
-        db.upsert_account(&key_a, Some("无指纹"), &token_envelope("fp_user_2")).expect("insert");
+        db.upsert_account(&key_a, Some("无指纹"), &token_envelope("fp_user_2"))
+            .expect("insert");
         assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
         assert!(!dir.join("key_id").exists(), "错误密钥不得写入指纹");
-        db.verify_or_init_key_fingerprint(&dir, &key_a).expect("correct key blesses");
+        db.verify_or_init_key_fingerprint(&dir, &key_a)
+            .expect("correct key blesses");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1428,38 +1484,60 @@ mod tests {
         let key = [21u8; 32];
 
         let env_a = token_envelope("real_uid_aaa111");
-        let acc = db.upsert_account(&key, Some("主力号"), &env_a).expect("insert");
+        let acc = db
+            .upsert_account(&key, Some("主力号"), &env_a)
+            .expect("insert");
         assert_eq!(acc.label, "主力号");
 
         // 显式停用后重新导入（无显式备注）：备注与停用状态均不被覆盖
-        db.update_account_status(&acc.id, AccountStatus::Disabled).expect("disable");
+        db.update_account_status(&acc.id, AccountStatus::Disabled)
+            .expect("disable");
         let mut env_a2 = token_envelope("real_uid_aaa111");
         env_a2.display_name = Some("官方昵称".to_string());
         let again = db.upsert_account(&key, None, &env_a2).expect("reimport");
         assert_eq!(again.id, acc.id);
         assert_eq!(again.label, "主力号", "默认展示名不得覆盖用户自定义备注");
-        assert_eq!(again.status, AccountStatus::Disabled, "重新导入不得复活已停用账号");
+        assert_eq!(
+            again.status,
+            AccountStatus::Disabled,
+            "重新导入不得复活已停用账号"
+        );
 
         // 显式备注仍可覆盖
-        let renamed = db.upsert_account(&key, Some("新备注"), &env_a2).expect("rename via import");
+        let renamed = db
+            .upsert_account(&key, Some("新备注"), &env_a2)
+            .expect("rename via import");
         assert_eq!(renamed.label, "新备注");
 
         // risk_paused 同样保护
-        db.update_account_status(&acc.id, AccountStatus::RiskPaused).expect("pause");
-        let paused = db.upsert_account(&key, None, &env_a2).expect("reimport paused");
+        db.update_account_status(&acc.id, AccountStatus::RiskPaused)
+            .expect("pause");
+        let paused = db
+            .upsert_account(&key, None, &env_a2)
+            .expect("reimport paused");
         assert_eq!(paused.status, AccountStatus::RiskPaused);
 
         // A 卡绑定 B 凭据：双方真实 UID 不一致必须拒绝
         let env_b = token_envelope("real_uid_bbb222");
-        let err = db.bind_account_credential(&key, &acc.id, None, &env_b).expect_err("must reject");
+        let err = db
+            .bind_account_credential(&key, &acc.id, None, &env_b)
+            .expect_err("must reject");
         assert!(err.to_string().contains("凭据归属不匹配"));
         let summary = db.get_account_summary(&acc.id).expect("summary");
-        assert_eq!(summary.uid_masked, crypto::mask_uid("real_uid_aaa111"), "拒绝后原账号身份不变");
+        assert_eq!(
+            summary.uid_masked,
+            crypto::mask_uid("real_uid_aaa111"),
+            "拒绝后原账号身份不变"
+        );
 
         // fallback UID 目标允许被真实 UID 升级
         let fallback_env = token_envelope("wb_manual_temp123");
-        let fb = db.upsert_account(&key, None, &fallback_env).expect("fallback insert");
-        let bound = db.bind_account_credential(&key, &fb.id, None, &env_b).expect("fallback bind ok");
+        let fb = db
+            .upsert_account(&key, None, &fallback_env)
+            .expect("fallback insert");
+        let bound = db
+            .bind_account_credential(&key, &fb.id, None, &env_b)
+            .expect("fallback bind ok");
         assert_eq!(bound.uid_masked, crypto::mask_uid("real_uid_bbb222"));
 
         let _ = std::fs::remove_file(&db_path);
@@ -1476,24 +1554,33 @@ mod tests {
         assert_eq!(default_account_label(&env), "138****5678");
 
         env.display_email = None;
-        assert_eq!(default_account_label(&env), crypto::mask_uid("user_plain_uid_99"));
+        assert_eq!(
+            default_account_label(&env),
+            crypto::mask_uid("user_plain_uid_99")
+        );
     }
 
     #[test]
     fn delete_logs_empty_request_defaults_to_active_scope() {
         let db_path = temp_db_path("delscope");
         let db = QwitchDatabase::open(&db_path).expect("open");
-        db.append_action_log(None, "trae_cn", "import", "success", None, "活跃日志").unwrap();
-        db.append_action_log(None, "trae_cn", "claim", "success", None, "待归档日志").unwrap();
+        db.append_action_log(None, "trae_cn", "import", "success", None, "活跃日志")
+            .unwrap();
+        db.append_action_log(None, "trae_cn", "claim", "success", None, "待归档日志")
+            .unwrap();
         db.archive_action_logs(&ActionLogCleanupRequest {
             action_type: Some("claim".to_string()),
             ..Default::default()
         })
         .expect("archive");
 
-        let deleted = db.delete_action_logs(&ActionLogCleanupRequest::default()).expect("delete");
+        let deleted = db
+            .delete_action_logs(&ActionLogCleanupRequest::default())
+            .expect("delete");
         assert_eq!(deleted, 1, "空请求默认只删除活跃日志，不得清空归档");
-        let archived = db.list_action_logs(LogScope::Archived, 100, 0).expect("list");
+        let archived = db
+            .list_action_logs(LogScope::Archived, 100, 0)
+            .expect("list");
         assert_eq!(archived.len(), 1);
 
         let _ = std::fs::remove_file(&db_path);

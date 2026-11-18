@@ -431,7 +431,10 @@ impl AntiRiskScheduler {
                         "query",
                         "success",
                         None,
-                        &format!("已刷新 {} ({}) 的最新额度", summary.label, summary.uid_masked),
+                        &format!(
+                            "已刷新 {} ({}) 的最新额度",
+                            summary.label, summary.uid_masked
+                        ),
                     );
                 }
                 Err(err) => {
@@ -499,6 +502,12 @@ impl AntiRiskScheduler {
         );
 
         Ok(())
+    }
+}
+
+impl Default for AntiRiskScheduler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

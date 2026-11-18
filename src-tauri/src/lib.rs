@@ -5,6 +5,7 @@ pub mod platform;
 pub mod scheduler;
 pub mod storage;
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -54,6 +55,8 @@ pub fn run() {
                 host,
                 adapters: Arc::new(create_all_adapters(&data_dir)),
                 scheduler: Arc::new(AntiRiskScheduler::new()),
+                oauth_flow_seq: Arc::new(AtomicU64::new(0)),
+                switching_in_progress: Arc::new(AtomicBool::new(false)),
             };
             app.manage(state);
 
@@ -122,12 +125,20 @@ pub fn run() {
                 let _ = window.hide();
             }
             ("tray", WindowEvent::Focused(false)) => {
-                let _ = window.hide();
+                let switching = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .map(|s| s.switching_in_progress.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+                if !switching {
+                    let _ = window.hide();
+                }
             }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::show_main_window,
+            commands::quit_app,
             commands::get_app_settings,
             commands::save_app_settings,
             commands::list_adapters,
@@ -137,9 +148,11 @@ pub fn run() {
             commands::add_account_by_token,
             commands::start_webview_oauth,
             commands::refresh_account_quota,
+            commands::refresh_quota_batch,
             commands::switch_desktop_account,
             commands::delete_account,
             commands::update_account_status,
+            commands::rename_account,
             commands::claim_daily_batch,
             commands::get_action_logs,
             commands::get_action_log_stats,

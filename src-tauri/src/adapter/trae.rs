@@ -356,33 +356,45 @@ impl TraeAdapter {
         }
     }
 
-    fn apply_vscdb_auth_entries(vscdb_path: &std::path::Path, entries: &Map<String, Value>) {
+    fn apply_vscdb_auth_entries(
+        vscdb_path: &std::path::Path,
+        entries: &Map<String, Value>,
+    ) -> Result<(), AdapterError> {
         if !vscdb_path.is_file() {
-            return;
+            return Ok(());
         }
-        let Ok(mut conn) = rusqlite::Connection::open(vscdb_path) else {
-            return;
-        };
-        let Ok(tx) = conn.transaction() else {
-            return;
-        };
-        if tx
-            .execute("DELETE FROM ItemTable WHERE key LIKE 'iCubeAuthInfo://%'", [])
-            .is_err()
-        {
-            return;
-        }
+        let mut conn = rusqlite::Connection::open(vscdb_path).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("打开 Trae state.vscdb 失败: {e}"),
+        })?;
+        let tx = conn.transaction().map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("开启 Trae state.vscdb 事务失败: {e}"),
+        })?;
+        tx.execute("DELETE FROM ItemTable WHERE key LIKE 'iCubeAuthInfo://%'", [])
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("清理 Trae state.vscdb 旧登录态失败: {e}"),
+            })?;
         for (k, v) in entries {
             let val_str = match v {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            let _ = tx.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?1, ?2)",
                 rusqlite::params![k, val_str],
-            );
+            )
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("写入 Trae state.vscdb 登录态失败: {e}"),
+            })?;
         }
-        let _ = tx.commit();
+        tx.commit().map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("提交 Trae state.vscdb 事务失败: {e}"),
+        })?;
+        Ok(())
     }
 
     fn base_api_url(&self) -> &'static str {
@@ -471,6 +483,56 @@ impl TraeAdapter {
         (token_opt, is_encrypted_local)
     }
 
+    fn parse_checkin_status_from_body(
+        body: &Value,
+    ) -> Result<(ClaimStatus, Option<i64>), AdapterError> {
+        if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
+            if code != 0 {
+                let msg = body
+                    .get("message")
+                    .or_else(|| body.get("msg"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("查询签到状态失败");
+                let lower = msg.to_lowercase();
+                if code == 401
+                    || lower.contains("unauthorized")
+                    || lower.contains("token")
+                    || lower.contains("expired")
+                {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::AuthExpired,
+                        message: format!("Trae CN 登录态已失效 ({code}): {msg}"),
+                    });
+                }
+                return Ok((ClaimStatus::Unknown, None));
+            }
+        }
+        let data = body.get("data").filter(|v| v.is_object()).unwrap_or(body);
+
+        let enabled = data.get("enable").and_then(|v| v.as_bool());
+        let credits = data
+            .get("credits")
+            .or_else(|| data.get("extra_credits"))
+            .and_then(|v| v.as_i64());
+
+        if enabled == Some(false) {
+            return Ok((ClaimStatus::Unsupported, credits));
+        }
+
+        let checked_in = data
+            .get("checked_in")
+            .and_then(|v| v.as_bool())
+            .or_else(|| data.get("did_checked_in").and_then(|v| v.as_bool()));
+
+        let claim_status = match checked_in {
+            Some(true) => ClaimStatus::Claimed,
+            Some(false) => ClaimStatus::Available,
+            None => ClaimStatus::Unknown,
+        };
+
+        Ok((claim_status, credits))
+    }
+
     async fn fetch_checkin_status(&self, token: &str) -> Result<(ClaimStatus, Option<i64>), AdapterError> {
         if !self.is_cn {
             return Ok((ClaimStatus::Unsupported, None));
@@ -499,49 +561,7 @@ impl TraeAdapter {
             code: UnifiedErrorCode::NetworkError,
             message: format!("解析 Trae CN 签到状态失败: {e}"),
         })?;
-        if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
-            if code != 0 {
-                let msg = body
-                    .get("message")
-                    .or_else(|| body.get("msg"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("查询签到状态失败");
-                let lower = msg.to_lowercase();
-                if code == 401
-                    || lower.contains("unauthorized")
-                    || lower.contains("token")
-                    || lower.contains("expired")
-                {
-                    return Err(AdapterError::Unified {
-                        code: UnifiedErrorCode::AuthExpired,
-                        message: format!("Trae CN 登录态已失效 ({code}): {msg}"),
-                    });
-                }
-                return Ok((ClaimStatus::Unsupported, None));
-            }
-        }
-        let data = body.get("data").filter(|v| v.is_object()).unwrap_or(&body);
-
-        let checked_in = data.get("checked_in").and_then(|v| v.as_bool()).unwrap_or(false)
-            || data
-                .get("did_checked_in")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        let enabled = data.get("enable").and_then(|v| v.as_bool()).unwrap_or(true);
-        let credits = data
-            .get("credits")
-            .or_else(|| data.get("extra_credits"))
-            .and_then(|v| v.as_i64());
-
-        let claim_status = if checked_in {
-            ClaimStatus::Claimed
-        } else if !enabled {
-            ClaimStatus::Unsupported
-        } else {
-            ClaimStatus::Available
-        };
-
-        Ok((claim_status, credits))
+        Self::parse_checkin_status_from_body(&body)
     }
 
     async fn fetch_entitlement_quota(&self, token: &str) -> Result<QuotaSnapshot, AdapterError> {
@@ -1027,6 +1047,12 @@ impl ToolAdapter for TraeAdapter {
                 updated_quota: None,
             });
         }
+        if current_status != ClaimStatus::Available {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: "Trae CN 签到状态未知，为避免重复请求已中止领取".into(),
+            });
+        }
 
         let url = format!("{}/trae/api/v2/ug/checkin_credits/claim", self.base_api_url());
         let headers = self.build_api_headers(&token)?;
@@ -1047,8 +1073,16 @@ impl ToolAdapter for TraeAdapter {
             return Err(Self::map_http_status(status, "Trae CN 每日签到"));
         }
 
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        let code = body.get("code").and_then(|v| v.as_i64()).unwrap_or(0);
+        let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("解析 Trae CN 签到响应失败: {e}"),
+        })?;
+        let Some(code) = body.get("code").and_then(|v| v.as_i64()) else {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: "Trae CN 签到响应缺少状态码，请刷新核实".into(),
+            });
+        };
         if code != 0 {
             let msg = body
                 .get("message")
@@ -1074,17 +1108,20 @@ impl ToolAdapter for TraeAdapter {
             });
         }
 
-        let gained = body
+        let gained_opt = body
             .pointer("/data/credits")
             .or_else(|| body.get("credits"))
             .and_then(|v| v.as_i64())
-            .or(credits_hint)
-            .unwrap_or(100);
+            .or(credits_hint);
         let refreshed = self.inspect_quota(cred).await.ok();
+        let reward_summary = match gained_opt {
+            Some(g) => format!("成功领取 {g} Credits"),
+            None => "每日签到已完成".to_string(),
+        };
 
         Ok(ClaimResult {
             claimed: true,
-            reward_summary: format!("成功领取 {gained} Credits"),
+            reward_summary,
             updated_quota: refreshed,
         })
     }
@@ -1197,8 +1234,38 @@ impl ToolAdapter for TraeAdapter {
         } else {
             auth_entries
         };
-        Self::apply_vscdb_auth_entries(&config_dir.join(STATE_VSCDB), &vscdb_entries);
+        Self::apply_vscdb_auth_entries(&config_dir.join(STATE_VSCDB), &vscdb_entries)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trae_checkin_parser_is_fail_closed_when_fields_missing() {
+        let missing = serde_json::json!({ "code": 0, "data": { "enable": true } });
+        let (cs, _) = TraeAdapter::parse_checkin_status_from_body(&missing).unwrap();
+        assert_eq!(cs, ClaimStatus::Unknown);
+
+        let avail = serde_json::json!({ "code": 0, "data": { "checked_in": false, "enable": true, "credits": 50 } });
+        let (cs2, cr2) = TraeAdapter::parse_checkin_status_from_body(&avail).unwrap();
+        assert_eq!(cs2, ClaimStatus::Available);
+        assert_eq!(cr2, Some(50));
+
+        let disabled = serde_json::json!({ "code": 0, "data": { "enable": false } });
+        let (cs3, _) = TraeAdapter::parse_checkin_status_from_body(&disabled).unwrap();
+        assert_eq!(cs3, ClaimStatus::Unsupported);
+
+        let err_body = serde_json::json!({ "code": 401, "message": "Token expired" });
+        assert!(matches!(
+            TraeAdapter::parse_checkin_status_from_body(&err_body),
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            })
+        ));
     }
 }

@@ -6,9 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
+
+const MAX_ADAPTER_OUTPUT_BYTES: u64 = 1_048_576; // 1 MiB 上限
+const MAX_ADAPTER_TIMEOUT_MS: u64 = 60_000; // 60s 上限
 
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
@@ -104,7 +107,7 @@ impl ExternalAdapter {
             },
             adapter_dir,
             entry: raw.entry,
-            timeout_ms: raw.timeout_ms.max(1000),
+            timeout_ms: raw.timeout_ms.clamp(1000, MAX_ADAPTER_TIMEOUT_MS),
         }
     }
 
@@ -169,18 +172,41 @@ impl ExternalAdapter {
         }
 
         let timeout = Duration::from_millis(self.timeout_ms);
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .map_err(|_| AdapterError::Unified {
-                code: UnifiedErrorCode::NetworkError,
-                message: format!("外部适配器 {} 执行超时 ({}ms)", self.manifest.id, self.timeout_ms),
-            })?
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("外部适配器执行异常: {e}"),
-            })?;
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
 
-        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let stdout_bytes = tokio::time::timeout(timeout, async {
+            let mut out_buf = Vec::new();
+            if let Some(stdout) = stdout_pipe {
+                let mut reader = stdout.take(MAX_ADAPTER_OUTPUT_BYTES + 1);
+                reader.read_to_end(&mut out_buf).await?;
+            }
+            if let Some(stderr) = stderr_pipe {
+                let mut err_buf = Vec::new();
+                let mut reader = stderr.take(MAX_ADAPTER_OUTPUT_BYTES + 1);
+                let _ = reader.read_to_end(&mut err_buf).await;
+            }
+            let _ = child.wait().await?;
+            Ok::<Vec<u8>, std::io::Error>(out_buf)
+        })
+        .await
+        .map_err(|_| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("外部适配器 {} 执行超时 ({}ms)", self.manifest.id, self.timeout_ms),
+        })?
+        .map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("外部适配器执行异常: {e}"),
+        })?;
+
+        if stdout_bytes.len() as u64 > MAX_ADAPTER_OUTPUT_BYTES {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("外部适配器 {} 输出超过 1MB 上限，已中止", self.manifest.id),
+            });
+        }
+
+        let stdout_str = String::from_utf8_lossy(&stdout_bytes);
         let last_line = stdout_str
             .lines()
             .rev()

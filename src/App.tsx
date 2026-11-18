@@ -4,6 +4,7 @@ import { Monitor, PanelTop, Moon, Sun } from "lucide-react";
 import { QwitchProvider, useQwitch } from "./context/QwitchContext";
 import { Dashboard } from "./pages/Dashboard";
 import { TrayPopover } from "./pages/TrayPopover";
+import { ToastViewport } from "./components/ui/ToastViewport";
 
 function PrototypeShell() {
   const params = new URLSearchParams(window.location.search);
@@ -11,16 +12,17 @@ function PrototypeShell() {
   const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 
   const [previewMode, setPreviewMode] = useState<"dashboard" | "tray">("dashboard");
-  const { toastMessage, theme, toggleTheme } = useQwitch();
+  const { theme, toggleTheme } = useQwitch();
 
   if (isTauriTrayWindow) {
     return (
-      <div className="h-screen w-screen">
+      <div className="relative h-screen w-screen">
         <TrayPopover
           onOpenMain={() => {
             void invoke("show_main_window");
           }}
         />
+        <ToastViewport compact />
       </div>
     );
   }
@@ -29,7 +31,7 @@ function PrototypeShell() {
     <div className="relative min-h-screen">
       {!isTauriRuntime && (
         <div className="sticky top-0 z-40 flex items-center justify-between border-b border-zinc-200 bg-zinc-100/90 px-4 py-1.5 text-xs backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
-          <span className="font-medium text-zinc-500 dark:text-zinc-400">
+          <span className="font-medium text-zinc-600 dark:text-zinc-400">
             Qwitch 交互原型预览（Mock 数据模式）
           </span>
           <div className="flex items-center gap-2">
@@ -43,7 +45,7 @@ function PrototypeShell() {
                     : "text-zinc-600 dark:text-zinc-400"
                 }`}
               >
-                <Monitor className="h-3 w-3" />
+                <Monitor className="h-3 w-3" aria-hidden="true" />
                 主窗口 Dashboard
               </button>
               <button
@@ -55,7 +57,7 @@ function PrototypeShell() {
                     : "text-zinc-600 dark:text-zinc-400"
                 }`}
               >
-                <PanelTop className="h-3 w-3" />
+                <PanelTop className="h-3 w-3" aria-hidden="true" />
                 系统托盘 Popover
               </button>
             </div>
@@ -63,9 +65,14 @@ function PrototypeShell() {
               type="button"
               onClick={toggleTheme}
               title="切换深色/浅色主题"
+              aria-label="切换深色或浅色主题"
               className="rounded-lg border border-zinc-200 bg-white p-1.5 text-zinc-600 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
             >
-              {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+              {theme === "dark" ? (
+                <Sun className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <Moon className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
             </button>
           </div>
         </div>
@@ -75,17 +82,13 @@ function PrototypeShell() {
         <Dashboard />
       ) : (
         <div className="flex min-h-[calc(100vh-40px)] items-center justify-center bg-zinc-200/60 p-8 dark:bg-zinc-950">
-          <div className="h-[480px] w-[340px] overflow-hidden rounded-2xl border border-zinc-200 shadow-2xl dark:border-zinc-800">
+          <div className="relative h-[420px] w-[340px] overflow-hidden rounded-2xl border border-zinc-200 shadow-2xl dark:border-zinc-800">
             <TrayPopover onOpenMain={() => setPreviewMode("dashboard")} />
           </div>
         </div>
       )}
 
-      {toastMessage && (
-        <div className="fixed right-5 bottom-5 z-50 rounded-xl bg-zinc-900 px-4 py-2.5 text-xs font-medium text-white shadow-lg dark:bg-zinc-100 dark:text-zinc-900">
-          {toastMessage}
-        </div>
-      )}
+      <ToastViewport compact={previewMode === "tray"} />
     </div>
   );
 }

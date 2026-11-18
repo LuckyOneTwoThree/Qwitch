@@ -4,10 +4,12 @@ use chrono::Utc;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
@@ -22,6 +24,16 @@ const DEFAULT_ENDPOINT: &str = "https://copilot.tencent.com";
 const WEB_AUTH_ORIGIN: &str = "https://www.workbuddy.cn";
 const AUTH_FILENAME: &str = "workbuddy-desktop.info";
 const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
+
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 const AUTH_HELPER_JS: &str = r#"'use strict';
 const crypto = require('crypto');
@@ -203,7 +215,42 @@ impl WorkBuddyAdapter {
         }
     }
 
-    fn decrypt_sym_v1_batch(
+    pub fn validate_endpoint(raw_url: &str) -> Result<String, AdapterError> {
+        let trimmed = raw_url.trim();
+        let parsed = reqwest::Url::parse(trimmed).map_err(|_| AdapterError::Unified {
+            code: UnifiedErrorCode::InvalidCredential,
+            message: "WorkBuddy 端点 URL 格式无效".into(),
+        })?;
+        if parsed.scheme() != "https"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "WorkBuddy 端点必须为无查询参数的 HTTPS 地址".into(),
+            });
+        }
+        let host = parsed
+            .host_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let allowed = host == "copilot.tencent.com"
+            || host == "www.workbuddy.cn"
+            || host == "workbuddy.cn"
+            || host.ends_with(".workbuddy.cn")
+            || host.ends_with(".tencent.com");
+        if !allowed {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "WorkBuddy 端点不在受信任的官方 HTTPS 白名单内".into(),
+            });
+        }
+        Ok(trimmed.trim_end_matches('/').to_string())
+    }
+
+    async fn decrypt_sym_v1_batch(
         runtime_bin: &Path,
         fields: &serde_json::Map<String, Value>,
     ) -> Result<HashMap<String, String>, AdapterError> {
@@ -223,6 +270,7 @@ impl WorkBuddyAdapter {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::ClientNotFound,
@@ -230,13 +278,20 @@ impl WorkBuddyAdapter {
             })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(&req_bytes);
+            let _ = stdin.write_all(&req_bytes).await;
+            let _ = stdin.shutdown().await;
         }
 
-        let output = child.wait_with_output().map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("等待 WorkBuddy 解密助手失败: {e}"),
-        })?;
+        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .map_err(|_| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: "WorkBuddy 解密助手执行超时".into(),
+            })?
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("等待 WorkBuddy 解密助手失败: {e}"),
+            })?;
 
         let reply: Value =
             serde_json::from_slice(&output.stdout).map_err(|_| AdapterError::Unified {
@@ -266,10 +321,13 @@ impl WorkBuddyAdapter {
         })
     }
 
-    fn decrypt_sym_v1(runtime_bin: &Path, encrypted_val: &Value) -> Result<String, AdapterError> {
+    async fn decrypt_sym_v1(
+        runtime_bin: &Path,
+        encrypted_val: &Value,
+    ) -> Result<String, AdapterError> {
         let mut fields = serde_json::Map::new();
         fields.insert("accessToken".to_string(), encrypted_val.clone());
-        let mut out = Self::decrypt_sym_v1_batch(runtime_bin, &fields)?;
+        let mut out = Self::decrypt_sym_v1_batch(runtime_bin, &fields).await?;
         out.remove("accessToken").ok_or_else(|| AdapterError::Unified {
             code: UnifiedErrorCode::InvalidCredential,
             message: "WorkBuddy 加密凭据解密失败 (DECRYPT_FAILED)".into(),
@@ -306,10 +364,7 @@ impl WorkBuddyAdapter {
     }
 
     pub async fn create_oauth_session() -> Result<(String, String), String> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = shared_http_client();
 
         let url = format!("{WEB_AUTH_ORIGIN}/v2/plugin/auth/state?platform=workbuddy");
         let resp = http
@@ -352,10 +407,7 @@ impl WorkBuddyAdapter {
     }
 
     pub async fn poll_oauth_result(state_token: &str) -> Result<Option<CredentialEnvelope>, String> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = shared_http_client();
 
         let token_url = format!("{WEB_AUTH_ORIGIN}/v2/plugin/auth/token?state={state_token}");
         let resp = http
@@ -500,7 +552,7 @@ impl WorkBuddyAdapter {
         }))
     }
 
-    fn extract_api_context(
+    async fn extract_api_context(
         cred: &CredentialEnvelope,
         host: Option<&dyn PlatformHost>,
     ) -> Result<(String, String, HeaderMap), AdapterError> {
@@ -516,13 +568,12 @@ impl WorkBuddyAdapter {
                 })?;
                 let sess = Self::parse_session_json(&raw)?;
                 let uid = sess["account"]["uid"].as_str().unwrap_or(&cred.uid).to_string();
-                let endpoint = sess
+                let raw_endpoint = sess
                     .pointer("/auth/endpoint")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(DEFAULT_ENDPOINT)
-                    .trim_end_matches('/')
-                    .to_string();
+                    .unwrap_or(DEFAULT_ENDPOINT);
+                let endpoint = Self::validate_endpoint(raw_endpoint)?;
 
                 let cached_plain_token = files
                     .get(DECRYPTED_TOKEN_FILE)
@@ -545,7 +596,7 @@ impl WorkBuddyAdapter {
                         code: UnifiedErrorCode::ClientNotFound,
                         message: "未找到本机 WorkBuddy 客户端，无法解密 sym-v1 凭据".into(),
                     })?;
-                    Self::decrypt_sym_v1(&bin, token_val)?
+                    Self::decrypt_sym_v1(&bin, token_val).await?
                 } else {
                     return Err(AdapterError::Unified {
                         code: UnifiedErrorCode::InvalidCredential,
@@ -566,12 +617,12 @@ impl WorkBuddyAdapter {
                 extra,
                 ..
             } => {
-                let endpoint = extra
+                let raw_endpoint = extra
                     .get("endpoint")
                     .map(|s| s.as_str())
-                    .unwrap_or(DEFAULT_ENDPOINT)
-                    .trim_end_matches('/')
-                    .to_string();
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(DEFAULT_ENDPOINT);
+                let endpoint = Self::validate_endpoint(raw_endpoint)?;
                 let headers = Self::build_headers(access_token, &cred.uid, None, None)?;
                 Ok((endpoint, cred.uid.clone(), headers))
             }
@@ -637,6 +688,53 @@ impl WorkBuddyAdapter {
         }
     }
 
+    fn parse_checkin_status_from_body(
+        body: &Value,
+    ) -> Result<(ClaimStatus, f64, i64), AdapterError> {
+        if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
+            if code != 0 {
+                let msg = body
+                    .get("msg")
+                    .or_else(|| body.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("查询签到状态失败");
+                let lower = msg.to_lowercase();
+                if code == 401
+                    || lower.contains("unauthorized")
+                    || lower.contains("token")
+                    || lower.contains("expired")
+                {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::AuthExpired,
+                        message: format!("WorkBuddy 登录态已失效 ({code}): {msg}"),
+                    });
+                }
+                if code == 403 {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::RiskTriggered,
+                        message: format!("WorkBuddy 拒绝访问 ({code}): {msg}"),
+                    });
+                }
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!("查询 WorkBuddy 签到状态异常 ({code}): {msg}"),
+                });
+            }
+        }
+
+        let data = dig_data(body);
+        let claim_status = match data.get("today_checked_in") {
+            Some(v) if v.as_bool() == Some(true) || v.as_i64() == Some(1) => ClaimStatus::Claimed,
+            Some(v) if v.as_bool() == Some(false) || v.as_i64() == Some(0) => {
+                ClaimStatus::Available
+            }
+            _ => ClaimStatus::Unknown,
+        };
+        let checkin_total_credits = parse_json_f64(data.get("total_credits")).unwrap_or(0.0);
+        let streak_days = data.get("streak_days").and_then(|v| v.as_i64()).unwrap_or(0);
+        Ok((claim_status, checkin_total_credits, streak_days))
+    }
+
     async fn fetch_quota_and_checkin(
         &self,
         endpoint: &str,
@@ -665,13 +763,8 @@ impl WorkBuddyAdapter {
             message: format!("解析 WorkBuddy 状态响应失败: {e}"),
         })?;
 
-        let data = dig_data(&body);
-        let checked_in = data
-            .get("today_checked_in")
-            .map(|v| v.as_bool() == Some(true) || v.as_i64() == Some(1))
-            .unwrap_or(false);
-        let checkin_total_credits = parse_json_f64(data.get("total_credits")).unwrap_or(0.0);
-        let streak_days = data.get("streak_days").and_then(|v| v.as_i64()).unwrap_or(0);
+        let (claim_status, checkin_total_credits, streak_days) =
+            Self::parse_checkin_status_from_body(&body)?;
 
         let mut plan_name: Option<String> = None;
         let mut buckets: Vec<QuotaBucket> = Vec::new();
@@ -749,11 +842,7 @@ impl WorkBuddyAdapter {
 
         Ok(QuotaSnapshot {
             plan_name,
-            claim_status: if checked_in {
-                ClaimStatus::Claimed
-            } else {
-                ClaimStatus::Available
-            },
+            claim_status,
             buckets,
             fetched_at: Utc::now().to_rfc3339(),
         })
@@ -850,7 +939,7 @@ impl ToolAdapter for WorkBuddyAdapter {
             if let Some(v) = sess.pointer("/account/email") {
                 req_fields.insert("email".to_string(), v.clone());
             }
-            if let Ok(vals) = Self::decrypt_sym_v1_batch(&bin, &req_fields) {
+            if let Ok(vals) = Self::decrypt_sym_v1_batch(&bin, &req_fields).await {
                 decrypted_fields = vals;
             }
         }
@@ -1002,13 +1091,13 @@ impl ToolAdapter for WorkBuddyAdapter {
 
     async fn inspect_quota(&self, cred: &CredentialEnvelope) -> Result<QuotaSnapshot, AdapterError> {
         let host = crate::platform::NativePlatformHost;
-        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&host))?;
+        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&host)).await?;
         self.fetch_quota_and_checkin(&endpoint, &headers).await
     }
 
     async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError> {
         let host = crate::platform::NativePlatformHost;
-        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&host))?;
+        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&host)).await?;
 
         let current = self.fetch_quota_and_checkin(&endpoint, &headers).await?;
         if current.claim_status == ClaimStatus::Claimed {
@@ -1016,6 +1105,12 @@ impl ToolAdapter for WorkBuddyAdapter {
                 claimed: false,
                 reward_summary: "今日已签过".into(),
                 updated_quota: Some(current),
+            });
+        }
+        if current.claim_status != ClaimStatus::Available {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: "WorkBuddy 签到状态未知，为避免重复请求已中止领取".into(),
             });
         }
 
@@ -1037,7 +1132,21 @@ impl ToolAdapter for WorkBuddyAdapter {
             return Err(Self::map_http_status(status, "WorkBuddy 每日签到"));
         }
 
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let raw_text = resp.text().await.map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("读取 WorkBuddy 签到响应失败: {e}"),
+        })?;
+        let body: Value = serde_json::from_str(&raw_text).map_err(|e| {
+            if !status.is_success() {
+                Self::map_http_status(status, "WorkBuddy 每日签到")
+            } else {
+                AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!("解析 WorkBuddy 签到响应失败: {e}"),
+                }
+            }
+        })?;
+
         let code = body.get("code").and_then(|v| v.as_i64());
         let msg = body
             .get("msg")
@@ -1076,12 +1185,22 @@ impl ToolAdapter for WorkBuddyAdapter {
         }
 
         let data = dig_data(&body);
-        let credit = data.get("credit").and_then(|v| v.as_i64()).unwrap_or(100);
+        let credit_opt = data.get("credit").and_then(|v| v.as_i64());
+        if code != Some(0) && credit_opt.is_none() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: "WorkBuddy 每日签到响应缺少有效结果字段，请刷新核实状态".into(),
+            });
+        }
         let refreshed = self.fetch_quota_and_checkin(&endpoint, &headers).await.ok();
+        let reward_summary = match credit_opt {
+            Some(c) => format!("成功领取 {c} 积分"),
+            None => "每日签到已完成".to_string(),
+        };
 
         Ok(ClaimResult {
             claimed: true,
-            reward_summary: format!("成功领取 {credit} 积分"),
+            reward_summary,
             updated_quota: refreshed,
         })
     }
@@ -1120,11 +1239,12 @@ impl ToolAdapter for WorkBuddyAdapter {
                 extra,
                 ..
             } => {
-                let endpoint = extra
+                let raw_endpoint = extra
                     .get("endpoint")
                     .map(|s| s.as_str())
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or(DEFAULT_ENDPOINT);
+                let endpoint = Self::validate_endpoint(raw_endpoint)?;
 
                 let mut root = if target.is_file() {
                     std::fs::read(&target)
@@ -1186,5 +1306,50 @@ impl ToolAdapter for WorkBuddyAdapter {
         })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_endpoint_allows_official_https_and_rejects_untrusted() {
+        assert_eq!(
+            WorkBuddyAdapter::validate_endpoint("https://copilot.tencent.com/").unwrap(),
+            "https://copilot.tencent.com"
+        );
+        assert_eq!(
+            WorkBuddyAdapter::validate_endpoint("https://www.workbuddy.cn").unwrap(),
+            "https://www.workbuddy.cn"
+        );
+        assert!(WorkBuddyAdapter::validate_endpoint("http://copilot.tencent.com").is_err());
+        assert!(WorkBuddyAdapter::validate_endpoint("https://evil.example.com").is_err());
+        assert!(WorkBuddyAdapter::validate_endpoint("https://copilot.tencent.com?x=1").is_err());
+    }
+
+    #[test]
+    fn checkin_parser_is_fail_closed_when_fields_missing_or_error_code() {
+        let missing = serde_json::json!({ "code": 0, "data": { "total_credits": 500 } });
+        let (cs, credits, _) = WorkBuddyAdapter::parse_checkin_status_from_body(&missing).unwrap();
+        assert_eq!(cs, ClaimStatus::Unknown);
+        assert_eq!(credits, 500.0);
+
+        let avail = serde_json::json!({ "code": 0, "data": { "today_checked_in": false } });
+        let (cs2, _, _) = WorkBuddyAdapter::parse_checkin_status_from_body(&avail).unwrap();
+        assert_eq!(cs2, ClaimStatus::Available);
+
+        let claimed = serde_json::json!({ "code": 0, "data": { "today_checked_in": true } });
+        let (cs3, _, _) = WorkBuddyAdapter::parse_checkin_status_from_body(&claimed).unwrap();
+        assert_eq!(cs3, ClaimStatus::Claimed);
+
+        let err_body = serde_json::json!({ "code": 401, "msg": "token expired" });
+        assert!(matches!(
+            WorkBuddyAdapter::parse_checkin_status_from_body(&err_body),
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            })
+        ));
     }
 }

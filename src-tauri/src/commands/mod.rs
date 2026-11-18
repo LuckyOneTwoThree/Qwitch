@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -49,6 +50,13 @@ pub struct AppState {
     pub host: Arc<dyn PlatformHost>,
     pub adapters: Arc<HashMap<String, Arc<dyn ToolAdapter>>>,
     pub scheduler: Arc<AntiRiskScheduler>,
+    pub oauth_flow_seq: Arc<AtomicU64>,
+    pub switching_in_progress: Arc<AtomicBool>,
+}
+
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +241,7 @@ pub async fn import_local_account(
         &log_msg,
     );
     let _ = app.emit("qwitch://account-updated", &summary.id);
+    let _ = app.emit("qwitch://logs-updated", ());
     state
         .db
         .get_account_summary(&summary.id)
@@ -296,6 +305,7 @@ pub async fn add_account_by_token(
         &log_msg,
     );
     let _ = app.emit("qwitch://account-updated", &summary.id);
+    let _ = app.emit("qwitch://logs-updated", ());
     state
         .db
         .get_account_summary(&summary.id)
@@ -330,6 +340,7 @@ pub async fn refresh_account_quota(
                 &format!("已刷新 {} ({}) 的最新额度", summary.label, summary.uid_masked),
             );
             let _ = app.emit("qwitch://account-updated", &summary.id);
+            let _ = app.emit("qwitch://logs-updated", ());
             Ok(snapshot)
         }
         Err(AdapterError::Unified { code, message }) => {
@@ -354,7 +365,32 @@ pub async fn refresh_account_quota(
                 &format!("{} 查询失败：{message}", summary.label),
             );
             let _ = app.emit("qwitch://account-updated", &summary.id);
+            let _ = app.emit("qwitch://logs-updated", ());
             Err(message)
+        }
+    }
+}
+
+struct SwitchFlagGuard {
+    flag: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl SwitchFlagGuard {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self { flag, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SwitchFlagGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(false, Ordering::SeqCst);
         }
     }
 }
@@ -366,6 +402,8 @@ pub async fn switch_desktop_account(
     account_id: String,
     force_kill: bool,
 ) -> Result<(), String> {
+    let mut switch_guard = SwitchFlagGuard::new(Arc::clone(&state.switching_in_progress));
+
     let (summary, cred) = state
         .db
         .get_account_credential(&state.master_key, &account_id)
@@ -375,6 +413,15 @@ pub async fn switch_desktop_account(
         .adapters
         .get(&summary.tool_id)
         .ok_or_else(|| format!("适配器 {} 尚未注册", summary.tool_id))?;
+
+    let settings = load_app_settings(&state.db);
+    let exe = resolve_client_executable(state.host.as_ref(), &settings, &summary.tool_id)
+        .ok_or_else(|| {
+            format!(
+                "未检测到 {} 客户端安装路径，请在设置中配置自定义路径后再切换",
+                summary.tool_id
+            )
+        })?;
 
     let running = state
         .host
@@ -413,11 +460,6 @@ pub async fn switch_desktop_account(
         .await
         .map_err(|e| e.to_string())?;
 
-    state
-        .db
-        .set_active_on_client(&summary.tool_id, &summary.id)
-        .map_err(|e| e.to_string())?;
-
     let _ = app.emit(
         "qwitch://switch-progress",
         SwitchProgressEvent {
@@ -426,10 +468,15 @@ pub async fn switch_desktop_account(
         },
     );
 
-    let settings = load_app_settings(&state.db);
-    if let Some(exe) = resolve_client_executable(state.host.as_ref(), &settings, &summary.tool_id) {
-        let _ = state.host.launch_client(&exe, &[]);
-    }
+    state
+        .host
+        .launch_client(&exe, &[])
+        .map_err(|e| format!("写入快照成功但拉起客户端失败: {e}"))?;
+
+    state
+        .db
+        .set_active_on_client(&summary.tool_id, &summary.id)
+        .map_err(|e| e.to_string())?;
 
     let _ = state.db.append_action_log(
         Some(&summary.id),
@@ -447,27 +494,134 @@ pub async fn switch_desktop_account(
         },
     );
     let _ = app.emit("qwitch://account-updated", &summary.id);
+    let _ = app.emit("qwitch://logs-updated", ());
+
+    switch_guard.disarm();
+    let flag_clone = Arc::clone(&state.switching_in_progress);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        flag_clone.store(false, Ordering::SeqCst);
+    });
+
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_account(state: State<'_, AppState>, account_id: String) -> Result<(), String> {
+pub fn delete_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<(), String> {
+    let summary = state
+        .db
+        .get_account_summary(&account_id)
+        .map_err(|e| e.to_string())?;
     state
         .db
         .delete_account(&account_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = state.db.append_action_log(
+        None,
+        &summary.tool_id,
+        "import",
+        "success",
+        None,
+        &format!("已删除账号 {} ({})", summary.label, summary.uid_masked),
+    );
+    let _ = app.emit("qwitch://account-updated", &account_id);
+    let _ = app.emit("qwitch://logs-updated", ());
+    Ok(())
 }
 
 #[tauri::command]
 pub fn update_account_status(
+    app: AppHandle,
     state: State<'_, AppState>,
     account_id: String,
     status: AccountStatus,
 ) -> Result<(), String> {
     state
         .db
-        .update_account_status(&account_id, status)
-        .map_err(|e| e.to_string())
+        .update_account_status(&account_id, status.clone())
+        .map_err(|e| e.to_string())?;
+    if let Ok(summary) = state.db.get_account_summary(&account_id) {
+        let status_label = match status {
+            AccountStatus::Active => "正常",
+            AccountStatus::Expired => "凭据过期",
+            AccountStatus::RiskPaused => "风控暂停",
+            AccountStatus::Disabled => "已停用",
+        };
+        let _ = state.db.append_action_log(
+            Some(&summary.id),
+            &summary.tool_id,
+            "import",
+            "success",
+            None,
+            &format!(
+                "已将账号 {} ({}) 状态切换为{status_label}",
+                summary.label, summary.uid_masked
+            ),
+        );
+    }
+    let _ = app.emit("qwitch://account-updated", &account_id);
+    let _ = app.emit("qwitch://logs-updated", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+    label: String,
+) -> Result<AccountSummary, String> {
+    let summary = state
+        .db
+        .update_account_label(&account_id, &label)
+        .map_err(|e| e.to_string())?;
+    let _ = state.db.append_action_log(
+        Some(&summary.id),
+        &summary.tool_id,
+        "import",
+        "success",
+        None,
+        &format!("已将账号 ({}) 备注重命名为 {}", summary.uid_masked, summary.label),
+    );
+    let _ = app.emit("qwitch://account-updated", &summary.id);
+    let _ = app.emit("qwitch://logs-updated", ());
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn refresh_quota_batch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_ids: Vec<String>,
+) -> Result<(), String> {
+    let settings = load_app_settings(&state.db);
+    let jitter = JitterConfig {
+        min_ms: settings.jitter_min_ms,
+        max_ms: settings.jitter_max_ms.max(settings.jitter_min_ms),
+    };
+    let db = Arc::clone(&state.db);
+    let master_key = state.master_key;
+    let adapters = Arc::clone(&state.adapters);
+    let scheduler = Arc::clone(&state.scheduler);
+
+    tokio::spawn(async move {
+        let _ = scheduler
+            .run_quota_refresh_batch(
+                &app,
+                &db,
+                &master_key,
+                &adapters,
+                account_ids,
+                jitter,
+            )
+            .await;
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -790,7 +944,7 @@ const OAUTH_CAPTURE_JS: &str = r#"
         name: acc.name || undefined,
         refreshToken: acc.refreshToken || undefined,
       });
-      window.location.href = 'https://qwitch.local/oauth-callback?payload=' + encodeURIComponent(payloadStr);
+      window.location.href = 'https://qwitch.local/oauth-callback?nonce=' + encodeURIComponent('__QWITCH_NONCE__') + '&payload=' + encodeURIComponent(payloadStr);
     }
   }
 
@@ -934,11 +1088,17 @@ async fn persist_oauth_envelope(
     host: &Arc<dyn PlatformHost>,
     master_key: &[u8; 32],
     adapter: &Arc<dyn ToolAdapter>,
+    flow_seq: &Arc<AtomicU64>,
+    flow_id: u64,
     tool_id: &str,
     label: &str,
     target_account_id: Option<&str>,
     envelope: crate::domain::CredentialEnvelope,
 ) {
+    if flow_seq.load(Ordering::SeqCst) != flow_id {
+        return;
+    }
+
     let mut matched_local = false;
     let envelope_to_save = match adapter.import_from_local(host.as_ref()).await {
         Ok(local_env)
@@ -949,6 +1109,10 @@ async fn persist_oauth_envelope(
         }
         _ => envelope,
     };
+
+    if flow_seq.load(Ordering::SeqCst) != flow_id {
+        return;
+    }
 
     let save_res = if let Some(acc_id) = target_account_id {
         let label_override = (!label.is_empty()).then_some(label);
@@ -989,13 +1153,16 @@ async fn persist_oauth_envelope(
                 &log_msg,
             );
             let _ = app.emit("qwitch://account-updated", &summary.id);
+            let _ = app.emit("qwitch://logs-updated", ());
         }
         Err(e) => {
             let _ = app.emit("qwitch://oauth-error", format!("保存账号失败: {e}"));
         }
     }
-    if let Some(win) = app.get_webview_window("oauth-login") {
-        let _ = win.close();
+    if flow_seq.load(Ordering::SeqCst) == flow_id {
+        if let Some(win) = app.get_webview_window("oauth-login") {
+            let _ = win.close();
+        }
     }
 }
 
@@ -1007,6 +1174,9 @@ pub async fn start_webview_oauth(
     label: String,
     target_account_id: Option<String>,
 ) -> Result<(), String> {
+    let flow_id = state.oauth_flow_seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let flow_nonce = uuid::Uuid::new_v4().to_string();
+
     if let Some(existing) = app.get_webview_window("oauth-login") {
         let _ = existing.close();
     }
@@ -1052,15 +1222,18 @@ pub async fn start_webview_oauth(
     let db = Arc::clone(&state.db);
     let host_arc = Arc::clone(&state.host);
     let master_key = state.master_key;
+    let flow_seq = Arc::clone(&state.oauth_flow_seq);
     let app_handle = app.clone();
     let tool_id_owned = tool_id.clone();
     let label_owned = label.trim().to_string();
     let target_id_owned = target_account_id.filter(|s| !s.trim().is_empty());
 
     let app_for_popup = app.clone();
-    let init_js = match mode {
-        OAuthMode::TraeCapture => OAUTH_CAPTURE_JS,
-        OAuthMode::WorkBuddyPoll { .. } | OAuthMode::QoderPkcePoll { .. } => POPUP_REDIRECT_JS,
+    let init_js: String = match mode {
+        OAuthMode::TraeCapture => OAUTH_CAPTURE_JS.replace("__QWITCH_NONCE__", &flow_nonce),
+        OAuthMode::WorkBuddyPoll { .. } | OAuthMode::QoderPkcePoll { .. } => {
+            POPUP_REDIRECT_JS.to_string()
+        }
     };
 
     let mut builder = WebviewWindowBuilder::new(&app, "oauth-login", WebviewUrl::External(parsed_url))
@@ -1069,7 +1242,7 @@ pub async fn start_webview_oauth(
         .center()
         .incognito(true)
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-        .initialization_script(init_js)
+        .initialization_script(&init_js)
         .on_new_window(move |url, _features| {
             if url.as_str() != "about:blank" {
                 if let Some(win) = app_for_popup.get_webview_window("oauth-login") {
@@ -1084,12 +1257,31 @@ pub async fn start_webview_oauth(
         let db_nav = Arc::clone(&db);
         let host_nav = Arc::clone(&host_arc);
         let adapter_nav = Arc::clone(&adapter);
+        let flow_seq_nav = Arc::clone(&flow_seq);
+        let expected_nonce = flow_nonce.clone();
         let tid_nav = tool_id_owned.clone();
         let lbl_nav = label_owned.clone();
         let target_nav = target_id_owned.clone();
 
         builder = builder.on_navigation(move |nav_url| {
             if nav_url.host_str() == Some("qwitch.local") {
+                if nav_url.path() != "/oauth-callback"
+                    || flow_seq_nav.load(Ordering::SeqCst) != flow_id
+                {
+                    return false;
+                }
+                let callback_nonce = nav_url
+                    .query_pairs()
+                    .find(|(k, _)| k == "nonce")
+                    .map(|(_, v)| v.to_string());
+                if callback_nonce.as_deref() != Some(expected_nonce.as_str()) {
+                    let _ = app_nav.emit(
+                        "qwitch://oauth-error",
+                        "内置授权回调校验失败（会话状态不匹配），已拒绝该请求",
+                    );
+                    return false;
+                }
+
                 let raw_payload = nav_url
                     .query_pairs()
                     .find(|(k, _)| k == "payload")
@@ -1101,6 +1293,7 @@ pub async fn start_webview_oauth(
                     let db_clone = Arc::clone(&db_nav);
                     let host_clone = Arc::clone(&host_nav);
                     let adapter_clone = Arc::clone(&adapter_nav);
+                    let flow_seq_clone = Arc::clone(&flow_seq_nav);
                     let tid = tid_nav.clone();
                     let lbl = lbl_nav.clone();
                     let target_id = target_nav.clone();
@@ -1114,6 +1307,8 @@ pub async fn start_webview_oauth(
                                     &host_clone,
                                     &master_key,
                                     &adapter_clone,
+                                    &flow_seq_clone,
+                                    flow_id,
                                     &tid,
                                     &lbl,
                                     target_id.as_deref(),
@@ -1126,8 +1321,10 @@ pub async fn start_webview_oauth(
                                     "qwitch://oauth-error",
                                     format!("解析授权凭据失败: {e}"),
                                 );
-                                if let Some(win) = app_clone.get_webview_window("oauth-login") {
-                                    let _ = win.close();
+                                if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
+                                    if let Some(win) = app_clone.get_webview_window("oauth-login") {
+                                        let _ = win.close();
+                                    }
                                 }
                             }
                         }
@@ -1149,7 +1346,9 @@ pub async fn start_webview_oauth(
             tauri::async_runtime::spawn(async move {
                 for _ in 0..180 {
                     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                    if app_handle.get_webview_window("oauth-login").is_none() {
+                    if flow_seq.load(Ordering::SeqCst) != flow_id
+                        || app_handle.get_webview_window("oauth-login").is_none()
+                    {
                         break;
                     }
                     match WorkBuddyAdapter::poll_oauth_result(&state_token).await {
@@ -1160,6 +1359,8 @@ pub async fn start_webview_oauth(
                                 &host_arc,
                                 &master_key,
                                 &adapter,
+                                &flow_seq,
+                                flow_id,
                                 &tool_id_owned,
                                 &label_owned,
                                 target_id_owned.as_deref(),
@@ -1170,9 +1371,11 @@ pub async fn start_webview_oauth(
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            let _ = app_handle.emit("qwitch://oauth-error", err);
-                            if let Some(win) = app_handle.get_webview_window("oauth-login") {
-                                let _ = win.close();
+                            if flow_seq.load(Ordering::SeqCst) == flow_id {
+                                let _ = app_handle.emit("qwitch://oauth-error", err);
+                                if let Some(win) = app_handle.get_webview_window("oauth-login") {
+                                    let _ = win.close();
+                                }
                             }
                             break;
                         }
@@ -1188,7 +1391,9 @@ pub async fn start_webview_oauth(
             tauri::async_runtime::spawn(async move {
                 for _ in 0..180 {
                     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                    if app_handle.get_webview_window("oauth-login").is_none() {
+                    if flow_seq.load(Ordering::SeqCst) != flow_id
+                        || app_handle.get_webview_window("oauth-login").is_none()
+                    {
                         break;
                     }
                     match QoderAdapter::poll_pkce_device_token(&nonce, &verifier, &machine_id).await {
@@ -1199,6 +1404,8 @@ pub async fn start_webview_oauth(
                                 &host_arc,
                                 &master_key,
                                 &adapter,
+                                &flow_seq,
+                                flow_id,
                                 &tool_id_owned,
                                 &label_owned,
                                 target_id_owned.as_deref(),
@@ -1209,9 +1416,11 @@ pub async fn start_webview_oauth(
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            let _ = app_handle.emit("qwitch://oauth-error", err);
-                            if let Some(win) = app_handle.get_webview_window("oauth-login") {
-                                let _ = win.close();
+                            if flow_seq.load(Ordering::SeqCst) == flow_id {
+                                let _ = app_handle.emit("qwitch://oauth-error", err);
+                                if let Some(win) = app_handle.get_webview_window("oauth-login") {
+                                    let _ = win.close();
+                                }
                             }
                             break;
                         }

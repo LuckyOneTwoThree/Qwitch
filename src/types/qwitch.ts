@@ -117,3 +117,13 @@ export interface ExportLogsResult {
   count: number;
   archivedCount: number;
 }
+
+export type ToastTone = "success" | "error" | "warning" | "info";
+
+export interface ToastState {
+  id: number;
+  message: string;
+  tone: ToastTone;
+}
+
+export type BatchActionType = "claim" | "refresh";

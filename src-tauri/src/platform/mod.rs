@@ -82,6 +82,101 @@ pub trait PlatformHost: Send + Sync {
 pub struct NativePlatformHost;
 
 impl NativePlatformHost {
+    fn read_custom_client_path(&self, tool_id: &str) -> Option<PathBuf> {
+        let db_path = self.qwitch_data_dir().ok()?.join("qwitch.db");
+        if !db_path.is_file() {
+            return None;
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
+        let json: String = conn
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key = 'app.settings'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let val: serde_json::Value = serde_json::from_str(&json).ok()?;
+        let raw = val
+            .pointer(&format!("/customClientPaths/{tool_id}"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let path = PathBuf::from(raw);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    fn resolve_target_process_names(&self, tool_id: &str) -> (Vec<String>, Vec<String>) {
+        let mut mac_apps = Vec::new();
+        let mut mac_procs = Vec::new();
+        let mut win_exes = Vec::new();
+
+        if let Some(spec) = client_spec(tool_id) {
+            for a in spec.mac_app_names {
+                mac_apps.push((*a).to_string());
+            }
+            for p in spec.mac_process_names {
+                mac_procs.push((*p).to_string());
+            }
+            for e in spec.win_exe_names {
+                win_exes.push((*e).to_string());
+            }
+        }
+
+        if let Some(custom) = self.read_custom_client_path(tool_id) {
+            if let Some(name) = custom.file_name().and_then(|n| n.to_str()) {
+                #[cfg(target_os = "macos")]
+                {
+                    if name.ends_with(".app") {
+                        if !mac_apps.iter().any(|x| x == name) {
+                            mac_apps.push(name.to_string());
+                        }
+                        let stem = name.trim_end_matches(".app").to_string();
+                        if !mac_procs.iter().any(|x| x == &stem) {
+                            mac_procs.push(stem);
+                        }
+                    } else if !mac_procs.iter().any(|x| x == name) {
+                        mac_procs.push(name.to_string());
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    if name.to_lowercase().ends_with(".exe")
+                        && !win_exes.iter().any(|x| x.eq_ignore_ascii_case(name))
+                    {
+                        win_exes.push(name.to_string());
+                    }
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    let _ = name;
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            (mac_apps, mac_procs)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = (mac_apps, mac_procs);
+            (win_exes, Vec::new())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (mac_apps, mac_procs, win_exes);
+            (Vec::new(), Vec::new())
+        }
+    }
+
     fn resolve_data_dirs() -> Result<(PathBuf, PathBuf), HostError> {
         #[cfg(target_os = "macos")]
         {
@@ -236,6 +331,9 @@ impl PlatformHost for NativePlatformHost {
     }
 
     fn detect_client_executable(&self, tool_id: &str) -> Option<PathBuf> {
+        if let Some(custom) = self.read_custom_client_path(tool_id) {
+            return Some(custom);
+        }
         let spec = client_spec(tool_id)?;
 
         #[cfg(target_os = "macos")]
@@ -288,15 +386,16 @@ impl PlatformHost for NativePlatformHost {
     }
 
     fn is_client_running(&self, tool_id: &str) -> Result<bool, HostError> {
-        let Some(spec) = client_spec(tool_id) else {
+        let (primary_names, proc_names) = self.resolve_target_process_names(tool_id);
+        if primary_names.is_empty() && proc_names.is_empty() {
             return Ok(false);
-        };
+        }
 
         #[cfg(target_os = "macos")]
         {
-            for proc_name in spec.mac_process_names {
+            for proc_name in proc_names {
                 let status = Command::new("pgrep")
-                    .args(["-x", proc_name])
+                    .args(["-x", &proc_name])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status()?;
@@ -309,7 +408,8 @@ impl PlatformHost for NativePlatformHost {
 
         #[cfg(target_os = "windows")]
         {
-            for exe in spec.win_exe_names {
+            let _ = proc_names;
+            for exe in primary_names {
                 let output = Command::new("tasklist")
                     .args(["/FI", &format!("IMAGENAME eq {exe}"), "/NH"])
                     .output()?;
@@ -323,7 +423,7 @@ impl PlatformHost for NativePlatformHost {
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let _ = spec;
+            let _ = (primary_names, proc_names);
             Ok(false)
         }
     }
@@ -337,30 +437,33 @@ impl PlatformHost for NativePlatformHost {
             return Ok(());
         }
 
-        let Some(spec) = client_spec(tool_id) else {
+        let (primary_names, proc_names) = self.resolve_target_process_names(tool_id);
+        if primary_names.is_empty() && proc_names.is_empty() {
             return Ok(());
-        };
+        }
 
         #[cfg(target_os = "macos")]
         {
-            for app_name in spec.mac_app_names {
+            for app_name in &primary_names {
                 let clean = app_name.trim_end_matches(".app");
-                let _ = Command::new("osascript")
+                let _ = tokio::process::Command::new("osascript")
                     .args(["-e", &format!("tell application \"{clean}\" to quit")])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .status();
+                    .status()
+                    .await;
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            for exe in spec.win_exe_names {
-                let _ = Command::new("taskkill")
+            for exe in &primary_names {
+                let _ = tokio::process::Command::new("taskkill")
                     .args(["/IM", exe])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .status();
+                    .status()
+                    .await;
             }
         }
 
@@ -377,22 +480,24 @@ impl PlatformHost for NativePlatformHost {
         // 超时后尝试温和信号或强杀兜底
         #[cfg(target_os = "macos")]
         {
-            for proc_name in spec.mac_process_names {
-                let _ = Command::new("pkill")
+            for proc_name in &proc_names {
+                let _ = tokio::process::Command::new("pkill")
                     .args(["-TERM", "-x", proc_name])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .status();
+                    .status()
+                    .await;
             }
         }
         #[cfg(target_os = "windows")]
         {
-            for exe in spec.win_exe_names {
-                let _ = Command::new("taskkill")
+            for exe in &primary_names {
+                let _ = tokio::process::Command::new("taskkill")
                     .args(["/F", "/IM", exe])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .status();
+                    .status()
+                    .await;
             }
         }
 
@@ -447,19 +552,60 @@ impl PlatformHost for NativePlatformHost {
             }
             Ok(())
         };
+        let remove_key_file_if_exists = |kf: &Option<PathBuf>| {
+            if let Some(ref path) = kf {
+                if path.exists() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        };
+        let persist_in_keyring = |kr: &Entry, hex_key: &str| -> bool {
+            if kr.set_password(hex_key.trim()).is_err() {
+                return false;
+            }
+            kr.get_password()
+                .ok()
+                .map(|stored| stored.trim().eq_ignore_ascii_case(hex_key.trim()))
+                .unwrap_or(false)
+        };
 
         let entry = Entry::new(KEYRING_SERVICE, KEYRING_MASTER_USER).ok();
 
+        // 1. 优先从 OS Keychain 读取主密钥，不再同步镜像写入明文 master.key；并清理历史明文副本
         if let Some(ref kr) = entry {
             if let Ok(hex_key) = kr.get_password() {
                 if let Ok(key) = read_hex_key(&hex_key) {
+                    remove_key_file_if_exists(&key_file);
+                    return Ok(key);
+                }
+            }
+        }
+
+        // 2. 尝试迁移旧版 Quiver Keychain 密钥，验证写入新 Keychain 成功后清理明文副本
+        if let Ok(legacy_kr) = Entry::new(LEGACY_KEYRING_SERVICE, KEYRING_MASTER_USER) {
+            if let Ok(legacy_hex) = legacy_kr.get_password() {
+                if let Ok(key) = read_hex_key(&legacy_hex) {
+                    if let Some(ref kr) = entry {
+                        if persist_in_keyring(kr, &legacy_hex) {
+                            remove_key_file_if_exists(&key_file);
+                            return Ok(key);
+                        }
+                    }
                     if let Some(ref kf) = key_file {
-                        let needs_sync = std::fs::read_to_string(kf)
-                            .ok()
-                            .map(|s| s.trim() != hex_key.trim())
-                            .unwrap_or(true);
-                        if needs_sync {
-                            let _ = write_key_file(kf, hex_key.trim());
+                        let _ = write_key_file(kf, legacy_hex.trim());
+                    }
+                    return Ok(key);
+                }
+            }
+        }
+
+        // 3. 若 Keychain 尚无记录但存在旧版 master.key，迁移至 Keychain 并清理明文文件
+        if let Some(ref kf) = key_file {
+            if let Ok(file_hex) = std::fs::read_to_string(kf) {
+                if let Ok(key) = read_hex_key(&file_hex) {
+                    if let Some(ref kr) = entry {
+                        if persist_in_keyring(kr, &file_hex) {
+                            remove_key_file_if_exists(&key_file);
                         }
                     }
                     return Ok(key);
@@ -467,54 +613,27 @@ impl PlatformHost for NativePlatformHost {
             }
         }
 
-        if let Some(ref kf) = key_file {
-            if let Ok(file_hex) = std::fs::read_to_string(kf) {
-                if let Ok(key) = read_hex_key(&file_hex) {
-                    if let Some(ref kr) = entry {
-                        let _ = kr.set_password(file_hex.trim());
-                    }
-                    return Ok(key);
-                }
-            }
-        }
-
-        if let Ok(legacy_kr) = Entry::new(LEGACY_KEYRING_SERVICE, KEYRING_MASTER_USER) {
-            if let Ok(legacy_hex) = legacy_kr.get_password() {
-                if let Ok(key) = read_hex_key(&legacy_hex) {
-                    if let Some(ref kf) = key_file {
-                        let _ = write_key_file(kf, legacy_hex.trim());
-                    }
-                    if let Some(ref kr) = entry {
-                        let _ = kr.set_password(legacy_hex.trim());
-                    }
-                    return Ok(key);
-                }
-            }
-        }
-
+        // 4. 首次生成随机 256-bit 主密钥：首选 Keychain 托管，仅当 Keychain 不可用时降级落盘
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
         let hex_key = hex::encode(key);
 
-        let mut persisted = false;
-        if let Some(ref kf) = key_file {
-            if write_key_file(kf, &hex_key).is_ok() {
-                persisted = true;
-            }
-        }
         if let Some(ref kr) = entry {
-            if kr.set_password(&hex_key).is_ok() {
-                persisted = true;
+            if persist_in_keyring(kr, &hex_key) {
+                remove_key_file_if_exists(&key_file);
+                return Ok(key);
             }
         }
 
-        if persisted {
-            Ok(key)
-        } else {
-            Err(HostError::Keyring(
-                "Failed to persist master key to keyring or data directory".into(),
-            ))
+        if let Some(ref kf) = key_file {
+            if write_key_file(kf, &hex_key).is_ok() {
+                return Ok(key);
+            }
         }
+
+        Err(HostError::Keyring(
+            "Failed to persist master key to keyring or data directory".into(),
+        ))
     }
 }
 

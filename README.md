@@ -48,6 +48,9 @@
 * [核心接口契约与数据模型](docs/CORE_DESIGN.md) — 领域模型、Rust Trait、外部 JSON-RPC 协议与 SQLite Schema。
 * [内置适配器参考规范](docs/ADAPTER_SPEC.md) — 各工具本地存储路径、加密格式与接口细节。
 * [品牌定位与命名规范](docs/BRAND_IDENTITY.md) — 唯一主品牌 **Qwitch** 的定位、命名规范与视觉原则。
+* [前端体验与交互审计报告](docs/FRONTEND_UX_AUDIT.md) — 前端 UI/交互/无障碍/响应式审计定稿及专项优化计划。
+* [代码安全与架构审查报告](docs/BACKEND_ARCH_REVIEW.md) — Rust 后端安全、可靠性、性能审查定稿及专项加固计划。
+* [综合优化计划与任务排期](docs/OPTIMIZATION_ROADMAP.md) — 前后端拉通对齐的四阶段 Sprint 排期与接口契约变更总表。
 
 ---
 

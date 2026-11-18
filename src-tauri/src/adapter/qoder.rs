@@ -10,6 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -31,6 +32,16 @@ const APP_STATUS_SNAPSHOT_KEY: &str = "qoder_app_status.json";
 
 #[cfg(target_os = "windows")]
 const LOCAL_STATE_FILE: &str = "Local State";
+
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 pub struct QoderAdapter {
     manifest: AdapterManifest,
@@ -386,10 +397,7 @@ impl QoderAdapter {
         verifier: &str,
         machine_id: &str,
     ) -> Result<Option<CredentialEnvelope>, String> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = shared_http_client();
 
         let poll_url = reqwest::Url::parse_with_params(
             &format!("{DEFAULT_BASE_URL}/api/v1/deviceToken/poll"),
@@ -504,6 +512,55 @@ impl QoderAdapter {
             },
         }))
     }
+
+    fn build_quota_snapshot(payload: &Value) -> QuotaSnapshot {
+        let has_campaigns = payload
+            .get("campaigns")
+            .and_then(|v| v.as_array())
+            .is_some();
+        let (claimable, claimed, claimable_credits, claimed_credits) =
+            Self::analyze_campaigns(payload);
+
+        let claim_status = if !has_campaigns {
+            ClaimStatus::Unknown
+        } else if !claimable.is_empty() {
+            ClaimStatus::Available
+        } else if !claimed.is_empty() {
+            ClaimStatus::Claimed
+        } else {
+            ClaimStatus::Unsupported
+        };
+
+        let total_window = claimable_credits + claimed_credits;
+        let buckets = match claim_status {
+            ClaimStatus::Claimed => vec![QuotaBucket {
+                key: "daily_credits".into(),
+                label: "本周期已领福利".into(),
+                used: 0.0,
+                total: total_window.max(100.0),
+                remaining: claimed_credits.max(total_window.max(100.0)),
+                unit: "Credits".into(),
+                reset_at: None,
+            }],
+            ClaimStatus::Available => vec![QuotaBucket {
+                key: "daily_credits".into(),
+                label: "本周期可领福利".into(),
+                used: 0.0,
+                total: total_window.max(100.0),
+                remaining: claimable_credits,
+                unit: "Credits".into(),
+                reset_at: None,
+            }],
+            ClaimStatus::Unsupported | ClaimStatus::Unknown => Vec::new(),
+        };
+
+        QuotaSnapshot {
+            plan_name: None,
+            claim_status,
+            buckets,
+            fetched_at: Utc::now().to_rfc3339(),
+        }
+    }
 }
 
 #[async_trait]
@@ -580,14 +637,22 @@ impl ToolAdapter for QoderAdapter {
         }
 
         #[cfg(target_os = "windows")]
-        if let Some(sess) = Self::try_decrypt_windows_auth_dat(&config_dir, &raw_dat) {
-            if let Some(tok) = sess.get("token").and_then(|v| v.as_str()) {
-                files.insert(
-                    "decrypted_token.txt".to_string(),
-                    BASE64.encode(tok.as_bytes()),
-                );
-                if uid.starts_with("qoder_cn_") {
-                    uid = Self::hash_uid("qoder_cn", tok.as_bytes());
+        {
+            let cfg_clone = config_dir.clone();
+            let dat_clone = raw_dat.clone();
+            if let Ok(Some(sess)) = tokio::task::spawn_blocking(move || {
+                Self::try_decrypt_windows_auth_dat(&cfg_clone, &dat_clone)
+            })
+            .await
+            {
+                if let Some(tok) = sess.get("token").and_then(|v| v.as_str()) {
+                    files.insert(
+                        "decrypted_token.txt".to_string(),
+                        BASE64.encode(tok.as_bytes()),
+                    );
+                    if uid.starts_with("qoder_cn_") {
+                        uid = Self::hash_uid("qoder_cn", tok.as_bytes());
+                    }
                 }
             }
         }
@@ -690,38 +755,23 @@ impl ToolAdapter for QoderAdapter {
         let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
         let headers = Self::build_headers(&token, machine_id.as_deref())?;
         let payload = self.fetch_campaigns(&headers).await?;
-        let (claimable, claimed, claimable_credits, claimed_credits) =
-            Self::analyze_campaigns(&payload);
-
-        let claim_status = if !claimable.is_empty() {
-            ClaimStatus::Available
-        } else if !claimed.is_empty() {
-            ClaimStatus::Claimed
-        } else {
-            ClaimStatus::Unsupported
-        };
-
-        let total_window = claimable_credits + claimed_credits;
-        Ok(QuotaSnapshot {
-            plan_name: None,
-            claim_status,
-            buckets: vec![QuotaBucket {
-                key: "daily_credits".into(),
-                label: "本周期每日 Credits".into(),
-                used: claimed_credits,
-                total: total_window.max(100.0),
-                remaining: claimable_credits,
-                unit: "Credits".into(),
-                reset_at: None,
-            }],
-            fetched_at: Utc::now().to_rfc3339(),
-        })
+        Ok(Self::build_quota_snapshot(&payload))
     }
 
     async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError> {
         let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
         let headers = Self::build_headers(&token, machine_id.as_deref())?;
         let payload = self.fetch_campaigns(&headers).await?;
+        let has_campaigns = payload
+            .get("campaigns")
+            .and_then(|v| v.as_array())
+            .is_some();
+        if !has_campaigns {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: "Qoder CN 活动列表格式异常，已中止领取".into(),
+            });
+        }
         let (claimable, claimed, _, _) = Self::analyze_campaigns(&payload);
 
         if claimable.is_empty() {
@@ -739,6 +789,7 @@ impl ToolAdapter for QoderAdapter {
         }
 
         let mut total_gained = 0.0;
+        let mut claimed_any = false;
         for campaign in claimable {
             let Some(cid) = campaign.get("campaignId").and_then(|v| v.as_str()) else {
                 continue;
@@ -776,7 +827,10 @@ impl ToolAdapter for QoderAdapter {
                 return Err(Self::map_http_status(status, "领取 Qoder CN Credits"));
             }
 
-            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("解析 Qoder CN 领取响应失败: {e}"),
+            })?;
             let data = body.get("data").filter(|v| v.is_object()).unwrap_or(&body);
             let status_str = data
                 .get("status")
@@ -785,21 +839,30 @@ impl ToolAdapter for QoderAdapter {
                 .or_else(|| body.get("claimStatus"))
                 .and_then(|v| v.as_str());
             let api_code = body.get("code").and_then(|v| v.as_i64());
-            if status_str == Some("CLAIMED") || (status_str.is_none() && api_code.unwrap_or(0) == 0) {
-                let amt = data
+            if status_str == Some("CLAIMED") || (status_str.is_none() && api_code == Some(0)) {
+                claimed_any = true;
+                if let Some(amt) = data
                     .pointer("/benefit/amount")
                     .or_else(|| campaign.pointer("/benefit/amount"))
                     .and_then(|v| v.as_f64())
-                    .unwrap_or(100.0);
-                total_gained += amt;
+                {
+                    total_gained += amt;
+                }
+            } else {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: "Qoder CN 领取响应缺少确认状态，请刷新核实".into(),
+                });
             }
         }
 
         let refreshed = self.inspect_quota(cred).await.ok();
         Ok(ClaimResult {
-            claimed: total_gained > 0.0,
+            claimed: claimed_any,
             reward_summary: if total_gained > 0.0 {
                 format!("成功领取 {} Credits", total_gained as i64)
+            } else if claimed_any {
+                "每日 Credits 领取已完成".into()
             } else {
                 "本周期已领取".into()
             },
@@ -862,5 +925,35 @@ impl ToolAdapter for QoderAdapter {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qoder_snapshot_claimed_stays_healthy_and_missing_campaigns_is_unknown() {
+        let missing = serde_json::json!({});
+        let snap_missing = QoderAdapter::build_quota_snapshot(&missing);
+        assert_eq!(snap_missing.claim_status, ClaimStatus::Unknown);
+        assert!(snap_missing.buckets.is_empty());
+
+        let claimed_payload = serde_json::json!({
+            "campaigns": [
+                {
+                    "campaignId": "c1",
+                    "actionType": "CLAIM_BENEFIT",
+                    "claimStatus": "CLAIMED",
+                    "benefit": { "amount": 100.0 }
+                }
+            ]
+        });
+        let snap_claimed = QoderAdapter::build_quota_snapshot(&claimed_payload);
+        assert_eq!(snap_claimed.claim_status, ClaimStatus::Claimed);
+        assert_eq!(snap_claimed.buckets.len(), 1);
+        assert_eq!(snap_claimed.buckets[0].remaining, 100.0);
+        assert_eq!(snap_claimed.buckets[0].total, 100.0);
+        assert_eq!(snap_claimed.buckets[0].label, "本周期已领福利");
     }
 }

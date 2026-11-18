@@ -29,6 +29,7 @@ impl Default for JitterConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchProgressEvent {
+    pub action: String, // "claim" | "refresh"
     pub running: bool,
     pub total: usize,
     pub completed: usize,
@@ -128,6 +129,7 @@ impl AntiRiskScheduler {
             let _ = app.emit(
                 "qwitch://batch-progress",
                 BatchProgressEvent {
+                    action: "claim".into(),
                     running: true,
                     total,
                     completed: idx,
@@ -138,7 +140,7 @@ impl AntiRiskScheduler {
                 },
             );
 
-            // 1. 幂等前置校验：先查状态再决定是否领取
+            // 1. 幂等前置校验：先查状态再决定是否领取（Fail-Closed）
             let quota = match adapter.inspect_quota(&cred).await {
                 Ok(q) => {
                     let _ = db.save_quota_snapshot(&summary.id, &q);
@@ -146,78 +148,112 @@ impl AntiRiskScheduler {
                 }
                 Err(err) => {
                     failed_count += 1;
-                    handle_adapter_failure(db, &summary.id, &summary.tool_id, &summary.label, err);
+                    handle_adapter_failure(
+                        db,
+                        &summary.id,
+                        &summary.tool_id,
+                        &summary.label,
+                        "claim",
+                        err,
+                    );
                     let _ = app.emit("qwitch://account-updated", &summary.id);
                     continue;
                 }
             };
 
-            if quota.claim_status == ClaimStatus::Claimed {
-                skipped_count += 1;
-                let _ = db.append_action_log(
-                    Some(&summary.id),
-                    &summary.tool_id,
-                    "claim",
-                    "skipped",
-                    None,
-                    &format!("{} 今日已领取，幂等校验自动跳过", summary.label),
-                );
-            } else if quota.claim_status == ClaimStatus::Unsupported {
-                skipped_count += 1;
-                let _ = db.append_action_log(
-                    Some(&summary.id),
-                    &summary.tool_id,
-                    "claim",
-                    "skipped",
-                    None,
-                    &format!("{} 当前无可用签到活动，已自动跳过", summary.label),
-                );
-            } else {
-                let _ = app.emit(
-                    "qwitch://batch-progress",
-                    BatchProgressEvent {
-                        running: true,
-                        total,
-                        completed: idx,
-                        current_label: Some(summary.label.clone()),
-                        phase: "claiming".into(),
-                        jitter_seconds: None,
-                        summary_text: None,
-                    },
-                );
+            match quota.claim_status {
+                ClaimStatus::Claimed => {
+                    skipped_count += 1;
+                    let _ = db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "claim",
+                        "skipped",
+                        None,
+                        &format!("{} 今日已领取，幂等校验自动跳过", summary.label),
+                    );
+                }
+                ClaimStatus::Unsupported => {
+                    skipped_count += 1;
+                    let _ = db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "claim",
+                        "skipped",
+                        None,
+                        &format!("{} 当前无可用签到活动，已自动跳过", summary.label),
+                    );
+                }
+                ClaimStatus::Unknown => {
+                    skipped_count += 1;
+                    let _ = db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "claim",
+                        "skipped",
+                        None,
+                        &format!("{} 签到状态未知，为防重复请求已跳过", summary.label),
+                    );
+                }
+                ClaimStatus::Available => {
+                    let _ = app.emit(
+                        "qwitch://batch-progress",
+                        BatchProgressEvent {
+                            action: "claim".into(),
+                            running: true,
+                            total,
+                            completed: idx,
+                            current_label: Some(summary.label.clone()),
+                            phase: "claiming".into(),
+                            jitter_seconds: None,
+                            summary_text: None,
+                        },
+                    );
 
-                // 2. 执行手动领取
-                match adapter.claim_daily(&cred).await {
-                    Ok(res) => {
-                        if let Some(updated_q) = res.updated_quota {
-                            let _ = db.save_quota_snapshot(&summary.id, &updated_q);
+                    // 2. 执行手动领取
+                    match adapter.claim_daily(&cred).await {
+                        Ok(res) => {
+                            if let Some(updated_q) = res.updated_quota {
+                                let _ = db.save_quota_snapshot(&summary.id, &updated_q);
+                            }
+                            if res.claimed {
+                                claimed_count += 1;
+                                let _ =
+                                    db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
+                                let _ = db.append_action_log(
+                                    Some(&summary.id),
+                                    &summary.tool_id,
+                                    "claim",
+                                    "success",
+                                    None,
+                                    &format!(
+                                        "{} ({}) {}",
+                                        summary.label, summary.uid_masked, res.reward_summary
+                                    ),
+                                );
+                            } else {
+                                skipped_count += 1;
+                                let _ = db.append_action_log(
+                                    Some(&summary.id),
+                                    &summary.tool_id,
+                                    "claim",
+                                    "skipped",
+                                    None,
+                                    &format!("{} {}", summary.label, res.reward_summary),
+                                );
+                            }
                         }
-                        if res.claimed {
-                            claimed_count += 1;
-                            let _ = db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
-                            let _ = db.append_action_log(
-                                Some(&summary.id),
+                        Err(err) => {
+                            failed_count += 1;
+                            handle_adapter_failure(
+                                db,
+                                &summary.id,
                                 &summary.tool_id,
+                                &summary.label,
                                 "claim",
-                                "success",
-                                None,
-                                &format!("{} ({}) {}", summary.label, summary.uid_masked, res.reward_summary),
-                            );
-                        } else {
-                            skipped_count += 1;
-                            let _ = db.append_action_log(
-                                Some(&summary.id),
-                                &summary.tool_id,
-                                "claim",
-                                "skipped",
-                                None,
-                                &format!("{} {}", summary.label, res.reward_summary),
+                                err,
                             );
                         }
-                    }
-                    Err(err) => {
-                        failed_count += 1;
-                        handle_adapter_failure(db, &summary.id, &summary.tool_id, &summary.label, err);
                     }
                 }
             }
@@ -232,6 +268,7 @@ impl AntiRiskScheduler {
                 let _ = app.emit(
                     "qwitch://batch-progress",
                     BatchProgressEvent {
+                        action: "claim".into(),
                         running: true,
                         total,
                         completed: idx + 1,
@@ -251,6 +288,147 @@ impl AntiRiskScheduler {
         let _ = app.emit(
             "qwitch://batch-progress",
             BatchProgressEvent {
+                action: "claim".into(),
+                running: false,
+                total,
+                completed: total,
+                current_label: None,
+                phase: "done".into(),
+                jitter_seconds: None,
+                summary_text: Some(summary_text),
+            },
+        );
+
+        Ok(())
+    }
+
+    pub async fn run_quota_refresh_batch(
+        &self,
+        app: &AppHandle,
+        db: &Arc<QwitchDatabase>,
+        master_key: &[u8; 32],
+        adapters: &HashMap<String, Arc<dyn ToolAdapter>>,
+        account_ids: Vec<String>,
+        jitter: JitterConfig,
+    ) -> Result<(), String> {
+        // 与批量领取共用单队列串行锁，防止并发请求触发平台限流与风控
+        let _guard = self.queue_lock.lock().await;
+
+        let total = account_ids.len();
+        if total == 0 {
+            return Ok(());
+        }
+
+        let mut refreshed_count: usize = 0;
+        let mut skipped_count: usize = 0;
+        let mut failed_count: usize = 0;
+
+        for (idx, account_id) in account_ids.iter().enumerate() {
+            let (summary, cred) = match db.get_account_credential(master_key, account_id) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    failed_count += 1;
+                    let (tid, acc_label) = match db.get_account_summary(account_id) {
+                        Ok(s) => (s.tool_id, Some(s.label)),
+                        Err(_) => ("unknown".to_string(), None),
+                    };
+                    let msg = match acc_label {
+                        Some(lbl) => format!("{lbl} 读取账号凭据失败: {e}"),
+                        None => format!("读取账号凭据失败: {e}"),
+                    };
+                    let _ = db.append_action_log(
+                        Some(account_id),
+                        &tid,
+                        "query",
+                        "failed",
+                        Some(&UnifiedErrorCode::InternalError),
+                        &msg,
+                    );
+                    let _ = app.emit("qwitch://account-updated", account_id);
+                    continue;
+                }
+            };
+
+            if summary.status != AccountStatus::Active || !summary.has_api_token {
+                skipped_count += 1;
+                continue;
+            }
+
+            let Some(adapter) = adapters.get(&summary.tool_id) else {
+                skipped_count += 1;
+                continue;
+            };
+
+            let _ = app.emit(
+                "qwitch://batch-progress",
+                BatchProgressEvent {
+                    action: "refresh".into(),
+                    running: true,
+                    total,
+                    completed: idx,
+                    current_label: Some(summary.label.clone()),
+                    phase: "checking".into(),
+                    jitter_seconds: None,
+                    summary_text: None,
+                },
+            );
+
+            match adapter.inspect_quota(&cred).await {
+                Ok(snapshot) => {
+                    refreshed_count += 1;
+                    let _ = db.save_quota_snapshot(&summary.id, &snapshot);
+                    let _ = db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "query",
+                        "success",
+                        None,
+                        &format!("已刷新 {} ({}) 的最新额度", summary.label, summary.uid_masked),
+                    );
+                }
+                Err(err) => {
+                    failed_count += 1;
+                    handle_adapter_failure(
+                        db,
+                        &summary.id,
+                        &summary.tool_id,
+                        &summary.label,
+                        "query",
+                        err,
+                    );
+                }
+            }
+
+            let _ = app.emit("qwitch://account-updated", &summary.id);
+
+            if idx + 1 < total {
+                let min = jitter.min_ms.min(jitter.max_ms);
+                let max = jitter.max_ms.max(min);
+                let wait_ms = rand::thread_rng().gen_range(min..=max);
+                let _ = app.emit(
+                    "qwitch://batch-progress",
+                    BatchProgressEvent {
+                        action: "refresh".into(),
+                        running: true,
+                        total,
+                        completed: idx + 1,
+                        current_label: None,
+                        phase: "jitter_wait".into(),
+                        jitter_seconds: Some((wait_ms as f64) / 1000.0),
+                        summary_text: None,
+                    },
+                );
+                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            }
+        }
+
+        let summary_text = format!(
+            "额度刷新完成：成功 {refreshed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个"
+        );
+        let _ = app.emit(
+            "qwitch://batch-progress",
+            BatchProgressEvent {
+                action: "refresh".into(),
                 running: false,
                 total,
                 completed: total,
@@ -270,6 +448,7 @@ fn handle_adapter_failure(
     account_id: &str,
     tool_id: &str,
     label: &str,
+    action_type: &str,
     err: crate::adapter::AdapterError,
 ) {
     let crate::adapter::AdapterError::Unified { code, message } = err;
@@ -285,7 +464,7 @@ fn handle_adapter_failure(
     let _ = db.append_action_log(
         Some(account_id),
         tool_id,
-        "claim",
+        action_type,
         "failed",
         Some(&code),
         &format!("{label} 操作中止：{message}"),

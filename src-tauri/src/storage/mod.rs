@@ -48,6 +48,9 @@ impl QwitchDatabase {
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA busy_timeout = 5000;
 
             CREATE TABLE IF NOT EXISTS accounts (
                 id TEXT PRIMARY KEY,
@@ -282,19 +285,23 @@ impl QwitchDatabase {
     pub fn get_account_summary(&self, account_id: &str) -> Result<AccountSummary, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let mut stmt = conn.prepare(
-            "SELECT id, tool_id, label, uid_masked, email_masked, status,
-                    is_active_on_client, has_local_snapshot, has_api_token,
-                    last_claimed_at, updated_at
-             FROM accounts WHERE id = ?1",
+            "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
+                    a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
+                    a.last_claimed_at, a.updated_at,
+                    q.plan_name, q.claim_status, q.buckets_json, q.fetched_at
+             FROM accounts a
+             LEFT JOIN quota_snapshots q ON q.id = (
+                 SELECT q2.id FROM quota_snapshots q2
+                 WHERE q2.account_id = a.id
+                 ORDER BY q2.fetched_at DESC, q2.rowid DESC
+                 LIMIT 1
+             )
+             WHERE a.id = ?1",
         )?;
 
-        let mut summary = stmt
-            .query_row(params![account_id], map_account_row)
+        stmt.query_row(params![account_id], map_account_row)
             .optional()?
-            .ok_or_else(|| StorageError::NotFound(account_id.to_string()))?;
-
-        summary.latest_quota = fetch_latest_quota(&conn, &summary.id)?;
-        Ok(summary)
+            .ok_or_else(|| StorageError::NotFound(account_id.to_string()))
     }
 
     pub fn list_accounts(&self, tool_id: Option<&str>) -> Result<Vec<AccountSummary>, StorageError> {
@@ -303,29 +310,42 @@ impl QwitchDatabase {
 
         if let Some(tid) = tool_id {
             let mut stmt = conn.prepare(
-                "SELECT id, tool_id, label, uid_masked, email_masked, status,
-                        is_active_on_client, has_local_snapshot, has_api_token,
-                        last_claimed_at, updated_at
-                 FROM accounts WHERE tool_id = ?1 ORDER BY updated_at DESC",
+                "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
+                        a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
+                        a.last_claimed_at, a.updated_at,
+                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at
+                 FROM accounts a
+                 LEFT JOIN quota_snapshots q ON q.id = (
+                     SELECT q2.id FROM quota_snapshots q2
+                     WHERE q2.account_id = a.id
+                     ORDER BY q2.fetched_at DESC, q2.rowid DESC
+                     LIMIT 1
+                 )
+                 WHERE a.tool_id = ?1
+                 ORDER BY a.updated_at DESC",
             )?;
             let rows = stmt.query_map(params![tid], map_account_row)?;
             for row in rows {
-                let mut acc = row?;
-                acc.latest_quota = fetch_latest_quota(&conn, &acc.id)?;
-                results.push(acc);
+                results.push(row?);
             }
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, tool_id, label, uid_masked, email_masked, status,
-                        is_active_on_client, has_local_snapshot, has_api_token,
-                        last_claimed_at, updated_at
-                 FROM accounts ORDER BY tool_id ASC, updated_at DESC",
+                "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
+                        a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
+                        a.last_claimed_at, a.updated_at,
+                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at
+                 FROM accounts a
+                 LEFT JOIN quota_snapshots q ON q.id = (
+                     SELECT q2.id FROM quota_snapshots q2
+                     WHERE q2.account_id = a.id
+                     ORDER BY q2.fetched_at DESC, q2.rowid DESC
+                     LIMIT 1
+                 )
+                 ORDER BY a.tool_id ASC, a.updated_at DESC",
             )?;
             let rows = stmt.query_map([], map_account_row)?;
             for row in rows {
-                let mut acc = row?;
-                acc.latest_quota = fetch_latest_quota(&conn, &acc.id)?;
-                results.push(acc);
+                results.push(row?);
             }
         }
 
@@ -378,6 +398,29 @@ impl QwitchDatabase {
             return Err(StorageError::NotFound(account_id.to_string()));
         }
         Ok(())
+    }
+
+    pub fn update_account_label(
+        &self,
+        account_id: &str,
+        label: &str,
+    ) -> Result<AccountSummary, StorageError> {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            return Err(StorageError::Crypto("账号备注不能为空".into()));
+        }
+        {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let now = Utc::now().to_rfc3339();
+            let affected = conn.execute(
+                "UPDATE accounts SET label = ?1, updated_at = ?2 WHERE id = ?3",
+                params![trimmed, now, account_id],
+            )?;
+            if affected == 0 {
+                return Err(StorageError::NotFound(account_id.to_string()));
+            }
+        }
+        self.get_account_summary(account_id)
     }
 
     pub fn mark_account_claimed(
@@ -447,6 +490,18 @@ impl QwitchDatabase {
                 snapshot.fetched_at
             ],
         )?;
+        // 单账号最多保留最近 20 条额度快照，防止长期运行导致数据库膨胀
+        let _ = conn.execute(
+            "DELETE FROM quota_snapshots
+             WHERE account_id = ?1
+               AND id NOT IN (
+                   SELECT id FROM quota_snapshots
+                   WHERE account_id = ?1
+                   ORDER BY fetched_at DESC, rowid DESC
+                   LIMIT 20
+               )",
+            params![account_id],
+        );
         Ok(())
     }
 
@@ -716,6 +771,24 @@ impl QwitchDatabase {
 
 fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> {
     let status_str: String = row.get(5)?;
+    let plan_name: Option<String> = row.get(11)?;
+    let claim_str_opt: Option<String> = row.get(12)?;
+    let buckets_json_opt: Option<String> = row.get(13)?;
+    let fetched_at_opt: Option<String> = row.get(14)?;
+
+    let latest_quota = match (claim_str_opt, buckets_json_opt, fetched_at_opt) {
+        (Some(claim_str), Some(buckets_json), Some(fetched_at)) => {
+            let buckets: Vec<QuotaBucket> = serde_json::from_str(&buckets_json).unwrap_or_default();
+            Some(QuotaSnapshot {
+                plan_name,
+                claim_status: parse_claim_status(&claim_str),
+                buckets,
+                fetched_at,
+            })
+        }
+        _ => None,
+    };
+
     Ok(AccountSummary {
         id: row.get(0)?,
         tool_id: row.get(1)?,
@@ -726,37 +799,10 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
         is_active_on_client: row.get::<_, i64>(6)? != 0,
         has_local_snapshot: row.get::<_, i64>(7)? != 0,
         has_api_token: row.get::<_, i64>(8)? != 0,
-        latest_quota: None,
+        latest_quota,
         last_claimed_at: row.get(9)?,
         updated_at: row.get(10)?,
     })
-}
-
-fn fetch_latest_quota(
-    conn: &Connection,
-    account_id: &str,
-) -> Result<Option<QuotaSnapshot>, StorageError> {
-    let row: Option<(Option<String>, String, String, String)> = conn
-        .query_row(
-            "SELECT plan_name, claim_status, buckets_json, fetched_at
-             FROM quota_snapshots WHERE account_id = ?1 ORDER BY fetched_at DESC LIMIT 1",
-            params![account_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-
-    match row {
-        Some((plan_name, claim_str, buckets_json, fetched_at)) => {
-            let buckets: Vec<QuotaBucket> = serde_json::from_str(&buckets_json)?;
-            Ok(Some(QuotaSnapshot {
-                plan_name,
-                claim_status: parse_claim_status(&claim_str),
-                buckets,
-                fetched_at,
-            }))
-        }
-        None => Ok(None),
-    }
 }
 
 fn parse_account_status(s: &str) -> AccountStatus {
@@ -995,6 +1041,68 @@ mod tests {
             .unwrap();
         assert_eq!(deleted, 2);
         assert_eq!(db.list_action_logs(LogScope::Archived, 50, 0).unwrap().len(), 0);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn quota_snapshot_join_retention_and_rename_account() {
+        let db_path = temp_db_path("snapshots");
+        let db = QwitchDatabase::open(&db_path).expect("open db");
+        let master_key = [9u8; 32];
+
+        let env = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u_snap_123456".to_string(),
+            display_name: Some("SnapUser".to_string()),
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "tok-1".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        let acc = db.upsert_account(&master_key, "初始名称", &env).unwrap();
+
+        let renamed = db.update_account_label(&acc.id, "新备注名").unwrap();
+        assert_eq!(renamed.label, "新备注名");
+
+        for i in 0..25 {
+            let snap = QuotaSnapshot {
+                plan_name: Some(format!("Plan-{i}")),
+                claim_status: ClaimStatus::Available,
+                buckets: vec![QuotaBucket {
+                    key: "k".into(),
+                    label: "额度".into(),
+                    used: i as f64,
+                    total: 100.0,
+                    remaining: (100 - i) as f64,
+                    unit: "Credits".into(),
+                    reset_at: None,
+                }],
+                fetched_at: format!("2026-11-18T12:{i:02}:00Z"),
+            };
+            db.save_quota_snapshot(&acc.id, &snap).unwrap();
+        }
+
+        let listed = db.list_accounts(Some("trae_cn")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].latest_quota.as_ref().and_then(|q| q.plan_name.as_deref()),
+            Some("Plan-24")
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM quota_snapshots WHERE account_id = ?1",
+                params![acc.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 20);
+        drop(conn);
 
         let _ = std::fs::remove_file(&db_path);
     }

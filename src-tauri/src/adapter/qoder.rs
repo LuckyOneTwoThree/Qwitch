@@ -1,0 +1,866 @@
+use async_trait::async_trait;
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
+    Engine as _,
+};
+use chrono::Utc;
+use rand::Rng;
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+use uuid::Uuid;
+
+use crate::adapter::{
+    AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
+};
+use crate::domain::{
+    AuthMethod, ClaimStatus, CredentialEnvelope, CredentialPayload, QuotaBucket, QuotaSnapshot,
+    UnifiedErrorCode,
+};
+use crate::platform::PlatformHost;
+
+const DEFAULT_BASE_URL: &str = "https://openapi.qoder.com.cn";
+const QODER_WEB_BASE: &str = "https://qoder.cn";
+const QODER_CLIENT_ID: &str = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
+const AUTH_DAT_FILE: &str = "auth.v1.dat";
+const MACHINE_ID_FILE: &str = "auth.machine-id";
+const APP_STATUS_SNAPSHOT_KEY: &str = "qoder_app_status.json";
+
+#[cfg(target_os = "windows")]
+const LOCAL_STATE_FILE: &str = "Local State";
+
+pub struct QoderAdapter {
+    manifest: AdapterManifest,
+    http: reqwest::Client,
+}
+
+impl QoderAdapter {
+    pub fn new() -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        Self {
+            manifest: AdapterManifest {
+                id: "qoder_cn".to_string(),
+                name: "Qoder CN".to_string(),
+                version: "0.1.0".to_string(),
+                is_builtin: true,
+                capabilities: AdapterCapabilities {
+                    auth_methods: vec![
+                        AuthMethod::LocalImport,
+                        AuthMethod::WebviewOauth,
+                    ],
+                    supports_quota_query: true,
+                    supports_daily_claim: true,
+                    supports_client_switch: true,
+                    supports_multi_instance: false,
+                },
+            },
+            http,
+        }
+    }
+
+    fn hash_uid(prefix: &str, data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hex_digest = hex::encode(hasher.finalize());
+        format!("{prefix}_{}", &hex_digest[..12])
+    }
+
+    #[cfg(target_os = "windows")]
+    fn try_decrypt_windows_auth_dat(
+        config_dir: &std::path::Path,
+        raw_dat: &[u8],
+    ) -> Option<Value> {
+        use aes_gcm::{
+            aead::{Aead, KeyInit},
+            Aes256Gcm, Nonce,
+        };
+        use std::process::Command;
+
+        if raw_dat.len() < 3 + 12 + 16 + 2 || &raw_dat[..3] != b"v10" {
+            return None;
+        }
+        let local_state_bytes = std::fs::read(config_dir.join(LOCAL_STATE_FILE)).ok()?;
+        let local_state: Value = serde_json::from_slice(&local_state_bytes).ok()?;
+        let enc_key_b64 = local_state.pointer("/os_crypt/encrypted_key")?.as_str()?;
+        let enc_key_blob = BASE64.decode(enc_key_b64).ok()?;
+        if enc_key_blob.len() <= 5 || &enc_key_blob[..5] != b"DPAPI" {
+            return None;
+        }
+        let dpapi_b64 = BASE64.encode(&enc_key_blob[5..]);
+
+        let ps_script = format!(
+            "Add-Type -AssemblyName System.Security; \
+             $b=[Convert]::FromBase64String('{dpapi_b64}'); \
+             $u=[System.Security.Cryptography.ProtectedData]::Unprotect($b,$null,'CurrentUser'); \
+             [Convert]::ToBase64String($u)"
+        );
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_script])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let aes_key_b64 = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let aes_key = BASE64.decode(aes_key_b64).ok()?;
+        let cipher = Aes256Gcm::new_from_slice(&aes_key).ok()?;
+        let nonce = Nonce::from_slice(&raw_dat[3..15]);
+        let plaintext = cipher.decrypt(nonce, &raw_dat[15..]).ok()?;
+        serde_json::from_slice::<Value>(&plaintext).ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn try_decrypt_macos_auth_dat(raw_dat: &[u8]) -> Option<Value> {
+        if raw_dat.len() > 3 && &raw_dat[..3] == b"v10" {
+            if let Ok(val) = serde_json::from_slice::<Value>(&raw_dat[3..]) {
+                return Some(val);
+            }
+        }
+        serde_json::from_slice::<Value>(raw_dat).ok()
+    }
+
+    fn build_headers(token: &str, machine_id: Option<&str>) -> Result<HeaderMap, AdapterError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("Qoder/claim"));
+        headers.insert("Cosy-ClientType", HeaderValue::from_static("10"));
+        let auth = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "Qoder Token 包含非法请求头字符".into(),
+            }
+        })?;
+        headers.insert(AUTHORIZATION, auth);
+        if let Some(mid) = machine_id.filter(|s| !s.trim().is_empty()) {
+            if let Ok(v) = HeaderValue::from_str(mid.trim()) {
+                headers.insert("Cosy-MachineId", v);
+            }
+        }
+        Ok(headers)
+    }
+
+    fn extract_token_and_machine_id(
+        cred: &CredentialEnvelope,
+    ) -> Result<(String, Option<String>), AdapterError> {
+        match &cred.payload {
+            CredentialPayload::Token {
+                access_token,
+                extra,
+                ..
+            } => Ok((access_token.clone(), extra.get("machine_id").cloned())),
+            CredentialPayload::LocalSnapshot { files } => {
+                let machine_id = files
+                    .get(MACHINE_ID_FILE)
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+
+                if let Some(tok_b64) = files.get("decrypted_token.txt") {
+                    if let Ok(bytes) = BASE64.decode(tok_b64) {
+                        if let Ok(tok) = String::from_utf8(bytes) {
+                            if !tok.trim().is_empty() {
+                                return Ok((tok.trim().to_string(), machine_id));
+                            }
+                        }
+                    }
+                }
+
+                Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InvalidCredential,
+                    message: "该账号尚未完成在线授权，请点击卡片上的「在线授权」完成一次登录以启用查额与签到".into(),
+                })
+            }
+            CredentialPayload::Cookies { .. } => Err(AdapterError::Unified {
+                code: UnifiedErrorCode::UnsupportedCapability,
+                message: "Qoder CN 不支持 Cookie 凭据模式".into(),
+            }),
+        }
+    }
+
+    fn map_http_status(status: reqwest::StatusCode, context: &str) -> AdapterError {
+        match status.as_u16() {
+            401 => AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: format!("{context}: 登录态已过期 (HTTP 401)"),
+            },
+            403 => AdapterError::Unified {
+                code: UnifiedErrorCode::RiskTriggered,
+                message: format!("{context}: 服务端拒绝访问 (HTTP 403)"),
+            },
+            429 => AdapterError::Unified {
+                code: UnifiedErrorCode::RateLimited,
+                message: format!("{context}: 请求过于频繁 (HTTP 429)"),
+            },
+            code => AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("{context}: HTTP {code}"),
+            },
+        }
+    }
+
+    async fn fetch_campaigns(&self, headers: &HeaderMap) -> Result<Value, AdapterError> {
+        let url = format!("{DEFAULT_BASE_URL}/sash/api/v1/me/campaigns");
+        let resp = self
+            .http
+            .get(&url)
+            .headers(headers.clone())
+            .send()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("查询 Qoder CN 活动失败: {e}"),
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(Self::map_http_status(status, "查询 Qoder CN 活动"));
+        }
+
+        resp.json::<Value>()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("解析 Qoder CN 活动响应失败: {e}"),
+            })
+    }
+
+    fn analyze_campaigns(payload: &Value) -> (Vec<Value>, Vec<Value>, f64, f64) {
+        let now = Utc::now().timestamp() as f64;
+        let rows = payload
+            .get("campaigns")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut claimable = Vec::new();
+        let mut claimed = Vec::new();
+        let mut claimable_credits = 0.0;
+        let mut claimed_credits = 0.0;
+
+        for row in rows {
+            if row.get("actionType").and_then(|v| v.as_str()) != Some("CLAIM_BENEFIT") {
+                continue;
+            }
+            let normalize_ts = |ts: f64| if ts > 1_000_000_000_000.0 { ts / 1000.0 } else { ts };
+            if let Some(start) = row.get("startAt").and_then(|v| v.as_f64()).map(normalize_ts) {
+                if now < start {
+                    continue;
+                }
+            }
+            if let Some(end) = row.get("endAt").and_then(|v| v.as_f64()).map(normalize_ts) {
+                if now >= end {
+                    continue;
+                }
+            }
+
+            let amount = row
+                .pointer("/benefit/amount")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+
+            match row.get("claimStatus").and_then(|v| v.as_str()) {
+                Some("CLAIMABLE") => {
+                    claimable_credits += amount;
+                    claimable.push(row);
+                }
+                Some("CLAIMED") => {
+                    claimed_credits += amount;
+                    claimed.push(row);
+                }
+                _ => {}
+            }
+        }
+
+        (claimable, claimed, claimable_credits, claimed_credits)
+    }
+
+    fn qoder_dot_dir() -> Option<PathBuf> {
+        #[cfg(target_os = "windows")]
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        #[cfg(not(target_os = "windows"))]
+        let home = std::env::var_os("HOME");
+        home.map(|h| PathBuf::from(h).join(".qoder-cn"))
+    }
+
+    fn extract_uid_from_avatar_url(avatar_url: &str) -> Option<String> {
+        let marker = "/users/";
+        let idx = avatar_url.find(marker)?;
+        let rest = &avatar_url[idx + marker.len()..];
+        let seg = rest.split('/').next()?.trim();
+        if seg.len() >= 8 {
+            Some(seg.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn read_uid_from_main_sqlite(config_dir: &std::path::Path) -> Option<String> {
+        let db_path = config_dir.join("main.sqlite");
+        if !db_path.is_file() {
+            return None;
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
+        for query in [
+            "SELECT account_id FROM plugin_inventory_meta WHERE account_id IS NOT NULL AND account_id != '' LIMIT 1",
+            "SELECT account_id FROM agent_profiles WHERE account_id IS NOT NULL AND account_id != '' LIMIT 1",
+        ] {
+            if let Ok(uid) = conn.query_row(query, [], |row| row.get::<_, String>(0)) {
+                let trimmed = uid.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn create_pkce_device_flow(host: &dyn PlatformHost) -> (String, String, String, String) {
+        const CHARSET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+        let verifier: String = {
+            let mut rng = rand::thread_rng();
+            (0..64)
+                .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+                .collect()
+        };
+        let challenge = BASE64_URL.encode(Sha256::digest(verifier.as_bytes()));
+        let nonce = Uuid::new_v4().to_string();
+
+        let machine_id = host
+            .client_config_dir("qoder_cn")
+            .ok()
+            .and_then(|d| std::fs::read_to_string(d.join(MACHINE_ID_FILE)).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                Self::qoder_dot_dir()
+                    .and_then(|d| std::fs::read_to_string(d.join(".auth").join("machine_id")).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        let machine_token = Self::qoder_dot_dir()
+            .and_then(|d| std::fs::read(d.join("umid-cache.json")).ok())
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|v| {
+                v.pointer("/info/machineToken")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty());
+
+        let mut params = vec![
+            ("challenge", challenge),
+            ("challenge_method", "S256".to_string()),
+            ("nonce", nonce.clone()),
+            ("machine_id", machine_id.clone()),
+            ("client_id", QODER_CLIENT_ID.to_string()),
+        ];
+        if let Some(mt) = machine_token {
+            params.push(("machine_token", mt));
+        }
+
+        let auth_url = reqwest::Url::parse_with_params(
+            &format!("{QODER_WEB_BASE}/device/selectAccounts"),
+            &params,
+        )
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| format!("{QODER_WEB_BASE}/users/sign-in"));
+
+        (auth_url, nonce, verifier, machine_id)
+    }
+
+    pub async fn poll_pkce_device_token(
+        nonce: &str,
+        verifier: &str,
+        machine_id: &str,
+    ) -> Result<Option<CredentialEnvelope>, String> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let poll_url = reqwest::Url::parse_with_params(
+            &format!("{DEFAULT_BASE_URL}/api/v1/deviceToken/poll"),
+            &[
+                ("nonce", nonce),
+                ("verifier", verifier),
+                ("challenge_method", "S256"),
+            ],
+        )
+        .map_err(|e| format!("构造 Qoder 轮询 URL 失败: {e}"))?;
+
+        let resp = http
+            .get(poll_url)
+            .header(ACCEPT, "application/json")
+            .header(USER_AGENT, "qoder/0.5.14")
+            .send()
+            .await
+            .map_err(|e| format!("轮询 Qoder 登录态失败: {e}"))?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!("Qoder 授权轮询返回 HTTP {}", resp.status().as_u16()));
+        }
+
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析 Qoder 授权响应失败: {e}"))?;
+        let Some(token) = body
+            .get("token")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        let refresh_token = body
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut uid_opt = body
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut name_opt = body
+            .get("user_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut email_opt: Option<String> = None;
+
+        if let Ok(info_resp) = http
+            .get(format!("{DEFAULT_BASE_URL}/api/v1/userinfo"))
+            .header(ACCEPT, "application/json")
+            .header(USER_AGENT, "qoder/0.5.14")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+        {
+            if info_resp.status().is_success() {
+                if let Ok(info) = info_resp.json::<Value>().await {
+                    if let Some(u) = info
+                        .get("id")
+                        .or_else(|| info.get("user_id"))
+                        .or_else(|| info.get("uid"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        uid_opt = Some(u.to_string());
+                    }
+                    if let Some(n) = info
+                        .get("name")
+                        .or_else(|| info.get("username"))
+                        .or_else(|| info.get("user_name"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        name_opt = Some(n.to_string());
+                    }
+                    email_opt = info
+                        .get("email")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                }
+            }
+        }
+
+        let uid = uid_opt.unwrap_or_else(|| Self::hash_uid("qoder_cn", token.as_bytes()));
+        let mut extra = HashMap::new();
+        if !machine_id.trim().is_empty() {
+            extra.insert("machine_id".to_string(), machine_id.trim().to_string());
+        }
+
+        Ok(Some(CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid,
+            display_name: name_opt,
+            display_email: email_opt,
+            payload: CredentialPayload::Token {
+                access_token: token.to_string(),
+                refresh_token,
+                expires_at: None,
+                extra,
+            },
+        }))
+    }
+}
+
+#[async_trait]
+impl ToolAdapter for QoderAdapter {
+    fn manifest(&self) -> &AdapterManifest {
+        &self.manifest
+    }
+
+    async fn import_from_local(
+        &self,
+        host: &dyn PlatformHost,
+    ) -> Result<CredentialEnvelope, AdapterError> {
+        let config_dir = host
+            .client_config_dir("qoder_cn")
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: e.to_string(),
+            })?;
+        let auth_path = config_dir.join(AUTH_DAT_FILE);
+        if !auth_path.is_file() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::ClientNotFound,
+                message: format!("未找到 Qoder CN 本机登录态: {}", auth_path.display()),
+            });
+        }
+
+        let raw_dat = std::fs::read(&auth_path).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("读取 Qoder CN auth.v1.dat 失败: {e}"),
+        })?;
+
+        let mut files = HashMap::new();
+        files.insert(AUTH_DAT_FILE.to_string(), BASE64.encode(&raw_dat));
+
+        if let Ok(mid_bytes) = std::fs::read(config_dir.join(MACHINE_ID_FILE)) {
+            files.insert(MACHINE_ID_FILE.to_string(), BASE64.encode(mid_bytes));
+        }
+
+        #[allow(unused_mut)]
+        let mut uid = Self::hash_uid("qoder_cn", &raw_dat);
+        let mut display_name: Option<String> = None;
+
+        if let Some(dot_dir) = Self::qoder_dot_dir() {
+            let status_path = dot_dir.join(".qoder-app-status.json");
+            if let Ok(status_bytes) = std::fs::read(&status_path) {
+                files.insert(
+                    APP_STATUS_SNAPSHOT_KEY.to_string(),
+                    BASE64.encode(&status_bytes),
+                );
+                if let Ok(status_json) = serde_json::from_slice::<Value>(&status_bytes) {
+                    if let Some(n) = status_json
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                    {
+                        display_name = Some(n);
+                    }
+                    if let Some(avatar_uid) = status_json
+                        .get("avatar_url")
+                        .and_then(|v| v.as_str())
+                        .and_then(Self::extract_uid_from_avatar_url)
+                    {
+                        uid = avatar_uid;
+                    }
+                }
+            }
+        }
+
+        if uid.starts_with("qoder_cn_") {
+            if let Some(sql_uid) = Self::read_uid_from_main_sqlite(&config_dir) {
+                uid = sql_uid;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if let Some(sess) = Self::try_decrypt_windows_auth_dat(&config_dir, &raw_dat) {
+            if let Some(tok) = sess.get("token").and_then(|v| v.as_str()) {
+                files.insert(
+                    "decrypted_token.txt".to_string(),
+                    BASE64.encode(tok.as_bytes()),
+                );
+                if uid.starts_with("qoder_cn_") {
+                    uid = Self::hash_uid("qoder_cn", tok.as_bytes());
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Some(sess) = Self::try_decrypt_macos_auth_dat(&raw_dat) {
+            if let Some(tok) = sess.get("token").and_then(|v| v.as_str()) {
+                files.insert(
+                    "decrypted_token.txt".to_string(),
+                    BASE64.encode(tok.as_bytes()),
+                );
+                if uid.starts_with("qoder_cn_") {
+                    uid = Self::hash_uid("qoder_cn", tok.as_bytes());
+                }
+            }
+        }
+
+        Ok(CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid,
+            display_name,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        })
+    }
+
+    async fn parse_manual_token(&self, raw_input: &str) -> Result<CredentialEnvelope, AdapterError> {
+        let trimmed = raw_input.trim();
+        if trimmed.is_empty() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "Qoder Token 不能为空".into(),
+            });
+        }
+
+        let (token, uid_opt, email_opt, name_opt) = if trimmed.starts_with('{') {
+            let val: Value =
+                serde_json::from_str(trimmed).map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InvalidCredential,
+                    message: format!("JSON 格式无效: {e}"),
+                })?;
+            let tok = val
+                .get("token")
+                .or_else(|| val.get("accessToken"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AdapterError::Unified {
+                    code: UnifiedErrorCode::InvalidCredential,
+                    message: "JSON 中缺少 token 字段".into(),
+                })?
+                .trim()
+                .to_string();
+            let uid = val
+                .get("userId")
+                .or_else(|| val.get("uid"))
+                .or_else(|| val.get("user_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let email = val
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let name = val
+                .get("name")
+                .or_else(|| val.get("nickName"))
+                .or_else(|| val.get("nickname"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            (tok, uid, email, name)
+        } else {
+            (
+                trimmed
+                    .strip_prefix("Bearer ")
+                    .unwrap_or(trimmed)
+                    .trim()
+                    .to_string(),
+                None,
+                None,
+                None,
+            )
+        };
+
+        let uid = uid_opt.unwrap_or_else(|| Self::hash_uid("qoder_cn", token.as_bytes()));
+
+        Ok(CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid,
+            display_name: name_opt,
+            display_email: email_opt,
+            payload: CredentialPayload::Token {
+                access_token: token,
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        })
+    }
+
+    async fn inspect_quota(&self, cred: &CredentialEnvelope) -> Result<QuotaSnapshot, AdapterError> {
+        let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
+        let headers = Self::build_headers(&token, machine_id.as_deref())?;
+        let payload = self.fetch_campaigns(&headers).await?;
+        let (claimable, claimed, claimable_credits, claimed_credits) =
+            Self::analyze_campaigns(&payload);
+
+        let claim_status = if !claimable.is_empty() {
+            ClaimStatus::Available
+        } else if !claimed.is_empty() {
+            ClaimStatus::Claimed
+        } else {
+            ClaimStatus::Unsupported
+        };
+
+        let total_window = claimable_credits + claimed_credits;
+        Ok(QuotaSnapshot {
+            plan_name: None,
+            claim_status,
+            buckets: vec![QuotaBucket {
+                key: "daily_credits".into(),
+                label: "本周期每日 Credits".into(),
+                used: claimed_credits,
+                total: total_window.max(100.0),
+                remaining: claimable_credits,
+                unit: "Credits".into(),
+                reset_at: None,
+            }],
+            fetched_at: Utc::now().to_rfc3339(),
+        })
+    }
+
+    async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError> {
+        let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
+        let headers = Self::build_headers(&token, machine_id.as_deref())?;
+        let payload = self.fetch_campaigns(&headers).await?;
+        let (claimable, claimed, _, _) = Self::analyze_campaigns(&payload);
+
+        if claimable.is_empty() {
+            let msg = if !claimed.is_empty() {
+                "本周期已领取 Credits".to_string()
+            } else {
+                "当前暂无可领取的 Credits 活动".to_string()
+            };
+            let refreshed = self.inspect_quota(cred).await.ok();
+            return Ok(ClaimResult {
+                claimed: false,
+                reward_summary: msg,
+                updated_quota: refreshed,
+            });
+        }
+
+        let mut total_gained = 0.0;
+        for campaign in claimable {
+            let Some(cid) = campaign.get("campaignId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let url = format!("{DEFAULT_BASE_URL}/sash/api/v1/me/campaigns/{cid}/claim");
+            let resp = self
+                .http
+                .post(&url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!("领取 Qoder CN Credits 失败: {e}"),
+                })?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                if status.as_u16() == 400 || status.as_u16() == 409 {
+                    let err_text = resp.text().await.unwrap_or_default();
+                    let lower = err_text.to_lowercase();
+                    if err_text.contains("已签")
+                        || err_text.contains("已领")
+                        || lower.contains("already")
+                        || lower.contains("claimed")
+                    {
+                        let refreshed = self.inspect_quota(cred).await.ok();
+                        return Ok(ClaimResult {
+                            claimed: false,
+                            reward_summary: "本周期已领取".into(),
+                            updated_quota: refreshed,
+                        });
+                    }
+                }
+                return Err(Self::map_http_status(status, "领取 Qoder CN Credits"));
+            }
+
+            let body: Value = resp.json().await.unwrap_or(Value::Null);
+            let data = body.get("data").filter(|v| v.is_object()).unwrap_or(&body);
+            let status_str = data
+                .get("status")
+                .or_else(|| data.get("claimStatus"))
+                .or_else(|| body.get("status"))
+                .or_else(|| body.get("claimStatus"))
+                .and_then(|v| v.as_str());
+            let api_code = body.get("code").and_then(|v| v.as_i64());
+            if status_str == Some("CLAIMED") || (status_str.is_none() && api_code.unwrap_or(0) == 0) {
+                let amt = data
+                    .pointer("/benefit/amount")
+                    .or_else(|| campaign.pointer("/benefit/amount"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(100.0);
+                total_gained += amt;
+            }
+        }
+
+        let refreshed = self.inspect_quota(cred).await.ok();
+        Ok(ClaimResult {
+            claimed: total_gained > 0.0,
+            reward_summary: if total_gained > 0.0 {
+                format!("成功领取 {} Credits", total_gained as i64)
+            } else {
+                "本周期已领取".into()
+            },
+            updated_quota: refreshed,
+        })
+    }
+
+    async fn apply_session(
+        &self,
+        host: &dyn PlatformHost,
+        cred: &CredentialEnvelope,
+    ) -> Result<(), AdapterError> {
+        let CredentialPayload::LocalSnapshot { files } = &cred.payload else {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::UnsupportedCapability,
+                message: "该账号缺少本机 auth.v1.dat 快照，无法写入客户端会话".into(),
+            });
+        };
+
+        let dat_b64 = files.get(AUTH_DAT_FILE).ok_or_else(|| AdapterError::Unified {
+            code: UnifiedErrorCode::InvalidCredential,
+            message: "快照中缺少 auth.v1.dat".into(),
+        })?;
+        let dat_bytes = BASE64.decode(dat_b64).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InvalidCredential,
+            message: format!("auth.v1.dat 解码失败: {e}"),
+        })?;
+
+        let config_dir = host
+            .client_config_dir("qoder_cn")
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: e.to_string(),
+            })?;
+        std::fs::create_dir_all(&config_dir).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("创建 Qoder CN 配置目录失败: {e}"),
+        })?;
+
+        let target = config_dir.join(AUTH_DAT_FILE);
+        let tmp = config_dir.join(".auth.v1.dat.tmp");
+        std::fs::write(&tmp, &dat_bytes).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("写入临时 auth.v1.dat 失败: {e}"),
+        })?;
+        std::fs::rename(&tmp, &target).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("替换 Qoder CN 会话文件失败: {e}"),
+        })?;
+
+        if let Some(status_b64) = files.get(APP_STATUS_SNAPSHOT_KEY) {
+            if let (Ok(status_bytes), Some(dot_dir)) = (BASE64.decode(status_b64), Self::qoder_dot_dir()) {
+                let _ = std::fs::create_dir_all(&dot_dir);
+                let status_target = dot_dir.join(".qoder-app-status.json");
+                let status_tmp = dot_dir.join(".qoder-app-status.json.tmp");
+                if std::fs::write(&status_tmp, status_bytes).is_ok() {
+                    let _ = std::fs::rename(&status_tmp, &status_target);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}

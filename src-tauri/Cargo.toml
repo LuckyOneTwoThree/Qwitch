@@ -1,0 +1,32 @@
+[package]
+name = "qwitch"
+version = "0.1.0"
+description = "Local-first multi-account session and daily quota manager for AI tools"
+authors = ["Qwitch Contributors"]
+edition = "2021"
+
+[lib]
+name = "qwitch_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes = "0.8"
+aes-gcm = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+keyring = "3"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+base64 = "0.22"

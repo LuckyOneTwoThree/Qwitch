@@ -51,6 +51,48 @@ pub struct ClaimResult {
     pub updated_quota: Option<QuotaSnapshot>,
 }
 
+/// 切号前的客户端会话文件备份（None 表示文件原本不存在）
+#[derive(Debug, Clone, Default)]
+pub struct SessionBackup {
+    pub files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
+}
+
+pub fn backup_files(paths: &[std::path::PathBuf]) -> SessionBackup {
+    SessionBackup {
+        files: paths
+            .iter()
+            .map(|p| (p.clone(), std::fs::read(p).ok()))
+            .collect(),
+    }
+}
+
+pub fn restore_files(backup: &SessionBackup) -> Result<(), AdapterError> {
+    for (path, content) in &backup.files {
+        match content {
+            Some(bytes) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let tmp = path.with_extension("qwitch-restore-tmp");
+                std::fs::write(&tmp, bytes).map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("恢复会话文件失败 {}: {e}", path.display()),
+                })?;
+                std::fs::rename(&tmp, path).map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("恢复会话文件失败 {}: {e}", path.display()),
+                })?;
+            }
+            None => {
+                if path.exists() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait ToolAdapter: Send + Sync {
     fn manifest(&self) -> &AdapterManifest;
@@ -75,6 +117,22 @@ pub trait ToolAdapter: Send + Sync {
         host: &dyn PlatformHost,
         cred: &CredentialEnvelope,
     ) -> Result<(), AdapterError>;
+
+    /// 切号写入前备份受影响的客户端文件，用于失败回滚。
+    /// 默认空备份（不支持回滚的适配器保持原行为）。
+    async fn backup_session(&self, host: &dyn PlatformHost) -> Result<SessionBackup, AdapterError> {
+        let _ = host;
+        Ok(SessionBackup::default())
+    }
+
+    async fn restore_session(
+        &self,
+        host: &dyn PlatformHost,
+        backup: &SessionBackup,
+    ) -> Result<(), AdapterError> {
+        let _ = host;
+        restore_files(backup)
+    }
 }
 
 pub fn create_all_adapters(data_dir: &Path, trusted_adapters: &[String]) -> HashMap<String, Arc<dyn ToolAdapter>> {
@@ -147,6 +205,29 @@ mod tests {
         let spoof = create_all_adapters(&root, &["trae".to_string(), "evil_plugin".to_string()]);
         assert!(!spoof.contains_key("trae"));
         assert!(spoof.contains_key("trae_cn"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_backup_restore_roundtrip_and_missing_file_removal() {
+        let root = std::env::temp_dir().join(format!("qwitch_backup_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let existing = root.join("storage.json");
+        let absent = root.join("state.vscdb");
+        std::fs::write(&existing, b"original-session").unwrap();
+
+        let backup = backup_files(&[existing.clone(), absent.clone()]);
+        assert_eq!(backup.files[0].1.as_deref(), Some(b"original-session".as_slice()));
+        assert!(backup.files[1].1.is_none());
+
+        // 模拟切号写入
+        std::fs::write(&existing, b"new-session").unwrap();
+        std::fs::write(&absent, b"new-vscdb").unwrap();
+
+        restore_files(&backup).expect("restore");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"original-session");
+        assert!(!absent.exists(), "原本不存在的文件回滚后应删除");
 
         let _ = std::fs::remove_dir_all(&root);
     }

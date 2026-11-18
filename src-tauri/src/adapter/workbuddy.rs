@@ -1350,6 +1350,19 @@ impl ToolAdapter for WorkBuddyAdapter {
 
         Ok(())
     }
+
+    async fn backup_session(
+        &self,
+        host: &dyn PlatformHost,
+    ) -> Result<crate::adapter::SessionBackup, AdapterError> {
+        let auth_dir = host
+            .client_config_dir("workbuddy")
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: e.to_string(),
+            })?;
+        Ok(crate::adapter::backup_files(&[auth_dir.join(AUTH_FILENAME)]))
+    }
 }
 
 #[cfg(test)]

@@ -469,9 +469,10 @@ struct SwitchFlagGuard {
 }
 
 impl SwitchFlagGuard {
-    fn new(flag: Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::SeqCst);
-        Self { flag, armed: true }
+    fn try_acquire(flag: Arc<AtomicBool>) -> Result<Self, String> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "切号进行中，请等待当前切换完成后再试".to_string())?;
+        Ok(Self { flag, armed: true })
     }
 
     fn disarm(&mut self) {
@@ -494,7 +495,7 @@ pub async fn switch_desktop_account(
     account_id: String,
     force_kill: bool,
 ) -> Result<(), String> {
-    let mut switch_guard = SwitchFlagGuard::new(Arc::clone(&state.switching_in_progress));
+    let mut switch_guard = SwitchFlagGuard::try_acquire(Arc::clone(&state.switching_in_progress))?;
 
     let (summary, cred) = state
         .db
@@ -547,10 +548,15 @@ pub async fn switch_desktop_account(
         },
     );
 
-    adapter
-        .apply_session(state.host.as_ref(), &cred)
+    let backup = adapter
+        .backup_session(state.host.as_ref())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("备份当前客户端会话失败: {e}"))?;
+
+    if let Err(e) = adapter.apply_session(state.host.as_ref(), &cred).await {
+        let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
+        return Err(format!("写入新会话失败，已恢复原会话: {e}"));
+    }
 
     let _ = app.emit(
         "qwitch://switch-progress",
@@ -560,10 +566,21 @@ pub async fn switch_desktop_account(
         },
     );
 
-    state
+    if let Err(e) = state.host.launch_client(&exe, &[]) {
+        let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
+        return Err(format!("拉起客户端失败，已恢复原会话: {e}"));
+    }
+
+    // 启动存活探测：spawn 成功不等于客户端真正起来
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    if !state
         .host
-        .launch_client(&exe, &[])
-        .map_err(|e| format!("写入快照成功但拉起客户端失败: {e}"))?;
+        .is_client_running(&summary.tool_id)
+        .unwrap_or(false)
+    {
+        let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
+        return Err("客户端启动后未能存活，已恢复原会话快照".into());
+    }
 
     state
         .db
@@ -1602,5 +1619,16 @@ mod tests {
         assert!(!is_valid_oauth_uid("null"));
         assert!(!is_valid_oauth_uid("0"));
         assert!(!is_valid_oauth_uid("guest"));
+    }
+
+    #[test]
+    fn switch_guard_rejects_concurrent_acquire_and_resets_on_drop() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let first = SwitchFlagGuard::try_acquire(Arc::clone(&flag)).expect("first acquires");
+        assert!(flag.load(Ordering::SeqCst));
+        assert!(SwitchFlagGuard::try_acquire(Arc::clone(&flag)).is_err());
+        drop(first);
+        assert!(!flag.load(Ordering::SeqCst), "持有者结束后释放互斥");
+        let _second = SwitchFlagGuard::try_acquire(Arc::clone(&flag)).expect("second acquires after release");
     }
 }

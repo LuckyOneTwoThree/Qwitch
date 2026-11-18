@@ -34,6 +34,8 @@ pub fn run() {
                 QwitchDatabase::open(&data_dir.join("qwitch.db"))
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
             );
+            db.verify_or_init_key_fingerprint(&data_dir, &master_key)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             let startup_settings = commands::load_app_settings(&db);
             let _ = db.apply_log_retention(
                 startup_settings.log_archive_after_days,

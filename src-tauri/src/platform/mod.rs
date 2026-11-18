@@ -270,6 +270,160 @@ impl NativePlatformHost {
             }
         }
     }
+
+    fn keyring_persistence_ok() -> bool {
+        matches!(
+            keyring::default::default_credential_builder().persistence(),
+            keyring::credential::CredentialPersistence::UntilDelete
+        )
+    }
+
+    fn resolve_master_key_logic(
+        keyring_hex: Option<&str>,
+        legacy_hex: Option<&str>,
+        file_hex: Option<&str>,
+        db_exists: bool,
+        keyring_persistent: bool,
+    ) -> Result<([u8; 32], KeySource), HostError> {
+        let read_hex_key = |hex_str: &str| -> Option<[u8; 32]> {
+            let bytes = hex::decode(hex_str.trim()).ok()?;
+            if bytes.len() != 32 {
+                return None;
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            Some(key)
+        };
+
+        // 仅当钥匙串真正跨进程持久化时才信任其中的密钥（mock/进程级存储重启即空）
+        if keyring_persistent {
+            if let Some(key) = keyring_hex.and_then(&read_hex_key) {
+                return Ok((key, KeySource::Keyring));
+            }
+        }
+        if let Some(key) = legacy_hex.and_then(&read_hex_key) {
+            return Ok((key, KeySource::LegacyKeyring));
+        }
+        if let Some(key) = file_hex.and_then(&read_hex_key) {
+            return Ok((key, KeySource::File));
+        }
+        if db_exists {
+            return Err(HostError::Keyring(
+                "检测到已有 Qwitch 数据库，但系统钥匙串与本地密钥文件均不可用。\
+                 为避免生成新密钥导致既有凭据永久无法解密，已拒绝启动。\
+                 请恢复钥匙串条目或 master.key 备份后重试。"
+                    .into(),
+            ));
+        }
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        Ok((key, KeySource::Generated))
+    }
+
+    fn get_or_create_master_key_in(data_dir: &Path) -> Result<[u8; 32], HostError> {
+        Self::get_or_create_master_key_with(data_dir, Self::keyring_persistence_ok())
+    }
+
+    fn get_or_create_master_key_with(
+        data_dir: &Path,
+        persistent: bool,
+    ) -> Result<[u8; 32], HostError> {
+        let key_file = data_dir.join("master.key");
+        let db_exists = data_dir.join("qwitch.db").exists();
+
+        let write_key_file = |path: &Path, hex_key: &str| -> Result<(), std::io::Error> {
+            std::fs::write(path, hex_key.as_bytes())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+            Ok(())
+        };
+        let remove_key_file = || {
+            if key_file.exists() {
+                let _ = std::fs::remove_file(&key_file);
+            }
+        };
+        let persist_in_keyring = |kr: &Entry, hex_key: &str| -> bool {
+            if kr.set_password(hex_key.trim()).is_err() {
+                return false;
+            }
+            kr.get_password()
+                .ok()
+                .map(|stored| stored.trim().eq_ignore_ascii_case(hex_key.trim()))
+                .unwrap_or(false)
+        };
+
+        let entry = if persistent {
+            Entry::new(KEYRING_SERVICE, KEYRING_MASTER_USER).ok()
+        } else {
+            None
+        };
+        let keyring_hex = entry.as_ref().and_then(|kr| kr.get_password().ok());
+        let legacy_hex = if persistent {
+            Entry::new(LEGACY_KEYRING_SERVICE, KEYRING_MASTER_USER)
+                .ok()
+                .and_then(|kr| kr.get_password().ok())
+        } else {
+            None
+        };
+        let file_hex = std::fs::read_to_string(&key_file).ok();
+
+        let (key, source) = Self::resolve_master_key_logic(
+            keyring_hex.as_deref(),
+            legacy_hex.as_deref(),
+            file_hex.as_deref(),
+            db_exists,
+            persistent,
+        )?;
+        let hex_key = hex::encode(key);
+
+        match source {
+            KeySource::Keyring => remove_key_file(),
+            KeySource::LegacyKeyring => {
+                let migrated = entry
+                    .as_ref()
+                    .map(|kr| persist_in_keyring(kr, &hex_key))
+                    .unwrap_or(false);
+                if migrated {
+                    remove_key_file();
+                } else {
+                    let _ = write_key_file(&key_file, &hex_key);
+                }
+            }
+            KeySource::File => {
+                // 仅在钥匙串可靠持久化时才迁移并清理明文副本，否则保留文件作为唯一密钥源
+                if let Some(kr) = entry.as_ref() {
+                    if persist_in_keyring(kr, &hex_key) {
+                        remove_key_file();
+                    }
+                }
+            }
+            KeySource::Generated => {
+                let persisted = entry
+                    .as_ref()
+                    .map(|kr| persist_in_keyring(kr, &hex_key))
+                    .unwrap_or(false);
+                if persisted {
+                    remove_key_file();
+                } else if write_key_file(&key_file, &hex_key).is_err() {
+                    return Err(HostError::Keyring(
+                        "无法持久化主密钥到钥匙串或数据目录".into(),
+                    ));
+                }
+            }
+        }
+        Ok(key)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySource {
+    Keyring,
+    LegacyKeyring,
+    File,
+    Generated,
 }
 
 #[async_trait]
@@ -531,110 +685,10 @@ impl PlatformHost for NativePlatformHost {
     }
 
     fn get_or_create_master_key(&self) -> Result<[u8; 32], HostError> {
-        let key_file = self.qwitch_data_dir().ok().map(|d| d.join("master.key"));
-        let read_hex_key = |hex_str: &str| -> Result<[u8; 32], HostError> {
-            let bytes = hex::decode(hex_str.trim())
-                .map_err(|e| HostError::Keyring(format!("Invalid key format: {e}")))?;
-            if bytes.len() != 32 {
-                return Err(HostError::Keyring(
-                    "Stored master key length is not 32 bytes".into(),
-                ));
-            }
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            Ok(key)
-        };
-        let write_key_file = |path: &Path, hex_key: &str| -> Result<(), std::io::Error> {
-            std::fs::write(path, hex_key.as_bytes())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-            }
-            Ok(())
-        };
-        let remove_key_file_if_exists = |kf: &Option<PathBuf>| {
-            if let Some(ref path) = kf {
-                if path.exists() {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-        };
-        let persist_in_keyring = |kr: &Entry, hex_key: &str| -> bool {
-            if kr.set_password(hex_key.trim()).is_err() {
-                return false;
-            }
-            kr.get_password()
-                .ok()
-                .map(|stored| stored.trim().eq_ignore_ascii_case(hex_key.trim()))
-                .unwrap_or(false)
-        };
-
-        let entry = Entry::new(KEYRING_SERVICE, KEYRING_MASTER_USER).ok();
-
-        // 1. 优先从 OS Keychain 读取主密钥，不再同步镜像写入明文 master.key；并清理历史明文副本
-        if let Some(ref kr) = entry {
-            if let Ok(hex_key) = kr.get_password() {
-                if let Ok(key) = read_hex_key(&hex_key) {
-                    remove_key_file_if_exists(&key_file);
-                    return Ok(key);
-                }
-            }
-        }
-
-        // 2. 尝试迁移旧版 Quiver Keychain 密钥，验证写入新 Keychain 成功后清理明文副本
-        if let Ok(legacy_kr) = Entry::new(LEGACY_KEYRING_SERVICE, KEYRING_MASTER_USER) {
-            if let Ok(legacy_hex) = legacy_kr.get_password() {
-                if let Ok(key) = read_hex_key(&legacy_hex) {
-                    if let Some(ref kr) = entry {
-                        if persist_in_keyring(kr, &legacy_hex) {
-                            remove_key_file_if_exists(&key_file);
-                            return Ok(key);
-                        }
-                    }
-                    if let Some(ref kf) = key_file {
-                        let _ = write_key_file(kf, legacy_hex.trim());
-                    }
-                    return Ok(key);
-                }
-            }
-        }
-
-        // 3. 若 Keychain 尚无记录但存在旧版 master.key，迁移至 Keychain 并清理明文文件
-        if let Some(ref kf) = key_file {
-            if let Ok(file_hex) = std::fs::read_to_string(kf) {
-                if let Ok(key) = read_hex_key(&file_hex) {
-                    if let Some(ref kr) = entry {
-                        if persist_in_keyring(kr, &file_hex) {
-                            remove_key_file_if_exists(&key_file);
-                        }
-                    }
-                    return Ok(key);
-                }
-            }
-        }
-
-        // 4. 首次生成随机 256-bit 主密钥：首选 Keychain 托管，仅当 Keychain 不可用时降级落盘
-        let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
-        let hex_key = hex::encode(key);
-
-        if let Some(ref kr) = entry {
-            if persist_in_keyring(kr, &hex_key) {
-                remove_key_file_if_exists(&key_file);
-                return Ok(key);
-            }
-        }
-
-        if let Some(ref kf) = key_file {
-            if write_key_file(kf, &hex_key).is_ok() {
-                return Ok(key);
-            }
-        }
-
-        Err(HostError::Keyring(
-            "Failed to persist master key to keyring or data directory".into(),
-        ))
+        let data_dir = self
+            .qwitch_data_dir()
+            .map_err(|e| HostError::Keyring(format!("无法解析数据目录，不能托管主密钥: {e}")))?;
+        Self::get_or_create_master_key_in(&data_dir)
     }
 
     fn set_launch_at_login(&self, enabled: bool) -> Result<(), String> {
@@ -783,6 +837,7 @@ fn find_latest_prefixed_dir(parent: &Path, prefix: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn macos_launch_agent_plist_escapes_path_and_sets_autostart() {
@@ -792,5 +847,186 @@ mod tests {
         assert!(plist.contains("<string>/Applications/Qwitch &amp; Tools.app/Contents/MacOS/qwitch</string>"));
         assert!(plist.contains("<string>--autostart</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
+    }
+
+    #[test]
+    fn master_key_resolution_decision_matrix() {
+        let key = [9u8; 32];
+        let hex_key = hex::encode(key);
+        let resolve = |kr: Option<&str>, legacy: Option<&str>, file: Option<&str>, db: bool, persistent: bool| {
+            NativePlatformHost::resolve_master_key_logic(kr, legacy, file, db, persistent)
+        };
+
+        // 已有数据库且所有密钥源不可用：绝不生成新密钥
+        assert!(resolve(None, None, None, true, true).is_err());
+        assert!(resolve(None, None, None, true, false).is_err());
+        // 首次运行才允许生成
+        let (_, src) = resolve(None, None, None, false, true).expect("first run");
+        assert_eq!(src, KeySource::Generated);
+        // 持久化钥匙串优先
+        let (k, src) = resolve(Some(&hex_key), None, None, true, true).expect("keyring");
+        assert_eq!(k, key);
+        assert_eq!(src, KeySource::Keyring);
+        // 非持久化（mock）钥匙串不可信，即使有值也回退文件
+        let (k, src) = resolve(Some(&hex_key), None, Some(&hex_key), true, false).expect("file");
+        assert_eq!(k, key);
+        assert_eq!(src, KeySource::File);
+        // 旧版 Quiver 钥匙串迁移
+        let (_, src) = resolve(None, Some(&hex_key), None, true, true).expect("legacy");
+        assert_eq!(src, KeySource::LegacyKeyring);
+        // 文件迁移
+        let (_, src) = resolve(None, None, Some(&hex_key), true, true).expect("file migrate");
+        assert_eq!(src, KeySource::File);
+        // 非法 hex 长度跳过，落到下一来源
+        let (_, src) = resolve(Some("abcd"), None, Some(&hex_key), true, true).expect("skip bad");
+        assert_eq!(src, KeySource::File);
+    }
+
+    struct FakeCredential {
+        id: String,
+    }
+
+    fn fake_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+        static STORE: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<String, String>>,
+        > = std::sync::OnceLock::new();
+        STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    impl keyring::credential::CredentialApi for FakeCredential {
+        fn set_secret(&self, password: &[u8]) -> keyring::Result<()> {
+            fake_store().lock().unwrap().insert(
+                self.id.clone(),
+                String::from_utf8_lossy(password).to_string(),
+            );
+            Ok(())
+        }
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            fake_store()
+                .lock()
+                .unwrap()
+                .get(&self.id)
+                .map(|s| s.clone().into_bytes())
+                .ok_or(keyring::Error::NoEntry)
+        }
+        fn delete_credential(&self) -> keyring::Result<()> {
+            fake_store()
+                .lock()
+                .unwrap()
+                .remove(&self.id)
+                .map(|_| ())
+                .ok_or(keyring::Error::NoEntry)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    struct FakePersistentBuilder;
+
+    impl keyring::credential::CredentialBuilderApi for FakePersistentBuilder {
+        fn build(
+            &self,
+            _target: Option<&str>,
+            service: &str,
+            user: &str,
+        ) -> keyring::Result<Box<keyring::Credential>> {
+            Ok(Box::new(FakeCredential {
+                id: format!("{service}:{user}"),
+            }))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn persistence(&self) -> keyring::credential::CredentialPersistence {
+            keyring::credential::CredentialPersistence::UntilDelete
+        }
+    }
+
+    fn temp_data_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("qwitch_keytest_{tag}_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    // 全局 credential builder 是进程级状态，所有涉及 builder 切换的场景
+    // 必须在单个测试内串行执行，避免与其他测试竞态。
+    // 注意：set_default_credential_builder 只影响 Entry::new，不影响
+    // default::default_credential_builder()，因此持久化标志经参数显式传入。
+    #[test]
+    fn master_key_restart_regression_and_persistence_guards() {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(
+            NativePlatformHost::keyring_persistence_ok(),
+            "启用原生 feature 后平台默认钥匙串必须跨进程持久化"
+        );
+
+        // --- 场景 1：mock（非持久化）钥匙串下重启不得丢钥、不得删明文副本 ---
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+
+        let dir = temp_data_dir("mock");
+        let key1 = NativePlatformHost::get_or_create_master_key_with(&dir, false).expect("first boot");
+        assert!(dir.join("master.key").exists(), "mock 环境必须保留明文密钥文件");
+
+        // 模拟已有数据库
+        std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
+        // 模拟重启：新 Entry 的 mock 存储为空
+        let key2 = NativePlatformHost::get_or_create_master_key_with(&dir, false).expect("restart");
+        assert_eq!(key1, key2, "重启后必须取回同一主密钥");
+        assert!(dir.join("master.key").exists(), "重启后明文副本仍须保留");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 2：已有数据库但密钥源全失 → 拒绝启动而非生成新钥 ---
+        let dir = temp_data_dir("lost");
+        std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
+        assert!(NativePlatformHost::get_or_create_master_key_with(&dir, false).is_err());
+        assert!(!dir.join("master.key").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 3：真正持久化的钥匙串 → 托管成功且不落明文 ---
+        fake_store().lock().unwrap().clear();
+        keyring::set_default_credential_builder(Box::new(FakePersistentBuilder));
+
+        let dir = temp_data_dir("persistent");
+        let key1 = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("first boot");
+        assert!(!dir.join("master.key").exists(), "持久化钥匙串不应落明文");
+        let key2 = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("restart");
+        assert_eq!(key1, key2);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 4：遗留 master.key 迁移到可靠钥匙串后才清理 ---
+        fake_store().lock().unwrap().clear();
+        let dir = temp_data_dir("migrate");
+        let legacy_key = [5u8; 32];
+        std::fs::write(dir.join("master.key"), hex::encode(legacy_key)).unwrap();
+        std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
+        let key = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("migrate");
+        assert_eq!(key, legacy_key);
+        assert!(!dir.join("master.key").exists(), "迁移成功后清理明文");
+        let key_again = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("restart");
+        assert_eq!(key_again, legacy_key);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 5：旧版 Quiver 钥匙串迁移 ---
+        fake_store().lock().unwrap().clear();
+        let dir = temp_data_dir("quiver");
+        let quiver_key = [6u8; 32];
+        fake_store().lock().unwrap().insert(
+            format!("{LEGACY_KEYRING_SERVICE}:{KEYRING_MASTER_USER}"),
+            hex::encode(quiver_key),
+        );
+        std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
+        let key = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("quiver migrate");
+        assert_eq!(key, quiver_key);
+        let stored = fake_store()
+            .lock()
+            .unwrap()
+            .get(&format!("{KEYRING_SERVICE}:{KEYRING_MASTER_USER}"))
+            .cloned();
+        assert_eq!(stored, Some(hex::encode(quiver_key)));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 恢复 mock，避免影响后续可能使用 keyring 的测试
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
     }
 }

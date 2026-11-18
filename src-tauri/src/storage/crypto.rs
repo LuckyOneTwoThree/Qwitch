@@ -54,6 +54,10 @@ pub fn decrypt_credential(
     serde_json::from_slice(&plaintext).map_err(|e| StorageError::Crypto(e.to_string()))
 }
 
+pub fn key_fingerprint(master_key: &[u8; 32]) -> String {
+    hex::encode(&Sha256::digest(master_key)[..16])
+}
+
 pub fn compute_uid_hash(tool_id: &str, uid: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(tool_id.as_bytes());

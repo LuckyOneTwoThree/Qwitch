@@ -372,14 +372,64 @@ impl QwitchDatabase {
         let envelope = match crypto::decrypt_credential(master_key, &blob) {
             Ok(env) => env,
             Err(e) => {
-                let _ = self.update_account_status(account_id, AccountStatus::Expired);
+                // 解密失败不等于凭据过期：可能是主密钥不匹配或数据损坏，
+                // 静默标记 Expired 会掩盖密钥事故并误导用户重新授权
                 return Err(StorageError::Crypto(format!(
-                    "{} ({}): 凭据已失效或主密钥变更，请重新在线授权 ({e})",
+                    "{} ({}): 凭据解密失败（主密钥不匹配或数据损坏），请检查密钥状态后重试 ({e})",
                     summary.label, summary.uid_masked
                 )));
             }
         };
         Ok((summary, envelope))
+    }
+
+    /// 启动时校验主密钥指纹；首次生成前必须确认当前密钥能解密既有数据，
+    /// 避免把错误密钥"祝福"为合法密钥
+    pub fn verify_or_init_key_fingerprint(
+        &self,
+        data_dir: &Path,
+        master_key: &[u8; 32],
+    ) -> Result<(), StorageError> {
+        let fingerprint = crypto::key_fingerprint(master_key);
+        let path = data_dir.join("key_id");
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if existing.trim() != fingerprint {
+                return Err(StorageError::Crypto(
+                    "主密钥与本地密钥指纹 (key_id) 不匹配：当前密钥无法解密既有数据。\
+                     已拒绝启动，请恢复原钥匙串条目或密钥备份。"
+                        .into(),
+                ));
+            }
+            return Ok(());
+        }
+
+        let sample: Option<Vec<u8>> = {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            conn.query_row(
+                "SELECT encrypted_credential FROM accounts LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        if let Some(blob) = sample {
+            crypto::decrypt_credential(master_key, &blob).map_err(|_| {
+                StorageError::Crypto(
+                    "主密钥无法解密既有账号凭据且缺少密钥指纹记录。\
+                     已拒绝启动，请恢复原钥匙串条目或密钥备份。"
+                        .into(),
+                )
+            })?;
+        }
+
+        std::fs::write(&path, fingerprint.as_bytes())
+            .map_err(|e| StorageError::Crypto(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 
     pub fn update_account_status(
@@ -1236,5 +1286,61 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    fn temp_data_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("qwitch_fp_test_{tag}_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    fn token_envelope(uid: &str) -> CredentialEnvelope {
+        CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid: uid.to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "tok-fingerprint-test".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn key_fingerprint_guards_wrong_key_and_never_blesses_it() {
+        let dir = temp_data_dir("guard");
+        let db_path = dir.join("qwitch.db");
+        let db = QwitchDatabase::open(&db_path).expect("open");
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+
+        // 空库：首次写入指纹，重复校验通过
+        db.verify_or_init_key_fingerprint(&dir, &key_a).expect("init empty");
+        assert!(dir.join("key_id").exists());
+        db.verify_or_init_key_fingerprint(&dir, &key_a).expect("same key");
+
+        // 指纹不匹配 → 拒绝
+        assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
+
+        // 解密失败不再静默标记 Expired
+        let acc = db.upsert_account(&key_a, "指纹测试", &token_envelope("fp_user_1")).expect("insert");
+        let err = db.get_account_credential(&key_b, &acc.id).expect_err("wrong key must fail");
+        assert!(matches!(err, StorageError::Crypto(_)));
+        let summary = db.get_account_summary(&acc.id).expect("summary");
+        assert_eq!(summary.status, AccountStatus::Active, "解密失败不得改写账号状态");
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 已有账号但无指纹记录：错误密钥不得被"祝福"写入指纹
+        let dir = temp_data_dir("nobless");
+        let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+        db.upsert_account(&key_a, "无指纹", &token_envelope("fp_user_2")).expect("insert");
+        assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
+        assert!(!dir.join("key_id").exists(), "错误密钥不得写入指纹");
+        db.verify_or_init_key_fingerprint(&dir, &key_a).expect("correct key blesses");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -239,6 +239,22 @@ impl QoderAdapter {
                 code: UnifiedErrorCode::NetworkError,
                 message: format!("解析 Qoder CN 活动响应失败: {e}"),
             })
+            .and_then(|body| {
+                if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
+                    if code != 0 {
+                        if let Some(err) =
+                            crate::adapter::common::map_business_code(code, "查询 Qoder CN 活动")
+                        {
+                            return Err(err);
+                        }
+                        return Err(AdapterError::Unified {
+                            code: UnifiedErrorCode::NetworkError,
+                            message: format!("Qoder CN 活动接口返回异常业务码 {code}"),
+                        });
+                    }
+                }
+                Ok(body)
+            })
     }
 
     fn analyze_campaigns(payload: &Value) -> (Vec<Value>, Vec<Value>, f64, f64) {
@@ -532,26 +548,31 @@ impl QoderAdapter {
         };
 
         let total_window = claimable_credits + claimed_credits;
-        let buckets = match claim_status {
-            ClaimStatus::Claimed => vec![QuotaBucket {
-                key: "daily_credits".into(),
-                label: "本周期已领福利".into(),
-                used: 0.0,
-                total: total_window.max(100.0),
-                remaining: claimed_credits.max(total_window.max(100.0)),
-                unit: "Credits".into(),
-                reset_at: None,
-            }],
-            ClaimStatus::Available => vec![QuotaBucket {
-                key: "daily_credits".into(),
-                label: "本周期可领福利".into(),
-                used: 0.0,
-                total: total_window.max(100.0),
-                remaining: claimable_credits,
-                unit: "Credits".into(),
-                reset_at: None,
-            }],
-            ClaimStatus::Unsupported | ClaimStatus::Unknown => Vec::new(),
+        // 如实反映活动窗口额度，不做 100 地板虚报；无额度数据时不造 bucket
+        let buckets = if total_window <= 0.0 {
+            Vec::new()
+        } else {
+            match claim_status {
+                ClaimStatus::Claimed => vec![QuotaBucket {
+                    key: "daily_credits".into(),
+                    label: "本周期已领福利".into(),
+                    used: 0.0,
+                    total: total_window,
+                    remaining: claimed_credits,
+                    unit: "Credits".into(),
+                    reset_at: None,
+                }],
+                ClaimStatus::Available => vec![QuotaBucket {
+                    key: "daily_credits".into(),
+                    label: "本周期可领福利".into(),
+                    used: 0.0,
+                    total: total_window,
+                    remaining: claimable_credits,
+                    unit: "Credits".into(),
+                    reset_at: None,
+                }],
+                ClaimStatus::Unsupported | ClaimStatus::Unknown => Vec::new(),
+            }
         };
 
         QuotaSnapshot {
@@ -758,7 +779,11 @@ impl ToolAdapter for QoderAdapter {
         Ok(Self::build_quota_snapshot(&payload))
     }
 
-    async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError> {
+    async fn claim_daily(
+        &self,
+        cred: &CredentialEnvelope,
+        precheck: Option<&QuotaSnapshot>,
+    ) -> Result<ClaimResult, AdapterError> {
         let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
         let headers = Self::build_headers(&token, machine_id.as_deref())?;
         let payload = self.fetch_campaigns(&headers).await?;
@@ -780,7 +805,11 @@ impl ToolAdapter for QoderAdapter {
             } else {
                 "当前暂无可领取的 Credits 活动".to_string()
             };
-            let refreshed = self.inspect_quota(cred).await.ok();
+            // 有前置快照时直接复用，避免重复查额
+            let refreshed = match precheck {
+                Some(q) => Some(q.clone()),
+                None => self.inspect_quota(cred).await.ok(),
+            };
             return Ok(ClaimResult {
                 claimed: false,
                 reward_summary: msg,
@@ -839,6 +868,11 @@ impl ToolAdapter for QoderAdapter {
                 .or_else(|| body.get("claimStatus"))
                 .and_then(|v| v.as_str());
             let api_code = body.get("code").and_then(|v| v.as_i64());
+            if let Some(c) = api_code {
+                if let Some(err) = crate::adapter::common::map_business_code(c, "领取 Qoder CN Credits") {
+                    return Err(err);
+                }
+            }
             if status_str == Some("CLAIMED") || (status_str.is_none() && api_code == Some(0)) {
                 claimed_any = true;
                 if let Some(amt) = data
@@ -955,5 +989,34 @@ mod tests {
         assert_eq!(snap_claimed.buckets[0].remaining, 100.0);
         assert_eq!(snap_claimed.buckets[0].total, 100.0);
         assert_eq!(snap_claimed.buckets[0].label, "本周期已领福利");
+
+        // 非整百额度如实展示，不做 100 地板虚报
+        let partial = serde_json::json!({
+            "campaigns": [
+                {
+                    "campaignId": "c2",
+                    "actionType": "CLAIM_BENEFIT",
+                    "claimStatus": "CLAIMED",
+                    "benefit": { "amount": 50.0 }
+                }
+            ]
+        });
+        let snap_partial = QoderAdapter::build_quota_snapshot(&partial);
+        assert_eq!(snap_partial.buckets[0].remaining, 50.0);
+        assert_eq!(snap_partial.buckets[0].total, 50.0);
+
+        // amount 缺失不伪造额度桶
+        let no_amount = serde_json::json!({
+            "campaigns": [
+                {
+                    "campaignId": "c3",
+                    "actionType": "CLAIM_BENEFIT",
+                    "claimStatus": "CLAIMED"
+                }
+            ]
+        });
+        let snap_no_amount = QoderAdapter::build_quota_snapshot(&no_amount);
+        assert_eq!(snap_no_amount.claim_status, ClaimStatus::Claimed);
+        assert!(snap_no_amount.buckets.is_empty());
     }
 }

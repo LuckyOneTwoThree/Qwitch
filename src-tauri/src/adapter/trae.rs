@@ -561,6 +561,13 @@ impl TraeAdapter {
             code: UnifiedErrorCode::NetworkError,
             message: format!("解析 Trae CN 签到状态失败: {e}"),
         })?;
+        if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
+            if let Some(err) =
+                crate::adapter::common::map_business_code(code, "查询 Trae CN 签到状态")
+            {
+                return Err(err);
+            }
+        }
         Self::parse_checkin_status_from_body(&body)
     }
 
@@ -595,6 +602,18 @@ impl TraeAdapter {
             code: UnifiedErrorCode::NetworkError,
             message: format!("解析 Trae 额度响应失败: {e}"),
         })?;
+
+        if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
+            if code != 0 {
+                if let Some(err) = crate::adapter::common::map_business_code(code, "查询 Trae 额度") {
+                    return Err(err);
+                }
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!("Trae 额度接口返回异常业务码 {code}"),
+                });
+            }
+        }
 
         let mut used = 0.0_f64;
         let mut total = 0.0_f64;
@@ -990,7 +1009,15 @@ impl ToolAdapter for TraeAdapter {
                     Err(e @ AdapterError::Unified { code: UnifiedErrorCode::AuthExpired, .. }) => {
                         return Err(e);
                     }
-                    Err(_) => {}
+                    Err(
+                        e @ AdapterError::Unified {
+                            code: UnifiedErrorCode::RateLimited | UnifiedErrorCode::RiskTriggered,
+                            ..
+                        },
+                    ) => {
+                        return Err(e);
+                    }
+                    Err(_) => quota.claim_status = ClaimStatus::Unknown,
                 }
             }
             return Ok(quota);
@@ -1018,7 +1045,11 @@ impl ToolAdapter for TraeAdapter {
         })
     }
 
-    async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError> {
+    async fn claim_daily(
+        &self,
+        cred: &CredentialEnvelope,
+        precheck: Option<&QuotaSnapshot>,
+    ) -> Result<ClaimResult, AdapterError> {
         if !self.is_cn {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::UnsupportedCapability,
@@ -1032,12 +1063,19 @@ impl ToolAdapter for TraeAdapter {
             message: "缺少可用于签到的 Trae Token".into(),
         })?;
 
-        let (current_status, credits_hint) = self.fetch_checkin_status(&token).await?;
+        // 调度器已完成幂等前置查时直接复用快照，避免重复请求平台
+        let (current_status, credits_hint) = match precheck {
+            Some(q) => (q.claim_status.clone(), None),
+            None => self.fetch_checkin_status(&token).await?,
+        };
         if current_status == ClaimStatus::Claimed {
             return Ok(ClaimResult {
                 claimed: false,
                 reward_summary: "今日已签过".into(),
-                updated_quota: self.inspect_quota(cred).await.ok(),
+                updated_quota: match precheck {
+                    Some(q) => Some(q.clone()),
+                    None => self.inspect_quota(cred).await.ok(),
+                },
             });
         }
         if current_status == ClaimStatus::Unsupported {
@@ -1084,6 +1122,9 @@ impl ToolAdapter for TraeAdapter {
             });
         };
         if code != 0 {
+            if let Some(err) = crate::adapter::common::map_business_code(code, "Trae CN 签到") {
+                return Err(err);
+            }
             let msg = body
                 .get("message")
                 .or_else(|| body.get("msg"))

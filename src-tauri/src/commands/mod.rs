@@ -157,11 +157,11 @@ pub fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettingsDto, St
 pub fn save_app_settings(
     app: AppHandle,
     state: State<'_, AppState>,
-    settings: AppSettingsDto,
+    mut settings: AppSettingsDto,
 ) -> Result<AppSettingsDto, String> {
-    if settings.jitter_min_ms > settings.jitter_max_ms {
-        return Err("最小抖动间隔不能大于最大抖动间隔".into());
-    }
+    // 防风控抖动下限：不允许 0ms 连发
+    settings.jitter_min_ms = settings.jitter_min_ms.max(500);
+    settings.jitter_max_ms = settings.jitter_max_ms.max(settings.jitter_min_ms);
     for (tool, path) in &settings.custom_client_paths {
         let trimmed = path.trim();
         if trimmed.is_empty() {
@@ -416,6 +416,9 @@ pub async fn refresh_account_quota(
         .adapters
         .get(&summary.tool_id)
         .ok_or_else(|| format!("适配器 {} 尚未注册", summary.tool_id))?;
+
+    // 单账号查额同样进入串行队列，批量运行中排队等待而非并发请求平台
+    let _queue_guard = state.scheduler.queue_lock().lock_owned().await;
 
     match adapter.inspect_quota(&cred).await {
         Ok(snapshot) => {
@@ -687,6 +690,9 @@ pub async fn refresh_quota_batch(
     state: State<'_, AppState>,
     account_ids: Vec<String>,
 ) -> Result<(), String> {
+    if account_ids.len() > 200 {
+        return Err("单次批量最多 200 个账号".into());
+    }
     let settings = load_app_settings(&state.db);
     let jitter = JitterConfig {
         min_ms: settings.jitter_min_ms,
@@ -696,8 +702,14 @@ pub async fn refresh_quota_batch(
     let master_key = state.master_key;
     let adapters = Arc::clone(&state.adapters);
     let scheduler = Arc::clone(&state.scheduler);
+    // 重入即拒绝：快速双击/双窗口并发不再排队覆盖进度
+    let guard = scheduler
+        .queue_lock()
+        .try_lock_owned()
+        .map_err(|_| "已有批量任务正在进行，请等待完成后再试".to_string())?;
 
     tokio::spawn(async move {
+        let _guard = guard;
         let _ = scheduler
             .run_quota_refresh_batch(
                 &app,
@@ -719,6 +731,9 @@ pub async fn claim_daily_batch(
     state: State<'_, AppState>,
     account_ids: Vec<String>,
 ) -> Result<(), String> {
+    if account_ids.len() > 200 {
+        return Err("单次批量最多 200 个账号".into());
+    }
     let settings = load_app_settings(&state.db);
     let jitter = JitterConfig {
         min_ms: settings.jitter_min_ms,
@@ -728,8 +743,13 @@ pub async fn claim_daily_batch(
     let master_key = state.master_key;
     let adapters = Arc::clone(&state.adapters);
     let scheduler = Arc::clone(&state.scheduler);
+    let guard = scheduler
+        .queue_lock()
+        .try_lock_owned()
+        .map_err(|_| "已有批量任务正在进行，请等待完成后再试".to_string())?;
 
     tokio::spawn(async move {
+        let _guard = guard;
         let _ = scheduler
             .run_daily_claim_batch(
                 &app,

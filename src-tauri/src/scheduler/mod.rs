@@ -21,7 +21,7 @@ impl Default for JitterConfig {
     fn default() -> Self {
         Self {
             min_ms: 1500,
-            max_ms: 4000,
+            max_ms: 3500,
         }
     }
 }
@@ -40,16 +40,23 @@ pub struct BatchProgressEvent {
 }
 
 pub struct AntiRiskScheduler {
-    queue_lock: Mutex<()>,
+    queue_lock: Arc<Mutex<()>>,
 }
 
 impl AntiRiskScheduler {
     pub fn new() -> Self {
         Self {
-            queue_lock: Mutex::new(()),
+            queue_lock: Arc::new(Mutex::new(())),
         }
     }
 
+    /// 单队列串行锁。批量调用方必须先 try_lock_owned 成功（重入即拒绝），
+    /// 单账号请求用 lock_owned 排队等待，保证所有平台请求严格串行。
+    pub fn queue_lock(&self) -> Arc<Mutex<()>> {
+        Arc::clone(&self.queue_lock)
+    }
+
+    /// 调用方必须已持有 queue_lock（见 queue_lock()）
     pub async fn run_daily_claim_batch(
         &self,
         app: &AppHandle,
@@ -59,9 +66,6 @@ impl AntiRiskScheduler {
         account_ids: Vec<String>,
         jitter: JitterConfig,
     ) -> Result<(), String> {
-        // 严格单队列串行锁，防止并发触发平台风控
-        let _guard = self.queue_lock.lock().await;
-
         let total = account_ids.len();
         if total == 0 {
             return Ok(());
@@ -70,6 +74,8 @@ impl AntiRiskScheduler {
         let mut claimed_count: usize = 0;
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
+        // 工具级熔断：同一工具出现风控/限流后，中止该工具剩余账号
+        let mut risk_broken_tools: HashMap<String, ()> = HashMap::new();
 
         for (idx, account_id) in account_ids.iter().enumerate() {
             let (summary, cred) = match db.get_account_credential(master_key, account_id) {
@@ -126,6 +132,19 @@ impl AntiRiskScheduler {
                 continue;
             }
 
+            if risk_broken_tools.contains_key(&summary.tool_id) {
+                skipped_count += 1;
+                let _ = db.append_action_log(
+                    Some(&summary.id),
+                    &summary.tool_id,
+                    "claim",
+                    "skipped",
+                    None,
+                    &format!("{} 所属工具已触发风控熔断，本批次自动跳过", summary.label),
+                );
+                continue;
+            }
+
             let _ = app.emit(
                 "qwitch://batch-progress",
                 BatchProgressEvent {
@@ -148,7 +167,7 @@ impl AntiRiskScheduler {
                 }
                 Err(err) => {
                     failed_count += 1;
-                    handle_adapter_failure(
+                    let code = handle_adapter_failure(
                         db,
                         &summary.id,
                         &summary.tool_id,
@@ -156,6 +175,12 @@ impl AntiRiskScheduler {
                         "claim",
                         err,
                     );
+                    if matches!(
+                        code,
+                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+                    ) {
+                        risk_broken_tools.insert(summary.tool_id.clone(), ());
+                    }
                     let _ = app.emit("qwitch://account-updated", &summary.id);
                     continue;
                 }
@@ -210,8 +235,8 @@ impl AntiRiskScheduler {
                         },
                     );
 
-                    // 2. 执行手动领取
-                    match adapter.claim_daily(&cred).await {
+                    // 2. 执行手动领取（复用前置快照，避免适配器重复查状态）
+                    match adapter.claim_daily(&cred, Some(&quota)).await {
                         Ok(res) => {
                             if let Some(updated_q) = res.updated_quota {
                                 let _ = db.save_quota_snapshot(&summary.id, &updated_q);
@@ -245,7 +270,7 @@ impl AntiRiskScheduler {
                         }
                         Err(err) => {
                             failed_count += 1;
-                            handle_adapter_failure(
+                            let code = handle_adapter_failure(
                                 db,
                                 &summary.id,
                                 &summary.tool_id,
@@ -253,6 +278,12 @@ impl AntiRiskScheduler {
                                 "claim",
                                 err,
                             );
+                            if matches!(
+                                code,
+                                UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+                            ) {
+                                risk_broken_tools.insert(summary.tool_id.clone(), ());
+                            }
                         }
                     }
                 }
@@ -282,8 +313,13 @@ impl AntiRiskScheduler {
             }
         }
 
+        let breaker_note = if risk_broken_tools.is_empty() {
+            String::new()
+        } else {
+            format!("，{} 个工具因风控熔断中止", risk_broken_tools.len())
+        };
         let summary_text = format!(
-            "串行领取完成：成功 {claimed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个"
+            "串行领取完成：成功 {claimed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个{breaker_note}"
         );
         let _ = app.emit(
             "qwitch://batch-progress",
@@ -302,6 +338,7 @@ impl AntiRiskScheduler {
         Ok(())
     }
 
+    /// 调用方必须已持有 queue_lock（见 queue_lock()）
     pub async fn run_quota_refresh_batch(
         &self,
         app: &AppHandle,
@@ -311,9 +348,6 @@ impl AntiRiskScheduler {
         account_ids: Vec<String>,
         jitter: JitterConfig,
     ) -> Result<(), String> {
-        // 与批量领取共用单队列串行锁，防止并发请求触发平台限流与风控
-        let _guard = self.queue_lock.lock().await;
-
         let total = account_ids.len();
         if total == 0 {
             return Ok(());
@@ -322,6 +356,7 @@ impl AntiRiskScheduler {
         let mut refreshed_count: usize = 0;
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
+        let mut risk_broken_tools: HashMap<String, ()> = HashMap::new();
 
         for (idx, account_id) in account_ids.iter().enumerate() {
             let (summary, cred) = match db.get_account_credential(master_key, account_id) {
@@ -359,6 +394,19 @@ impl AntiRiskScheduler {
                 continue;
             };
 
+            if risk_broken_tools.contains_key(&summary.tool_id) {
+                skipped_count += 1;
+                let _ = db.append_action_log(
+                    Some(&summary.id),
+                    &summary.tool_id,
+                    "query",
+                    "skipped",
+                    None,
+                    &format!("{} 所属工具已触发风控熔断，本批次自动跳过", summary.label),
+                );
+                continue;
+            }
+
             let _ = app.emit(
                 "qwitch://batch-progress",
                 BatchProgressEvent {
@@ -388,7 +436,7 @@ impl AntiRiskScheduler {
                 }
                 Err(err) => {
                     failed_count += 1;
-                    handle_adapter_failure(
+                    let code = handle_adapter_failure(
                         db,
                         &summary.id,
                         &summary.tool_id,
@@ -396,6 +444,12 @@ impl AntiRiskScheduler {
                         "query",
                         err,
                     );
+                    if matches!(
+                        code,
+                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+                    ) {
+                        risk_broken_tools.insert(summary.tool_id.clone(), ());
+                    }
                 }
             }
 
@@ -422,8 +476,13 @@ impl AntiRiskScheduler {
             }
         }
 
+        let breaker_note = if risk_broken_tools.is_empty() {
+            String::new()
+        } else {
+            format!("，{} 个工具因风控熔断中止", risk_broken_tools.len())
+        };
         let summary_text = format!(
-            "额度刷新完成：成功 {refreshed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个"
+            "额度刷新完成：成功 {refreshed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个{breaker_note}"
         );
         let _ = app.emit(
             "qwitch://batch-progress",
@@ -450,7 +509,7 @@ fn handle_adapter_failure(
     label: &str,
     action_type: &str,
     err: crate::adapter::AdapterError,
-) {
+) -> UnifiedErrorCode {
     let crate::adapter::AdapterError::Unified { code, message } = err;
     match code {
         UnifiedErrorCode::AuthExpired => {
@@ -469,4 +528,5 @@ fn handle_adapter_failure(
         Some(&code),
         &format!("{label} 操作中止：{message}"),
     );
+    code
 }

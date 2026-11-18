@@ -1811,6 +1811,7 @@ export function Dashboard() {
                     <input
                       id="qwitch-jitter-min"
                       type="number"
+                      min={500}
                       value={jitterRangeMs[0]}
                       onChange={(e) => setJitterRangeMs([Number(e.target.value), jitterRangeMs[1]])}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"
@@ -1826,6 +1827,7 @@ export function Dashboard() {
                     <input
                       id="qwitch-jitter-max"
                       type="number"
+                      min={500}
                       value={jitterRangeMs[1]}
                       onChange={(e) => setJitterRangeMs([jitterRangeMs[0], Number(e.target.value)])}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"

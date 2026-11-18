@@ -875,10 +875,12 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
         (Some(claim_str), Some(buckets_json), Some(fetched_at)) => {
             let buckets: Vec<QuotaBucket> = serde_json::from_str(&buckets_json).unwrap_or_default();
             let raw_claim_status = parse_claim_status(&claim_str);
+            let row_tool_id: String = row.get(1)?;
             let normalized_claim_status = normalize_daily_claim_status(
                 raw_claim_status,
                 &fetched_at,
                 last_claimed_at.as_deref(),
+                &row_tool_id,
             );
             Some(QuotaSnapshot {
                 plan_name,
@@ -920,9 +922,10 @@ pub fn normalize_daily_claim_status(
     raw_status: ClaimStatus,
     fetched_at: &str,
     last_claimed_at: Option<&str>,
+    tool_id: &str,
 ) -> ClaimStatus {
     let today_cst = Utc::now().with_timezone(&cst_offset()).date_naive();
-    normalize_daily_claim_status_on_date(raw_status, fetched_at, last_claimed_at, today_cst)
+    normalize_daily_claim_status_on_date(raw_status, fetched_at, last_claimed_at, today_cst, tool_id)
 }
 
 fn normalize_daily_claim_status_on_date(
@@ -930,22 +933,27 @@ fn normalize_daily_claim_status_on_date(
     fetched_at: &str,
     last_claimed_at: Option<&str>,
     today_cst: NaiveDate,
+    tool_id: &str,
 ) -> ClaimStatus {
+    // 每日重置型工具（Trae/WorkBuddy）以 last_claimed_at 为权威；
+    // Qoder 活动按周期而非自然日，不适用"今日已领即 Claimed"覆盖
+    let daily_reset_tool = matches!(tool_id, "trae" | "trae_cn" | "workbuddy");
+    let claimed_today = last_claimed_at
+        .map(|ts| is_same_cst_day(ts, today_cst))
+        .unwrap_or(false);
     match raw_status {
         ClaimStatus::Unsupported | ClaimStatus::Unknown => raw_status,
         ClaimStatus::Claimed => {
-            if is_same_cst_day(fetched_at, today_cst)
-                || last_claimed_at
-                    .map(|ts| is_same_cst_day(ts, today_cst))
-                    .unwrap_or(false)
-            {
+            if is_same_cst_day(fetched_at, today_cst) || claimed_today {
                 ClaimStatus::Claimed
             } else {
                 ClaimStatus::Unknown
             }
         }
         ClaimStatus::Available => {
-            if is_same_cst_day(fetched_at, today_cst) {
+            if daily_reset_tool && claimed_today {
+                ClaimStatus::Claimed
+            } else if is_same_cst_day(fetched_at, today_cst) {
                 ClaimStatus::Available
             } else {
                 ClaimStatus::Unknown
@@ -1314,7 +1322,8 @@ mod tests {
                 ClaimStatus::Claimed,
                 "2026-11-17T15:30:00Z",
                 Some("2026-11-17T15:00:00Z"),
-                today_cst
+                today_cst,
+                "trae_cn"
             ),
             ClaimStatus::Unknown
         );
@@ -1323,9 +1332,32 @@ mod tests {
                 ClaimStatus::Claimed,
                 "2026-11-17T16:30:00Z",
                 None,
-                today_cst
+                today_cst,
+                "trae_cn"
             ),
             ClaimStatus::Claimed
+        );
+        // 每日重置型工具：今日已领 + 服务端缓存仍返回 Available → 权威口径 Claimed
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Available,
+                "2026-11-18T02:00:00Z",
+                Some("2026-11-18T01:00:00Z"),
+                today_cst,
+                "workbuddy"
+            ),
+            ClaimStatus::Claimed
+        );
+        // Qoder 活动按周期：今日已领不覆盖新出现的 Available 活动
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Available,
+                "2026-11-18T02:00:00Z",
+                Some("2026-11-18T01:00:00Z"),
+                today_cst,
+                "qoder_cn"
+            ),
+            ClaimStatus::Available
         );
 
         let _ = std::fs::remove_file(&db_path);

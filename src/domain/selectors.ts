@@ -35,7 +35,11 @@ export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
   const raw = acc.latestQuota?.claimStatus;
   if (raw === "unsupported") return "unsupported";
 
-  if (acc.lastClaimedAt && isSameCstDay(acc.lastClaimedAt)) {
+  // 与后端 normalize_daily_claim_status 同口径：仅每日重置型工具
+  // 以 lastClaimedAt 今日为权威；Qoder 活动按周期，不做自然日覆盖
+  const dailyResetTool =
+    acc.toolId === "trae_cn" || acc.toolId === "trae" || acc.toolId === "workbuddy";
+  if (dailyResetTool && acc.lastClaimedAt && isSameCstDay(acc.lastClaimedAt)) {
     return "claimed";
   }
 

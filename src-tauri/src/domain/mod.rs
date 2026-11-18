@@ -85,7 +85,7 @@ fn default_true() -> bool {
 }
 
 fn default_auto_refresh_interval_minutes() -> u32 {
-    30
+    0
 }
 
 fn default_log_archive_after_days() -> u32 {
@@ -116,7 +116,7 @@ pub struct AppSettingsDto {
     pub launch_at_login: bool,
     #[serde(default)]
     pub start_minimized: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_refresh_on_startup: bool,
     #[serde(default = "default_auto_refresh_interval_minutes")]
     pub auto_refresh_interval_minutes: u32,
@@ -139,7 +139,7 @@ impl Default for AppSettingsDto {
             hide_dock_icon: false,
             launch_at_login: false,
             start_minimized: false,
-            auto_refresh_on_startup: true,
+            auto_refresh_on_startup: false,
             auto_refresh_interval_minutes: default_auto_refresh_interval_minutes(),
             auto_claim_daily: false,
             trusted_adapters: Vec::new(),
@@ -469,8 +469,10 @@ mod tests {
         assert!(!parsed.hide_dock_icon);
         assert!(!parsed.launch_at_login);
         assert!(!parsed.start_minimized);
-        assert!(parsed.auto_refresh_on_startup);
-        assert_eq!(parsed.auto_refresh_interval_minutes, 30);
+        // 默认不静默后台刷新（Human-in-the-Loop 产品边界）
+        assert!(!parsed.auto_refresh_on_startup);
+        assert_eq!(parsed.auto_refresh_interval_minutes, 0);
         assert!(!parsed.auto_claim_daily);
+        assert!(parsed.trusted_adapters.is_empty());
     }
 }

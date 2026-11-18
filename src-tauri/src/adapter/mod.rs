@@ -1,3 +1,4 @@
+pub mod common;
 pub mod external;
 pub mod qoder;
 pub mod trae;
@@ -63,7 +64,11 @@ pub trait ToolAdapter: Send + Sync {
 
     async fn inspect_quota(&self, cred: &CredentialEnvelope) -> Result<QuotaSnapshot, AdapterError>;
 
-    async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError>;
+    async fn claim_daily(
+        &self,
+        cred: &CredentialEnvelope,
+        precheck: Option<&QuotaSnapshot>,
+    ) -> Result<ClaimResult, AdapterError>;
 
     async fn apply_session(
         &self,

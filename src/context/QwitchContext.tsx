@@ -139,8 +139,8 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   hideDockIcon: false,
   launchAtLogin: false,
   startMinimized: false,
-  autoRefreshOnStartup: true,
-  autoRefreshIntervalMinutes: 30,
+  autoRefreshOnStartup: false,
+  autoRefreshIntervalMinutes: 0,
   autoClaimDaily: false,
   trustedAdapters: [],
 };
@@ -167,11 +167,11 @@ const normalizeAppSettings = (
   launchAtLogin: raw?.launchAtLogin ?? fallback.launchAtLogin ?? false,
   startMinimized: raw?.startMinimized ?? fallback.startMinimized ?? false,
   autoRefreshOnStartup:
-    raw?.autoRefreshOnStartup ?? fallback.autoRefreshOnStartup ?? true,
+    raw?.autoRefreshOnStartup ?? fallback.autoRefreshOnStartup ?? false,
   autoRefreshIntervalMinutes:
     raw?.autoRefreshIntervalMinutes ??
     fallback.autoRefreshIntervalMinutes ??
-    30,
+    0,
   autoClaimDaily: raw?.autoClaimDaily ?? fallback.autoClaimDaily ?? false,
   trustedAdapters: raw?.trustedAdapters ?? fallback.trustedAdapters ?? [],
 });
@@ -1536,10 +1536,12 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (isTrayWindow || isInitializing) return;
-    const mins = appSettings.autoRefreshIntervalMinutes ?? 30;
+    const mins = appSettings.autoRefreshIntervalMinutes ?? 0;
     if (mins <= 0) return;
     const intervalId = window.setInterval(() => {
       if (batchRunningRef.current) return;
+      // 主窗口隐藏到托盘后不再静默刷新（Human-in-the-Loop 边界）
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       const hasRefreshable = accountsRef.current.some(
         (a) => a.status === "active" && a.hasApiToken !== false
       );

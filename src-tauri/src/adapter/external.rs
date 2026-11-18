@@ -287,11 +287,15 @@ impl ToolAdapter for ExternalAdapter {
         })
     }
 
-    async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError> {
+    async fn claim_daily(
+        &self,
+        cred: &CredentialEnvelope,
+        precheck: Option<&QuotaSnapshot>,
+    ) -> Result<ClaimResult, AdapterError> {
         let res = self
             .call_rpc(
                 "claim_daily",
-                serde_json::json!({ "credential": cred }),
+                serde_json::json!({ "credential": cred, "precheck": precheck }),
             )
             .await?;
         serde_json::from_value(res).map_err(|e| AdapterError::Unified {

@@ -784,6 +784,12 @@ impl WorkBuddyAdapter {
             message: format!("解析 WorkBuddy 状态响应失败: {e}"),
         })?;
 
+        if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
+            if let Some(err) = crate::adapter::common::map_business_code(code, "查询 WorkBuddy 状态") {
+                return Err(err);
+            }
+        }
+
         let (claim_status, checkin_total_credits, streak_days) =
             Self::parse_checkin_status_from_body(&body)?;
 
@@ -1116,11 +1122,19 @@ impl ToolAdapter for WorkBuddyAdapter {
         self.fetch_quota_and_checkin(&endpoint, &headers).await
     }
 
-    async fn claim_daily(&self, cred: &CredentialEnvelope) -> Result<ClaimResult, AdapterError> {
+    async fn claim_daily(
+        &self,
+        cred: &CredentialEnvelope,
+        precheck: Option<&QuotaSnapshot>,
+    ) -> Result<ClaimResult, AdapterError> {
         let host = crate::platform::NativePlatformHost;
         let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&host)).await?;
 
-        let current = self.fetch_quota_and_checkin(&endpoint, &headers).await?;
+        // 复用调度器前置快照，避免重复查状态
+        let current = match precheck {
+            Some(q) => q.clone(),
+            None => self.fetch_quota_and_checkin(&endpoint, &headers).await?,
+        };
         if current.claim_status == ClaimStatus::Claimed {
             return Ok(ClaimResult {
                 claimed: false,
@@ -1175,11 +1189,23 @@ impl ToolAdapter for WorkBuddyAdapter {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let msg_lower = msg.to_lowercase();
+
+        // 先按 HTTP 状态与业务码判定风控/过期，再考虑"已签"文案启发式
+        if !status.is_success() {
+            return Err(Self::map_http_status(status, "WorkBuddy 每日签到"));
+        }
+        if let Some(c) = code {
+            if let Some(err) = crate::adapter::common::map_business_code(c, "WorkBuddy 每日签到") {
+                return Err(err);
+            }
+        }
+
         let already_claimed = code == Some(10001)
             || msg.contains("已签")
-            || msg.contains("重复")
-            || msg_lower.contains("already")
-            || msg_lower.contains("checked");
+            || msg.contains("重复领取")
+            || msg_lower.contains("already claimed")
+            || msg_lower.contains("already checked")
+            || msg_lower.contains("checked in");
         if already_claimed {
             let refreshed = self
                 .fetch_quota_and_checkin(&endpoint, &headers)
@@ -1191,10 +1217,6 @@ impl ToolAdapter for WorkBuddyAdapter {
                 reward_summary: "今日已签过".into(),
                 updated_quota: refreshed,
             });
-        }
-
-        if !status.is_success() {
-            return Err(Self::map_http_status(status, "WorkBuddy 每日签到"));
         }
 
         if let Some(c) = code.filter(|&c| c != 0) {

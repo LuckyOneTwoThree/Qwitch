@@ -77,6 +77,7 @@ pub trait PlatformHost: Send + Sync {
     ) -> Result<(), HostError>;
     fn launch_client(&self, executable: &Path, args: &[String]) -> Result<(), HostError>;
     fn get_or_create_master_key(&self) -> Result<[u8; 32], HostError>;
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), String>;
 }
 
 pub struct NativePlatformHost;
@@ -635,6 +636,120 @@ impl PlatformHost for NativePlatformHost {
             "Failed to persist master key to keyring or data directory".into(),
         ))
     }
+
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or_else(|| "无法读取 HOME 目录，不能配置 macOS 开机自启".to_string())?;
+            let agents_dir = home.join("Library").join("LaunchAgents");
+            let plist_path = agents_dir.join("dev.qwitch.app.plist");
+            if enabled {
+                let exe = std::env::current_exe()
+                    .map_err(|e| format!("无法获取当前程序路径: {e}"))?;
+                std::fs::create_dir_all(&agents_dir)
+                    .map_err(|e| format!("创建 LaunchAgents 目录失败: {e}"))?;
+                let plist = render_macos_launch_agent_plist(&exe);
+                std::fs::write(&plist_path, plist.as_bytes())
+                    .map_err(|e| format!("写入开机自启配置失败: {e}"))?;
+            } else if plist_path.exists() {
+                std::fs::remove_file(&plist_path)
+                    .map_err(|e| format!("移除开机自启配置失败: {e}"))?;
+            }
+            return Ok(());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+            if enabled {
+                let exe = std::env::current_exe()
+                    .map_err(|e| format!("无法获取当前程序路径: {e}"))?;
+                let value = format!("\"{}\" --autostart", exe.to_string_lossy());
+                let output = Command::new("reg")
+                    .args(["add", RUN_KEY, "/v", "Qwitch", "/t", "REG_SZ", "/d", &value, "/f"])
+                    .output()
+                    .map_err(|e| format!("执行 reg add 失败: {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "写入 Windows 开机自启注册表失败: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
+            } else {
+                let _ = Command::new("reg")
+                    .args(["delete", RUN_KEY, "/v", "Qwitch", "/f"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            return Ok(());
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .ok_or_else(|| "无法定位用户配置目录，不能配置 Linux 开机自启".to_string())?;
+            let autostart_dir = base.join("autostart");
+            let desktop_path = autostart_dir.join("dev.qwitch.app.desktop");
+            if enabled {
+                let exe = std::env::current_exe()
+                    .map_err(|e| format!("无法获取当前程序路径: {e}"))?;
+                std::fs::create_dir_all(&autostart_dir)
+                    .map_err(|e| format!("创建 autostart 目录失败: {e}"))?;
+                let content = format!(
+                    "[Desktop Entry]\nType=Application\nName=Qwitch\nExec=\"{}\" --autostart\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+                    exe.to_string_lossy()
+                );
+                std::fs::write(&desktop_path, content.as_bytes())
+                    .map_err(|e| format!("写入开机自启配置失败: {e}"))?;
+            } else if desktop_path.exists() {
+                std::fs::remove_file(&desktop_path)
+                    .map_err(|e| format!("移除开机自启配置失败: {e}"))?;
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            let _ = enabled;
+            Ok(())
+        }
+    }
+}
+
+fn escape_xml(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+pub fn render_macos_launch_agent_plist(exe_path: &Path) -> String {
+    let escaped_exe = escape_xml(&exe_path.to_string_lossy());
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.qwitch.app</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{escaped_exe}</string>
+    <string>--autostart</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+"#
+    )
 }
 
 fn find_latest_prefixed_dir(parent: &Path, prefix: &str) -> Option<PathBuf> {
@@ -663,4 +778,19 @@ fn find_latest_prefixed_dir(parent: &Path, prefix: &str) -> Option<PathBuf> {
     }
 
     best.map(|(_, p)| p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_launch_agent_plist_escapes_path_and_sets_autostart() {
+        let exe = PathBuf::from("/Applications/Qwitch & Tools.app/Contents/MacOS/qwitch");
+        let plist = render_macos_launch_agent_plist(&exe);
+        assert!(plist.contains("<string>dev.qwitch.app</string>"));
+        assert!(plist.contains("<string>/Applications/Qwitch &amp; Tools.app/Contents/MacOS/qwitch</string>"));
+        assert!(plist.contains("<string>--autostart</string>"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
+    }
 }

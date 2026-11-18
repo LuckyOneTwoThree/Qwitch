@@ -19,6 +19,7 @@ import type { AccountSummary } from "../types/qwitch";
 import { AccountStatusBadge, ClaimStatusBadge } from "./StatusBadge";
 import { ToolBrandIcon } from "./ToolBrandIcon";
 import { getToolBrandMeta } from "../domain/toolRegistry";
+import { getEffectiveClaimStatus } from "../domain/selectors";
 import { useQwitch } from "../context/QwitchContext";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 
@@ -67,6 +68,7 @@ export const AccountCard = React.memo(function AccountCard({
   const missingApiToken = account.hasApiToken === false;
   const missingLocalSnapshot = account.hasLocalSnapshot === false;
   const isBatchRunning = Boolean(batchProgress?.running);
+  const effectiveClaimStatus = getEffectiveClaimStatus(account);
 
   const buckets = account.latestQuota?.buckets ?? [];
   const primaryBucket = buckets[0];
@@ -201,8 +203,8 @@ export const AccountCard = React.memo(function AccountCard({
 
             <div className="flex shrink-0 flex-col items-end gap-1">
               <AccountStatusBadge status={account.status} />
-              {account.latestQuota && !missingApiToken && (
-                <ClaimStatusBadge status={account.latestQuota.claimStatus} />
+              {canClaim && !missingApiToken && (
+                <ClaimStatusBadge status={effectiveClaimStatus} />
               )}
             </div>
           </div>
@@ -227,7 +229,7 @@ export const AccountCard = React.memo(function AccountCard({
                 <div>
                   {(() => {
                     const isQoderClaimed =
-                      isQoderClaimBucket && account.latestQuota?.claimStatus === "claimed";
+                      isQoderClaimBucket && effectiveClaimStatus === "claimed";
                     const pct = isQoderClaimed
                       ? 100
                       : primaryBucket.total > 0
@@ -397,28 +399,31 @@ export const AccountCard = React.memo(function AccountCard({
                   查额
                 </button>
 
-                {canClaim && (
-                  <button
-                    type="button"
-                    disabled={isBatchRunning || account.latestQuota?.claimStatus === "claimed"}
-                    onClick={() => void claimDailyBatch([account.id])}
-                    className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
-                      account.latestQuota?.claimStatus === "claimed" || isBatchRunning
-                        ? "cursor-default border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-400"
-                        : "border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                    }`}
-                  >
-                    <Sparkles
-                      className={`h-3 w-3 shrink-0 ${
-                        account.latestQuota?.claimStatus === "claimed"
-                          ? "text-zinc-500 dark:text-zinc-400"
-                          : "text-sky-600 dark:text-sky-400"
+                {canClaim &&
+                  (effectiveClaimStatus === "available" ||
+                    effectiveClaimStatus === "unknown") && (
+                    <button
+                      type="button"
+                      disabled={isBatchRunning}
+                      title={
+                        effectiveClaimStatus === "unknown"
+                          ? "先核实今日签到状态，未领取则自动领取"
+                          : "领取今日签到福利"
+                      }
+                      onClick={() => void claimDailyBatch([account.id])}
+                      className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+                        isBatchRunning
+                          ? "cursor-default border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-400"
+                          : "border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
                       }`}
-                      aria-hidden="true"
-                    />
-                    {account.latestQuota?.claimStatus === "claimed" ? "今日已签" : "领取"}
-                  </button>
-                )}
+                    >
+                      <Sparkles
+                        className="h-3 w-3 shrink-0 text-sky-600 dark:text-sky-400"
+                        aria-hidden="true"
+                      />
+                      领取
+                    </button>
+                  )}
               </>
             )}
 

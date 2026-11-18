@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   RefreshCw,
   Sparkles,
@@ -30,6 +30,8 @@ import {
   CheckSquare,
   Square,
   Power,
+  AppWindow,
+  Timer,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { AccountCard } from "../components/AccountCard";
@@ -40,6 +42,8 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import {
+  isAccountClaimable,
+  isAccountNeedingAttention,
   selectScopeAccounts,
   selectScopedStats,
   type AccountFilter,
@@ -87,6 +91,51 @@ const formatLogDayLabel = (iso: string) => {
   return key;
 };
 
+function SettingToggleRow({
+  id,
+  label,
+  description,
+  checked,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-xl border border-zinc-100 bg-zinc-50/70 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-800/40">
+      <label htmlFor={id} className="min-w-0 flex-1 cursor-pointer">
+        <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{label}</div>
+        <p className="mt-0.5 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
+          {description}
+        </p>
+      </label>
+      <button
+        id={id}
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+          checked
+            ? "bg-zinc-900 dark:bg-zinc-100"
+            : "bg-zinc-300 dark:bg-zinc-700"
+        }`}
+      >
+        <span
+          className={`inline-block h-4 w-4 transform rounded-full shadow-xs transition-transform ${
+            checked
+              ? "translate-x-4 bg-white dark:bg-zinc-900"
+              : "translate-x-0.5 bg-white dark:bg-zinc-200"
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+
 export function Dashboard() {
   const {
     isInitializing,
@@ -101,6 +150,7 @@ export function Dashboard() {
     refreshAllQuotas,
     claimDailyBatch,
     batchProgress,
+    appSettings,
     jitterRangeMs,
     setJitterRangeMs,
     logRetention,
@@ -118,6 +168,7 @@ export function Dashboard() {
     quitApp,
   } = useQwitch();
 
+  const mainScrollRef = useRef<HTMLElement | null>(null);
   const [nav, setNav] = useState<NavSection>("all");
   const [importOpen, setImportOpen] = useState(false);
   const [importDefaultMethod, setImportDefaultMethod] = useState<AuthMethod | undefined>(undefined);
@@ -174,23 +225,10 @@ export function Dashboard() {
     const q = searchQuery.trim().toLowerCase();
     return scopeAccounts.filter((acc) => {
       if (statusFilter === "active_client" && !acc.isActiveOnClient) return false;
-      if (
-        statusFilter === "claimable" &&
-        !(
-          acc.status === "active" &&
-          acc.hasApiToken !== false &&
-          acc.latestQuota?.claimStatus === "available"
-        )
-      ) {
+      if (statusFilter === "claimable" && !isAccountClaimable(acc, adapters)) {
         return false;
       }
-      if (
-        statusFilter === "attention" &&
-        (acc.status === "disabled" ||
-          (acc.status === "active" &&
-            acc.hasApiToken !== false &&
-            acc.hasLocalSnapshot !== false))
-      ) {
+      if (statusFilter === "attention" && !isAccountNeedingAttention(acc)) {
         return false;
       }
       if (!q) return true;
@@ -240,6 +278,7 @@ export function Dashboard() {
   useEffect(() => {
     setSelectedLogIds([]);
     setConfirmLogAction(null);
+    mainScrollRef.current?.scrollTo({ top: 0 });
   }, [logScope, nav]);
 
   const filteredLogs = useMemo(() => {
@@ -334,8 +373,8 @@ export function Dashboard() {
     logScope === "archived" ? logStats.archivedCount : logStats.activeCount;
 
   return (
-    <div className="flex min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <aside className="sticky top-0 flex h-screen w-54 shrink-0 flex-col justify-between border-r border-zinc-200 bg-white/85 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/65">
+    <div className="flex h-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+      <aside className="flex h-full w-54 shrink-0 flex-col justify-between border-r border-zinc-200 bg-white/85 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/65">
         <div className="overflow-y-auto pr-0.5">
           <div className="mb-5 flex items-center gap-2.5 px-1.5">
             <QwitchLogo size="md" />
@@ -475,7 +514,10 @@ export function Dashboard() {
               <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">v0.1.0</span>
             </div>
             <p className="mt-1 leading-snug">
-              凭据经系统钥匙串与 AES-256-GCM 加密落盘；关闭主窗将隐藏至托盘。
+              凭据经系统钥匙串与 AES-256-GCM 加密落盘；
+              {appSettings.closeToTray !== false
+                ? "关闭主窗将隐藏至菜单栏常驻。"
+                : "关闭主窗将直接退出程序。"}
             </p>
           </div>
 
@@ -490,8 +532,8 @@ export function Dashboard() {
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/80 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/65">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/90 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/80">
           <div className="flex min-w-0 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
@@ -505,31 +547,61 @@ export function Dashboard() {
           <div className="flex items-center gap-2">
             {isAccountSection && (
               <>
-                <button
-                  type="button"
-                  onClick={() => void refreshAllQuotas(activeToolFilter)}
-                  disabled={isBatchBusy}
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
-                >
-                  <RefreshCw
-                    className={`h-3.5 w-3.5 shrink-0 ${
-                      isBatchBusy && batchProgress?.action === "refresh" ? "animate-spin" : ""
-                    }`}
-                    aria-hidden="true"
-                  />
-                  {activeToolMeta ? `刷新 ${activeToolMeta.name}` : "刷新全部额度"}
-                </button>
-
-                {activeToolSupportsClaim && (
+                {scopeAccounts.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => void claimDailyBatch(undefined, activeToolFilter)}
+                    onClick={() => void refreshAllQuotas(activeToolFilter)}
                     disabled={isBatchBusy}
-                    className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                    className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
                   >
-                    <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    {activeToolMeta ? `领取 ${activeToolMeta.name}` : "手动一键领取"}
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 shrink-0 ${
+                        isBatchBusy && batchProgress?.action === "refresh" ? "animate-spin" : ""
+                      }`}
+                      aria-hidden="true"
+                    />
+                    {activeToolMeta ? `刷新 ${activeToolMeta.name}` : "刷新全部额度"}
                   </button>
+                )}
+
+                {scopeAccounts.length > 0 && activeToolSupportsClaim && (
+                  <>
+                    {scopedStats.claimActionState === "all_claimed" ? (
+                      <span
+                        role="status"
+                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/12 px-2.5 py-1.5 text-xs font-medium text-emerald-800 dark:text-emerald-300"
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        {scopedStats.unclaimedAuthMissingCount > 0
+                          ? `可签已全领 (${scopedStats.claimedCount})`
+                          : `今日已全签 (${scopedStats.claimedCount})`}
+                      </span>
+                    ) : scopedStats.claimActionState === "claimable" ? (
+                      <button
+                        type="button"
+                        onClick={() => void claimDailyBatch(undefined, activeToolFilter)}
+                        disabled={isBatchBusy}
+                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                      >
+                        <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        {activeToolMeta
+                          ? `领取 ${activeToolMeta.name} (${scopedStats.claimableCount})`
+                          : `一键领取 (${scopedStats.claimableCount})`}
+                      </button>
+                    ) : scopedStats.claimActionState === "verify_and_claim" ? (
+                      <button
+                        type="button"
+                        onClick={() => void claimDailyBatch(undefined, activeToolFilter)}
+                        disabled={isBatchBusy}
+                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                      >
+                        <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        {activeToolMeta
+                          ? `核实并领 ${activeToolMeta.name} (${scopedStats.unknownClaimCount})`
+                          : `核实并领取 (${scopedStats.unknownClaimCount})`}
+                      </button>
+                    ) : null}
+                  </>
                 )}
 
                 <button
@@ -559,241 +631,669 @@ export function Dashboard() {
           </div>
         </header>
 
-        <main className="flex-1 space-y-3.5 p-5">
-          <BatchClaimBanner />
+        {isAccountSection && (
+          <div className="shrink-0 space-y-2.5 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
+            <BatchClaimBanner />
 
-          {isAccountSection && (
-            <>
-              <section
-                aria-label="当前作用域核心指标"
-                className="grid grid-cols-2 gap-2.5 xl:grid-cols-4"
+            <section
+              aria-label="当前作用域核心指标"
+              className="grid grid-cols-2 gap-2.5 sm:grid-cols-4"
+            >
+              <button
+                type="button"
+                onClick={() => setStatusFilter("all")}
+                aria-pressed={statusFilter === "all"}
+                className="flex min-w-0 flex-col justify-between rounded-xl border border-zinc-200 bg-white px-3 py-2 text-left transition hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900/90 dark:hover:border-zinc-700"
               >
-                <div className="flex min-w-0 items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-                      <Layers className="h-3.5 w-3.5" aria-hidden="true" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-                        {activeToolMeta ? `${activeToolMeta.name} 账号` : "纳管账号"}
-                      </div>
-                      <div className="text-base leading-tight font-semibold tabular-nums">
-                        {scopedStats.total}
-                      </div>
-                    </div>
+                <div className="flex w-full items-center justify-between gap-1.5">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                      <Layers className="h-3 w-3" aria-hidden="true" />
+                    </span>
+                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                      {activeToolMeta ? `${activeToolMeta.name} 账号` : "纳管账号"}
+                    </span>
                   </div>
                   {!activeToolFilter && (
-                    <div className="hidden shrink-0 items-center gap-1 2xl:flex">
+                    <div className="hidden shrink-0 items-center gap-1 xl:flex">
                       {visibleTools.slice(0, 3).map((t) => (
-                        <button
+                        <span
                           key={t.id}
-                          type="button"
-                          onClick={() => setNav(t.id)}
                           title={`${t.name}: ${accounts.filter((a) => a.toolId === t.id).length}`}
-                          aria-label={`切换到 ${t.name}`}
-                          className="inline-flex items-center gap-0.5 rounded bg-zinc-50 px-1 py-0.5 text-[11px] text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-800 dark:text-zinc-300"
+                          className="inline-flex items-center gap-0.5 rounded bg-zinc-100 px-1 py-0.2 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                         >
                           <ToolBrandIcon toolId={t.id} size="xs" decorative />
                           <span className="tabular-nums">
                             {accounts.filter((a) => a.toolId === t.id).length}
                           </span>
-                        </button>
+                        </span>
                       ))}
                     </div>
                   )}
                 </div>
 
-                <div className="flex min-w-0 items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/12 text-emerald-700 dark:text-emerald-400">
-                      <MonitorCheck className="h-3.5 w-3.5" aria-hidden="true" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-                        本机挂载
-                      </div>
-                      <div className="text-base leading-tight font-semibold tabular-nums">
-                        {scopedStats.activeClientsCount}
-                        <span className="ml-0.5 text-[11px] font-normal text-zinc-500 dark:text-zinc-400">
-                          /{scopedStats.scopeToolCapacity}
-                        </span>
-                      </div>
-                    </div>
+                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                      {scopedStats.total}
+                    </span>
+                    <span className="text-[11px] text-zinc-600 dark:text-zinc-400">个</span>
                   </div>
-                  <span className="shrink-0 whitespace-nowrap rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                  <span className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+                    {statusFilter === "all" ? "当前总览" : "点击看全部"}
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setStatusFilter((prev) => (prev === "active_client" ? "all" : "active_client"))
+                }
+                aria-pressed={statusFilter === "active_client"}
+                className={`flex min-w-0 flex-col justify-between rounded-xl border bg-white px-3 py-2 text-left transition dark:bg-zinc-900/90 ${
+                  statusFilter === "active_client"
+                    ? "border-emerald-500/60 ring-1 ring-emerald-500/20 dark:border-emerald-400/50"
+                    : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                }`}
+              >
+                <div className="flex w-full items-center justify-between gap-1.5">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-400">
+                      <MonitorCheck className="h-3 w-3" aria-hidden="true" />
+                    </span>
+                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                      本机挂载
+                    </span>
+                  </div>
+                  <span
+                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.2 text-[11px] font-medium ${
+                      scopedStats.runningClientsCount > 0
+                        ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
+                        : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                  >
                     {scopedStats.runningClientsCount > 0
                       ? activeToolFilter
                         ? "运行中"
-                        : `${scopedStats.runningClientsCount} 运行中`
+                        : `${scopedStats.runningClientsCount} 运行`
                       : "未启动"}
                   </span>
                 </div>
 
-                <div className="flex min-w-0 items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-sky-500/12 text-sky-700 dark:text-sky-400">
-                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-                        今日签到
-                      </div>
-                      <div className="text-base leading-tight font-semibold tabular-nums">
-                        {scopedStats.claimedCount}
-                        <span className="ml-1 text-[11px] font-normal text-zinc-500 dark:text-zinc-400">
-                          已签
-                        </span>
-                      </div>
-                    </div>
+                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                  <div className="flex items-baseline">
+                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                      {scopedStats.activeClientsCount}
+                    </span>
+                    <span className="ml-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                      /{scopedStats.scopeToolCapacity}
+                    </span>
+                  </div>
+                  <span className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+                    {statusFilter === "active_client" ? "已筛选" : "使用中"}
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setStatusFilter((prev) => (prev === "claimable" ? "all" : "claimable"))
+                }
+                aria-pressed={statusFilter === "claimable"}
+                className={`flex min-w-0 flex-col justify-between rounded-xl border bg-white px-3 py-2 text-left transition dark:bg-zinc-900/90 ${
+                  statusFilter === "claimable"
+                    ? "border-sky-500/60 ring-1 ring-sky-500/20 dark:border-sky-400/50"
+                    : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                }`}
+              >
+                <div className="flex w-full items-center justify-between gap-1.5">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-sky-500/12 text-sky-700 dark:text-sky-400">
+                      <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                    </span>
+                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                      今日签到
+                    </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.2 text-[11px] font-medium ${
                       scopedStats.claimableCount > 0
                         ? "bg-sky-500/12 text-sky-800 dark:text-sky-300"
                         : scopedStats.unclaimedAuthMissingCount > 0
                           ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
-                          : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                          : scopedStats.allClaimed
+                            ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
+                            : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                     }`}
                   >
                     {scopedStats.claimBadgeText}
                   </span>
                 </div>
 
-                <div className="flex min-w-0 items-center justify-between gap-2 rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <div
-                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
+                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                      {scopedStats.claimedCount}
+                    </span>
+                    <span className="text-[11px] text-zinc-600 dark:text-zinc-400">已签</span>
+                  </div>
+                  <span className="truncate text-[11px] tabular-nums text-zinc-600 dark:text-zinc-400">
+                    {scopedStats.eligibleClaimTotal > 0
+                      ? `共 ${scopedStats.eligibleClaimTotal} 可签`
+                      : "仅查额/切号"}
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setStatusFilter((prev) => (prev === "attention" ? "all" : "attention"))
+                }
+                aria-pressed={statusFilter === "attention"}
+                className={`flex min-w-0 flex-col justify-between rounded-xl border bg-white px-3 py-2 text-left transition dark:bg-zinc-900/90 ${
+                  statusFilter === "attention"
+                    ? "border-amber-500/60 ring-1 ring-amber-500/20 dark:border-amber-400/50"
+                    : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                }`}
+              >
+                <div className="flex w-full items-center justify-between gap-1.5">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${
                         scopedStats.attentionCount > 0
                           ? "bg-amber-500/12 text-amber-700 dark:text-amber-400"
                           : "bg-emerald-500/12 text-emerald-700 dark:text-emerald-400"
                       }`}
                     >
-                      <Activity className="h-3.5 w-3.5" aria-hidden="true" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
-                        凭据健康
-                      </div>
-                      <div className="text-base leading-tight font-semibold tabular-nums">
-                        {scopedStats.healthyCount}
-                        <span className="ml-1 text-[11px] font-normal text-zinc-500 dark:text-zinc-400">
-                          正常
-                        </span>
-                      </div>
-                    </div>
+                      <Activity className="h-3 w-3" aria-hidden="true" />
+                    </span>
+                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                      凭据健康
+                    </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.2 text-[11px] font-medium ${
                       scopedStats.attentionCount > 0
                         ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
                         : "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
                     }`}
                   >
                     {scopedStats.attentionCount > 0
-                      ? `${scopedStats.attentionCount} 需完善`
+                      ? `${scopedStats.attentionCount} 待修`
                       : scopedStats.disabledCount > 0
-                        ? `${scopedStats.disabledCount} 已停用`
+                        ? `${scopedStats.disabledCount} 停用`
                         : "完好"}
                   </span>
                 </div>
-              </section>
 
-              {scopeAccounts.length > 0 && (
-                <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-zinc-200 bg-white px-3.5 py-2 dark:border-zinc-800 dark:bg-zinc-900/90">
-                  <div className="relative min-w-[190px] flex-1 max-w-xs">
-                    <Search
-                      className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
-                      aria-hidden="true"
-                    />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="搜索昵称、UID、手机号或套餐..."
-                      aria-label="搜索账号"
-                      className="w-full rounded-lg border border-zinc-200 bg-zinc-50 py-1 pr-7 pl-8 text-xs text-zinc-900 transition focus:border-zinc-400 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-100 dark:focus:bg-zinc-800"
-                    />
-                    {searchQuery && (
-                      <button
-                        type="button"
-                        onClick={() => setSearchQuery("")}
-                        aria-label="清空搜索"
-                        className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
-                      >
-                        <X className="h-3 w-3" aria-hidden="true" />
-                      </button>
-                    )}
+                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                      {scopedStats.healthyCount}
+                    </span>
+                    <span className="text-[11px] text-zinc-600 dark:text-zinc-400">正常</span>
                   </div>
+                  <span className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+                    {scopedStats.attentionCount > 0 ? "点击筛选" : "状态完好"}
+                  </span>
+                </div>
+              </button>
+            </section>
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex flex-wrap items-center gap-1">
-                      {(
-                        [
-                          { id: "all", label: "全部" },
-                          { id: "active_client", label: "使用中" },
-                          { id: "claimable", label: "待领" },
-                          { id: "attention", label: "待完善" },
-                        ] as const
-                      ).map((f) => {
-                        const active = statusFilter === f.id;
-                        const cnt = scopedStats.filterCounts[f.id];
-                        return (
-                          <button
-                            key={f.id}
-                            type="button"
-                            onClick={() => setStatusFilter(f.id)}
-                            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium transition ${
-                              active
-                                ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                                : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700/70"
+            {scopeAccounts.length > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-zinc-200 bg-white px-3.5 py-2 dark:border-zinc-800 dark:bg-zinc-900/90">
+                <div className="relative min-w-[190px] flex-1 max-w-xs">
+                  <Search
+                    className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="搜索昵称、UID、手机号或套餐..."
+                    aria-label="搜索账号"
+                    className="w-full rounded-lg border border-zinc-200 bg-zinc-50 py-1 pr-7 pl-8 text-xs text-zinc-900 transition focus:border-zinc-400 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-100 dark:focus:bg-zinc-800"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery("")}
+                      aria-label="清空搜索"
+                      className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                    >
+                      <X className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1">
+                    {(
+                      [
+                        { id: "all", label: "全部" },
+                        { id: "active_client", label: "使用中" },
+                        { id: "claimable", label: "待领" },
+                        { id: "attention", label: "待完善" },
+                      ] as const
+                    ).map((f) => {
+                      const active = statusFilter === f.id;
+                      const cnt = scopedStats.filterCounts[f.id];
+                      return (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setStatusFilter(f.id)}
+                          className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium transition ${
+                            active
+                              ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                              : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700/70"
+                          }`}
+                        >
+                          <span>{f.label}</span>
+                          <span
+                            className={`text-[11px] tabular-nums ${
+                              active ? "opacity-80" : "text-zinc-500 dark:text-zinc-400"
                             }`}
                           >
-                            <span>{f.label}</span>
-                            <span
-                              className={`text-[11px] tabular-nums ${
-                                active ? "opacity-80" : "text-zinc-500 dark:text-zinc-400"
-                              }`}
-                            >
-                              {cnt}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                            {cnt}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                    {nav === "all" && (
-                      <div className="inline-flex shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-700 dark:bg-zinc-800/70">
+                  {nav === "all" && (
+                    <div className="inline-flex shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-700 dark:bg-zinc-800/70">
+                      <button
+                        type="button"
+                        onClick={() => setViewMode("grouped")}
+                        title="按平台模块化分类展示"
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                          viewMode === "grouped"
+                            ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
+                            : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                        }`}
+                      >
+                        <LayoutList className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        分组
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setViewMode("flat")}
+                        title="紧凑平铺展示"
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                          viewMode === "flat"
+                            ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
+                            : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                        }`}
+                      >
+                        <LayoutGrid className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        平铺
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {nav === "logs" && (
+          <div className="shrink-0 space-y-2.5 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
+            <BatchClaimBanner />
+
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/60">
+                <button
+                  type="button"
+                  onClick={() => setLogScope("active")}
+                  className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                    logScope === "active"
+                      ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
+                      : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                  }`}
+                >
+                  <ScrollText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  活跃日志
+                  <span
+                    className={`rounded-full px-1.5 py-0.2 text-[11px] tabular-nums ${
+                      logScope === "active"
+                        ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                        : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                  >
+                    {logStats.activeCount}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLogScope("archived")}
+                  className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                    logScope === "archived"
+                      ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
+                      : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                  }`}
+                >
+                  <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  已归档
+                  <span
+                    className={`rounded-full px-1.5 py-0.2 text-[11px] tabular-nums ${
+                      logScope === "archived"
+                        ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                        : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                  >
+                    {logStats.archivedCount}
+                  </span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {logScope === "active" ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={logStats.noiseActiveCount === 0}
+                      onClick={() =>
+                        void archiveLogs(
+                          { scope: "active", redundantOnly: true },
+                          `已归档 ${logStats.noiseActiveCount} 条日常冗余记录（已保留签到、切号与异常）`
+                        )
+                      }
+                      title="将日常“额度查询成功”和“幂等跳过”归档，仅保留签到成功、切号、导入及所有异常"
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                    >
+                      <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      清理冗余
+                      {logStats.noiseActiveCount > 0 && (
+                        <span className="rounded-full bg-white/20 px-1.5 text-[11px] tabular-nums dark:bg-zinc-900/15">
+                          {logStats.noiseActiveCount}
+                        </span>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={logStats.activeCount === 0}
+                      onClick={() =>
+                        void archiveLogs(
+                          { scope: "active", olderThanDays: 7 },
+                          "已将 7 天前活跃日志移入归档"
+                        )
+                      }
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    >
+                      <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      归档 7 天前
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={logStats.activeCount === 0}
+                      onClick={() =>
+                        setConfirmLogAction({
+                          label: "归档当前全部活跃日志？",
+                          detail: `将把 ${logStats.activeCount} 条活跃日志全部转入「已归档」，可在归档区查看、导出或恢复。`,
+                          run: async () => {
+                            await archiveLogs({ scope: "active" });
+                          },
+                        })
+                      }
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    >
+                      <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      全部归档
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={logStats.activeCount === 0}
+                      onClick={() => void exportLogs("active", false)}
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    >
+                      <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      导出
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={logStats.activeCount === 0}
+                      onClick={() =>
+                        setConfirmLogAction({
+                          label: "确认清空全部活跃日志？",
+                          detail: `将永久删除 ${logStats.activeCount} 条活跃日志，不可恢复；若需留存请先点击「全部归档」或「导出」。`,
+                          danger: true,
+                          run: async () => {
+                            await deleteLogs({ scope: "active" });
+                          },
+                        })
+                      }
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      清空活跃
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={logStats.archivedCount === 0}
+                      onClick={() => void exportLogs("archived", false)}
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                    >
+                      <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      导出归档 JSON
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={logStats.archivedCount === 0}
+                      onClick={() =>
+                        void unarchiveLogs(
+                          { scope: "archived" },
+                          `已恢复 ${logStats.archivedCount} 条归档日志`
+                        )
+                      }
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    >
+                      <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      全部恢复
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={logStats.archivedCount === 0}
+                      onClick={() =>
+                        setConfirmLogAction({
+                          label: "确认彻底清空已归档日志？",
+                          detail: `将永久删除 ${logStats.archivedCount} 条已归档历史记录，建议先点击「导出归档 JSON」保存备份。`,
+                          danger: true,
+                          run: async () => {
+                            await deleteLogs({ scope: "archived" });
+                          },
+                        })
+                      }
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      彻底清空归档
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2.5 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="relative min-w-[220px] flex-1">
+                  <Search
+                    className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="text"
+                    value={logSearch}
+                    onChange={(e) => setLogSearch(e.target.value)}
+                    placeholder="搜索日志内容、平台名称或错误码..."
+                    aria-label="搜索操作日志"
+                    className="w-full rounded-xl border border-zinc-200 bg-zinc-50/70 py-1.5 pr-8 pl-8 text-xs text-zinc-900 transition focus:border-zinc-400 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-zinc-500"
+                  />
+                  {logSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setLogSearch("")}
+                      className="absolute top-1/2 right-2.5 -translate-y-1/2 text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                      aria-label="清除搜索"
+                    >
+                      <X className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+
+                {filteredLogs.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={toggleSelectAllVisibleLogs}
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                    >
+                      {allVisibleLogsSelected ? (
+                        <CheckSquare className="h-3.5 w-3.5 text-zinc-900 dark:text-zinc-100" aria-hidden="true" />
+                      ) : (
+                        <Square className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" aria-hidden="true" />
+                      )}
+                      {allVisibleLogsSelected ? "取消全选" : `全选 (${filteredLogs.length})`}
+                    </button>
+
+                    {selectedLogIds.length > 0 && (
+                      <>
+                        {logScope === "active" ? (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const ids = [...selectedLogIds];
+                              setSelectedLogIds([]);
+                              await archiveLogs({ scope: "active", ids });
+                            }}
+                            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
+                          >
+                            <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                            归档已选 ({selectedLogIds.length})
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const ids = [...selectedLogIds];
+                              setSelectedLogIds([]);
+                              await unarchiveLogs({ scope: "archived", ids });
+                            }}
+                            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
+                          >
+                            <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                            恢复已选 ({selectedLogIds.length})
+                          </button>
+                        )}
+
                         <button
                           type="button"
-                          onClick={() => setViewMode("grouped")}
-                          title="按平台模块化分类展示"
-                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                            viewMode === "grouped"
-                              ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                              : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-                          }`}
+                          onClick={() =>
+                            setConfirmLogAction({
+                              label: `确认永久删除已选 ${selectedLogIds.length} 条日志？`,
+                              detail: "删除后将无法在活跃或归档列表中恢复。",
+                              danger: true,
+                              run: async () => {
+                                const ids = [...selectedLogIds];
+                                setSelectedLogIds([]);
+                                await deleteLogs({ scope: logScope, ids });
+                              },
+                            })
+                          }
+                          className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
                         >
-                          <LayoutList className="h-3 w-3 shrink-0" aria-hidden="true" />
-                          分组
+                          <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                          删除已选 ({selectedLogIds.length})
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setViewMode("flat")}
-                          title="紧凑平铺展示"
-                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                            viewMode === "flat"
-                              ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                              : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-                          }`}
-                        >
-                          <LayoutGrid className="h-3 w-3 shrink-0" aria-hidden="true" />
-                          平铺
-                        </button>
-                      </div>
+                      </>
                     )}
                   </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="mr-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    动作：
+                  </span>
+                  {(
+                    [
+                      { id: "all", label: "全部" },
+                      { id: "claim", label: "每日签到" },
+                      { id: "query", label: "额度查询" },
+                      { id: "switch", label: "桌面切号" },
+                      { id: "import", label: "账号管理" },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setLogActionFilter(item.id)}
+                      className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+                        logActionFilter === item.id
+                          ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                          : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
-              )}
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="mr-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    结果：
+                  </span>
+                  {(
+                    [
+                      { id: "all", label: "全部" },
+                      { id: "success", label: "成功" },
+                      { id: "skipped", label: "幂等跳过" },
+                      { id: "failed", label: "异常" },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setLogResultFilter(item.id)}
+                      className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+                        logResultFilter === item.id
+                          ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                          : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {nav === "settings" && batchProgress && (
+          <div className="shrink-0 px-5 pt-3.5">
+            <BatchClaimBanner />
+          </div>
+        )}
+
+        <main ref={mainScrollRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-3.5">
+          {isAccountSection && (
+            <>
 
               {isInitializing && scopeAccounts.length === 0 ? (
                 <div
@@ -961,343 +1461,6 @@ export function Dashboard() {
 
           {nav === "logs" && (
             <div className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                <div className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/60">
-                  <button
-                    type="button"
-                    onClick={() => setLogScope("active")}
-                    className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                      logScope === "active"
-                        ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                        : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-                    }`}
-                  >
-                    <ScrollText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    活跃日志
-                    <span
-                      className={`rounded-full px-1.5 py-0.2 text-[11px] tabular-nums ${
-                        logScope === "active"
-                          ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
-                          : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                      }`}
-                    >
-                      {logStats.activeCount}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLogScope("archived")}
-                    className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                      logScope === "archived"
-                        ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                        : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-                    }`}
-                  >
-                    <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    已归档
-                    <span
-                      className={`rounded-full px-1.5 py-0.2 text-[11px] tabular-nums ${
-                        logScope === "archived"
-                          ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
-                          : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                      }`}
-                    >
-                      {logStats.archivedCount}
-                    </span>
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {logScope === "active" ? (
-                    <>
-                      <button
-                        type="button"
-                        disabled={logStats.noiseActiveCount === 0}
-                        onClick={() =>
-                          void archiveLogs(
-                            { scope: "active", redundantOnly: true },
-                            `已归档 ${logStats.noiseActiveCount} 条日常冗余记录（已保留签到、切号与异常）`
-                          )
-                        }
-                        title="将日常“额度查询成功”和“幂等跳过”归档，仅保留签到成功、切号、导入及所有异常"
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
-                      >
-                        <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        清理冗余
-                        {logStats.noiseActiveCount > 0 && (
-                          <span className="rounded-full bg-white/20 px-1.5 text-[11px] tabular-nums dark:bg-zinc-900/15">
-                            {logStats.noiseActiveCount}
-                          </span>
-                        )}
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={logStats.activeCount === 0}
-                        onClick={() =>
-                          void archiveLogs(
-                            { scope: "active", olderThanDays: 7 },
-                            "已将 7 天前活跃日志移入归档"
-                          )
-                        }
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
-                      >
-                        <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        归档 7 天前
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={logStats.activeCount === 0}
-                        onClick={() =>
-                          setConfirmLogAction({
-                            label: "归档当前全部活跃日志？",
-                            detail: `将把 ${logStats.activeCount} 条活跃日志全部转入「已归档」，可在归档区查看、导出或恢复。`,
-                            run: async () => {
-                              await archiveLogs({ scope: "active" });
-                            },
-                          })
-                        }
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
-                      >
-                        <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        全部归档
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={logStats.activeCount === 0}
-                        onClick={() => void exportLogs("active", false)}
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
-                      >
-                        <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        导出
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={logStats.activeCount === 0}
-                        onClick={() =>
-                          setConfirmLogAction({
-                            label: "确认清空全部活跃日志？",
-                            detail: `将永久删除 ${logStats.activeCount} 条活跃日志，不可恢复；若需留存请先点击「全部归档」或「导出」。`,
-                            danger: true,
-                            run: async () => {
-                              await deleteLogs({ scope: "active" });
-                            },
-                          })
-                        }
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
-                      >
-                        <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        清空活跃
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        disabled={logStats.archivedCount === 0}
-                        onClick={() => void exportLogs("archived", false)}
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
-                      >
-                        <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        导出归档 JSON
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={logStats.archivedCount === 0}
-                        onClick={() =>
-                          void unarchiveLogs(
-                            { scope: "archived" },
-                            `已恢复 ${logStats.archivedCount} 条归档日志`
-                          )
-                        }
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
-                      >
-                        <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        全部恢复
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={logStats.archivedCount === 0}
-                        onClick={() =>
-                          setConfirmLogAction({
-                            label: "确认彻底清空已归档日志？",
-                            detail: `将永久删除 ${logStats.archivedCount} 条已归档历史记录，建议先点击「导出归档 JSON」保存备份。`,
-                            danger: true,
-                            run: async () => {
-                              await deleteLogs({ scope: "archived" });
-                            },
-                          })
-                        }
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
-                      >
-                        <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        彻底清空归档
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-2.5 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
-                <div className="flex flex-wrap items-center justify-between gap-2.5">
-                  <div className="relative min-w-[220px] flex-1">
-                    <Search
-                      className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
-                      aria-hidden="true"
-                    />
-                    <input
-                      type="text"
-                      value={logSearch}
-                      onChange={(e) => setLogSearch(e.target.value)}
-                      placeholder="搜索日志内容、平台名称或错误码..."
-                      aria-label="搜索操作日志"
-                      className="w-full rounded-xl border border-zinc-200 bg-zinc-50/70 py-1.5 pr-8 pl-8 text-xs text-zinc-900 transition focus:border-zinc-400 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-zinc-500"
-                    />
-                    {logSearch && (
-                      <button
-                        type="button"
-                        onClick={() => setLogSearch("")}
-                        className="absolute top-1/2 right-2.5 -translate-y-1/2 text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
-                        aria-label="清除搜索"
-                      >
-                        <X className="h-3.5 w-3.5" aria-hidden="true" />
-                      </button>
-                    )}
-                  </div>
-
-                  {filteredLogs.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={toggleSelectAllVisibleLogs}
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                      >
-                        {allVisibleLogsSelected ? (
-                          <CheckSquare className="h-3.5 w-3.5 text-zinc-900 dark:text-zinc-100" aria-hidden="true" />
-                        ) : (
-                          <Square className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" aria-hidden="true" />
-                        )}
-                        {allVisibleLogsSelected ? "取消全选" : `全选 (${filteredLogs.length})`}
-                      </button>
-
-                      {selectedLogIds.length > 0 && (
-                        <>
-                          {logScope === "active" ? (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                const ids = [...selectedLogIds];
-                                setSelectedLogIds([]);
-                                await archiveLogs({ scope: "active", ids });
-                              }}
-                              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
-                            >
-                              <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                              归档已选 ({selectedLogIds.length})
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                const ids = [...selectedLogIds];
-                                setSelectedLogIds([]);
-                                await unarchiveLogs({ scope: "archived", ids });
-                              }}
-                              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
-                            >
-                              <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                              恢复已选 ({selectedLogIds.length})
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setConfirmLogAction({
-                                label: `确认永久删除已选 ${selectedLogIds.length} 条日志？`,
-                                detail: "删除后将无法在活跃或归档列表中恢复。",
-                                danger: true,
-                                run: async () => {
-                                  const ids = [...selectedLogIds];
-                                  setSelectedLogIds([]);
-                                  await deleteLogs({ scope: logScope, ids });
-                                },
-                              })
-                            }
-                            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
-                          >
-                            <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                            删除已选 ({selectedLogIds.length})
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-2.5">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="mr-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-                      动作：
-                    </span>
-                    {(
-                      [
-                        { id: "all", label: "全部" },
-                        { id: "claim", label: "每日签到" },
-                        { id: "query", label: "额度查询" },
-                        { id: "switch", label: "桌面切号" },
-                        { id: "import", label: "账号管理" },
-                      ] as const
-                    ).map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => setLogActionFilter(item.id)}
-                        className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition ${
-                          logActionFilter === item.id
-                            ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                            : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300"
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="mr-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-                      结果：
-                    </span>
-                    {(
-                      [
-                        { id: "all", label: "全部" },
-                        { id: "success", label: "成功" },
-                        { id: "skipped", label: "幂等跳过" },
-                        { id: "failed", label: "异常" },
-                      ] as const
-                    ).map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => setLogResultFilter(item.id)}
-                        className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition ${
-                          logResultFilter === item.id
-                            ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                            : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300"
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
               <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
                 {filteredLogs.length === 0 ? (
                   <div className="px-6 py-12 text-center">
@@ -1473,6 +1636,127 @@ export function Dashboard() {
 
           {nav === "settings" && (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <AppWindow className="h-4 w-4 text-sky-500" aria-hidden="true" />
+                    桌面常驻、程序坞与启动偏好
+                  </div>
+                  <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                    即时生效
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                  控制关闭窗口行为、macOS 程序坞图标显示及系统登录自动启动策略。
+                </p>
+
+                <div className="mt-4 space-y-2.5">
+                  <SettingToggleRow
+                    id="qwitch-close-to-tray"
+                    label="关闭主窗口时隐藏至菜单栏常驻"
+                    description="开启后点击关闭按钮仅隐藏窗口，保留后台进程与顶部菜单栏；关闭则直接退出 Qwitch。"
+                    checked={appSettings.closeToTray !== false}
+                    onChange={(next) => void saveAppSettings({ closeToTray: next })}
+                  />
+                  <SettingToggleRow
+                    id="qwitch-hide-dock-icon"
+                    label="macOS 隐藏程序坞 (Dock) 图标"
+                    description="作为纯菜单栏应用运行，不占用 Dock 栏位；仍可通过菜单栏「主面板」随时打开完整界面。"
+                    checked={Boolean(appSettings.hideDockIcon)}
+                    onChange={(next) => void saveAppSettings({ hideDockIcon: next })}
+                  />
+                  <SettingToggleRow
+                    id="qwitch-launch-at-login"
+                    label="开机自动启动"
+                    description="登录系统时自动启动 Qwitch（macOS 写入 ~/Library/LaunchAgents，启动后静默驻留）。"
+                    checked={Boolean(appSettings.launchAtLogin)}
+                    onChange={(next) => void saveAppSettings({ launchAtLogin: next })}
+                  />
+                  <SettingToggleRow
+                    id="qwitch-start-minimized"
+                    label="启动时静默驻留菜单栏"
+                    description="手动打开应用时默认不弹出主窗口，直接隐身于菜单栏，减少对桌面的打扰。"
+                    checked={Boolean(appSettings.startMinimized)}
+                    onChange={(next) => void saveAppSettings({ startMinimized: next })}
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <Timer className="h-4 w-4 text-indigo-500" aria-hidden="true" />
+                    自动化巡检与每日签到策略
+                  </div>
+                  <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                    即时生效
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                  在主进程后台按单队列防风控节奏静默核实额度、同步跨天签到状态。
+                </p>
+
+                <div className="mt-4 space-y-2.5">
+                  <SettingToggleRow
+                    id="qwitch-auto-refresh-startup"
+                    label="启动时自动同步额度与签到状态"
+                    description="应用启动完成初始化后，自动在后台串行刷新一次已授权账号的最新额度与跨天签到状态。"
+                    checked={appSettings.autoRefreshOnStartup !== false}
+                    onChange={(next) => void saveAppSettings({ autoRefreshOnStartup: next })}
+                  />
+                  <SettingToggleRow
+                    id="qwitch-auto-claim-daily"
+                    label="发现待领福利时自动后台签到"
+                    description="结合启动巡检或后台定时刷新，若确认账号今日可领 (Available)，按防风控抖动延迟自动领取。"
+                    checked={Boolean(appSettings.autoClaimDaily)}
+                    onChange={(next) => void saveAppSettings({ autoClaimDaily: next })}
+                  />
+
+                  <div className="rounded-xl border border-zinc-100 bg-zinc-50/70 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-800/40">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                          后台定时刷新间隔
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                          常驻菜单栏期间周期性检查额度与次日新签到活动。
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1">
+                        {[
+                          { label: "关闭", value: 0 },
+                          { label: "15 分钟", value: 15 },
+                          { label: "30 分钟", value: 30 },
+                          { label: "60 分钟", value: 60 },
+                          { label: "120 分钟", value: 120 },
+                        ].map((opt) => {
+                          const current = appSettings.autoRefreshIntervalMinutes ?? 30;
+                          const selected = current === opt.value;
+                          return (
+                            <button
+                              key={opt.value}
+                              type="button"
+                              onClick={() =>
+                                void saveAppSettings({
+                                  autoRefreshIntervalMinutes: opt.value,
+                                })
+                              }
+                              className={`rounded-lg px-2 py-1 text-[11px] font-medium transition ${
+                                selected
+                                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                                  : "bg-white text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 text-sm font-semibold">

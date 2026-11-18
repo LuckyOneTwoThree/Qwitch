@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Monitor, PanelTop, Moon, Sun } from "lucide-react";
 import { QwitchProvider, useQwitch } from "./context/QwitchContext";
@@ -14,9 +14,16 @@ function PrototypeShell() {
   const [previewMode, setPreviewMode] = useState<"dashboard" | "tray">("dashboard");
   const { theme, toggleTheme } = useQwitch();
 
+  useEffect(() => {
+    document.documentElement.classList.toggle("tray-window", isTauriTrayWindow);
+    return () => {
+      document.documentElement.classList.remove("tray-window");
+    };
+  }, [isTauriTrayWindow]);
+
   if (isTauriTrayWindow) {
     return (
-      <div className="relative h-screen w-screen">
+      <div className="relative h-screen w-screen bg-transparent p-2 pt-1 pb-2.5">
         <TrayPopover
           onOpenMain={() => {
             void invoke("show_main_window");
@@ -28,9 +35,9 @@ function PrototypeShell() {
   }
 
   return (
-    <div className="relative min-h-screen">
+    <div className="relative flex h-screen flex-col overflow-hidden">
       {!isTauriRuntime && (
-        <div className="sticky top-0 z-40 flex items-center justify-between border-b border-zinc-200 bg-zinc-100/90 px-4 py-1.5 text-xs backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
+        <div className="z-40 flex shrink-0 items-center justify-between border-b border-zinc-200 bg-zinc-100/90 px-4 py-1.5 text-xs backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
           <span className="font-medium text-zinc-600 dark:text-zinc-400">
             Qwitch 交互原型预览（Mock 数据模式）
           </span>
@@ -79,10 +86,12 @@ function PrototypeShell() {
       )}
 
       {previewMode === "dashboard" ? (
-        <Dashboard />
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <Dashboard />
+        </div>
       ) : (
-        <div className="flex min-h-[calc(100vh-40px)] items-center justify-center bg-zinc-200/60 p-8 dark:bg-zinc-950">
-          <div className="relative h-[420px] w-[340px] overflow-hidden rounded-2xl border border-zinc-200 shadow-2xl dark:border-zinc-800">
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-zinc-200/60 p-8 dark:bg-zinc-950">
+          <div className="relative h-[500px] w-[384px] p-2 pt-1 pb-2.5">
             <TrayPopover onOpenMain={() => setPreviewMode("dashboard")} />
           </div>
         </div>

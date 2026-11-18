@@ -17,12 +17,28 @@ use crate::storage::QwitchDatabase;
 
 const SETTINGS_KEY: &str = "app.settings";
 
-fn load_app_settings(db: &QwitchDatabase) -> AppSettingsDto {
+pub fn load_app_settings(db: &QwitchDatabase) -> AppSettingsDto {
     db.get_setting(SETTINGS_KEY)
         .ok()
         .flatten()
         .and_then(|json| serde_json::from_str::<AppSettingsDto>(&json).ok())
         .unwrap_or_default()
+}
+
+pub fn apply_runtime_app_policy(app: &AppHandle, settings: &AppSettingsDto) {
+    #[cfg(target_os = "macos")]
+    {
+        let policy = if settings.hide_dock_icon {
+            tauri::ActivationPolicy::Accessory
+        } else {
+            tauri::ActivationPolicy::Regular
+        };
+        let _ = app.set_activation_policy(policy);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, settings);
+    }
 }
 
 fn resolve_client_executable(
@@ -112,6 +128,7 @@ pub fn save_app_settings(
     if settings.jitter_min_ms > settings.jitter_max_ms {
         return Err("最小抖动间隔不能大于最大抖动间隔".into());
     }
+    state.host.set_launch_at_login(settings.launch_at_login)?;
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
     state
         .db
@@ -120,6 +137,7 @@ pub fn save_app_settings(
     let _ = state
         .db
         .apply_log_retention(settings.log_archive_after_days, settings.log_max_active_count);
+    apply_runtime_app_policy(&app, &settings);
     let _ = app.emit("qwitch://settings-updated", &settings);
     let _ = app.emit("qwitch://logs-updated", ());
     Ok(settings)

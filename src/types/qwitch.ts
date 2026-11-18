@@ -80,6 +80,13 @@ export interface AppSettings {
   customClientPaths: Record<string, string>;
   logArchiveAfterDays?: number;
   logMaxActiveCount?: number;
+  closeToTray?: boolean;
+  hideDockIcon?: boolean;
+  launchAtLogin?: boolean;
+  startMinimized?: boolean;
+  autoRefreshOnStartup?: boolean;
+  autoRefreshIntervalMinutes?: number;
+  autoClaimDaily?: boolean;
 }
 
 export type LogScope = "active" | "archived" | "all";

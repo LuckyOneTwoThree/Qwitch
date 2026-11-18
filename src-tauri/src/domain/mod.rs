@@ -80,6 +80,14 @@ pub struct AccountSummary {
     pub updated_at: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_auto_refresh_interval_minutes() -> u32 {
+    30
+}
+
 fn default_log_archive_after_days() -> u32 {
     14
 }
@@ -100,6 +108,20 @@ pub struct AppSettingsDto {
     pub log_archive_after_days: u32,
     #[serde(default = "default_log_max_active_count")]
     pub log_max_active_count: u32,
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+    #[serde(default)]
+    pub hide_dock_icon: bool,
+    #[serde(default)]
+    pub launch_at_login: bool,
+    #[serde(default)]
+    pub start_minimized: bool,
+    #[serde(default = "default_true")]
+    pub auto_refresh_on_startup: bool,
+    #[serde(default = "default_auto_refresh_interval_minutes")]
+    pub auto_refresh_interval_minutes: u32,
+    #[serde(default)]
+    pub auto_claim_daily: bool,
 }
 
 impl Default for AppSettingsDto {
@@ -111,6 +133,13 @@ impl Default for AppSettingsDto {
             custom_client_paths: HashMap::new(),
             log_archive_after_days: default_log_archive_after_days(),
             log_max_active_count: default_log_max_active_count(),
+            close_to_tray: true,
+            hide_dock_icon: false,
+            launch_at_login: false,
+            start_minimized: false,
+            auto_refresh_on_startup: true,
+            auto_refresh_interval_minutes: default_auto_refresh_interval_minutes(),
+            auto_claim_daily: false,
         }
     }
 }
@@ -425,5 +454,18 @@ mod tests {
         } else {
             panic!("expected LocalSnapshot after reverse merge");
         }
+    }
+
+    #[test]
+    fn app_settings_legacy_json_deserializes_with_safe_defaults() {
+        let legacy_json = r#"{"jitterMinMs":1500,"jitterMaxMs":3500,"theme":"dark"}"#;
+        let parsed: AppSettingsDto = serde_json::from_str(legacy_json).expect("deserialize legacy");
+        assert!(parsed.close_to_tray);
+        assert!(!parsed.hide_dock_icon);
+        assert!(!parsed.launch_at_login);
+        assert!(!parsed.start_minimized);
+        assert!(parsed.auto_refresh_on_startup);
+        assert_eq!(parsed.auto_refresh_interval_minutes, 30);
+        assert!(!parsed.auto_claim_daily);
     }
 }

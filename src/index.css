@@ -13,6 +13,12 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   }
 
+  html.tray-window,
+  html.tray-window body {
+    background: transparent !important;
+    overflow: hidden;
+  }
+
   button:focus-visible,
   a:focus-visible,
   input:focus-visible,

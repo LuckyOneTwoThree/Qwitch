@@ -10,6 +10,7 @@ import React, {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { INITIAL_ACCOUNTS, INITIAL_LOGS, MOCK_ADAPTERS } from "../data/mockStore";
+import { getEffectiveClaimStatus } from "../domain/selectors";
 import type {
   AccountSummary,
   ActionLogCleanupRequest,
@@ -62,6 +63,7 @@ interface QwitchContextValue {
   dismissToast: () => void;
   theme: "light" | "dark";
   toggleTheme: () => void;
+  appSettings: AppSettings;
   jitterRangeMs: [number, number];
   setJitterRangeMs: (range: [number, number]) => void;
   logRetention: { archiveAfterDays: number; maxActiveCount: number };
@@ -126,6 +128,56 @@ const syncThemeStorage = (nextTheme: "light" | "dark") => {
   }
 };
 
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  jitterMinMs: 1500,
+  jitterMaxMs: 3500,
+  theme: getInitialTheme(),
+  customClientPaths: {},
+  logArchiveAfterDays: 14,
+  logMaxActiveCount: 200,
+  closeToTray: true,
+  hideDockIcon: false,
+  launchAtLogin: false,
+  startMinimized: false,
+  autoRefreshOnStartup: true,
+  autoRefreshIntervalMinutes: 30,
+  autoClaimDaily: false,
+};
+
+const normalizeAppSettings = (
+  raw?: Partial<AppSettings> | null,
+  fallback: AppSettings = DEFAULT_APP_SETTINGS
+): AppSettings => ({
+  jitterMinMs: raw?.jitterMinMs ?? fallback.jitterMinMs,
+  jitterMaxMs: raw?.jitterMaxMs ?? fallback.jitterMaxMs,
+  theme:
+    raw?.theme === "dark"
+      ? "dark"
+      : raw?.theme === "light"
+        ? "light"
+        : fallback.theme,
+  customClientPaths: raw?.customClientPaths ?? fallback.customClientPaths,
+  logArchiveAfterDays:
+    raw?.logArchiveAfterDays ?? fallback.logArchiveAfterDays ?? 14,
+  logMaxActiveCount:
+    raw?.logMaxActiveCount ?? fallback.logMaxActiveCount ?? 200,
+  closeToTray: raw?.closeToTray ?? fallback.closeToTray ?? true,
+  hideDockIcon: raw?.hideDockIcon ?? fallback.hideDockIcon ?? false,
+  launchAtLogin: raw?.launchAtLogin ?? fallback.launchAtLogin ?? false,
+  startMinimized: raw?.startMinimized ?? fallback.startMinimized ?? false,
+  autoRefreshOnStartup:
+    raw?.autoRefreshOnStartup ?? fallback.autoRefreshOnStartup ?? true,
+  autoRefreshIntervalMinutes:
+    raw?.autoRefreshIntervalMinutes ??
+    fallback.autoRefreshIntervalMinutes ??
+    30,
+  autoClaimDaily: raw?.autoClaimDaily ?? fallback.autoClaimDaily ?? false,
+});
+
+const detectTrayWindow = () =>
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("view") === "tray";
+
 const isRedundantLog = (log: ActionLogItem) =>
   log.resultStatus === "skipped" ||
   (log.actionType === "query" && log.resultStatus === "success");
@@ -157,6 +209,7 @@ const matchesLogCleanup = (
 
 export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const isTauriRuntime = detectTauriRuntime();
+  const isTrayWindow = detectTrayWindow();
 
   const [isInitializing, setIsInitializing] = useState<boolean>(isTauriRuntime);
   const [adapters, setAdapters] = useState<AdapterManifest[]>(MOCK_ADAPTERS);
@@ -179,6 +232,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     phase: "confirm",
   });
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings>(() => normalizeAppSettings());
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const [jitterRangeMs, setJitterRangeMs] = useState<[number, number]>([1500, 3500]);
   const [logRetention, setLogRetention] = useState<{
@@ -195,6 +249,31 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   logScopeRef.current = logScope;
   const didMountLogsRef = useRef(false);
   const syncDebounceTimerRef = useRef<number | null>(null);
+  const appSettingsRef = useRef(appSettings);
+  appSettingsRef.current = appSettings;
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
+  const adaptersRef = useRef(adapters);
+  adaptersRef.current = adapters;
+  const batchRunningRef = useRef(Boolean(batchProgress?.running));
+  batchRunningRef.current = Boolean(batchProgress?.running);
+  const pendingAutoClaimRef = useRef(false);
+  const startupAutoRunDoneRef = useRef(false);
+  const batchDismissTimerRef = useRef<number | null>(null);
+
+  const applyIncomingSettings = useCallback((raw?: Partial<AppSettings> | null) => {
+    const normalized = normalizeAppSettings(raw, appSettingsRef.current);
+    setAppSettings(normalized);
+    appSettingsRef.current = normalized;
+    setJitterRangeMs([normalized.jitterMinMs, normalized.jitterMaxMs]);
+    setTheme(normalized.theme);
+    syncThemeStorage(normalized.theme);
+    setCustomClientPaths(normalized.customClientPaths);
+    setLogRetention({
+      archiveAfterDays: normalized.logArchiveAfterDays ?? 14,
+      maxActiveCount: normalized.logMaxActiveCount ?? 200,
+    });
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -209,8 +288,32 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       if (syncDebounceTimerRef.current !== null) {
         window.clearTimeout(syncDebounceTimerRef.current);
       }
+      if (batchDismissTimerRef.current !== null) {
+        window.clearTimeout(batchDismissTimerRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (batchDismissTimerRef.current !== null) {
+      window.clearTimeout(batchDismissTimerRef.current);
+      batchDismissTimerRef.current = null;
+    }
+    if (!batchProgress || batchProgress.running) return;
+    const summary = batchProgress.summaryText ?? "";
+    const hasFailure = /异常\s+[1-9]/.test(summary) || summary.includes("失败");
+    const delayMs = hasFailure ? 5000 : 3200;
+    batchDismissTimerRef.current = window.setTimeout(() => {
+      setBatchProgress(null);
+      batchDismissTimerRef.current = null;
+    }, delayMs);
+    return () => {
+      if (batchDismissTimerRef.current !== null) {
+        window.clearTimeout(batchDismissTimerRef.current);
+        batchDismissTimerRef.current = null;
+      }
+    };
+  }, [batchProgress]);
 
   const dismissToast = useCallback(() => {
     if (toastTimerRef.current !== null) {
@@ -235,49 +338,29 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   const saveAppSettings = useCallback(
     async (next: Partial<AppSettings>, silent = false) => {
-      const payload: AppSettings = {
-        jitterMinMs: next.jitterMinMs ?? jitterRangeMs[0],
-        jitterMaxMs: next.jitterMaxMs ?? jitterRangeMs[1],
-        theme: next.theme ?? theme,
-        customClientPaths: next.customClientPaths ?? customClientPaths,
-        logArchiveAfterDays: next.logArchiveAfterDays ?? logRetention.archiveAfterDays,
-        logMaxActiveCount: next.logMaxActiveCount ?? logRetention.maxActiveCount,
-      };
+      const previous = appSettingsRef.current;
+      const payload = normalizeAppSettings(next, previous);
       if (payload.jitterMinMs > payload.jitterMaxMs) {
         showToast("保存失败：最小间隔不能大于最大间隔", "error");
         return;
       }
 
-      setJitterRangeMs([payload.jitterMinMs, payload.jitterMaxMs]);
-      setTheme(payload.theme);
-      syncThemeStorage(payload.theme);
-      setCustomClientPaths(payload.customClientPaths);
-      setLogRetention({
-        archiveAfterDays: payload.logArchiveAfterDays ?? 14,
-        maxActiveCount: payload.logMaxActiveCount ?? 200,
-      });
+      applyIncomingSettings(payload);
 
       if (isTauriRuntime) {
         try {
           const saved = await invoke<AppSettings>("save_app_settings", { settings: payload });
-          setJitterRangeMs([saved.jitterMinMs, saved.jitterMaxMs]);
-          const nextTheme = saved.theme === "dark" ? "dark" : "light";
-          setTheme(nextTheme);
-          syncThemeStorage(nextTheme);
-          setCustomClientPaths(saved.customClientPaths ?? {});
-          setLogRetention({
-            archiveAfterDays: saved.logArchiveAfterDays ?? 14,
-            maxActiveCount: saved.logMaxActiveCount ?? 200,
-          });
+          applyIncomingSettings(saved);
           if (!silent) showToast("设置已保存", "success");
         } catch (err) {
+          applyIncomingSettings(previous);
           showToast(`保存设置失败：${String(err)}`, "error");
         }
       } else if (!silent) {
         showToast("设置已保存（Mock 模式）", "success");
       }
     },
-    [customClientPaths, isTauriRuntime, jitterRangeMs, logRetention, showToast, theme]
+    [applyIncomingSettings, isTauriRuntime, showToast]
   );
 
   const toggleTheme = useCallback(() => {
@@ -411,21 +494,13 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       setAccounts(accList);
       setLogsState(logList);
       setBackendLogStats(stats);
-      setJitterRangeMs([settings.jitterMinMs, settings.jitterMaxMs]);
-      const nextTheme = settings.theme === "dark" ? "dark" : "light";
-      setTheme(nextTheme);
-      syncThemeStorage(nextTheme);
-      setCustomClientPaths(settings.customClientPaths ?? {});
-      setLogRetention({
-        archiveAfterDays: settings.logArchiveAfterDays ?? 14,
-        maxActiveCount: settings.logMaxActiveCount ?? 200,
-      });
+      applyIncomingSettings(settings);
     } catch (err) {
       showToast(`同步后端数据失败：${String(err)}`, "error");
     } finally {
       setIsInitializing(false);
     }
-  }, [isTauriRuntime, showToast]);
+  }, [applyIncomingSettings, isTauriRuntime, showToast]);
 
   useEffect(() => {
     if (!isTauriRuntime) return;
@@ -471,11 +546,15 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       setBatchProgress(payload);
       if (!payload.running) {
         scheduleSync();
-        if (payload.summaryText) {
-          const hasFailure =
-            /异常\s+[1-9]/.test(payload.summaryText) ||
-            payload.summaryText.includes("失败");
-          showToast(payload.summaryText, hasFailure ? "warning" : "success");
+        if (
+          payload.action === "refresh" &&
+          !isTrayWindow &&
+          pendingAutoClaimRef.current
+        ) {
+          pendingAutoClaimRef.current = false;
+          window.setTimeout(() => {
+            void triggerAutoClaimAvailableRef.current();
+          }, 250);
         }
       }
     });
@@ -500,15 +579,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     );
 
     register<AppSettings>("qwitch://settings-updated", (payload) => {
-      setJitterRangeMs([payload.jitterMinMs, payload.jitterMaxMs]);
-      const nextTheme = payload.theme === "dark" ? "dark" : "light";
-      setTheme(nextTheme);
-      syncThemeStorage(nextTheme);
-      setCustomClientPaths(payload.customClientPaths ?? {});
-      setLogRetention({
-        archiveAfterDays: payload.logArchiveAfterDays ?? 14,
-        maxActiveCount: payload.logMaxActiveCount ?? 200,
-      });
+      applyIncomingSettings(payload);
     });
 
     register<unknown>("qwitch://logs-updated", () => {
@@ -525,7 +596,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         unlisten();
       }
     };
-  }, [isTauriRuntime, refreshLogs, showToast, syncFromBackend]);
+  }, [applyIncomingSettings, isTrayWindow, isTauriRuntime, refreshLogs, showToast, syncFromBackend]);
 
   const appendLog = useCallback(
     (entry: Omit<ActionLogItem, "id" | "createdAt">) => {
@@ -667,9 +738,14 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         phase: "done",
         summaryText,
       });
-      showToast(summaryText, "success");
+      if (!isTrayWindow && pendingAutoClaimRef.current) {
+        pendingAutoClaimRef.current = false;
+        window.setTimeout(() => {
+          void triggerAutoClaimAvailableRef.current();
+        }, 250);
+      }
     },
-    [accounts, appendLog, batchProgress?.running, isTauriRuntime, showToast]
+    [accounts, appendLog, batchProgress?.running, isTauriRuntime, isTrayWindow, showToast]
   );
 
   const claimDailyBatch = useCallback(
@@ -683,14 +759,32 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         if (targetIds && !targetIds.includes(acc.id)) return false;
         if (!targetIds && toolId && acc.toolId !== toolId) return false;
         const adapter = adapters.find((ad) => ad.id === acc.toolId);
-        return (
-          acc.status === "active" &&
-          acc.hasApiToken !== false &&
-          Boolean(adapter?.capabilities.supportsDailyClaim)
-        );
+        if (
+          acc.status !== "active" ||
+          acc.hasApiToken === false ||
+          !adapter?.capabilities.supportsDailyClaim
+        ) {
+          return false;
+        }
+        if (targetIds) return true;
+        const effectiveClaim = getEffectiveClaimStatus(acc);
+        return effectiveClaim === "available" || effectiveClaim === "unknown";
       });
 
       if (candidates.length === 0) {
+        const eligibleAll = accounts.filter((acc) => {
+          if (targetIds && !targetIds.includes(acc.id)) return false;
+          if (!targetIds && toolId && acc.toolId !== toolId) return false;
+          const adapter = adapters.find((ad) => ad.id === acc.toolId);
+          return (
+            acc.status === "active" &&
+            acc.hasApiToken !== false &&
+            Boolean(adapter?.capabilities.supportsDailyClaim)
+          );
+        });
+        const alreadyClaimedCount = eligibleAll.filter(
+          (acc) => getEffectiveClaimStatus(acc) === "claimed"
+        ).length;
         const missingTokenCount = accounts.filter((acc) => {
           if (targetIds && !targetIds.includes(acc.id)) return false;
           if (!targetIds && toolId && acc.toolId !== toolId) return false;
@@ -701,6 +795,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
             Boolean(adapter?.capabilities.supportsDailyClaim)
           );
         }).length;
+        if (alreadyClaimedCount > 0 && missingTokenCount === 0) {
+          showToast(`今日可签到账号已全部领取完成 (${alreadyClaimedCount} 个)`, "success");
+          return;
+        }
         showToast(
           missingTokenCount > 0
             ? "账号尚未完成在线授权，请先点击卡片「在线授权」后再领取"
@@ -745,7 +843,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         });
         await sleep(450);
 
-        if (acc.latestQuota?.claimStatus === "claimed") {
+        if (getEffectiveClaimStatus(acc) === "claimed") {
           skippedCount++;
           appendLog({
             accountId: acc.id,
@@ -826,7 +924,6 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         phase: "done",
         summaryText,
       });
-      showToast(summaryText, "success");
     },
     [accounts, adapters, appendLog, batchProgress?.running, isTauriRuntime, jitterRangeMs, showToast]
   );
@@ -1382,6 +1479,75 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     showToast("Mock 模式下无需退出应用", "info");
   }, [isTauriRuntime, showToast]);
 
+  const triggerAutoClaimAvailable = useCallback(async () => {
+    if (isTrayWindow || batchRunningRef.current) return;
+    try {
+      const latestAccounts = isTauriRuntime
+        ? await invoke<AccountSummary[]>("list_accounts", { toolId: null })
+        : accountsRef.current;
+      const availableIds = latestAccounts
+        .filter((acc) => {
+          const adapter = adaptersRef.current.find((ad) => ad.id === acc.toolId);
+          return (
+            acc.status === "active" &&
+            acc.hasApiToken !== false &&
+            Boolean(adapter?.capabilities.supportsDailyClaim) &&
+            getEffectiveClaimStatus(acc) === "available"
+          );
+        })
+        .map((acc) => acc.id);
+      if (availableIds.length === 0) return;
+      if (isTauriRuntime) {
+        await invoke("claim_daily_batch", { accountIds: availableIds });
+      } else {
+        await claimDailyBatch(availableIds);
+      }
+    } catch {
+      // background automation errors should not crash UI
+    }
+  }, [claimDailyBatch, isTauriRuntime, isTrayWindow]);
+
+  const refreshAllQuotasRef = useRef(refreshAllQuotas);
+  refreshAllQuotasRef.current = refreshAllQuotas;
+  const triggerAutoClaimAvailableRef = useRef(triggerAutoClaimAvailable);
+  triggerAutoClaimAvailableRef.current = triggerAutoClaimAvailable;
+
+  useEffect(() => {
+    if (isTrayWindow || isInitializing || startupAutoRunDoneRef.current) return;
+    const timer = window.setTimeout(() => {
+      if (startupAutoRunDoneRef.current) return;
+      startupAutoRunDoneRef.current = true;
+      const currentSettings = appSettingsRef.current;
+      const hasRefreshable = accountsRef.current.some(
+        (a) => a.status === "active" && a.hasApiToken !== false
+      );
+      if (!hasRefreshable || batchRunningRef.current) return;
+      if (currentSettings.autoRefreshOnStartup) {
+        pendingAutoClaimRef.current = Boolean(currentSettings.autoClaimDaily);
+        void refreshAllQuotasRef.current();
+      } else if (currentSettings.autoClaimDaily) {
+        void triggerAutoClaimAvailableRef.current();
+      }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [isInitializing, isTrayWindow]);
+
+  useEffect(() => {
+    if (isTrayWindow || isInitializing) return;
+    const mins = appSettings.autoRefreshIntervalMinutes ?? 30;
+    if (mins <= 0) return;
+    const intervalId = window.setInterval(() => {
+      if (batchRunningRef.current) return;
+      const hasRefreshable = accountsRef.current.some(
+        (a) => a.status === "active" && a.hasApiToken !== false
+      );
+      if (!hasRefreshable) return;
+      pendingAutoClaimRef.current = Boolean(appSettingsRef.current.autoClaimDaily);
+      void refreshAllQuotasRef.current();
+    }, mins * 60_000);
+    return () => window.clearInterval(intervalId);
+  }, [appSettings.autoRefreshIntervalMinutes, isInitializing, isTrayWindow]);
+
   const contextValue = useMemo<QwitchContextValue>(
     () => ({
       isTauriRuntime,
@@ -1401,6 +1567,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       dismissToast,
       theme,
       toggleTheme,
+      appSettings,
       jitterRangeMs,
       setJitterRangeMs,
       logRetention,
@@ -1444,6 +1611,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       dismissToast,
       theme,
       toggleTheme,
+      appSettings,
       jitterRangeMs,
       logRetention,
       customClientPaths,

@@ -1,4 +1,4 @@
-import { Loader2, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, X } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 
 export function BatchClaimBanner({ compact = false }: { compact?: boolean }) {
@@ -25,42 +25,79 @@ export function BatchClaimBanner({ compact = false }: { compact?: boolean }) {
       batchProgress.summaryText ?? (isRefresh ? "批量查额已完成" : "领取队列已完成");
   }
 
+  if (!batchProgress.running) {
+    const hasFailure =
+      /异常\s+[1-9]/.test(statusLine) || statusLine.includes("失败");
+
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className={`flex items-center justify-between gap-2 rounded-xl border transition-all ${
+          compact ? "px-2.5 py-1.5" : "px-3 py-1.5"
+        } ${
+          hasFailure
+            ? "border-amber-500/25 bg-amber-500/[0.08] text-amber-900 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200"
+            : "border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-200"
+        }`}
+      >
+        <div className="flex min-w-0 items-center gap-1.5 text-xs">
+          {hasFailure ? (
+            <AlertTriangle
+              className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+              aria-hidden="true"
+            />
+          ) : (
+            <CheckCircle2
+              className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
+              aria-hidden="true"
+            />
+          )}
+          <span className="truncate font-medium">{statusLine}</span>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1.5">
+          {!compact && (
+            <span className="text-[11px] opacity-70">自动收起</span>
+          )}
+          <button
+            type="button"
+            onClick={dismissBatchProgress}
+            aria-label="关闭任务状态提示"
+            className="rounded-md p-0.5 opacity-70 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/10"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
-      className={`rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${
-        compact ? "p-2.5" : "p-3.5"
+      role="status"
+      aria-live="polite"
+      className={`rounded-xl border border-sky-500/20 bg-sky-500/[0.06] dark:border-sky-400/20 dark:bg-sky-500/10 ${
+        compact ? "px-2.5 py-2" : "px-3 py-2"
       }`}
     >
-      <div className="flex items-center justify-between gap-2.5">
-        <div className="flex min-w-0 items-center gap-2 text-xs">
-          {batchProgress.running ? (
-            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-sky-500" aria-hidden="true" />
-          ) : (
-            <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-500" aria-hidden="true" />
-          )}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5 text-xs">
+          <Loader2
+            className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-600 dark:text-sky-400"
+            aria-hidden="true"
+          />
           <span className="truncate font-medium text-zinc-900 dark:text-zinc-100">
             {statusLine}
           </span>
-          <span className="shrink-0 tabular-nums text-zinc-500 dark:text-zinc-400">
+          <span className="shrink-0 tabular-nums text-zinc-600 dark:text-zinc-400">
             ({batchProgress.completed}/{batchProgress.total})
           </span>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1.5">
-          <span className="rounded-md bg-zinc-100 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-            {pct}%
-          </span>
-          {!batchProgress.running && (
-            <button
-              type="button"
-              onClick={dismissBatchProgress}
-              aria-label="关闭任务进度条"
-              className="rounded p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-            >
-              <X className="h-3.5 w-3.5" aria-hidden="true" />
-            </button>
-          )}
-        </div>
+        <span className="shrink-0 rounded-md bg-sky-500/12 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-sky-800 dark:text-sky-300">
+          {pct}%
+        </span>
       </div>
 
       <div
@@ -69,7 +106,7 @@ export function BatchClaimBanner({ compact = false }: { compact?: boolean }) {
         aria-valuenow={pct}
         aria-valuemin={0}
         aria-valuemax={100}
-        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800"
+        className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-sky-500/15 dark:bg-sky-400/15"
       >
         <div
           className="h-full rounded-full bg-sky-500 transition-all duration-300"

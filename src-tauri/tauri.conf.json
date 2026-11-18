@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -25,10 +26,12 @@
         "label": "tray",
         "title": "Qwitch Tray",
         "url": "index.html?view=tray",
-        "width": 340,
-        "height": 420,
+        "width": 384,
+        "height": 500,
         "resizable": false,
         "decorations": false,
+        "transparent": true,
+        "shadow": false,
         "visible": false,
         "skipTaskbar": true,
         "alwaysOnTop": true

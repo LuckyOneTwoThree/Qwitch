@@ -1,6 +1,6 @@
 pub mod crypto;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, Utc};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
@@ -771,6 +771,8 @@ impl QwitchDatabase {
 
 fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> {
     let status_str: String = row.get(5)?;
+    let last_claimed_at: Option<String> = row.get(9)?;
+    let updated_at: String = row.get(10)?;
     let plan_name: Option<String> = row.get(11)?;
     let claim_str_opt: Option<String> = row.get(12)?;
     let buckets_json_opt: Option<String> = row.get(13)?;
@@ -779,9 +781,15 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
     let latest_quota = match (claim_str_opt, buckets_json_opt, fetched_at_opt) {
         (Some(claim_str), Some(buckets_json), Some(fetched_at)) => {
             let buckets: Vec<QuotaBucket> = serde_json::from_str(&buckets_json).unwrap_or_default();
+            let raw_claim_status = parse_claim_status(&claim_str);
+            let normalized_claim_status = normalize_daily_claim_status(
+                raw_claim_status,
+                &fetched_at,
+                last_claimed_at.as_deref(),
+            );
             Some(QuotaSnapshot {
                 plan_name,
-                claim_status: parse_claim_status(&claim_str),
+                claim_status: normalized_claim_status,
                 buckets,
                 fetched_at,
             })
@@ -800,9 +808,57 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
         has_local_snapshot: row.get::<_, i64>(7)? != 0,
         has_api_token: row.get::<_, i64>(8)? != 0,
         latest_quota,
-        last_claimed_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        last_claimed_at,
+        updated_at,
     })
+}
+
+fn cst_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 3600).expect("UTC+8 fixed offset must be valid")
+}
+
+pub fn is_same_cst_day(iso_str: &str, now_cst_date: NaiveDate) -> bool {
+    DateTime::parse_from_rfc3339(iso_str)
+        .map(|dt| dt.with_timezone(&cst_offset()).date_naive() == now_cst_date)
+        .unwrap_or(false)
+}
+
+pub fn normalize_daily_claim_status(
+    raw_status: ClaimStatus,
+    fetched_at: &str,
+    last_claimed_at: Option<&str>,
+) -> ClaimStatus {
+    let today_cst = Utc::now().with_timezone(&cst_offset()).date_naive();
+    normalize_daily_claim_status_on_date(raw_status, fetched_at, last_claimed_at, today_cst)
+}
+
+fn normalize_daily_claim_status_on_date(
+    raw_status: ClaimStatus,
+    fetched_at: &str,
+    last_claimed_at: Option<&str>,
+    today_cst: NaiveDate,
+) -> ClaimStatus {
+    match raw_status {
+        ClaimStatus::Unsupported | ClaimStatus::Unknown => raw_status,
+        ClaimStatus::Claimed => {
+            if is_same_cst_day(fetched_at, today_cst)
+                || last_claimed_at
+                    .map(|ts| is_same_cst_day(ts, today_cst))
+                    .unwrap_or(false)
+            {
+                ClaimStatus::Claimed
+            } else {
+                ClaimStatus::Unknown
+            }
+        }
+        ClaimStatus::Available => {
+            if is_same_cst_day(fetched_at, today_cst) {
+                ClaimStatus::Available
+            } else {
+                ClaimStatus::Unknown
+            }
+        }
+    }
 }
 
 fn parse_account_status(s: &str) -> AccountStatus {
@@ -1103,6 +1159,81 @@ mod tests {
             .unwrap();
         assert_eq!(count, 20);
         drop(conn);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn cross_day_claim_status_resets_stale_snapshot_and_keeps_same_cst_day() {
+        let db_path = temp_db_path("cross_day_claim");
+        let db = QwitchDatabase::open(&db_path).expect("open db");
+        let master_key = [7u8; 32];
+
+        let env = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u_cross_day_1".to_string(),
+            display_name: Some("CrossDayUser".to_string()),
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "tok-cross".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        let acc = db.upsert_account(&master_key, "跨天账号", &env).unwrap();
+
+        // 保存一条昨天 UTC+8 的已签到快照，经过数据库读取后今日应归零为 Unknown
+        let yesterday_snap = QuotaSnapshot {
+            plan_name: Some("Pro".into()),
+            claim_status: ClaimStatus::Claimed,
+            buckets: vec![],
+            fetched_at: "2020-01-01T10:00:00+08:00".into(),
+        };
+        db.save_quota_snapshot(&acc.id, &yesterday_snap).unwrap();
+        let loaded_yesterday = db.get_account_summary(&acc.id).unwrap();
+        assert_eq!(
+            loaded_yesterday.latest_quota.as_ref().map(|q| &q.claim_status),
+            Some(&ClaimStatus::Unknown)
+        );
+
+        // 保存一条今日 UTC+8 的已签到快照，应保持 Claimed
+        let today_now_rfc3339 = Utc::now().to_rfc3339();
+        let today_snap = QuotaSnapshot {
+            plan_name: Some("Pro".into()),
+            claim_status: ClaimStatus::Claimed,
+            buckets: vec![],
+            fetched_at: today_now_rfc3339.clone(),
+        };
+        db.save_quota_snapshot(&acc.id, &today_snap).unwrap();
+        let loaded_today = db.get_account_summary(&acc.id).unwrap();
+        assert_eq!(
+            loaded_today.latest_quota.as_ref().map(|q| &q.claim_status),
+            Some(&ClaimStatus::Claimed)
+        );
+
+        // 直接测试跨天 boundary（UTC 16:30 即 UTC+8 次日 00:30 vs 同日 15:30 即 UTC+8 当日 23:30）
+        let today_cst = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        assert!(is_same_cst_day("2026-11-17T16:30:00Z", today_cst));
+        assert!(!is_same_cst_day("2026-11-17T15:30:00Z", today_cst));
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Claimed,
+                "2026-11-17T15:30:00Z",
+                Some("2026-11-17T15:00:00Z"),
+                today_cst
+            ),
+            ClaimStatus::Unknown
+        );
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Claimed,
+                "2026-11-17T16:30:00Z",
+                None,
+                today_cst
+            ),
+            ClaimStatus::Claimed
+        );
 
         let _ = std::fs::remove_file(&db_path);
     }

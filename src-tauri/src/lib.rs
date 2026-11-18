@@ -34,19 +34,20 @@ pub fn run() {
                 QwitchDatabase::open(&data_dir.join("qwitch.db"))
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
             );
-            if let Ok(Some(json)) = db.get_setting("app.settings") {
-                if let Ok(settings) = serde_json::from_str::<crate::domain::AppSettingsDto>(&json) {
-                    let _ = db.apply_log_retention(
-                        settings.log_archive_after_days,
-                        settings.log_max_active_count,
-                    );
+            let startup_settings = commands::load_app_settings(&db);
+            let _ = db.apply_log_retention(
+                startup_settings.log_archive_after_days,
+                startup_settings.log_max_active_count,
+            );
+            commands::apply_runtime_app_policy(app.handle(), &startup_settings);
+            if startup_settings.launch_at_login {
+                let _ = host.set_launch_at_login(true);
+            }
+            let launched_by_autostart = std::env::args().any(|a| a == "--autostart");
+            if startup_settings.start_minimized || launched_by_autostart {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
                 }
-            } else {
-                let defaults = crate::domain::AppSettingsDto::default();
-                let _ = db.apply_log_retention(
-                    defaults.log_archive_after_days,
-                    defaults.log_max_active_count,
-                );
             }
 
             let state = AppState {
@@ -78,6 +79,7 @@ pub fn run() {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         position,
+                        rect,
                         ..
                     } = event
                     {
@@ -86,12 +88,55 @@ pub fn run() {
                             if win.is_visible().unwrap_or(false) {
                                 let _ = win.hide();
                             } else {
-                                let size = win.outer_size().unwrap_or(PhysicalSize::new(340, 420));
-                                let x = (position.x - (size.width as f64) / 2.0).max(8.0) as i32;
+                                let scale = win.scale_factor().unwrap_or(1.0);
+                                let (icon_x, icon_y) = match rect.position {
+                                    Position::Physical(p) => (p.x as f64, p.y as f64),
+                                    Position::Logical(p) => (p.x * scale, p.y * scale),
+                                };
+                                let (icon_w, icon_h) = match rect.size {
+                                    tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
+                                    tauri::Size::Logical(s) => (s.width * scale, s.height * scale),
+                                };
+                                let size = win.outer_size().unwrap_or(PhysicalSize::new(
+                                    (384.0 * scale) as u32,
+                                    (500.0 * scale) as u32,
+                                ));
+                                let center_x = if icon_w > 0.0 {
+                                    icon_x + icon_w / 2.0
+                                } else {
+                                    position.x
+                                };
+                                let raw_x = center_x - (size.width as f64) / 2.0;
+                                let x = if let Some(mon) = win
+                                    .current_monitor()
+                                    .ok()
+                                    .flatten()
+                                    .or_else(|| app.primary_monitor().ok().flatten())
+                                {
+                                    let mon_x = mon.position().x as f64;
+                                    let mon_w = mon.size().width as f64;
+                                    let margin = 4.0 * scale;
+                                    let max_x =
+                                        (mon_x + mon_w - (size.width as f64) - margin).max(mon_x + margin);
+                                    raw_x.clamp(mon_x + margin, max_x) as i32
+                                } else {
+                                    raw_x.max(8.0) as i32
+                                };
+
                                 #[cfg(target_os = "macos")]
-                                let y = (position.y + 8.0).max(0.0) as i32;
+                                let y = if icon_h > 0.0 {
+                                    (icon_y + icon_h + 2.0 * scale).max(0.0) as i32
+                                } else {
+                                    (position.y + 18.0 * scale).max(0.0) as i32
+                                };
                                 #[cfg(not(target_os = "macos"))]
-                                let y = (position.y - (size.height as f64) - 8.0).max(0.0) as i32;
+                                let y = if icon_h > 0.0 {
+                                    (icon_y - (size.height as f64) - 2.0 * scale).max(0.0) as i32
+                                } else {
+                                    (position.y - (size.height as f64) - 8.0 * scale).max(0.0)
+                                        as i32
+                                };
+
                                 let _ = win.set_position(Position::Physical(PhysicalPosition::new(x, y)));
                                 let _ = win.show();
                                 let _ = win.set_focus();
@@ -121,8 +166,17 @@ pub fn run() {
         })
         .on_window_event(|window, event| match (window.label(), event) {
             ("main", WindowEvent::CloseRequested { api, .. }) => {
-                api.prevent_close();
-                let _ = window.hide();
+                let close_to_tray = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .map(|s| commands::load_app_settings(&s.db).close_to_tray)
+                    .unwrap_or(true);
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                } else {
+                    window.app_handle().exit(0);
+                }
             }
             ("tray", WindowEvent::Focused(false)) => {
                 let switching = window
@@ -161,6 +215,24 @@ pub fn run() {
             commands::delete_action_logs,
             commands::export_action_logs
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Qwitch application");
+        .build(tauri::generate_context!())
+        .expect("error while building Qwitch application")
+        .run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } = event
+            {
+                if !has_visible_windows {
+                    if let Some(win) = app_handle.get_webview_window("main") {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
+        });
 }

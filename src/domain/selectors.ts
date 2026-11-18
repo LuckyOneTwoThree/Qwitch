@@ -1,12 +1,58 @@
 import type {
   AccountSummary,
   AdapterManifest,
+  ClaimStatus,
   ClientHostStatus,
   ToolId,
 } from "../types/qwitch";
 import { getVisibleTools } from "./toolRegistry";
 
 export type AccountFilter = "all" | "active_client" | "claimable" | "attention";
+export type ClaimActionState =
+  | "claimable"
+  | "verify_and_claim"
+  | "all_claimed"
+  | "no_eligible";
+
+const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function toCstDayKey(timestampMs: number): string {
+  const d = new Date(timestampMs + CST_OFFSET_MS);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+export function isSameCstDay(iso?: string): boolean {
+  if (!iso) return false;
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return false;
+  return toCstDayKey(ms) === toCstDayKey(Date.now());
+}
+
+export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
+  const raw = acc.latestQuota?.claimStatus;
+  if (raw === "unsupported") return "unsupported";
+
+  if (acc.lastClaimedAt && isSameCstDay(acc.lastClaimedAt)) {
+    return "claimed";
+  }
+
+  if (!acc.latestQuota) {
+    return "unknown";
+  }
+
+  if (raw === "claimed") {
+    return isSameCstDay(acc.latestQuota.fetchedAt) ? "claimed" : "unknown";
+  }
+
+  if (raw === "available") {
+    return isSameCstDay(acc.latestQuota.fetchedAt) ? "available" : "unknown";
+  }
+
+  return "unknown";
+}
 
 export function isAccountNeedingAttention(acc: AccountSummary): boolean {
   if (acc.status === "disabled") return false;
@@ -36,7 +82,7 @@ export function isAccountClaimable(
     supportsClaim &&
     acc.status === "active" &&
     acc.hasApiToken !== false &&
-    acc.latestQuota?.claimStatus === "available"
+    getEffectiveClaimStatus(acc) === "available"
   );
 }
 
@@ -53,10 +99,14 @@ export interface ScopedStats {
   healthyCount: number;
   attentionCount: number;
   disabledCount: number;
+  eligibleClaimTotal: number;
   claimableCount: number;
   claimedCount: number;
+  unsupportedClaimCount: number;
   unclaimedAuthMissingCount: number;
   unknownClaimCount: number;
+  allClaimed: boolean;
+  claimActionState: ClaimActionState;
   claimBadgeText: string;
   activeClientsCount: number;
   scopeToolCapacity: number;
@@ -78,8 +128,10 @@ export function selectScopedStats(
   let healthyCount = 0;
   let attentionCount = 0;
   let disabledCount = 0;
+  let eligibleClaimTotal = 0;
   let claimableCount = 0;
   let claimedCount = 0;
+  let unsupportedClaimCount = 0;
   let unclaimedAuthMissingCount = 0;
   let unknownClaimCount = 0;
   let activeClientsCount = 0;
@@ -103,14 +155,34 @@ export function selectScopedStats(
     if (supportsClaim && acc.status === "active") {
       if (acc.hasApiToken === false) {
         unclaimedAuthMissingCount += 1;
-      } else if (acc.latestQuota?.claimStatus === "available") {
-        claimableCount += 1;
-      } else if (acc.latestQuota?.claimStatus === "claimed") {
-        claimedCount += 1;
-      } else if (!acc.latestQuota || acc.latestQuota.claimStatus === "unknown") {
-        unknownClaimCount += 1;
+      } else {
+        const effectiveClaim = getEffectiveClaimStatus(acc);
+        if (effectiveClaim === "unsupported") {
+          unsupportedClaimCount += 1;
+        } else {
+          eligibleClaimTotal += 1;
+          if (effectiveClaim === "available") {
+            claimableCount += 1;
+          } else if (effectiveClaim === "claimed") {
+            claimedCount += 1;
+          } else {
+            unknownClaimCount += 1;
+          }
+        }
       }
     }
+  }
+
+  const allClaimed =
+    claimedCount > 0 && claimableCount === 0 && unknownClaimCount === 0;
+
+  let claimActionState: ClaimActionState = "no_eligible";
+  if (claimableCount > 0) {
+    claimActionState = "claimable";
+  } else if (unknownClaimCount > 0) {
+    claimActionState = "verify_and_claim";
+  } else if (allClaimed) {
+    claimActionState = "all_claimed";
   }
 
   let claimBadgeText = "无签到项";
@@ -133,10 +205,14 @@ export function selectScopedStats(
     healthyCount,
     attentionCount,
     disabledCount,
+    eligibleClaimTotal,
     claimableCount,
     claimedCount,
+    unsupportedClaimCount,
     unclaimedAuthMissingCount,
     unknownClaimCount,
+    allClaimed,
+    claimActionState,
     claimBadgeText,
     activeClientsCount,
     scopeToolCapacity: targetToolIds.length,

@@ -122,6 +122,8 @@ pub struct AppSettingsDto {
     pub auto_refresh_interval_minutes: u32,
     #[serde(default)]
     pub auto_claim_daily: bool,
+    #[serde(default)]
+    pub trusted_adapters: Vec<String>,
 }
 
 impl Default for AppSettingsDto {
@@ -140,6 +142,7 @@ impl Default for AppSettingsDto {
             auto_refresh_on_startup: true,
             auto_refresh_interval_minutes: default_auto_refresh_interval_minutes(),
             auto_claim_daily: false,
+            trusted_adapters: Vec::new(),
         }
     }
 }
@@ -233,7 +236,9 @@ impl CredentialEnvelope {
             CredentialPayload::LocalSnapshot { files } => {
                 let has_local_snapshot = true;
                 let has_api_token = match self.tool_id.as_str() {
-                    "workbuddy" => true,
+                    // 仅存在已解密 token 缓存才算就绪；纯加密快照需本机客户端解密，
+                    // 不再无条件虚报"查额与签到就绪"
+                    "workbuddy" => files.contains_key("decrypted_token.txt"),
                     "qoder" | "qoder_cn" => files.contains_key("decrypted_token.txt"),
                     "trae" | "trae_cn" => {
                         files.contains_key("decrypted_token.txt")
@@ -276,7 +281,7 @@ impl CredentialEnvelope {
             .is_some_and(|s| !s.trim().is_empty())
     }
 
-    fn is_fallback_uid(uid: &str) -> bool {
+    pub(crate) fn is_fallback_uid(uid: &str) -> bool {
         uid.starts_with("trae_cn_")
             || uid.starts_with("trae_")
             || uid.starts_with("qoder_cn_")

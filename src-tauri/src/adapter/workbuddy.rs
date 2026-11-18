@@ -170,8 +170,7 @@ impl WorkBuddyAdapter {
 
         let uid = val
             .pointer("/account/uid")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty());
+            .and_then(Self::json_uid_to_string);
         let access_token = val.pointer("/auth/accessToken");
 
         if uid.is_none() || access_token.is_none() {
@@ -334,6 +333,19 @@ impl WorkBuddyAdapter {
         })
     }
 
+    fn json_uid_to_string(v: &Value) -> Option<String> {
+        if let Some(s) = v.as_str() {
+            let t = s.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        if let Some(n) = v.as_i64() {
+            return Some(n.to_string());
+        }
+        v.as_u64().map(|n| n.to_string())
+    }
+
     fn format_display_identity(
         nickname: Option<&str>,
         phone: Option<&str>,
@@ -351,10 +363,10 @@ impl WorkBuddyAdapter {
 
         let display_name = match (clean_nick, clean_phone) {
             (Some(n), Some(p)) if n.chars().count() <= 1 || n == "~" => {
-                Some(format!("WorkBuddy ({p})"))
+                Some(format!("WorkBuddy ({})", crate::storage::crypto::mask_phone(p)))
             }
             (Some(n), _) => Some(n.to_string()),
-            (None, Some(p)) => Some(format!("WorkBuddy ({p})")),
+            (None, Some(p)) => Some(format!("WorkBuddy ({})", crate::storage::crypto::mask_phone(p))),
             (None, None) => None,
         };
         let display_email = clean_email
@@ -462,7 +474,7 @@ impl WorkBuddyAdapter {
                         continue;
                     }
                     let d = dig_data(&acc_body);
-                    if d.get("uid").and_then(|v| v.as_str()).is_some() {
+                    if d.get("uid").and_then(Self::json_uid_to_string).is_some() {
                         account_val = d.clone();
                         break;
                     }
@@ -472,6 +484,7 @@ impl WorkBuddyAdapter {
         }
 
         if account_val.is_null() {
+            // 兜底仅允许唯一账号列表；多账号场景禁止取第一个以免绑定错账号
             if let Ok(cons_resp) = http
                 .get(format!("{WEB_AUTH_ORIGIN}/console/accounts"))
                 .header(ACCEPT, "application/json")
@@ -482,23 +495,31 @@ impl WorkBuddyAdapter {
             {
                 if cons_resp.status().is_success() {
                     if let Ok(cons_body) = cons_resp.json::<Value>().await {
-                        if let Some(first) = cons_body
-                            .pointer("/data/accounts/0")
-                            .or_else(|| cons_body.pointer("/accounts/0"))
-                        {
-                            account_val = first.clone();
+                        let accounts = cons_body
+                            .pointer("/data/accounts")
+                            .or_else(|| cons_body.pointer("/accounts"))
+                            .and_then(|v| v.as_array());
+                        if let Some(list) = accounts {
+                            if list.len() == 1 {
+                                account_val = list[0].clone();
+                            }
                         }
                     }
                 }
             }
         }
 
+        if account_val.is_null() {
+            return Err(
+                "WorkBuddy 授权完成但无法唯一确认账号身份（接口未返回或存在多个账号），请重试或改用本机导入"
+                    .to_string(),
+            );
+        }
+
         let uid = account_val
             .get("uid")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| "WorkBuddy 授权成功但未获取到账号 UID".to_string())?
-            .to_string();
+            .and_then(Self::json_uid_to_string)
+            .ok_or_else(|| "WorkBuddy 授权成功但未获取到账号 UID".to_string())?;
 
         let nick = account_val
             .get("nickname")

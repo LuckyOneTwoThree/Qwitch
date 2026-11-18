@@ -142,6 +142,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   autoRefreshOnStartup: true,
   autoRefreshIntervalMinutes: 30,
   autoClaimDaily: false,
+  trustedAdapters: [],
 };
 
 const normalizeAppSettings = (
@@ -172,6 +173,7 @@ const normalizeAppSettings = (
     fallback.autoRefreshIntervalMinutes ??
     30,
   autoClaimDaily: raw?.autoClaimDaily ?? fallback.autoClaimDaily ?? false,
+  trustedAdapters: raw?.trustedAdapters ?? fallback.trustedAdapters ?? [],
 });
 
 const detectTrayWindow = () =>

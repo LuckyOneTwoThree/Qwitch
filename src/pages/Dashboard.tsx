@@ -48,7 +48,8 @@ import {
   selectScopedStats,
   type AccountFilter,
 } from "../domain/selectors";
-import type { ActionLogItem, AuthMethod, ToolId } from "../types/qwitch";
+import type { ActionLogItem, AuthMethod, ExternalAdapterInfo, ToolId } from "../types/qwitch";
+import { invoke } from "@tauri-apps/api/core";
 
 type NavSection = "all" | "logs" | "settings" | ToolId;
 type AllViewMode = "grouped" | "flat";
@@ -139,6 +140,7 @@ function SettingToggleRow({
 export function Dashboard() {
   const {
     isInitializing,
+    isTauriRuntime,
     accounts,
     logs,
     logScope,
@@ -166,6 +168,7 @@ export function Dashboard() {
     theme,
     toggleTheme,
     quitApp,
+    showToast,
   } = useQwitch();
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
@@ -175,6 +178,23 @@ export function Dashboard() {
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
   const [loadingMoreLogs, setLoadingMoreLogs] = useState(false);
   const [pathDrafts, setPathDrafts] = useState<Record<string, string>>({});
+  const [externalPlugins, setExternalPlugins] = useState<ExternalAdapterInfo[]>([]);
+  const [trustedDraft, setTrustedDraft] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (nav !== "settings" || !isTauriRuntime) return;
+    let cancelled = false;
+    invoke<ExternalAdapterInfo[]>("list_external_adapters")
+      .then((list) => {
+        if (cancelled) return;
+        setExternalPlugins(list);
+        setTrustedDraft(list.filter((p) => p.trusted).map((p) => p.id));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [nav, isTauriRuntime]);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<AccountFilter>("all");
   const [viewMode, setViewMode] = useState<AllViewMode>("grouped");
@@ -1912,6 +1932,85 @@ export function Dashboard() {
                   ))}
                 </div>
               </div>
+
+              {isTauriRuntime && (
+                <div className="rounded-2xl border border-zinc-200 bg-white p-5 lg:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2 text-sm font-semibold">
+                        <ShieldCheck className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+                        外部插件信任管理
+                      </div>
+                      <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+                        外部适配器仅在显式启用后才会加载并接收账号凭据；保存后需重启 Qwitch 生效。内置与保留 ID 不可被外部插件冒用。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await saveAppSettings({ trustedAdapters: trustedDraft });
+                        showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
+                      }}
+                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                    >
+                      <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
+                      保存信任设置
+                    </button>
+                  </div>
+                  {externalPlugins.length === 0 ? (
+                    <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
+                      未发现外部插件。将插件目录放入 Qwitch 数据目录的 adapters/ 下后重新进入本页即可看到。
+                    </p>
+                  ) : (
+                    <div className="mt-3 space-y-2">
+                      {externalPlugins.map((plugin) => {
+                        const enabled = trustedDraft.includes(plugin.id);
+                        return (
+                          <div
+                            key={plugin.id}
+                            className="flex items-center justify-between gap-3 rounded-xl border border-zinc-100 px-3 py-2.5 text-xs dark:border-zinc-800"
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate font-semibold text-zinc-900 dark:text-zinc-100">
+                                {plugin.name}
+                                <span className="ml-2 font-normal text-zinc-500 dark:text-zinc-400">
+                                  {plugin.id} · v{plugin.version}
+                                </span>
+                              </div>
+                              {plugin.reserved && (
+                                <div className="mt-0.5 text-[11px] text-rose-600 dark:text-rose-400">
+                                  该 ID 为内置/历史保留，已被禁止加载
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={enabled}
+                              aria-label={`${enabled ? "停用" : "启用"}插件 ${plugin.name}`}
+                              disabled={plugin.reserved}
+                              onClick={() =>
+                                setTrustedDraft((prev) =>
+                                  enabled ? prev.filter((id) => id !== plugin.id) : [...prev, plugin.id]
+                                )
+                              }
+                              className={`relative h-5 w-9 shrink-0 rounded-full transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                                enabled ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600"
+                              }`}
+                            >
+                              <span
+                                className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                                  enabled ? "left-4.5" : "left-0.5"
+                                }`}
+                              />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="rounded-2xl border border-zinc-200 bg-white p-5 lg:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
                 <div className="flex flex-wrap items-center justify-between gap-2">

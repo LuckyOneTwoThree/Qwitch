@@ -76,6 +76,16 @@ pub fn mask_uid(uid: &str) -> String {
     format!("{prefix}****{suffix}")
 }
 
+pub fn mask_phone(phone: &str) -> String {
+    let digits: Vec<char> = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() < 7 {
+        return "***".to_string();
+    }
+    let prefix: String = digits.iter().take(3).collect();
+    let suffix: String = digits.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{prefix}****{suffix}")
+}
+
 pub fn mask_email(email: &str) -> String {
     if email.contains("****") {
         return email.to_string();
@@ -85,8 +95,46 @@ pub fn mask_email(email: &str) -> String {
             let visible: String = local.chars().take(2).collect();
             format!("{visible}***@{domain}")
         }
-        None => "***".to_string(),
+        None => {
+            // 无 @ 的"邮箱"字段实际可能是手机号
+            if email.chars().all(|c| c.is_ascii_digit()) && email.len() >= 7 {
+                mask_phone(email)
+            } else {
+                "***".to_string()
+            }
+        }
     }
+}
+
+/// 审计日志兜底脱敏：扫描消息中的邮箱/手机号形态片段并打码，
+/// 防止用户自定义备注等自由文本把 PII 带入日志与导出归档
+pub fn sanitize_log_message(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        let t = token.as_str();
+        if t.contains('@') && t.contains('.') {
+            out.push_str(&mask_email(t));
+        } else if t.len() == 11 && t.starts_with('1') && t.chars().all(|c| c.is_ascii_digit()) {
+            out.push_str(&mask_phone(t));
+        } else {
+            out.push_str(t);
+        }
+        token.clear();
+    };
+    for ch in message.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '%' | '+' | '-' | '@') {
+            token.push(ch);
+        } else {
+            flush(&mut token, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -133,5 +181,20 @@ mod tests {
         assert_eq!(mask_uid("u_8f3a91c"), "u_8f****1c");
         assert_eq!(mask_email("alice@example.com"), "al***@example.com");
         assert_eq!(mask_email("not-an-email"), "***");
+        assert_eq!(mask_email("13812345678"), "138****5678");
+        assert_eq!(mask_phone("13812345678"), "138****5678");
+    }
+
+    #[test]
+    fn log_sanitizer_masks_email_and_phone_in_free_text() {
+        let msg = "已删除账号 alice@example.com (13812345678) 备注 alice@corp.cn";
+        let sanitized = sanitize_log_message(msg);
+        assert!(!sanitized.contains("alice@example.com"));
+        assert!(!sanitized.contains("13812345678"));
+        assert!(!sanitized.contains("alice@corp.cn"));
+        assert!(sanitized.contains("al***@example.com"));
+        assert!(sanitized.contains("138****5678"));
+        // 普通文本不受影响
+        assert_eq!(sanitize_log_message("已导入账号 Qoder 主力"), "已导入账号 Qoder 主力");
     }
 }

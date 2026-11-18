@@ -600,7 +600,10 @@ impl PlatformHost for NativePlatformHost {
         #[cfg(target_os = "macos")]
         {
             for app_name in &primary_names {
-                let clean = app_name.trim_end_matches(".app");
+                let clean = app_name
+                    .trim_end_matches(".app")
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
                 let _ = tokio::process::Command::new("osascript")
                     .args(["-e", &format!("tell application \"{clean}\" to quit")])
                     .stdout(Stdio::null())

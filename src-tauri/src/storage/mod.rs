@@ -30,6 +30,30 @@ pub struct QwitchDatabase {
     conn: Mutex<Connection>,
 }
 
+/// 默认展示名：优先官方昵称，其次脱敏邮箱/手机号/UID，绝不落明文 PII
+pub fn default_account_label(envelope: &CredentialEnvelope) -> String {
+    if let Some(name) = envelope
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return name.to_string();
+    }
+    if let Some(email) = envelope
+        .display_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return crypto::mask_email(email);
+    }
+    if !envelope.uid.trim().is_empty() {
+        return crypto::mask_uid(&envelope.uid);
+    }
+    format!("{} 账号", envelope.tool_id)
+}
+
 impl QwitchDatabase {
     pub fn open(db_path: &Path) -> Result<Self, StorageError> {
         if let Some(parent) = db_path.parent() {
@@ -125,7 +149,7 @@ impl QwitchDatabase {
     pub fn upsert_account(
         &self,
         master_key: &[u8; 32],
-        label: &str,
+        label_override: Option<&str>,
         envelope: &CredentialEnvelope,
     ) -> Result<AccountSummary, StorageError> {
         let now = Utc::now().to_rfc3339();
@@ -154,12 +178,13 @@ impl QwitchDatabase {
 
                 conn.execute(
                     "UPDATE accounts
-                     SET label = ?1, uid_masked = ?2, email_masked = ?3, status = 'active',
+                     SET label = COALESCE(?1, label), uid_masked = ?2, email_masked = ?3,
+                         status = CASE WHEN status IN ('disabled', 'risk_paused') THEN status ELSE 'active' END,
                          encrypted_credential = ?4, has_local_snapshot = ?5, has_api_token = ?6,
                          updated_at = ?7
                      WHERE id = ?8",
                     params![
-                        label,
+                        label_override,
                         uid_masked,
                         email_masked,
                         encrypted_cred,
@@ -173,6 +198,8 @@ impl QwitchDatabase {
             }
             None => {
                 let id = Uuid::new_v4().to_string();
+                let default_label = default_account_label(envelope);
+                let label = label_override.unwrap_or(&default_label);
                 let uid_masked = crypto::mask_uid(&envelope.uid);
                 let email_masked = envelope.display_email.as_deref().map(crypto::mask_email);
                 let encrypted_cred = crypto::encrypt_credential(master_key, envelope)?;
@@ -234,6 +261,20 @@ impl QwitchDatabase {
         }
 
         let old_env = crypto::decrypt_credential(master_key, &old_blob)?;
+
+        // 双方均为真实 UID 且不一致 → 凭据属于另一个账号，拒绝串号绑定
+        let old_uid_real = !old_env.uid.trim().is_empty()
+            && !CredentialEnvelope::is_fallback_uid(&old_env.uid);
+        let incoming_uid_real = !incoming.uid.trim().is_empty()
+            && !CredentialEnvelope::is_fallback_uid(&incoming.uid);
+        if old_uid_real && incoming_uid_real && old_env.uid != incoming.uid {
+            return Err(StorageError::Crypto(format!(
+                "凭据归属不匹配：目标账号 {}，实际授权账号 {}。已拒绝绑定，请在对应账号卡片上操作或导入为新账号。",
+                crypto::mask_uid(&old_env.uid),
+                crypto::mask_uid(&incoming.uid)
+            )));
+        }
+
         let merged = old_env.merge_from(incoming);
         let uid_hash = crypto::compute_uid_hash(&merged.tool_id, &merged.uid);
 
@@ -262,7 +303,8 @@ impl QwitchDatabase {
         conn.execute(
             "UPDATE accounts
              SET label = ?1, uid_masked = ?2, uid_hash = ?3, email_masked = ?4,
-                 status = 'active', encrypted_credential = ?5,
+                 status = CASE WHEN status IN ('disabled', 'risk_paused') THEN status ELSE 'active' END,
+                 encrypted_credential = ?5,
                  has_local_snapshot = ?6, has_api_token = ?7, updated_at = ?8
              WHERE id = ?9",
             params![
@@ -567,6 +609,7 @@ impl QwitchDatabase {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let now = Utc::now().to_rfc3339();
         let err_str = error_code.map(serialize_error_code);
+        let message_sanitized = crypto::sanitize_log_message(message_sanitized);
 
         conn.execute(
             "INSERT INTO action_logs (account_id, tool_id, action_type, result_status, error_code, message_sanitized, created_at)
@@ -1006,7 +1049,7 @@ mod tests {
         };
 
         let created = db
-            .upsert_account(&master_key, "Qoder 账号1", &snap_env)
+            .upsert_account(&master_key, Some("Qoder 账号1"), &snap_env)
             .expect("insert snap");
         assert!(created.has_local_snapshot);
         assert!(!created.has_api_token);
@@ -1026,7 +1069,7 @@ mod tests {
 
         // 同 UID 再次 upsert 自动合并双轨凭据
         let upserted = db
-            .upsert_account(&master_key, "Qoder 主力", &token_env)
+            .upsert_account(&master_key, Some("Qoder 主力"), &token_env)
             .expect("merge upsert");
         assert_eq!(upserted.id, created.id);
         assert!(upserted.has_local_snapshot);
@@ -1042,7 +1085,7 @@ mod tests {
             display_email: None,
             payload: CredentialPayload::LocalSnapshot { files: files2 },
         };
-        let acc2 = db.upsert_account(&master_key, "Qoder 副号", &snap2).expect("acc2");
+        let acc2 = db.upsert_account(&master_key, Some("Qoder 副号"), &snap2).expect("acc2");
         let bind_tok = CredentialEnvelope {
             tool_id: "qoder_cn".to_string(),
             uid: "real_uid_9999".to_string(),
@@ -1169,7 +1212,7 @@ mod tests {
                 extra: HashMap::new(),
             },
         };
-        let acc = db.upsert_account(&master_key, "初始名称", &env).unwrap();
+        let acc = db.upsert_account(&master_key, Some("初始名称"), &env).unwrap();
 
         let renamed = db.update_account_label(&acc.id, "新备注名").unwrap();
         assert_eq!(renamed.label, "新备注名");
@@ -1231,7 +1274,7 @@ mod tests {
                 extra: HashMap::new(),
             },
         };
-        let acc = db.upsert_account(&master_key, "跨天账号", &env).unwrap();
+        let acc = db.upsert_account(&master_key, Some("跨天账号"), &env).unwrap();
 
         // 保存一条昨天 UTC+8 的已签到快照，经过数据库读取后今日应归零为 Unknown
         let yesterday_snap = QuotaSnapshot {
@@ -1326,7 +1369,7 @@ mod tests {
         assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
 
         // 解密失败不再静默标记 Expired
-        let acc = db.upsert_account(&key_a, "指纹测试", &token_envelope("fp_user_1")).expect("insert");
+        let acc = db.upsert_account(&key_a, Some("指纹测试"), &token_envelope("fp_user_1")).expect("insert");
         let err = db.get_account_credential(&key_b, &acc.id).expect_err("wrong key must fail");
         assert!(matches!(err, StorageError::Crypto(_)));
         let summary = db.get_account_summary(&acc.id).expect("summary");
@@ -1337,10 +1380,68 @@ mod tests {
         // 已有账号但无指纹记录：错误密钥不得被"祝福"写入指纹
         let dir = temp_data_dir("nobless");
         let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
-        db.upsert_account(&key_a, "无指纹", &token_envelope("fp_user_2")).expect("insert");
+        db.upsert_account(&key_a, Some("无指纹"), &token_envelope("fp_user_2")).expect("insert");
         assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
         assert!(!dir.join("key_id").exists(), "错误密钥不得写入指纹");
         db.verify_or_init_key_fingerprint(&dir, &key_a).expect("correct key blesses");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reimport_preserves_custom_label_and_paused_status_and_rejects_uid_mismatch() {
+        let db_path = temp_db_path("protect");
+        let db = QwitchDatabase::open(&db_path).expect("open");
+        let key = [21u8; 32];
+
+        let env_a = token_envelope("real_uid_aaa111");
+        let acc = db.upsert_account(&key, Some("主力号"), &env_a).expect("insert");
+        assert_eq!(acc.label, "主力号");
+
+        // 显式停用后重新导入（无显式备注）：备注与停用状态均不被覆盖
+        db.update_account_status(&acc.id, AccountStatus::Disabled).expect("disable");
+        let mut env_a2 = token_envelope("real_uid_aaa111");
+        env_a2.display_name = Some("官方昵称".to_string());
+        let again = db.upsert_account(&key, None, &env_a2).expect("reimport");
+        assert_eq!(again.id, acc.id);
+        assert_eq!(again.label, "主力号", "默认展示名不得覆盖用户自定义备注");
+        assert_eq!(again.status, AccountStatus::Disabled, "重新导入不得复活已停用账号");
+
+        // 显式备注仍可覆盖
+        let renamed = db.upsert_account(&key, Some("新备注"), &env_a2).expect("rename via import");
+        assert_eq!(renamed.label, "新备注");
+
+        // risk_paused 同样保护
+        db.update_account_status(&acc.id, AccountStatus::RiskPaused).expect("pause");
+        let paused = db.upsert_account(&key, None, &env_a2).expect("reimport paused");
+        assert_eq!(paused.status, AccountStatus::RiskPaused);
+
+        // A 卡绑定 B 凭据：双方真实 UID 不一致必须拒绝
+        let env_b = token_envelope("real_uid_bbb222");
+        let err = db.bind_account_credential(&key, &acc.id, None, &env_b).expect_err("must reject");
+        assert!(err.to_string().contains("凭据归属不匹配"));
+        let summary = db.get_account_summary(&acc.id).expect("summary");
+        assert_eq!(summary.uid_masked, crypto::mask_uid("real_uid_aaa111"), "拒绝后原账号身份不变");
+
+        // fallback UID 目标允许被真实 UID 升级
+        let fallback_env = token_envelope("wb_manual_temp123");
+        let fb = db.upsert_account(&key, None, &fallback_env).expect("fallback insert");
+        let bound = db.bind_account_credential(&key, &fb.id, None, &env_b).expect("fallback bind ok");
+        assert_eq!(bound.uid_masked, crypto::mask_uid("real_uid_bbb222"));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn default_label_never_contains_plain_pii() {
+        let mut env = token_envelope("user_plain_uid_99");
+        env.display_name = None;
+        env.display_email = Some("alice@example.com".to_string());
+        assert_eq!(default_account_label(&env), "al***@example.com");
+
+        env.display_email = Some("13812345678".to_string());
+        assert_eq!(default_account_label(&env), "138****5678");
+
+        env.display_email = None;
+        assert_eq!(default_account_label(&env), crypto::mask_uid("user_plain_uid_99"));
     }
 }

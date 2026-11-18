@@ -72,7 +72,7 @@ pub trait ToolAdapter: Send + Sync {
     ) -> Result<(), AdapterError>;
 }
 
-pub fn create_all_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn ToolAdapter>> {
+pub fn create_all_adapters(data_dir: &Path, trusted_adapters: &[String]) -> HashMap<String, Arc<dyn ToolAdapter>> {
     let mut map: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
     // 优先注册国内版内置适配器（Trae 国际版无每日积分签到，暂不纳入）
     let builtins: Vec<Arc<dyn ToolAdapter>> = vec![
@@ -84,10 +84,65 @@ pub fn create_all_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn ToolAdapt
         map.insert(adapter.manifest().id.clone(), adapter);
     }
 
-    // 加载外部适配器（若与内置同 ID 则不覆盖内置，保障核心稳定性）
+    // 外部适配器必须经用户显式信任后才注册；内置及历史保留 ID 一律不允许冒名
     for (id, ext) in external::discover_external_adapters(data_dir) {
+        if RESERVED_ADAPTER_IDS.contains(&id.as_str()) {
+            continue;
+        }
+        if !trusted_adapters.iter().any(|t| t == &id) {
+            continue;
+        }
         map.entry(id).or_insert(ext);
     }
 
     map
+}
+
+/// 内置与历史数据保留的适配器 ID，外部插件不得使用（防止冒名接收旧账号凭据）
+pub const RESERVED_ADAPTER_IDS: &[&str] = &["trae", "qoder", "trae_cn", "workbuddy", "qoder_cn"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_manifest(root: &Path, id: &str) {
+        let dir = root.join("adapters").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::json!({
+                "id": id,
+                "name": format!("Plugin {id}"),
+                "version": "0.0.1",
+                "entry": { "command": "/bin/echo" },
+                "capabilities": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn external_adapters_require_explicit_trust_and_reserved_ids_are_blocked() {
+        let root = std::env::temp_dir().join(format!("qwitch_trust_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        write_manifest(&root, "evil_plugin");
+        write_manifest(&root, "trae");
+
+        // 未信任：外部插件不注册
+        let none = create_all_adapters(&root, &[]);
+        assert!(!none.contains_key("evil_plugin"));
+        assert!(none.contains_key("trae_cn"));
+
+        // 显式信任后注册
+        let trusted = create_all_adapters(&root, &["evil_plugin".to_string()]);
+        assert!(trusted.contains_key("evil_plugin"));
+
+        // 保留 ID 即使被"信任"也不允许冒名
+        let spoof = create_all_adapters(&root, &["trae".to_string(), "evil_plugin".to_string()]);
+        assert!(!spoof.contains_key("trae"));
+        assert!(spoof.contains_key("trae_cn"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

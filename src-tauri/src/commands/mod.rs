@@ -109,6 +109,40 @@ pub fn list_adapters(state: State<'_, AppState>) -> Vec<AdapterManifest> {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExternalAdapterInfo {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub platforms: Vec<String>,
+    pub trusted: bool,
+    pub reserved: bool,
+}
+
+#[tauri::command]
+pub fn list_external_adapters(state: State<'_, AppState>) -> Result<Vec<ExternalAdapterInfo>, String> {
+    let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
+    let settings = load_app_settings(&state.db);
+    let mut list: Vec<ExternalAdapterInfo> =
+        crate::adapter::external::scan_external_manifests(&data_dir)
+            .into_iter()
+            .map(|(_, m)| {
+                let reserved = crate::adapter::RESERVED_ADAPTER_IDS.contains(&m.id.as_str());
+                ExternalAdapterInfo {
+                    trusted: !reserved && settings.trusted_adapters.iter().any(|t| t == &m.id),
+                    reserved,
+                    id: m.id,
+                    name: m.name,
+                    version: m.version,
+                    platforms: m.platforms,
+                }
+            })
+            .collect();
+    list.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(list)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwitchProgressEvent {
     pub account_id: String,
     pub phase: String,
@@ -127,6 +161,18 @@ pub fn save_app_settings(
 ) -> Result<AppSettingsDto, String> {
     if settings.jitter_min_ms > settings.jitter_max_ms {
         return Err("最小抖动间隔不能大于最大抖动间隔".into());
+    }
+    for (tool, path) in &settings.custom_client_paths {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let p = std::path::Path::new(trimmed);
+        if !p.is_absolute() || !p.exists() {
+            return Err(format!(
+                "工具 {tool} 的自定义客户端路径不存在或不是绝对路径：{trimmed}"
+            ));
+        }
     }
     state.host.set_launch_at_login(settings.launch_at_login)?;
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
@@ -180,25 +226,54 @@ pub fn list_accounts(
         .map_err(|e| e.to_string())
 }
 
-fn resolve_account_label(
-    requested: &str,
-    adapter_name: &str,
-    envelope: &crate::domain::CredentialEnvelope,
-) -> String {
-    let trimmed = requested.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
+fn is_valid_oauth_uid(uid: &str) -> bool {
+    let s = uid.trim();
+    if s.len() < 2 || s.len() > 128 {
+        return false;
     }
-    if let Some(name) = envelope.display_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        return name.to_string();
+    if s
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, ',' | '[' | ']' | '{' | '}' | '"' | '\''))
+    {
+        return false;
     }
-    if let Some(email) = envelope.display_email.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        return email.to_string();
+    !matches!(
+        s.to_ascii_lowercase().as_str(),
+        "0" | "-1" | "null" | "undefined" | "none" | "guest" | "anonymous"
+    )
+}
+
+async fn record_import_quota_check(
+    db: &Arc<QwitchDatabase>,
+    adapter: &Arc<dyn ToolAdapter>,
+    summary: &AccountSummary,
+    cred: &crate::domain::CredentialEnvelope,
+) {
+    match adapter.inspect_quota(cred).await {
+        Ok(snapshot) => {
+            let _ = db.save_quota_snapshot(&summary.id, &snapshot);
+        }
+        Err(AdapterError::Unified { code, message }) => {
+            let status = match code {
+                UnifiedErrorCode::AuthExpired => Some(AccountStatus::Expired),
+                UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited => {
+                    Some(AccountStatus::RiskPaused)
+                }
+                _ => None,
+            };
+            if let Some(status) = status {
+                let _ = db.update_account_status(&summary.id, status);
+            }
+            let _ = db.append_action_log(
+                Some(&summary.id),
+                &summary.tool_id,
+                "query",
+                "failed",
+                Some(&code),
+                &format!("导入后查额失败：{message}"),
+            );
+        }
     }
-    if !envelope.uid.trim().is_empty() {
-        return envelope.uid.clone();
-    }
-    format!("{adapter_name} 账号")
 }
 
 #[tauri::command]
@@ -227,10 +302,10 @@ pub async fn import_local_account(
             .bind_account_credential(&state.master_key, acc_id, label_override, &envelope)
             .map_err(|e| e.to_string())?
     } else {
-        let effective_label = resolve_account_label(&label, &adapter.manifest().name, &envelope);
+        let label_override = (!label.trim().is_empty()).then_some(label.trim());
         state
             .db
-            .upsert_account(&state.master_key, &effective_label, &envelope)
+            .upsert_account(&state.master_key, label_override, &envelope)
             .map_err(|e| e.to_string())?
     };
 
@@ -239,9 +314,7 @@ pub async fn import_local_account(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    if let Ok(snapshot) = adapter.inspect_quota(&cred_for_quota).await {
-        let _ = state.db.save_quota_snapshot(&summary.id, &snapshot);
-    }
+    record_import_quota_check(&state.db, &adapter, &summary, &cred_for_quota).await;
 
     let _ = state.db.set_active_on_client(&tool_id, &summary.id);
 
@@ -293,10 +366,10 @@ pub async fn add_account_by_token(
             .bind_account_credential(&state.master_key, acc_id, label_override, &envelope)
             .map_err(|e| e.to_string())?
     } else {
-        let effective_label = resolve_account_label(&label, &adapter.manifest().name, &envelope);
+        let label_override = (!label.trim().is_empty()).then_some(label.trim());
         state
             .db
-            .upsert_account(&state.master_key, &effective_label, &envelope)
+            .upsert_account(&state.master_key, label_override, &envelope)
             .map_err(|e| e.to_string())?
     };
 
@@ -305,9 +378,7 @@ pub async fn add_account_by_token(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    if let Ok(snapshot) = adapter.inspect_quota(&cred_for_quota).await {
-        let _ = state.db.save_quota_snapshot(&summary.id, &snapshot);
-    }
+    record_import_quota_check(&state.db, &adapter, &summary, &cred_for_quota).await;
 
     let log_msg = if target_id.is_some() {
         format!("补充/更新凭据 {} ({})", summary.label, summary.uid_masked)
@@ -839,9 +910,10 @@ const OAUTH_CAPTURE_JS: &str = r#"
   }
 
   function isValidUid(val) {
-    if (val === null || val === undefined) return false;
+    if (typeof val !== 'string' && typeof val !== 'number') return false;
     const s = String(val).trim();
-    if (!s || s.length < 2) return false;
+    if (!s || s.length < 2 || s.length > 128) return false;
+    if (/[\s,\[\]{}"']/.test(s)) return false;
     if (/^(0|-1|null|undefined|none|guest|anonymous)$/i.test(s)) return false;
     return true;
   }
@@ -1117,6 +1189,14 @@ async fn persist_oauth_envelope(
         return;
     }
 
+    if !is_valid_oauth_uid(&envelope.uid) {
+        let _ = app.emit(
+            "qwitch://oauth-error",
+            "授权返回的账号 UID 无效（疑似非字符串身份字段），已拒绝导入",
+        );
+        return;
+    }
+
     let mut matched_local = false;
     let envelope_to_save = match adapter.import_from_local(host.as_ref()).await {
         Ok(local_env)
@@ -1136,8 +1216,11 @@ async fn persist_oauth_envelope(
         let label_override = (!label.is_empty()).then_some(label);
         db.bind_account_credential(master_key, acc_id, label_override, &envelope_to_save)
     } else {
-        let effective_label = resolve_account_label(label, &adapter.manifest().name, &envelope_to_save);
-        db.upsert_account(master_key, &effective_label, &envelope_to_save)
+        db.upsert_account(
+            master_key,
+            (!label.is_empty()).then_some(label),
+            &envelope_to_save,
+        )
     };
     match save_res {
         Ok(summary) => {
@@ -1148,9 +1231,7 @@ async fn persist_oauth_envelope(
                 .get_account_credential(master_key, &summary.id)
                 .map(|(_, env)| env)
                 .unwrap_or(envelope_to_save);
-            if let Ok(snapshot) = adapter.inspect_quota(&cred_for_quota).await {
-                let _ = db.save_quota_snapshot(&summary.id, &snapshot);
-            }
+            record_import_quota_check(db, adapter, &summary, &cred_for_quota).await;
             let log_msg = if target_account_id.is_some() {
                 format!(
                     "通过内置授权补充/更新 {} ({})",
@@ -1230,6 +1311,18 @@ pub async fn start_webview_oauth(
         _ => return Err(format!("工具 {tool_id} 暂不支持内置 WebView 授权")),
     };
 
+    // 导航白名单：授权窗口只允许停留在对应工具的官方域名，
+    // 防止被诱导跳转到第三方页面后注入脚本收集凭据
+    let allowed_auth_hosts: Vec<String> = match tool_id.as_str() {
+        "trae_cn" => vec!["trae.cn".to_string()],
+        "workbuddy" => vec![
+            "copilot.tencent.com".to_string(),
+            "workbuddy.cn".to_string(),
+        ],
+        "qoder_cn" => vec!["qoder.cn".to_string(), "qoder.com.cn".to_string()],
+        _ => vec![],
+    };
+
     let parsed_url: tauri::Url = login_url.parse().map_err(|e| format!("URL 解析失败: {e}"))?;
     let adapter = state
         .adapters
@@ -1247,6 +1340,7 @@ pub async fn start_webview_oauth(
     let target_id_owned = target_account_id.filter(|s| !s.trim().is_empty());
 
     let app_for_popup = app.clone();
+    let allowed_for_popup = allowed_auth_hosts.clone();
     let init_js: String = match mode {
         OAuthMode::TraeCapture => OAUTH_CAPTURE_JS.replace("__QWITCH_NONCE__", &flow_nonce),
         OAuthMode::WorkBuddyPoll { .. } | OAuthMode::QoderPkcePoll { .. } => {
@@ -1263,8 +1357,14 @@ pub async fn start_webview_oauth(
         .initialization_script(&init_js)
         .on_new_window(move |url, _features| {
             if url.as_str() != "about:blank" {
-                if let Some(win) = app_for_popup.get_webview_window("oauth-login") {
-                    let _ = win.navigate(url);
+                let host = url.host_str().unwrap_or("");
+                let allowed = allowed_for_popup
+                    .iter()
+                    .any(|base| host == base || host.ends_with(&format!(".{base}")));
+                if allowed {
+                    if let Some(win) = app_for_popup.get_webview_window("oauth-login") {
+                        let _ = win.navigate(url);
+                    }
                 }
             }
             tauri::webview::NewWindowResponse::Deny
@@ -1280,6 +1380,7 @@ pub async fn start_webview_oauth(
         let tid_nav = tool_id_owned.clone();
         let lbl_nav = label_owned.clone();
         let target_nav = target_id_owned.clone();
+        let allowed_nav = allowed_auth_hosts.clone();
 
         builder = builder.on_navigation(move |nav_url| {
             if nav_url.host_str() == Some("qwitch.local") {
@@ -1350,7 +1451,20 @@ pub async fn start_webview_oauth(
                 }
                 return false;
             }
-            true
+            let host = nav_url.host_str().unwrap_or("");
+            allowed_nav
+                .iter()
+                .any(|base| host == base || host.ends_with(&format!(".{base}")))
+        });
+    }
+
+    if !matches!(mode, OAuthMode::TraeCapture) {
+        let allowed_nav = allowed_auth_hosts.clone();
+        builder = builder.on_navigation(move |nav_url| {
+            let host = nav_url.host_str().unwrap_or("");
+            allowed_nav
+                .iter()
+                .any(|base| host == base || host.ends_with(&format!(".{base}")))
         });
     }
 
@@ -1449,4 +1563,24 @@ pub async fn start_webview_oauth(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_uid_validation_rejects_objects_and_blacklist() {
+        assert!(is_valid_oauth_uid("u_123456"));
+        assert!(is_valid_oauth_uid("1234567890"));
+        assert!(!is_valid_oauth_uid("[object Object]"));
+        assert!(!is_valid_oauth_uid("a,b"));
+        assert!(!is_valid_oauth_uid("has space"));
+        assert!(!is_valid_oauth_uid("{\"id\":1}"));
+        assert!(!is_valid_oauth_uid(""));
+        assert!(!is_valid_oauth_uid("x"));
+        assert!(!is_valid_oauth_uid("null"));
+        assert!(!is_valid_oauth_uid("0"));
+        assert!(!is_valid_oauth_uid("guest"));
+    }
 }

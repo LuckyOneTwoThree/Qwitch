@@ -321,17 +321,15 @@ impl ToolAdapter for ExternalAdapter {
     }
 }
 
-/// 扫描 <qwitch_data_dir>/adapters/<adapter_id>/manifest.json 并加载适配当前平台的外部适配器
-pub fn discover_external_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn ToolAdapter>> {
-    let mut loaded: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
+/// 扫描 <qwitch_data_dir>/adapters/<adapter_id>/manifest.json（仅解析清单，不执行插件）
+pub fn scan_external_manifests(data_dir: &Path) -> Vec<(PathBuf, ExternalManifestFile)> {
+    let mut out = Vec::new();
     let adapters_root = data_dir.join("adapters");
     let _ = std::fs::create_dir_all(&adapters_root);
 
     let Ok(entries) = std::fs::read_dir(&adapters_root) else {
-        return loaded;
+        return out;
     };
-
-    let current_os = ExternalAdapter::current_platform_tag();
 
     for entry in entries.flatten() {
         let dir = entry.path();
@@ -348,13 +346,21 @@ pub fn discover_external_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn To
         let Ok(parsed) = serde_json::from_slice::<ExternalManifestFile>(&bytes) else {
             continue;
         };
-        if !parsed.platforms.is_empty() && !parsed.platforms.iter().any(|p| p == current_os) {
-            continue;
-        }
-        let id = parsed.id.clone();
-        let adapter: Arc<dyn ToolAdapter> = Arc::new(ExternalAdapter::from_manifest_file(dir, parsed));
-        loaded.insert(id, adapter);
+        out.push((dir, parsed));
     }
+    out
+}
 
-    loaded
+/// 加载适配当前平台的外部适配器（信任门禁由调用方 create_all_adapters 负责）
+pub fn discover_external_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn ToolAdapter>> {
+    let current_os = ExternalAdapter::current_platform_tag();
+    scan_external_manifests(data_dir)
+        .into_iter()
+        .filter(|(_, m)| m.platforms.is_empty() || m.platforms.iter().any(|p| p == current_os))
+        .map(|(dir, m)| {
+            let id = m.id.clone();
+            let adapter: Arc<dyn ToolAdapter> = Arc::new(ExternalAdapter::from_manifest_file(dir, m));
+            (id, adapter)
+        })
+        .collect()
 }

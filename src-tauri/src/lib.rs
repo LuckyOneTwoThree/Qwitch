@@ -22,6 +22,13 @@ use storage::QwitchDatabase;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .setup(|app| {
             let host: Arc<dyn PlatformHost> = Arc::new(NativePlatformHost);
             let data_dir = host
@@ -56,7 +63,7 @@ pub fn run() {
                 db,
                 master_key,
                 host,
-                adapters: Arc::new(create_all_adapters(&data_dir)),
+                adapters: Arc::new(create_all_adapters(&data_dir, &startup_settings.trusted_adapters)),
                 scheduler: Arc::new(AntiRiskScheduler::new()),
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
                 switching_in_progress: Arc::new(AtomicBool::new(false)),
@@ -198,6 +205,7 @@ pub fn run() {
             commands::get_app_settings,
             commands::save_app_settings,
             commands::list_adapters,
+            commands::list_external_adapters,
             commands::detect_client_status,
             commands::list_accounts,
             commands::import_local_account,

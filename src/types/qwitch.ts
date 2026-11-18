@@ -87,6 +87,16 @@ export interface AppSettings {
   autoRefreshOnStartup?: boolean;
   autoRefreshIntervalMinutes?: number;
   autoClaimDaily?: boolean;
+  trustedAdapters?: string[];
+}
+
+export interface ExternalAdapterInfo {
+  id: string;
+  name: string;
+  version: string;
+  platforms: string[];
+  trusted: boolean;
+  reserved: boolean;
 }
 
 export type LogScope = "active" | "archived" | "all";

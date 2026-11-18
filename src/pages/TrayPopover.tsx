@@ -29,6 +29,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
   const {
     adapters,
     accounts,
+    isInitializing,
     clientStatuses,
     claimDailyBatch,
     requestColdSwitch,
@@ -287,7 +288,16 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
         <BatchClaimBanner compact />
 
-        {accounts.length === 0 ? (
+        {isInitializing ? (
+          <div className="space-y-2.5" aria-label="正在加载账号" role="status">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="h-16 animate-pulse rounded-2xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-800/60"
+              />
+            ))}
+          </div>
+        ) : accounts.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-900">
             <QwitchLogo size="md" />
             <div className="mt-3 text-xs font-semibold text-zinc-900 dark:text-zinc-100">

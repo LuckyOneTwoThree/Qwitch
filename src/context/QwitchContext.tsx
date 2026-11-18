@@ -214,7 +214,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const isTrayWindow = detectTrayWindow();
 
   const [isInitializing, setIsInitializing] = useState<boolean>(isTauriRuntime);
-  const [adapters, setAdapters] = useState<AdapterManifest[]>(MOCK_ADAPTERS);
+  const [adapters, setAdapters] = useState<AdapterManifest[]>(
+    isTauriRuntime ? [] : MOCK_ADAPTERS
+  );
   const [accounts, setAccounts] = useState<AccountSummary[]>(
     isTauriRuntime ? [] : INITIAL_ACCOUNTS
   );
@@ -255,6 +257,8 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   appSettingsRef.current = appSettings;
   const accountsRef = useRef(accounts);
   accountsRef.current = accounts;
+  const logsRef = useRef(logsState);
+  logsRef.current = logsState;
   const adaptersRef = useRef(adapters);
   adaptersRef.current = adapters;
   const batchRunningRef = useRef(Boolean(batchProgress?.running));
@@ -262,6 +266,8 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const pendingAutoClaimRef = useRef(false);
   const startupAutoRunDoneRef = useRef(false);
   const batchDismissTimerRef = useRef<number | null>(null);
+  const settingsLoadedRef = useRef(false);
+  const logsDebounceTimerRef = useRef<number | null>(null);
 
   const applyIncomingSettings = useCallback((raw?: Partial<AppSettings> | null) => {
     const normalized = normalizeAppSettings(raw, appSettingsRef.current);
@@ -496,7 +502,12 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       setAccounts(accList);
       setLogsState(logList);
       setBackendLogStats(stats);
-      applyIncomingSettings(settings);
+      // 设置只在首次加载时应用；后续后台同步不得覆盖用户未保存的草稿
+      // （远端真实变更经 settings-updated 事件单独下发）
+      if (!settingsLoadedRef.current) {
+        settingsLoadedRef.current = true;
+        applyIncomingSettings(settings);
+      }
     } catch (err) {
       showToast(`同步后端数据失败：${String(err)}`, "error");
     } finally {
@@ -585,7 +596,13 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     });
 
     register<unknown>("qwitch://logs-updated", () => {
-      void refreshLogs();
+      if (logsDebounceTimerRef.current !== null) {
+        window.clearTimeout(logsDebounceTimerRef.current);
+      }
+      logsDebounceTimerRef.current = window.setTimeout(() => {
+        logsDebounceTimerRef.current = null;
+        void refreshLogs();
+      }, 150);
     });
 
     return () => {
@@ -593,6 +610,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       if (syncDebounceTimerRef.current !== null) {
         window.clearTimeout(syncDebounceTimerRef.current);
         syncDebounceTimerRef.current = null;
+      }
+      if (logsDebounceTimerRef.current !== null) {
+        window.clearTimeout(logsDebounceTimerRef.current);
+        logsDebounceTimerRef.current = null;
       }
       for (const unlisten of unlisteners) {
         unlisten();
@@ -770,7 +791,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         }
         if (targetIds) return true;
         const effectiveClaim = getEffectiveClaimStatus(acc);
-        return effectiveClaim === "available" || effectiveClaim === "unknown";
+        return effectiveClaim === "available";
       });
 
       if (candidates.length === 0) {
@@ -1072,6 +1093,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
           );
         } catch (err) {
           showToast(`导入失败：${String(err)}`, "error");
+          throw err;
         }
         return;
       }
@@ -1316,15 +1338,14 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       }
 
       const now = new Date().toISOString();
-      let count = 0;
+      // 先纯计算匹配集再 setState：updater 内累加会被 StrictMode 重复执行导致计数翻倍
+      const count = logsRef.current.filter((item) =>
+        matchesLogCleanup(item, request, "active")
+      ).length;
       setLogsState((prev) =>
-        prev.map((item) => {
-          if (matchesLogCleanup(item, request, "active")) {
-            count += 1;
-            return { ...item, archivedAt: now };
-          }
-          return item;
-        })
+        prev.map((item) =>
+          matchesLogCleanup(item, request, "active") ? { ...item, archivedAt: now } : item
+        )
       );
       showToast(
         count === 0 ? "当前没有可归档的匹配日志" : feedbackLabel ?? `已归档 ${count} 条日志`,
@@ -1354,15 +1375,13 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      let count = 0;
+      const count = logsRef.current.filter((item) =>
+        matchesLogCleanup(item, request, "archived")
+      ).length;
       setLogsState((prev) =>
-        prev.map((item) => {
-          if (matchesLogCleanup(item, request, "archived")) {
-            count += 1;
-            return { ...item, archivedAt: undefined };
-          }
-          return item;
-        })
+        prev.map((item) =>
+          matchesLogCleanup(item, request, "archived") ? { ...item, archivedAt: undefined } : item
+        )
       );
       showToast(
         count === 0 ? "没有可恢复的归档日志" : feedbackLabel ?? `已恢复 ${count} 条日志到活跃视图`,
@@ -1390,14 +1409,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      let count = 0;
-      setLogsState((prev) =>
-        prev.filter((item) => {
-          const matched = matchesLogCleanup(item, request, logScope);
-          if (matched) count += 1;
-          return !matched;
-        })
-      );
+      const count = logsRef.current.filter((item) =>
+        matchesLogCleanup(item, request, logScope)
+      ).length;
+      setLogsState((prev) => prev.filter((item) => !matchesLogCleanup(item, request, logScope)));
       showToast(
         count === 0 ? "没有可删除的匹配日志" : feedbackLabel ?? `已删除 ${count} 条日志`,
         count === 0 ? "info" : "success"

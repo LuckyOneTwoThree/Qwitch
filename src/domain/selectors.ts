@@ -81,7 +81,8 @@ export function isAccountClaimable(
   adapters: AdapterManifest[]
 ): boolean {
   const adapter = adapters.find((a) => a.id === acc.toolId);
-  const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : true;
+  // 与 AccountCard 同口径：适配器未加载时不计入可领
+  const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : false;
   return (
     supportsClaim &&
     acc.status === "active" &&

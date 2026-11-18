@@ -20,6 +20,10 @@ export function Modal({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const previousActiveRef = useRef<HTMLElement | null>(null);
+  // onClose 多为内联箭头函数：用 ref 持有，避免父组件重渲染时
+  // effect 反复重建导致焦点被归还再抢走
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
@@ -44,7 +48,7 @@ export function Modal({
       if (e.key === "Escape") {
         if (!disableClose) {
           e.preventDefault();
-          onClose();
+          onCloseRef.current();
         }
         return;
       }
@@ -82,7 +86,7 @@ export function Modal({
         previousActiveRef.current.focus();
       }
     };
-  }, [open, onClose, disableClose]);
+  }, [open, disableClose]);
 
   if (!open) return null;
 
@@ -91,7 +95,7 @@ export function Modal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-xs"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !disableClose) {
-          onClose();
+          onCloseRef.current();
         }
       }}
     >

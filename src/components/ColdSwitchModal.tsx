@@ -103,8 +103,9 @@ export function ColdSwitchModal() {
         <div className="mt-5 space-y-3 rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/70">
           <div className="grid grid-cols-3 gap-2">
             {SWITCH_STEPS.map((st, idx) => {
-              const done = currentRank > idx || switchDialog.phase === "done";
-              const active = currentRank === idx && switchDialog.phase !== "done";
+              const skipped = st.key === "closing" && switchDialog.isClientRunning === false;
+              const done = !skipped && (currentRank > idx || switchDialog.phase === "done");
+              const active = !skipped && currentRank === idx && switchDialog.phase !== "done";
               return (
                 <div
                   key={st.key}
@@ -125,7 +126,7 @@ export function ColdSwitchModal() {
                       {idx + 1}
                     </span>
                   )}
-                  <span className="truncate">{st.label}</span>
+                  <span className="truncate">{st.label}{skipped ? "（已跳过）" : ""}</span>
                 </div>
               );
             })}

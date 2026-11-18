@@ -714,12 +714,14 @@ impl QwitchDatabase {
         self.execute_log_mutation("UPDATE action_logs SET archived_at = NULL", None, &normalized)
     }
 
-    /// 按筛选条件永久删除操作日志
+    /// 按筛选条件永久删除操作日志（未指定 scope 时默认仅活跃日志，防止空请求清空全部）
     pub fn delete_action_logs(
         &self,
         req: &ActionLogCleanupRequest,
     ) -> Result<usize, StorageError> {
-        self.execute_log_mutation("DELETE FROM action_logs", None, req)
+        let mut normalized = req.clone();
+        normalized.scope = Some(req.scope.unwrap_or(LogScope::Active));
+        self.execute_log_mutation("DELETE FROM action_logs", None, &normalized)
     }
 
     /// 按保留策略自动将超期或超出上限的活跃日志转入归档
@@ -1475,5 +1477,25 @@ mod tests {
 
         env.display_email = None;
         assert_eq!(default_account_label(&env), crypto::mask_uid("user_plain_uid_99"));
+    }
+
+    #[test]
+    fn delete_logs_empty_request_defaults_to_active_scope() {
+        let db_path = temp_db_path("delscope");
+        let db = QwitchDatabase::open(&db_path).expect("open");
+        db.append_action_log(None, "trae_cn", "import", "success", None, "活跃日志").unwrap();
+        db.append_action_log(None, "trae_cn", "claim", "success", None, "待归档日志").unwrap();
+        db.archive_action_logs(&ActionLogCleanupRequest {
+            action_type: Some("claim".to_string()),
+            ..Default::default()
+        })
+        .expect("archive");
+
+        let deleted = db.delete_action_logs(&ActionLogCleanupRequest::default()).expect("delete");
+        assert_eq!(deleted, 1, "空请求默认只删除活跃日志，不得清空归档");
+        let archived = db.list_action_logs(LogScope::Archived, 100, 0).expect("list");
+        assert_eq!(archived.len(), 1);
+
+        let _ = std::fs::remove_file(&db_path);
     }
 }

@@ -122,6 +122,8 @@ export function ImportAccountModal({
       setLabel("");
       setRawInput("");
       onClose();
+    } catch {
+      // 失败时保留弹窗与已粘贴凭据，错误 Toast 已由 context 展示
     } finally {
       setSubmitting(false);
     }

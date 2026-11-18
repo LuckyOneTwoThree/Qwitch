@@ -178,6 +178,7 @@ export function Dashboard() {
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
   const [loadingMoreLogs, setLoadingMoreLogs] = useState(false);
   const [pathDrafts, setPathDrafts] = useState<Record<string, string>>({});
+  const [pathDraftsDirty, setPathDraftsDirty] = useState(false);
   const [externalPlugins, setExternalPlugins] = useState<ExternalAdapterInfo[]>([]);
   const [trustedDraft, setTrustedDraft] = useState<string[]>([]);
 
@@ -202,6 +203,13 @@ export function Dashboard() {
   const [logResultFilter, setLogResultFilter] = useState<LogResultFilter>("all");
   const [logSearch, setLogSearch] = useState("");
   const [selectedLogIds, setSelectedLogIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    setSelectedLogIds((prev) => {
+      const valid = prev.filter((id) => logs.some((l) => l.id === id));
+      return valid.length === prev.length ? prev : valid;
+    });
+  }, [logs]);
   const [confirmLogAction, setConfirmLogAction] = useState<{
     label: string;
     detail: string;
@@ -215,8 +223,11 @@ export function Dashboard() {
     nav !== "all" && nav !== "logs" && nav !== "settings" ? nav : undefined;
 
   useEffect(() => {
-    setPathDrafts(customClientPaths);
-  }, [customClientPaths]);
+    // 用户正在编辑时，后台同步不得覆盖未保存的路径草稿
+    if (!pathDraftsDirty) {
+      setPathDrafts(customClientPaths);
+    }
+  }, [customClientPaths, pathDraftsDirty]);
 
   useEffect(() => {
     void refreshClientStatuses();
@@ -1615,7 +1626,14 @@ export function Dashboard() {
                                       title="永久删除此条日志"
                                       aria-label="永久删除此条日志"
                                       onClick={() =>
-                                        void deleteLogs({ scope: logScope, ids: [log.id] })
+                                        setConfirmLogAction({
+                                          label: "永久删除此条日志？",
+                                          detail: "该操作不可撤销，日志将从本地库中永久移除。",
+                                          danger: true,
+                                          run: async () => {
+                                            await deleteLogs({ scope: logScope, ids: [log.id] });
+                                          },
+                                        })
                                       }
                                       className="rounded-md p-1 text-zinc-500 transition hover:bg-rose-500/10 hover:text-rose-600 dark:text-zinc-400 dark:hover:text-rose-400"
                                     >
@@ -1729,7 +1747,19 @@ export function Dashboard() {
                     label="发现待领福利时自动后台签到"
                     description="结合启动巡检或后台定时刷新，若确认账号今日可领 (Available)，按防风控抖动延迟自动领取。"
                     checked={Boolean(appSettings.autoClaimDaily)}
-                    onChange={(next) => void saveAppSettings({ autoClaimDaily: next })}
+                    onChange={(next) => {
+                      if (next) {
+                        setConfirmLogAction({
+                          label: "启用自动后台签到？",
+                          detail:
+                            "开启后将在启动巡检或后台定时刷新发现可领福利时自动发起领取，属于无人值守敏感动作，可能增加平台风控概率。确认启用？",
+                          danger: true,
+                          run: () => saveAppSettings({ autoClaimDaily: true }),
+                        });
+                      } else {
+                        void saveAppSettings({ autoClaimDaily: false });
+                      }
+                    }}
                   />
 
                   <div className="rounded-xl border border-zinc-100 bg-zinc-50/70 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-800/40">
@@ -2038,6 +2068,7 @@ export function Dashboard() {
                       type="button"
                       onClick={async () => {
                         await saveAppSettings({ customClientPaths: pathDrafts });
+                        setPathDraftsDirty(false);
                         await refreshClientStatuses();
                       }}
                       className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
@@ -2102,9 +2133,10 @@ export function Dashboard() {
                               type="text"
                               value={pathDrafts[ad.id] ?? ""}
                               aria-label={`${ad.name} 自定义客户端路径`}
-                              onChange={(e) =>
-                                setPathDrafts((prev) => ({ ...prev, [ad.id]: e.target.value }))
-                              }
+                              onChange={(e) => {
+                                setPathDrafts((prev) => ({ ...prev, [ad.id]: e.target.value }));
+                                setPathDraftsDirty(true);
+                              }}
                               placeholder="自定义客户端路径（留空使用自动探测路径）"
                               className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 font-mono text-[11px] text-zinc-900 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
                             />

@@ -83,13 +83,18 @@ export const AccountCard = React.memo(function AccountCard({
   };
 
   const handleDirectOAuth = () => {
-    void importAccount(account.toolId, "", "webview_oauth", undefined, account.id);
+    void importAccount(account.toolId, "", "webview_oauth", undefined, account.id).catch(() => {});
   };
 
   const handleAssociateLocal = async () => {
     setAssociating(true);
-    await importAccount(account.toolId, "", "local_import", undefined, account.id);
-    setAssociating(false);
+    try {
+      await importAccount(account.toolId, "", "local_import", undefined, account.id);
+    } catch {
+      // 错误 Toast 已由 context 统一展示
+    } finally {
+      setAssociating(false);
+    }
   };
 
   const handleSaveRename = async () => {
@@ -388,8 +393,8 @@ export const AccountCard = React.memo(function AccountCard({
                 <button
                   type="button"
                   onClick={() => void handleRefresh()}
-                  disabled={refreshing || isDisabled}
-                  title="刷新额度"
+                  disabled={refreshing || isDisabled || isBatchRunning}
+                  title={isBatchRunning ? "批量任务进行中，查额已排队禁用" : "刷新额度"}
                   className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
                 >
                   <RefreshCw

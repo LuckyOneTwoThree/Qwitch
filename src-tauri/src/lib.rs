@@ -33,6 +33,20 @@ pub fn run() {
                 QwitchDatabase::open(&data_dir.join("qwitch.db"))
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?,
             );
+            if let Ok(Some(json)) = db.get_setting("app.settings") {
+                if let Ok(settings) = serde_json::from_str::<crate::domain::AppSettingsDto>(&json) {
+                    let _ = db.apply_log_retention(
+                        settings.log_archive_after_days,
+                        settings.log_max_active_count,
+                    );
+                }
+            } else {
+                let defaults = crate::domain::AppSettingsDto::default();
+                let _ = db.apply_log_retention(
+                    defaults.log_archive_after_days,
+                    defaults.log_max_active_count,
+                );
+            }
 
             let state = AppState {
                 db,
@@ -48,7 +62,11 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "退出 Qwitch", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_main, &quit])?;
 
+            let tray_icon = tauri::include_image!("icons/tray-template.png");
+
             TrayIconBuilder::with_id("qwitch-tray")
+                .icon(tray_icon)
+                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("Qwitch - AI 多账号与额度管理")
@@ -123,7 +141,12 @@ pub fn run() {
             commands::delete_account,
             commands::update_account_status,
             commands::claim_daily_batch,
-            commands::get_action_logs
+            commands::get_action_logs,
+            commands::get_action_log_stats,
+            commands::archive_action_logs,
+            commands::unarchive_action_logs,
+            commands::delete_action_logs,
+            commands::export_action_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running Qwitch application");

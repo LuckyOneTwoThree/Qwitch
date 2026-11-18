@@ -1,14 +1,18 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from "react";
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { INITIAL_ACCOUNTS, INITIAL_LOGS, MOCK_ADAPTERS } from "../data/mockStore";
 import type {
   AccountSummary,
+  ActionLogCleanupRequest,
   ActionLogItem,
+  ActionLogStats,
   AdapterManifest,
   AppSettings,
   AuthMethod,
   ClientHostStatus,
+  ExportLogsResult,
+  LogScope,
   ToolId,
 } from "../types/qwitch";
 
@@ -33,6 +37,9 @@ interface QwitchContextValue {
   adapters: AdapterManifest[];
   accounts: AccountSummary[];
   logs: ActionLogItem[];
+  logScope: "active" | "archived";
+  setLogScope: (scope: "active" | "archived") => void;
+  logStats: ActionLogStats;
   batchProgress: BatchProgressState | null;
   switchDialog: SwitchDialogState;
   toastMessage: string | null;
@@ -40,6 +47,8 @@ interface QwitchContextValue {
   toggleTheme: () => void;
   jitterRangeMs: [number, number];
   setJitterRangeMs: (range: [number, number]) => void;
+  logRetention: { archiveAfterDays: number; maxActiveCount: number };
+  setLogRetention: (next: { archiveAfterDays: number; maxActiveCount: number }) => void;
   customClientPaths: Record<string, string>;
   clientStatuses: Record<string, ClientHostStatus>;
   saveAppSettings: (next: Partial<AppSettings>, silent?: boolean) => Promise<void>;
@@ -59,6 +68,10 @@ interface QwitchContextValue {
   ) => Promise<void>;
   recoverAccount: (accountId: string) => Promise<void>;
   deleteAccount: (accountId: string) => Promise<void>;
+  archiveLogs: (request: ActionLogCleanupRequest, feedbackLabel?: string) => Promise<number>;
+  unarchiveLogs: (request: ActionLogCleanupRequest, feedbackLabel?: string) => Promise<number>;
+  deleteLogs: (request: ActionLogCleanupRequest, feedbackLabel?: string) => Promise<number>;
+  exportLogs: (scope?: LogScope, archiveAfterExport?: boolean) => Promise<void>;
   dismissBatchProgress: () => void;
 }
 
@@ -69,6 +82,35 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const detectTauriRuntime = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+const isRedundantLog = (log: ActionLogItem) =>
+  log.resultStatus === "skipped" ||
+  (log.actionType === "query" && log.resultStatus === "success");
+
+const matchesLogCleanup = (
+  log: ActionLogItem,
+  req: ActionLogCleanupRequest,
+  defaultScope: LogScope
+) => {
+  const scope = req.scope ?? defaultScope;
+  if (scope === "active" && log.archivedAt) return false;
+  if (scope === "archived" && !log.archivedAt) return false;
+  if (req.ids) {
+    if (!req.ids.includes(log.id)) return false;
+  }
+  if (req.olderThanDays && req.olderThanDays > 0) {
+    const cutoff = Date.now() - req.olderThanDays * 86_400_000;
+    if (new Date(log.createdAt).getTime() >= cutoff) return false;
+  }
+  if (req.actionType && req.actionType !== "all" && log.actionType !== req.actionType) {
+    return false;
+  }
+  if (req.resultStatus && req.resultStatus !== "all" && log.resultStatus !== req.resultStatus) {
+    return false;
+  }
+  if (req.redundantOnly && !isRedundantLog(log)) return false;
+  return true;
+};
+
 export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const isTauriRuntime = detectTauriRuntime();
 
@@ -76,14 +118,25 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const [accounts, setAccounts] = useState<AccountSummary[]>(
     isTauriRuntime ? [] : INITIAL_ACCOUNTS
   );
-  const [logs, setLogs] = useState<ActionLogItem[]>(
+  const [logsState, setLogsState] = useState<ActionLogItem[]>(
     isTauriRuntime ? [] : INITIAL_LOGS
   );
+  const [logScope, setLogScope] = useState<"active" | "archived">("active");
+  const [backendLogStats, setBackendLogStats] = useState<ActionLogStats>({
+    activeCount: 0,
+    archivedCount: 0,
+    failedActiveCount: 0,
+    noiseActiveCount: 0,
+  });
   const [batchProgress, setBatchProgress] = useState<BatchProgressState | null>(null);
   const [switchDialog, setSwitchDialog] = useState<SwitchDialogState>({ account: null, phase: "confirm" });
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [jitterRangeMs, setJitterRangeMs] = useState<[number, number]>([1500, 3500]);
+  const [logRetention, setLogRetention] = useState<{
+    archiveAfterDays: number;
+    maxActiveCount: number;
+  }>({ archiveAfterDays: 14, maxActiveCount: 200 });
   const [customClientPaths, setCustomClientPaths] = useState<Record<string, string>>({});
   const [clientStatuses, setClientStatuses] = useState<Record<string, ClientHostStatus>>({});
 
@@ -105,6 +158,8 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         jitterMaxMs: next.jitterMaxMs ?? jitterRangeMs[1],
         theme: next.theme ?? theme,
         customClientPaths: next.customClientPaths ?? customClientPaths,
+        logArchiveAfterDays: next.logArchiveAfterDays ?? logRetention.archiveAfterDays,
+        logMaxActiveCount: next.logMaxActiveCount ?? logRetention.maxActiveCount,
       };
       if (payload.jitterMinMs > payload.jitterMaxMs) {
         showToast("保存失败：最小间隔不能大于最大间隔");
@@ -114,6 +169,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       setJitterRangeMs([payload.jitterMinMs, payload.jitterMaxMs]);
       setTheme(payload.theme);
       setCustomClientPaths(payload.customClientPaths);
+      setLogRetention({
+        archiveAfterDays: payload.logArchiveAfterDays ?? 14,
+        maxActiveCount: payload.logMaxActiveCount ?? 200,
+      });
 
       if (isTauriRuntime) {
         try {
@@ -121,6 +180,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
           setJitterRangeMs([saved.jitterMinMs, saved.jitterMaxMs]);
           setTheme(saved.theme === "dark" ? "dark" : "light");
           setCustomClientPaths(saved.customClientPaths ?? {});
+          setLogRetention({
+            archiveAfterDays: saved.logArchiveAfterDays ?? 14,
+            maxActiveCount: saved.logMaxActiveCount ?? 200,
+          });
           if (!silent) showToast("设置已保存");
         } catch (err) {
           showToast(`保存设置失败：${String(err)}`);
@@ -129,7 +192,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         showToast("设置已保存（Mock 模式）");
       }
     },
-    [customClientPaths, isTauriRuntime, jitterRangeMs, showToast, theme]
+    [customClientPaths, isTauriRuntime, jitterRangeMs, logRetention, showToast, theme]
   );
 
   const toggleTheme = useCallback(() => {
@@ -186,25 +249,54 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     [adapters, isTauriRuntime]
   );
 
+  const refreshLogs = useCallback(
+    async (targetScope?: "active" | "archived") => {
+      if (!isTauriRuntime) return;
+      const scope = targetScope ?? logScope;
+      try {
+        const [logList, stats] = await Promise.all([
+          invoke<ActionLogItem[]>("get_action_logs", { scope, limit: 200, offset: 0 }),
+          invoke<ActionLogStats>("get_action_log_stats"),
+        ]);
+        setLogsState(logList);
+        setBackendLogStats(stats);
+      } catch (err) {
+        showToast(`刷新日志失败：${String(err)}`);
+      }
+    },
+    [isTauriRuntime, logScope, showToast]
+  );
+
   const syncFromBackend = useCallback(async () => {
     if (!isTauriRuntime) return;
     try {
-      const [adList, accList, logList, settings] = await Promise.all([
+      const [adList, accList, logList, stats, settings] = await Promise.all([
         invoke<AdapterManifest[]>("list_adapters"),
         invoke<AccountSummary[]>("list_accounts", { toolId: null }),
-        invoke<ActionLogItem[]>("get_action_logs", { limit: 50, offset: 0 }),
+        invoke<ActionLogItem[]>("get_action_logs", { scope: logScope, limit: 200, offset: 0 }),
+        invoke<ActionLogStats>("get_action_log_stats"),
         invoke<AppSettings>("get_app_settings"),
       ]);
       setAdapters(adList);
       setAccounts(accList);
-      setLogs(logList);
+      setLogsState(logList);
+      setBackendLogStats(stats);
       setJitterRangeMs([settings.jitterMinMs, settings.jitterMaxMs]);
       setTheme(settings.theme === "dark" ? "dark" : "light");
       setCustomClientPaths(settings.customClientPaths ?? {});
+      setLogRetention({
+        archiveAfterDays: settings.logArchiveAfterDays ?? 14,
+        maxActiveCount: settings.logMaxActiveCount ?? 200,
+      });
     } catch (err) {
       showToast(`同步后端数据失败：${String(err)}`);
     }
-  }, [isTauriRuntime, showToast]);
+  }, [isTauriRuntime, logScope, showToast]);
+
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    void refreshLogs(logScope);
+  }, [isTauriRuntime, logScope, refreshLogs]);
 
   useEffect(() => {
     if (!isTauriRuntime) return;
@@ -215,6 +307,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     let unlistenOauthErr: (() => void) | undefined;
     let unlistenSwitch: (() => void) | undefined;
     let unlistenSettings: (() => void) | undefined;
+    let unlistenLogs: (() => void) | undefined;
 
     void listen<BatchProgressState>("qwitch://batch-progress", (event) => {
       setBatchProgress(event.payload);
@@ -254,8 +347,18 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       setJitterRangeMs([event.payload.jitterMinMs, event.payload.jitterMaxMs]);
       setTheme(event.payload.theme === "dark" ? "dark" : "light");
       setCustomClientPaths(event.payload.customClientPaths ?? {});
+      setLogRetention({
+        archiveAfterDays: event.payload.logArchiveAfterDays ?? 14,
+        maxActiveCount: event.payload.logMaxActiveCount ?? 200,
+      });
     }).then((fn) => {
       unlistenSettings = fn;
+    });
+
+    void listen("qwitch://logs-updated", () => {
+      void refreshLogs();
+    }).then((fn) => {
+      unlistenLogs = fn;
     });
 
     return () => {
@@ -264,12 +367,13 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       unlistenOauthErr?.();
       unlistenSwitch?.();
       unlistenSettings?.();
+      unlistenLogs?.();
     };
-  }, [isTauriRuntime, showToast, syncFromBackend]);
+  }, [isTauriRuntime, refreshLogs, showToast, syncFromBackend]);
 
   const appendLog = useCallback(
     (entry: Omit<ActionLogItem, "id" | "createdAt">) => {
-      setLogs((prev) => [
+      setLogsState((prev) => [
         {
           ...entry,
           id: Date.now() + Math.floor(Math.random() * 1000),
@@ -757,6 +861,185 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     [accounts, appendLog, isTauriRuntime, showToast, syncFromBackend]
   );
 
+  const logs = useMemo(() => {
+    if (isTauriRuntime) return logsState;
+    return logsState.filter((item) =>
+      logScope === "archived" ? Boolean(item.archivedAt) : !item.archivedAt
+    );
+  }, [isTauriRuntime, logScope, logsState]);
+
+  const logStats = useMemo<ActionLogStats>(() => {
+    if (isTauriRuntime) return backendLogStats;
+    const active = logsState.filter((item) => !item.archivedAt);
+    const archived = logsState.filter((item) => Boolean(item.archivedAt));
+    return {
+      activeCount: active.length,
+      archivedCount: archived.length,
+      failedActiveCount: active.filter((item) => item.resultStatus === "failed").length,
+      noiseActiveCount: active.filter(isRedundantLog).length,
+    };
+  }, [backendLogStats, isTauriRuntime, logsState]);
+
+  const archiveLogs = useCallback(
+    async (request: ActionLogCleanupRequest, feedbackLabel?: string) => {
+      if (isTauriRuntime) {
+        try {
+          const count = await invoke<number>("archive_action_logs", { request });
+          await refreshLogs();
+          if (count === 0) {
+            showToast("当前没有可归档的匹配日志");
+          } else {
+            showToast(feedbackLabel ?? `已归档 ${count} 条日志`);
+          }
+          return count;
+        } catch (err) {
+          showToast(`归档日志失败：${String(err)}`);
+          return 0;
+        }
+      }
+
+      const now = new Date().toISOString();
+      let count = 0;
+      setLogsState((prev) =>
+        prev.map((item) => {
+          if (matchesLogCleanup(item, request, "active")) {
+            count += 1;
+            return { ...item, archivedAt: now };
+          }
+          return item;
+        })
+      );
+      showToast(count === 0 ? "当前没有可归档的匹配日志" : feedbackLabel ?? `已归档 ${count} 条日志`);
+      return count;
+    },
+    [isTauriRuntime, refreshLogs, showToast]
+  );
+
+  const unarchiveLogs = useCallback(
+    async (request: ActionLogCleanupRequest, feedbackLabel?: string) => {
+      if (isTauriRuntime) {
+        try {
+          const count = await invoke<number>("unarchive_action_logs", { request });
+          await refreshLogs();
+          showToast(
+            count === 0
+              ? "没有可恢复的归档日志"
+              : feedbackLabel ?? `已恢复 ${count} 条日志到活跃视图`
+          );
+          return count;
+        } catch (err) {
+          showToast(`恢复日志失败：${String(err)}`);
+          return 0;
+        }
+      }
+
+      let count = 0;
+      setLogsState((prev) =>
+        prev.map((item) => {
+          if (matchesLogCleanup(item, request, "archived")) {
+            count += 1;
+            return { ...item, archivedAt: undefined };
+          }
+          return item;
+        })
+      );
+      showToast(
+        count === 0 ? "没有可恢复的归档日志" : feedbackLabel ?? `已恢复 ${count} 条日志到活跃视图`
+      );
+      return count;
+    },
+    [isTauriRuntime, refreshLogs, showToast]
+  );
+
+  const deleteLogs = useCallback(
+    async (request: ActionLogCleanupRequest, feedbackLabel?: string) => {
+      if (isTauriRuntime) {
+        try {
+          const count = await invoke<number>("delete_action_logs", { request });
+          await refreshLogs();
+          showToast(count === 0 ? "没有可删除的匹配日志" : feedbackLabel ?? `已删除 ${count} 条日志`);
+          return count;
+        } catch (err) {
+          showToast(`删除日志失败：${String(err)}`);
+          return 0;
+        }
+      }
+
+      let count = 0;
+      setLogsState((prev) =>
+        prev.filter((item) => {
+          const matched = matchesLogCleanup(item, request, logScope);
+          if (matched) count += 1;
+          return !matched;
+        })
+      );
+      showToast(count === 0 ? "没有可删除的匹配日志" : feedbackLabel ?? `已删除 ${count} 条日志`);
+      return count;
+    },
+    [isTauriRuntime, logScope, refreshLogs, showToast]
+  );
+
+  const exportLogs = useCallback(
+    async (scope: LogScope = logScope, archiveAfterExport = false) => {
+      if (isTauriRuntime) {
+        try {
+          const res = await invoke<ExportLogsResult>("export_action_logs", {
+            scope,
+            archiveAfterExport,
+          });
+          await refreshLogs();
+          const fileName = res.filePath.split(/[\\/]/).pop() ?? res.filePath;
+          showToast(
+            res.archivedCount > 0
+              ? `已导出 ${res.count} 条并归档（${fileName}）`
+              : `已导出 ${res.count} 条至 archives/${fileName}`
+          );
+        } catch (err) {
+          showToast(`导出日志失败：${String(err)}`);
+        }
+        return;
+      }
+
+      const targetItems = logsState.filter((item) => {
+        if (scope === "active") return !item.archivedAt;
+        if (scope === "archived") return Boolean(item.archivedAt);
+        return true;
+      });
+      if (targetItems.length === 0) {
+        showToast("当前视图没有可导出的操作日志");
+        return;
+      }
+      const blob = new Blob(
+        [
+          JSON.stringify(
+            {
+              app: "Qwitch",
+              exportedAt: new Date().toISOString(),
+              scope,
+              count: targetItems.length,
+              logs: targetItems,
+            },
+            null,
+            2
+          ),
+        ],
+        { type: "application/json" }
+      );
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `qwitch-logs-${scope}-${Date.now()}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      if (archiveAfterExport && scope === "active") {
+        await archiveLogs({ scope: "active" }, `已导出 ${targetItems.length} 条并全部归档`);
+      } else {
+        showToast(`已导出 ${targetItems.length} 条操作日志`);
+      }
+    },
+    [archiveLogs, isTauriRuntime, logScope, logsState, refreshLogs, showToast]
+  );
+
   const dismissBatchProgress = useCallback(() => {
     setBatchProgress(null);
   }, []);
@@ -768,6 +1051,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         adapters,
         accounts,
         logs,
+        logScope,
+        setLogScope,
+        logStats,
         batchProgress,
         switchDialog,
         toastMessage,
@@ -775,6 +1061,8 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         toggleTheme,
         jitterRangeMs,
         setJitterRangeMs,
+        logRetention,
+        setLogRetention,
         customClientPaths,
         clientStatuses,
         saveAppSettings,
@@ -788,6 +1076,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         importAccount,
         recoverAccount,
         deleteAccount,
+        archiveLogs,
+        unarchiveLogs,
+        deleteLogs,
+        exportLogs,
         dismissBatchProgress,
       }}
     >

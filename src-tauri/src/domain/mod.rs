@@ -80,6 +80,14 @@ pub struct AccountSummary {
     pub updated_at: String,
 }
 
+fn default_log_archive_after_days() -> u32 {
+    14
+}
+
+fn default_log_max_active_count() -> u32 {
+    200
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettingsDto {
@@ -88,6 +96,10 @@ pub struct AppSettingsDto {
     pub theme: String,
     #[serde(default)]
     pub custom_client_paths: HashMap<String, String>,
+    #[serde(default = "default_log_archive_after_days")]
+    pub log_archive_after_days: u32,
+    #[serde(default = "default_log_max_active_count")]
+    pub log_max_active_count: u32,
 }
 
 impl Default for AppSettingsDto {
@@ -97,8 +109,18 @@ impl Default for AppSettingsDto {
             jitter_max_ms: 3500,
             theme: "light".to_string(),
             custom_client_paths: HashMap::new(),
+            log_archive_after_days: default_log_archive_after_days(),
+            log_max_active_count: default_log_max_active_count(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogScope {
+    Active,
+    Archived,
+    All,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +134,36 @@ pub struct ActionLogItem {
     pub error_code: Option<UnifiedErrorCode>,
     pub message_sanitized: String,
     pub created_at: String,
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionLogStats {
+    pub active_count: u64,
+    pub archived_count: u64,
+    pub failed_active_count: u64,
+    pub noise_active_count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionLogCleanupRequest {
+    pub scope: Option<LogScope>,
+    pub ids: Option<Vec<i64>>,
+    pub older_than_days: Option<u32>,
+    pub action_type: Option<String>,
+    pub result_status: Option<String>,
+    #[serde(default)]
+    pub redundant_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportLogsResult {
+    pub file_path: String,
+    pub count: usize,
+    pub archived_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

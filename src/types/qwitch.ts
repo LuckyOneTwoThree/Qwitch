@@ -78,7 +78,11 @@ export interface AppSettings {
   jitterMaxMs: number;
   theme: "light" | "dark";
   customClientPaths: Record<string, string>;
+  logArchiveAfterDays?: number;
+  logMaxActiveCount?: number;
 }
+
+export type LogScope = "active" | "archived" | "all";
 
 export interface ActionLogItem {
   id: number;
@@ -89,4 +93,27 @@ export interface ActionLogItem {
   errorCode?: UnifiedErrorCode;
   messageSanitized: string;
   createdAt: string;
+  archivedAt?: string;
+}
+
+export interface ActionLogStats {
+  activeCount: number;
+  archivedCount: number;
+  failedActiveCount: number;
+  noiseActiveCount: number;
+}
+
+export interface ActionLogCleanupRequest {
+  scope?: LogScope;
+  ids?: number[];
+  olderThanDays?: number;
+  actionType?: string;
+  resultStatus?: string;
+  redundantOnly?: boolean;
+}
+
+export interface ExportLogsResult {
+  filePath: string;
+  count: number;
+  archivedCount: number;
 }

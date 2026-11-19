@@ -401,7 +401,7 @@ impl QwitchDatabase {
                      LIMIT 1
                  )
                  WHERE a.tool_id = ?1
-                 ORDER BY julianday(a.created_at) ASC, a.rowid ASC",
+                 ORDER BY a.is_active_on_client DESC, julianday(a.created_at) ASC, a.rowid ASC",
             )?;
             let rows = stmt.query_map(params![tid], map_account_row)?;
             for row in rows {
@@ -420,7 +420,7 @@ impl QwitchDatabase {
                      ORDER BY julianday(q2.fetched_at) DESC, q2.fetched_at DESC, q2.rowid DESC
                      LIMIT 1
                  )
-                 ORDER BY a.tool_id ASC, julianday(a.created_at) ASC, a.rowid ASC",
+                 ORDER BY a.tool_id ASC, a.is_active_on_client DESC, julianday(a.created_at) ASC, a.rowid ASC",
             )?;
             let rows = stmt.query_map([], map_account_row)?;
             for row in rows {
@@ -1386,6 +1386,7 @@ mod tests {
         let db = QwitchDatabase::open(&db_path).expect("open db");
         let master_key = [9u8; 32];
 
+        let mut ids = Vec::new();
         for (uid, label) in [
             ("u_first", "first"),
             ("u_second", "second"),
@@ -1403,8 +1404,11 @@ mod tests {
                     extra: HashMap::new(),
                 },
             };
-            db.upsert_account(&master_key, Some(label), &env)
-                .expect("insert account");
+            ids.push(
+                db.upsert_account(&master_key, Some(label), &env)
+                    .expect("insert account")
+                    .id,
+            );
         }
 
         // 模拟 later 账号被频繁更新：创建顺序与更新顺序相反
@@ -1434,6 +1438,25 @@ mod tests {
             .map(|a| a.label)
             .collect();
         assert_eq!(labels, vec!["first", "second", "third"]);
+
+        // 本机正在使用的账号必须置顶，其余仍按添加时间升序
+        db.set_active_on_client("trae_cn", &ids[1])
+            .expect("set active");
+        let labels_with_active: Vec<String> = db
+            .list_accounts(Some("trae_cn"))
+            .expect("list")
+            .into_iter()
+            .map(|a| a.label)
+            .collect();
+        assert_eq!(labels_with_active, vec!["second", "first", "third"]);
+
+        let all_tools: Vec<String> = db
+            .list_accounts(None)
+            .expect("list all")
+            .into_iter()
+            .map(|a| a.label)
+            .collect();
+        assert_eq!(all_tools, vec!["second", "first", "third"]);
 
         let _ = std::fs::remove_file(&db_path);
     }

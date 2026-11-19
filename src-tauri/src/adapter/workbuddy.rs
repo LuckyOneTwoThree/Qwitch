@@ -1409,9 +1409,7 @@ impl ToolAdapter for WorkBuddyAdapter {
                 code: UnifiedErrorCode::InternalError,
                 message: e.to_string(),
             })?;
-        Ok(crate::adapter::backup_files(
-            &[auth_dir.join(AUTH_FILENAME)],
-        ))
+        crate::adapter::backup_files(&[auth_dir.join(AUTH_FILENAME)])
     }
 }
 

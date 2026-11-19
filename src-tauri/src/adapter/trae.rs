@@ -1349,10 +1349,7 @@ impl ToolAdapter for TraeAdapter {
                     code: UnifiedErrorCode::InternalError,
                     message: e.to_string(),
                 })?;
-        Ok(crate::adapter::backup_files(&[
-            config_dir.join(STORAGE_JSON),
-            config_dir.join(STATE_VSCDB),
-        ]))
+        crate::adapter::backup_files(&[config_dir.join(STORAGE_JSON), config_dir.join(STATE_VSCDB)])
     }
 }
 

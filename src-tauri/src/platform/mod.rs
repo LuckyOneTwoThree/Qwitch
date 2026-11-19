@@ -76,7 +76,8 @@ pub trait PlatformHost: Send + Sync {
         timeout_ms: u64,
     ) -> Result<(), HostError>;
     fn launch_client(&self, executable: &Path, args: &[String]) -> Result<(), HostError>;
-    fn get_or_create_master_key(&self) -> Result<[u8; 32], HostError>;
+    fn get_or_create_master_key(&self, expectation: &KeyExpectation)
+        -> Result<[u8; 32], HostError>;
     fn set_launch_at_login(&self, enabled: bool) -> Result<(), String>;
 }
 
@@ -282,6 +283,7 @@ impl NativePlatformHost {
         file_hex: Option<&str>,
         db_exists: bool,
         keyring_persistent: bool,
+        expectation: &KeyExpectation,
     ) -> Result<([u8; 32], KeySource), HostError> {
         let read_hex_key = |hex_str: &str| -> Option<[u8; 32]> {
             let bytes = hex::decode(hex_str.trim()).ok()?;
@@ -293,23 +295,32 @@ impl NativePlatformHost {
             Some(key)
         };
 
-        // 仅当钥匙串真正跨进程持久化时才信任其中的密钥（mock/进程级存储重启即空）
+        // 收集全部候选（仅当钥匙串真正跨进程持久化时才信任其中的密钥），
+        // 逐个用指纹/密文样本验证后选中匹配者；验证通过前不做任何删除/迁移
+        let mut candidates: Vec<([u8; 32], KeySource)> = Vec::new();
         if keyring_persistent {
             if let Some(key) = keyring_hex.and_then(read_hex_key) {
-                return Ok((key, KeySource::Keyring));
+                candidates.push((key, KeySource::Keyring));
             }
         }
         if let Some(key) = legacy_hex.and_then(read_hex_key) {
-            return Ok((key, KeySource::LegacyKeyring));
+            candidates.push((key, KeySource::LegacyKeyring));
         }
         if let Some(key) = file_hex.and_then(read_hex_key) {
-            return Ok((key, KeySource::File));
+            candidates.push((key, KeySource::File));
         }
+
+        for (key, source) in candidates {
+            if Self::key_matches_expectation(&key, expectation) {
+                return Ok((key, source));
+            }
+        }
+
         if db_exists {
             return Err(HostError::Keyring(
-                "检测到已有 Qwitch 数据库，但系统钥匙串与本地密钥文件均不可用。\
-                 为避免生成新密钥导致既有凭据永久无法解密，已拒绝启动。\
-                 请恢复钥匙串条目或 master.key 备份后重试。"
+                "检测到已有 Qwitch 数据库，但没有可验证匹配的主密钥\
+                 （钥匙串/历史钥匙串/本地密钥文件均缺失或与数据库不匹配）。\
+                 已保留全部现有密钥文件并拒绝启动，请恢复正确的钥匙串条目或 master.key 备份后重试。"
                     .into(),
             ));
         }
@@ -318,13 +329,33 @@ impl NativePlatformHost {
         Ok((key, KeySource::Generated))
     }
 
-    fn get_or_create_master_key_in(data_dir: &Path) -> Result<[u8; 32], HostError> {
-        Self::get_or_create_master_key_with(data_dir, Self::keyring_persistence_ok())
+    fn key_matches_expectation(key: &[u8; 32], expectation: &KeyExpectation) -> bool {
+        if let Some(fp) = expectation.fingerprint.as_deref() {
+            return crate::storage::crypto::key_fingerprint(key) == fp;
+        }
+        if let Some(blob) = expectation.sample_blob.as_deref() {
+            return crate::storage::crypto::decrypt_credential(key, blob).is_ok();
+        }
+        // 无指纹也无样本（首次运行/空库）：接受候选
+        true
     }
 
+    #[cfg(test)]
     fn get_or_create_master_key_with(
         data_dir: &Path,
         persistent: bool,
+    ) -> Result<[u8; 32], HostError> {
+        Self::get_or_create_master_key_with_expectation(
+            data_dir,
+            persistent,
+            &KeyExpectation::default(),
+        )
+    }
+
+    fn get_or_create_master_key_with_expectation(
+        data_dir: &Path,
+        persistent: bool,
+        expectation: &KeyExpectation,
     ) -> Result<[u8; 32], HostError> {
         let key_file = data_dir.join("master.key");
         let db_exists = data_dir.join("qwitch.db").exists();
@@ -374,6 +405,7 @@ impl NativePlatformHost {
             file_hex.as_deref(),
             db_exists,
             persistent,
+            expectation,
         )?;
         let hex_key = hex::encode(key);
 
@@ -386,8 +418,10 @@ impl NativePlatformHost {
                     .unwrap_or(false);
                 if migrated {
                     remove_key_file();
-                } else {
-                    let _ = write_key_file(&key_file, &hex_key);
+                } else if write_key_file(&key_file, &hex_key).is_err() {
+                    return Err(HostError::Keyring(
+                        "历史钥匙串密钥迁移落盘失败，为避免重启后密钥不可用已中止启动".into(),
+                    ));
                 }
             }
             KeySource::File => {
@@ -422,6 +456,14 @@ enum KeySource {
     LegacyKeyring,
     File,
     Generated,
+}
+
+/// 启动时用于验证候选主密钥是否匹配当前数据库的依据：
+/// 优先 key_id 指纹；无指纹的旧库用一条账号密文样本试解密
+#[derive(Debug, Clone, Default)]
+pub struct KeyExpectation {
+    pub fingerprint: Option<String>,
+    pub sample_blob: Option<Vec<u8>>,
 }
 
 #[async_trait]
@@ -685,11 +727,18 @@ impl PlatformHost for NativePlatformHost {
         Ok(())
     }
 
-    fn get_or_create_master_key(&self) -> Result<[u8; 32], HostError> {
+    fn get_or_create_master_key(
+        &self,
+        expectation: &KeyExpectation,
+    ) -> Result<[u8; 32], HostError> {
         let data_dir = self
             .qwitch_data_dir()
             .map_err(|e| HostError::Keyring(format!("无法解析数据目录，不能托管主密钥: {e}")))?;
-        Self::get_or_create_master_key_in(&data_dir)
+        Self::get_or_create_master_key_with_expectation(
+            &data_dir,
+            Self::keyring_persistence_ok(),
+            expectation,
+        )
     }
 
     fn set_launch_at_login(&self, enabled: bool) -> Result<(), String> {
@@ -858,37 +907,102 @@ mod tests {
     fn master_key_resolution_decision_matrix() {
         let key = [9u8; 32];
         let hex_key = hex::encode(key);
+        let wrong_key = [8u8; 32];
+        let wrong_hex = hex::encode(wrong_key);
+        let no_exp = KeyExpectation::default();
         let resolve = |kr: Option<&str>,
                        legacy: Option<&str>,
                        file: Option<&str>,
                        db: bool,
-                       persistent: bool| {
-            NativePlatformHost::resolve_master_key_logic(kr, legacy, file, db, persistent)
+                       persistent: bool,
+                       exp: &KeyExpectation| {
+            NativePlatformHost::resolve_master_key_logic(kr, legacy, file, db, persistent, exp)
         };
 
         // 已有数据库且所有密钥源不可用：绝不生成新密钥
-        assert!(resolve(None, None, None, true, true).is_err());
-        assert!(resolve(None, None, None, true, false).is_err());
+        assert!(resolve(None, None, None, true, true, &no_exp).is_err());
+        assert!(resolve(None, None, None, true, false, &no_exp).is_err());
         // 首次运行才允许生成
-        let (_, src) = resolve(None, None, None, false, true).expect("first run");
+        let (_, src) = resolve(None, None, None, false, true, &no_exp).expect("first run");
         assert_eq!(src, KeySource::Generated);
-        // 持久化钥匙串优先
-        let (k, src) = resolve(Some(&hex_key), None, None, true, true).expect("keyring");
+        // 无验证依据时持久化钥匙串优先
+        let (k, src) = resolve(Some(&hex_key), None, None, true, true, &no_exp).expect("keyring");
         assert_eq!(k, key);
         assert_eq!(src, KeySource::Keyring);
         // 非持久化（mock）钥匙串不可信，即使有值也回退文件
-        let (k, src) = resolve(Some(&hex_key), None, Some(&hex_key), true, false).expect("file");
+        let (k, src) =
+            resolve(Some(&hex_key), None, Some(&hex_key), true, false, &no_exp).expect("file");
         assert_eq!(k, key);
         assert_eq!(src, KeySource::File);
         // 旧版 Quiver 钥匙串迁移
-        let (_, src) = resolve(None, Some(&hex_key), None, true, true).expect("legacy");
+        let (_, src) = resolve(None, Some(&hex_key), None, true, true, &no_exp).expect("legacy");
         assert_eq!(src, KeySource::LegacyKeyring);
         // 文件迁移
-        let (_, src) = resolve(None, None, Some(&hex_key), true, true).expect("file migrate");
+        let (_, src) =
+            resolve(None, None, Some(&hex_key), true, true, &no_exp).expect("file migrate");
         assert_eq!(src, KeySource::File);
         // 非法 hex 长度跳过，落到下一来源
-        let (_, src) = resolve(Some("abcd"), None, Some(&hex_key), true, true).expect("skip bad");
+        let (_, src) =
+            resolve(Some("abcd"), None, Some(&hex_key), true, true, &no_exp).expect("skip bad");
         assert_eq!(src, KeySource::File);
+
+        // 冲突来源：钥匙串是旧钥、文件才是匹配 key_id 的正确钥 → 选文件
+        let fp_exp = KeyExpectation {
+            fingerprint: Some(crate::storage::crypto::key_fingerprint(&key)),
+            sample_blob: None,
+        };
+        let (k, src) = resolve(Some(&wrong_hex), None, Some(&hex_key), true, true, &fp_exp)
+            .expect("conflict picks file");
+        assert_eq!(k, key);
+        assert_eq!(src, KeySource::File);
+
+        // 冲突来源：钥匙串匹配指纹 → 选钥匙串（即使文件也存在）
+        let (k, src) = resolve(Some(&hex_key), None, Some(&wrong_hex), true, true, &fp_exp)
+            .expect("conflict picks keyring");
+        assert_eq!(k, key);
+        assert_eq!(src, KeySource::Keyring);
+
+        // 全部候选都不匹配指纹 → 拒绝（保留文件交由调用方处理）
+        assert!(resolve(
+            Some(&wrong_hex),
+            None,
+            Some(&wrong_hex),
+            true,
+            true,
+            &fp_exp
+        )
+        .is_err());
+
+        // 无指纹旧库：用密文样本验证，只有能解密的候选被选中
+        let env = crate::domain::CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid: "sample_uid".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: crate::domain::CredentialPayload::Token {
+                access_token: "sample-token".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: std::collections::HashMap::new(),
+            },
+        };
+        let blob = crate::storage::crypto::encrypt_credential(&key, &env).expect("encrypt");
+        let sample_exp = KeyExpectation {
+            fingerprint: None,
+            sample_blob: Some(blob),
+        };
+        let (k, src) = resolve(
+            Some(&wrong_hex),
+            None,
+            Some(&hex_key),
+            true,
+            true,
+            &sample_exp,
+        )
+        .expect("sample picks file");
+        assert_eq!(k, key);
+        assert_eq!(src, KeySource::File);
+        assert!(resolve(Some(&wrong_hex), None, None, true, true, &sample_exp).is_err());
     }
 
     struct FakeCredential {
@@ -1040,6 +1154,68 @@ mod tests {
             .get(&format!("{KEYRING_SERVICE}:{KEYRING_MASTER_USER}"))
             .cloned();
         assert_eq!(stored, Some(hex::encode(quiver_key)));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 6：钥匙串残留旧钥 + master.key 是正确钥 + key_id 指向正确钥 ---
+        // 必须选中文件密钥、修复钥匙串，且不得在验证前删除正确文件
+        fake_store().lock().unwrap().clear();
+        let dir = temp_data_dir("conflict");
+        let correct_key = [7u8; 32];
+        let stale_key = [4u8; 32];
+        fake_store().lock().unwrap().insert(
+            format!("{KEYRING_SERVICE}:{KEYRING_MASTER_USER}"),
+            hex::encode(stale_key),
+        );
+        std::fs::write(dir.join("master.key"), hex::encode(correct_key)).unwrap();
+        std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
+        std::fs::write(
+            dir.join("key_id"),
+            crate::storage::crypto::key_fingerprint(&correct_key),
+        )
+        .unwrap();
+        let expectation = KeyExpectation {
+            fingerprint: Some(crate::storage::crypto::key_fingerprint(&correct_key)),
+            sample_blob: None,
+        };
+        let key =
+            NativePlatformHost::get_or_create_master_key_with_expectation(&dir, true, &expectation)
+                .expect("conflict resolves to file key");
+        assert_eq!(key, correct_key);
+        let repaired = fake_store()
+            .lock()
+            .unwrap()
+            .get(&format!("{KEYRING_SERVICE}:{KEYRING_MASTER_USER}"))
+            .cloned();
+        assert_eq!(
+            repaired,
+            Some(hex::encode(correct_key)),
+            "钥匙串应被修复为正确钥"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 7：所有候选都不匹配 → 拒绝启动且保留全部密钥文件 ---
+        fake_store().lock().unwrap().clear();
+        let dir = temp_data_dir("allwrong");
+        fake_store().lock().unwrap().insert(
+            format!("{KEYRING_SERVICE}:{KEYRING_MASTER_USER}"),
+            hex::encode(stale_key),
+        );
+        std::fs::write(dir.join("master.key"), hex::encode(stale_key)).unwrap();
+        std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
+        std::fs::write(
+            dir.join("key_id"),
+            crate::storage::crypto::key_fingerprint(&correct_key),
+        )
+        .unwrap();
+        assert!(
+            NativePlatformHost::get_or_create_master_key_with_expectation(&dir, true, &expectation)
+                .is_err()
+        );
+        assert!(
+            dir.join("master.key").exists(),
+            "不匹配时不得删除任何候选密钥文件"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
 
         // 恢复 mock，避免影响后续可能使用 keyring 的测试

@@ -425,6 +425,19 @@ impl QwitchDatabase {
         Ok((summary, envelope))
     }
 
+    /// 取一条账号密文样本，用于无指纹旧库的主密钥匹配验证
+    pub fn first_credential_blob(&self) -> Option<Vec<u8>> {
+        let conn = self.conn.lock().ok()?;
+        conn.query_row(
+            "SELECT encrypted_credential FROM accounts LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
     /// 启动时校验主密钥指纹；首次生成前必须确认当前密钥能解密既有数据，
     /// 避免把错误密钥"祝福"为合法密钥
     pub fn verify_or_init_key_fingerprint(

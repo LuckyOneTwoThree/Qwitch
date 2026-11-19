@@ -999,7 +999,7 @@ impl ToolAdapter for QoderAdapter {
         if let Some(dot_dir) = Self::qoder_dot_dir() {
             paths.push(dot_dir.join(".qoder-app-status.json"));
         }
-        Ok(crate::adapter::backup_files(&paths))
+        crate::adapter::backup_files(&paths)
     }
 }
 

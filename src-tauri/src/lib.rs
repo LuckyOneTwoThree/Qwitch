@@ -34,13 +34,22 @@ pub fn run() {
             let data_dir = host
                 .qwitch_data_dir()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let master_key = host
-                .get_or_create_master_key()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // 先开库（SQLite 本身不加密），取得指纹/密文样本后再选主密钥，
+            // 确保多来源密钥冲突时不会误删正确的密钥文件
             let db = Arc::new(
                 QwitchDatabase::open(&data_dir.join("qwitch.db"))
                     .map_err(|e| std::io::Error::other(e.to_string()))?,
             );
+            let expectation = platform::KeyExpectation {
+                fingerprint: std::fs::read_to_string(data_dir.join("key_id"))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                sample_blob: db.first_credential_blob(),
+            };
+            let master_key = host
+                .get_or_create_master_key(&expectation)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             db.verify_or_init_key_fingerprint(&data_dir, &master_key)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             let startup_settings = commands::load_app_settings(&db);

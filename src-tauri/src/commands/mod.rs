@@ -539,6 +539,12 @@ pub async fn switch_desktop_account(
         return Err("CLIENT_RUNNING".into());
     }
 
+    // 备份必须在终止客户端之前完成：备份失败时不触碰正在运行的客户端
+    let backup = adapter
+        .backup_session(state.host.as_ref())
+        .await
+        .map_err(|e| format!("备份当前客户端会话失败（客户端未做任何改动）: {e}"))?;
+
     if running {
         let _ = app.emit(
             "qwitch://switch-progress",
@@ -562,14 +568,19 @@ pub async fn switch_desktop_account(
         },
     );
 
-    let backup = adapter
-        .backup_session(state.host.as_ref())
-        .await
-        .map_err(|e| format!("备份当前客户端会话失败: {e}"))?;
-
     if let Err(e) = adapter.apply_session(state.host.as_ref(), &cred).await {
         let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
-        return Err(format!("写入新会话失败，已恢复原会话: {e}"));
+        if running {
+            let _ = state.host.launch_client(&exe, &[]);
+        }
+        return Err(format!(
+            "写入新会话失败，已恢复原会话{}: {e}",
+            if running {
+                "并尝试重新拉起原客户端"
+            } else {
+                ""
+            }
+        ));
     }
 
     let _ = app.emit(
@@ -582,18 +593,38 @@ pub async fn switch_desktop_account(
 
     if let Err(e) = state.host.launch_client(&exe, &[]) {
         let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
-        return Err(format!("拉起客户端失败，已恢复原会话: {e}"));
+        return Err(format!(
+            "拉起客户端失败，已恢复原会话（客户端当前处于关闭状态，请手动启动）: {e}"
+        ));
     }
 
-    // 启动存活探测：spawn 成功不等于客户端真正起来
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    if !state
-        .host
-        .is_client_running(&summary.tool_id)
-        .unwrap_or(false)
-    {
+    // 启动存活轮询：500ms 间隔、总超时 15s、连续两次探测存活才确认，
+    // 避免慢启动客户端被固定短延时误判失败而回滚正在启动的会话
+    let mut alive = false;
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if state
+            .host
+            .is_client_running(&summary.tool_id)
+            .unwrap_or(false)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if state
+                .host
+                .is_client_running(&summary.tool_id)
+                .unwrap_or(false)
+            {
+                alive = true;
+                break;
+            }
+        }
+    }
+    if !alive {
         let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
-        return Err("客户端启动后未能存活，已恢复原会话快照".into());
+        return Err(
+            "客户端启动后 15 秒内未确认存活，已恢复原会话快照；客户端可能仍在启动或已退出，请手动检查"
+                .into(),
+        );
     }
 
     state

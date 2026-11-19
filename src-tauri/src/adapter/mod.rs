@@ -57,13 +57,22 @@ pub struct SessionBackup {
     pub files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
 }
 
-pub fn backup_files(paths: &[std::path::PathBuf]) -> SessionBackup {
-    SessionBackup {
-        files: paths
-            .iter()
-            .map(|p| (p.clone(), std::fs::read(p).ok()))
-            .collect(),
+pub fn backup_files(paths: &[std::path::PathBuf]) -> Result<SessionBackup, AdapterError> {
+    let mut files = Vec::new();
+    for p in paths {
+        match std::fs::read(p) {
+            Ok(bytes) => files.push((p.clone(), Some(bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => files.push((p.clone(), None)),
+            // 读取失败 ≠ 文件不存在：中止切号，避免回滚时误删原会话文件
+            Err(e) => {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("备份会话文件失败 {}：{e}，已中止切号", p.display()),
+                });
+            }
+        }
     }
+    Ok(SessionBackup { files })
 }
 
 pub fn restore_files(backup: &SessionBackup) -> Result<(), AdapterError> {
@@ -223,7 +232,7 @@ mod tests {
         let absent = root.join("state.vscdb");
         std::fs::write(&existing, b"original-session").unwrap();
 
-        let backup = backup_files(&[existing.clone(), absent.clone()]);
+        let backup = backup_files(&[existing.clone(), absent.clone()]).expect("backup");
         assert_eq!(
             backup.files[0].1.as_deref(),
             Some(b"original-session".as_slice())
@@ -238,6 +247,24 @@ mod tests {
         assert_eq!(std::fs::read(&existing).unwrap(), b"original-session");
         assert!(!absent.exists(), "原本不存在的文件回滚后应删除");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_aborts_on_unreadable_existing_file_instead_of_marking_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("qwitch_backup_perm_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let locked = root.join("storage.json");
+        std::fs::write(&locked, b"original").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // 存在但不可读：必须报错中止，绝不能记为 None（回滚会误删）
+        assert!(backup_files(std::slice::from_ref(&locked)).is_err());
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 }

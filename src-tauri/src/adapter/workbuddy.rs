@@ -148,7 +148,11 @@ impl WorkBuddyAdapter {
                 version: "0.1.0".to_string(),
                 is_builtin: true,
                 capabilities: AdapterCapabilities {
-                    auth_methods: vec![AuthMethod::LocalImport, AuthMethod::WebviewOauth],
+                    auth_methods: vec![
+                        AuthMethod::LocalImport,
+                        AuthMethod::WebviewOauth,
+                        AuthMethod::TokenPaste,
+                    ],
                     supports_quota_query: true,
                     supports_daily_claim: true,
                     supports_client_switch: true,
@@ -167,7 +171,7 @@ impl WorkBuddyAdapter {
 
         let uid = val
             .pointer("/account/uid")
-            .and_then(Self::json_uid_to_string);
+            .and_then(crate::adapter::common::json_uid_to_string);
         let access_token = val.pointer("/auth/accessToken");
 
         if uid.is_none() || access_token.is_none() {
@@ -345,25 +349,7 @@ impl WorkBuddyAdapter {
             .or_else(|| body.get("message"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let lower = msg.to_lowercase();
-        msg.contains("已签")
-            || msg.contains("重复领取")
-            || lower.contains("already claimed")
-            || lower.contains("already checked")
-            || lower.contains("checked in")
-    }
-
-    fn json_uid_to_string(v: &Value) -> Option<String> {
-        if let Some(s) = v.as_str() {
-            let t = s.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
-        if let Some(n) = v.as_i64() {
-            return Some(n.to_string());
-        }
-        v.as_u64().map(|n| n.to_string())
+        crate::adapter::common::is_idempotent_claimed_phrase(msg)
     }
 
     fn format_display_identity(
@@ -444,9 +430,13 @@ impl WorkBuddyAdapter {
     ) -> Result<Option<CredentialEnvelope>, String> {
         let http = shared_http_client();
 
-        let token_url = format!("{WEB_AUTH_ORIGIN}/v2/plugin/auth/token?state={state_token}");
+        let token_url = reqwest::Url::parse_with_params(
+            &format!("{WEB_AUTH_ORIGIN}/v2/plugin/auth/token"),
+            &[("state", state_token)],
+        )
+        .map_err(|e| format!("构造 WorkBuddy Token 轮询 URL 失败: {e}"))?;
         let resp = http
-            .get(&token_url)
+            .get(token_url)
             .header(ACCEPT, "application/json")
             .header(USER_AGENT, "WorkBuddy")
             .header("X-No-Authorization", "true")
@@ -477,10 +467,14 @@ impl WorkBuddyAdapter {
         };
 
         let mut account_val = Value::Null;
+        let acc_url = reqwest::Url::parse_with_params(
+            &format!("{WEB_AUTH_ORIGIN}/v2/plugin/login/account"),
+            &[("state", state_token)],
+        )
+        .map_err(|e| format!("构造 WorkBuddy 账号查询 URL 失败: {e}"))?;
         for _ in 0..4 {
-            let acc_url = format!("{WEB_AUTH_ORIGIN}/v2/plugin/login/account?state={state_token}");
             if let Ok(acc_resp) = http
-                .get(&acc_url)
+                .get(acc_url.clone())
                 .header(ACCEPT, "application/json")
                 .header(USER_AGENT, "WorkBuddy")
                 .header(AUTHORIZATION, format!("Bearer {access_token}"))
@@ -497,7 +491,10 @@ impl WorkBuddyAdapter {
                         continue;
                     }
                     let d = dig_data(&acc_body);
-                    if d.get("uid").and_then(Self::json_uid_to_string).is_some() {
+                    if d.get("uid")
+                        .and_then(crate::adapter::common::json_uid_to_string)
+                        .is_some()
+                    {
                         account_val = d.clone();
                         break;
                     }
@@ -541,7 +538,7 @@ impl WorkBuddyAdapter {
 
         let uid = account_val
             .get("uid")
-            .and_then(Self::json_uid_to_string)
+            .and_then(crate::adapter::common::json_uid_to_string)
             .ok_or_else(|| "WorkBuddy 授权成功但未获取到账号 UID".to_string())?;
 
         let nick = account_val
@@ -613,10 +610,10 @@ impl WorkBuddyAdapter {
                     message: format!("快照 Base64 解码失败: {e}"),
                 })?;
                 let sess = Self::parse_session_json(&raw)?;
-                let uid = sess["account"]["uid"]
-                    .as_str()
-                    .unwrap_or(&cred.uid)
-                    .to_string();
+                let uid = sess
+                    .pointer("/account/uid")
+                    .and_then(crate::adapter::common::json_uid_to_string)
+                    .unwrap_or_else(|| cred.uid.clone());
                 let raw_endpoint = sess
                     .pointer("/auth/endpoint")
                     .and_then(|v| v.as_str())
@@ -840,8 +837,20 @@ impl WorkBuddyAdapter {
             .send()
             .await
         {
-            if sum_resp.status().is_success() {
+            let sum_status = sum_resp.status();
+            if matches!(sum_status.as_u16(), 401 | 403 | 429) {
+                return Err(Self::map_http_status(sum_status, "查询 WorkBuddy 额度汇总"));
+            }
+            if sum_status.is_success() {
                 if let Ok(sum_body) = sum_resp.json::<Value>().await {
+                    if let Some(code) = sum_body.get("code").and_then(|v| v.as_i64()) {
+                        if let Some(err) = crate::adapter::common::map_business_code(
+                            code,
+                            "查询 WorkBuddy 额度汇总",
+                        ) {
+                            return Err(err);
+                        }
+                    }
                     let sdata = dig_data(&sum_body);
                     plan_name = sdata
                         .get("SubscriptionPackageName")
@@ -980,10 +989,13 @@ impl ToolAdapter for WorkBuddyAdapter {
 
         let bytes = raw_bytes.unwrap_or_default();
         let sess = Self::parse_session_json(&bytes)?;
-        let uid = sess["account"]["uid"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        let uid = sess
+            .pointer("/account/uid")
+            .and_then(crate::adapter::common::json_uid_to_string)
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "WorkBuddy 会话缺少有效的 account.uid".into(),
+            })?;
 
         let mut files = HashMap::new();
         files.insert(AUTH_FILENAME.to_string(), BASE64.encode(&bytes));
@@ -1086,28 +1098,54 @@ impl ToolAdapter for WorkBuddyAdapter {
 
         if trimmed.starts_with('{') {
             if let Ok(sess) = Self::parse_session_json(trimmed.as_bytes()) {
-                let uid = sess["account"]["uid"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let email = sess
-                    .pointer("/account/email")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let name = sess
+                let uid = sess
+                    .pointer("/account/uid")
+                    .and_then(crate::adapter::common::json_uid_to_string)
+                    .ok_or_else(|| AdapterError::Unified {
+                        code: UnifiedErrorCode::InvalidCredential,
+                        message: "WorkBuddy 会话缺少有效的 account.uid".into(),
+                    })?;
+                let nick = sess
                     .pointer("/account/nickName")
                     .or_else(|| sess.pointer("/account/nickname"))
                     .or_else(|| sess.pointer("/account/name"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
+                    .and_then(|v| v.as_str());
+                let phone = sess
+                    .pointer("/account/phoneNumber")
+                    .or_else(|| sess.pointer("/account/phone_number"))
+                    .and_then(|v| v.as_str());
+                let email = sess.pointer("/account/email").and_then(|v| v.as_str());
+                let (name, masked_contact) = Self::format_display_identity(nick, phone, email);
+
                 let mut files = HashMap::new();
                 files.insert(AUTH_FILENAME.to_string(), BASE64.encode(trimmed.as_bytes()));
+                if let Some(tok) = sess
+                    .pointer("/auth/accessToken")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    files.insert(
+                        DECRYPTED_TOKEN_FILE.to_string(),
+                        BASE64.encode(tok.as_bytes()),
+                    );
+                }
+                if let Some(rt) = sess
+                    .pointer("/auth/refreshToken")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    files.insert(
+                        "decrypted_refresh_token.txt".to_string(),
+                        BASE64.encode(rt.as_bytes()),
+                    );
+                }
                 return Ok(CredentialEnvelope {
                     tool_id: "workbuddy".to_string(),
                     uid,
                     display_name: name,
-                    display_email: email,
+                    display_email: masked_contact,
                     payload: CredentialPayload::LocalSnapshot { files },
                 });
             }
@@ -1120,6 +1158,8 @@ impl ToolAdapter for WorkBuddyAdapter {
                 .get("token")
                 .or_else(|| val.get("accessToken"))
                 .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .ok_or_else(|| AdapterError::Unified {
                     code: UnifiedErrorCode::InvalidCredential,
                     message: "JSON 中缺少 token/accessToken 字段".into(),
@@ -1127,14 +1167,15 @@ impl ToolAdapter for WorkBuddyAdapter {
             let uid = val
                 .get("userId")
                 .or_else(|| val.get("uid"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .and_then(crate::adapter::common::json_uid_to_string)
                 .unwrap_or_else(|| {
-                    format!("wb_oauth_{}", token.chars().take(12).collect::<String>())
+                    crate::adapter::common::hash_fallback_uid("wb_oauth", token.as_bytes())
                 });
             let email = val
                 .get("email")
                 .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             let name = val
                 .get("name")
@@ -1160,13 +1201,21 @@ impl ToolAdapter for WorkBuddyAdapter {
             });
         }
 
+        let clean_token = trimmed.strip_prefix("Bearer ").unwrap_or(trimmed).trim();
+        if clean_token.is_empty() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "输入凭据不能为空".into(),
+            });
+        }
+
         Ok(CredentialEnvelope {
             tool_id: "workbuddy".to_string(),
-            uid: format!("wb_manual_{}", trimmed.chars().take(12).collect::<String>()),
+            uid: crate::adapter::common::hash_fallback_uid("wb_manual", clean_token.as_bytes()),
             display_name: None,
             display_email: None,
             payload: CredentialPayload::Token {
-                access_token: trimmed.to_string(),
+                access_token: clean_token.to_string(),
                 refresh_token: None,
                 expires_at: None,
                 extra: HashMap::new(),
@@ -1261,15 +1310,20 @@ impl ToolAdapter for WorkBuddyAdapter {
 
         // 幂等已签识别必须先于通用 HTTP 错误：HTTP 400 + code 10001 是契约内的"今日已签"
         if Self::checkin_claim_idempotent(status.as_u16(), &body) {
-            let refreshed = self
+            let mut refreshed = self
                 .fetch_quota_and_checkin(&endpoint, &headers)
                 .await
-                .ok()
-                .or(Some(current));
+                .unwrap_or_else(|_| QuotaSnapshot {
+                    plan_name: current.plan_name.clone(),
+                    claim_status: ClaimStatus::Claimed,
+                    buckets: current.buckets.clone(),
+                    fetched_at: Utc::now().to_rfc3339(),
+                });
+            refreshed.claim_status = ClaimStatus::Claimed;
             return Ok(ClaimResult {
                 claimed: false,
                 reward_summary: "今日已签过".into(),
-                updated_quota: refreshed,
+                updated_quota: Some(refreshed),
             });
         }
 
@@ -1353,48 +1407,34 @@ impl ToolAdapter for WorkBuddyAdapter {
                     .unwrap_or(DEFAULT_ENDPOINT);
                 let endpoint = Self::validate_endpoint(raw_endpoint)?;
 
-                let mut root = if target.is_file() {
-                    std::fs::read(&target)
-                        .ok()
-                        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
-                        .filter(|v| v.is_object())
-                        .unwrap_or_else(|| serde_json::json!({}))
-                } else {
-                    serde_json::json!({})
-                };
+                // 不得原地修改上一账号的 workbuddy-desktop.info，必须全新构建目标账号会话，
+                // 避免残留旧账号的 enterpriseId / refreshToken / accounts 导致串号
+                let mut account_map = serde_json::Map::new();
+                account_map.insert("uid".to_string(), Value::String(cred.uid.clone()));
+                if let Some(email) = cred.display_email.as_ref().filter(|s| !s.trim().is_empty()) {
+                    account_map.insert("email".to_string(), Value::String(email.clone()));
+                }
+                if let Some(name) = cred.display_name.as_ref().filter(|s| !s.trim().is_empty()) {
+                    account_map.insert("nickName".to_string(), Value::String(name.clone()));
+                }
+                let account_val = Value::Object(account_map);
 
-                if !root.get("account").is_some_and(|v| v.is_object()) {
-                    root["account"] = serde_json::json!({});
-                }
-                if !root.get("auth").is_some_and(|v| v.is_object()) {
-                    root["auth"] = serde_json::json!({});
+                let mut auth_map = serde_json::Map::new();
+                auth_map.insert(
+                    "accessToken".to_string(),
+                    Value::String(access_token.clone()),
+                );
+                auth_map.insert("endpoint".to_string(), Value::String(endpoint));
+                if let Some(rt) = refresh_token.as_ref().filter(|s| !s.trim().is_empty()) {
+                    auth_map.insert("refreshToken".to_string(), Value::String(rt.clone()));
                 }
 
-                if let Some(acc_obj) = root.get_mut("account").and_then(|v| v.as_object_mut()) {
-                    acc_obj.insert("uid".to_string(), Value::String(cred.uid.clone()));
-                    if let Some(email) =
-                        cred.display_email.as_ref().filter(|s| !s.trim().is_empty())
-                    {
-                        acc_obj.insert("email".to_string(), Value::String(email.clone()));
-                    }
-                    if let Some(name) = cred.display_name.as_ref().filter(|s| !s.trim().is_empty())
-                    {
-                        acc_obj.insert("nickName".to_string(), Value::String(name.clone()));
-                    }
-                }
-                if let Some(auth_obj) = root.get_mut("auth").and_then(|v| v.as_object_mut()) {
-                    auth_obj.insert(
-                        "accessToken".to_string(),
-                        Value::String(access_token.clone()),
-                    );
-                    if let Some(rt) = refresh_token.as_ref().filter(|s| !s.trim().is_empty()) {
-                        auth_obj.insert("refreshToken".to_string(), Value::String(rt.clone()));
-                    }
-                    if !auth_obj.contains_key("endpoint") {
-                        auth_obj
-                            .insert("endpoint".to_string(), Value::String(endpoint.to_string()));
-                    }
-                }
+                let root = serde_json::json!({
+                    "account": account_val.clone(),
+                    "auth": Value::Object(auth_map),
+                    "accounts": [account_val.clone()],
+                    "allAccounts": [account_val]
+                });
 
                 serde_json::to_vec_pretty(&root).map_err(|e| AdapterError::Unified {
                     code: UnifiedErrorCode::InternalError,
@@ -1518,5 +1558,138 @@ mod tests {
             500,
             &server_err
         ));
+    }
+
+    struct TempDirHost {
+        root: PathBuf,
+    }
+
+    #[async_trait]
+    impl PlatformHost for TempDirHost {
+        fn qwitch_data_dir(&self) -> Result<PathBuf, crate::platform::HostError> {
+            Ok(self.root.clone())
+        }
+        fn client_config_dir(&self, _tool_id: &str) -> Result<PathBuf, crate::platform::HostError> {
+            Ok(self.root.clone())
+        }
+        fn detect_client_executable(&self, _tool_id: &str) -> Option<PathBuf> {
+            None
+        }
+        fn is_client_running(&self, _tool_id: &str) -> Result<bool, crate::platform::HostError> {
+            Ok(false)
+        }
+        async fn terminate_client_gracefully(
+            &self,
+            _tool_id: &str,
+            _timeout_ms: u64,
+        ) -> Result<(), crate::platform::HostError> {
+            Ok(())
+        }
+        fn launch_client(
+            &self,
+            _executable: &Path,
+            _args: &[String],
+        ) -> Result<(), crate::platform::HostError> {
+            Ok(())
+        }
+        fn get_or_create_master_key(
+            &self,
+            _expectation: &crate::platform::KeyExpectation,
+        ) -> Result<[u8; 32], crate::platform::HostError> {
+            Ok([0u8; 32])
+        }
+        fn set_launch_at_login(&self, _enabled: bool) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn numeric_uid_hashed_jwt_plaintext_session_and_clean_apply_session() {
+        let adapter = WorkBuddyAdapter::new();
+        assert!(adapter
+            .manifest()
+            .capabilities
+            .auth_methods
+            .contains(&AuthMethod::TokenPaste));
+
+        // 1. 数字型 UID 解析（local_import + parse_manual_token）
+        let dir = std::env::temp_dir().join(format!("qwitch_wb_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sess_json = serde_json::json!({
+            "account": { "uid": 100200300, "phoneNumber": "13812345678" },
+            "auth": { "accessToken": "plain-wb-token-xyz", "refreshToken": "plain-wb-rt" }
+        });
+        std::fs::write(
+            dir.join(AUTH_FILENAME),
+            serde_json::to_vec(&sess_json).unwrap(),
+        )
+        .unwrap();
+        let host = TempDirHost { root: dir.clone() };
+        let imported = adapter
+            .import_from_local(&host)
+            .await
+            .expect("local import");
+        assert_eq!(imported.uid, "100200300");
+        assert_eq!(imported.capability_flags(), (true, true));
+
+        // 2. 手动粘贴明文会话 JSON 写入 decrypted_token.txt，has_api_token == true
+        let pasted_sess = adapter
+            .parse_manual_token(&sess_json.to_string())
+            .await
+            .expect("paste session");
+        assert_eq!(pasted_sess.uid, "100200300");
+        assert_eq!(pasted_sess.capability_flags(), (true, true));
+
+        // 3. 相同前缀的 JWT 生成不同哈希 UID 且不泄露原始前缀
+        let jwt_a = "eyJhbGciOiJIUzI1NiJ9.payload_one_aaa";
+        let jwt_b = "eyJhbGciOiJIUzI1NiJ9.payload_two_bbb";
+        let env_a = adapter.parse_manual_token(jwt_a).await.unwrap();
+        let env_b = adapter.parse_manual_token(jwt_b).await.unwrap();
+        assert_ne!(env_a.uid, env_b.uid);
+        assert!(!env_a.uid.contains("eyJhbGciOiJI"));
+
+        // 4. Token 模式切号不得残留上一账号的 enterpriseId / refreshToken / accounts
+        let stale_prev = serde_json::json!({
+            "account": { "uid": "old_uid", "enterpriseId": "ent-999", "phoneNumber": "13900001111" },
+            "auth": { "accessToken": "old-tok", "refreshToken": { "$wbEncrypted": 1, "envelope": "stale" } },
+            "accounts": [{ "uid": "old_uid" }],
+            "allAccounts": [{ "uid": "old_uid" }]
+        });
+        std::fs::write(
+            dir.join(AUTH_FILENAME),
+            serde_json::to_vec(&stale_prev).unwrap(),
+        )
+        .unwrap();
+        let target_cred = CredentialEnvelope {
+            tool_id: "workbuddy".to_string(),
+            uid: "new_uid_777".to_string(),
+            display_name: Some("NewUser".to_string()),
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "new-tok-777".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        adapter
+            .apply_session(&host, &target_cred)
+            .await
+            .expect("apply session");
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(dir.join(AUTH_FILENAME)).unwrap()).unwrap();
+        assert_eq!(
+            written.pointer("/account/uid").and_then(|v| v.as_str()),
+            Some("new_uid_777")
+        );
+        assert!(written.pointer("/account/enterpriseId").is_none());
+        assert!(written.pointer("/account/phoneNumber").is_none());
+        assert!(written.pointer("/auth/refreshToken").is_none());
+        assert_eq!(
+            written.pointer("/accounts/0/uid").and_then(|v| v.as_str()),
+            Some("new_uid_777")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

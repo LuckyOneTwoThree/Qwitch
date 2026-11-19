@@ -9,7 +9,7 @@ use crate::adapter::{
 };
 use crate::domain::{
     AccountStatus, AccountSummary, ActionLogCleanupRequest, ActionLogItem, ActionLogStats,
-    AppSettingsDto, ExportLogsResult, LogScope, QuotaSnapshot, UnifiedErrorCode,
+    AppSettingsDto, AuthMethod, ExportLogsResult, LogScope, QuotaSnapshot, UnifiedErrorCode,
 };
 use crate::platform::PlatformHost;
 use crate::scheduler::{AntiRiskScheduler, JitterConfig};
@@ -147,6 +147,8 @@ pub fn list_external_adapters(
             })
             .collect();
     list.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut seen = std::collections::HashSet::with_capacity(list.len());
+    list.retain(|item| seen.insert(item.id.clone()));
     Ok(list)
 }
 
@@ -273,10 +275,10 @@ async fn record_import_quota_check(
     adapter: &Arc<dyn ToolAdapter>,
     summary: &AccountSummary,
     cred: &crate::domain::CredentialEnvelope,
-    scheduler: &Arc<AntiRiskScheduler>,
 ) {
-    // 导入/授权完成后的查额同样进入串行队列，不得与批量任务并发请求平台
-    let _queue_guard = scheduler.queue_lock().lock_owned().await;
+    if !summary.has_api_token || !adapter.manifest().capabilities.supports_quota_query {
+        return;
+    }
     match adapter.inspect_quota(cred).await {
         Ok(snapshot) => {
             let _ = db.save_quota_snapshot(&summary.id, &snapshot);
@@ -304,6 +306,37 @@ async fn record_import_quota_check(
     }
 }
 
+async fn schedule_import_quota_check(
+    app: &AppHandle,
+    db: &Arc<QwitchDatabase>,
+    adapter: &Arc<dyn ToolAdapter>,
+    summary: &AccountSummary,
+    cred: &crate::domain::CredentialEnvelope,
+    scheduler: &Arc<AntiRiskScheduler>,
+) {
+    if !summary.has_api_token || !adapter.manifest().capabilities.supports_quota_query {
+        return;
+    }
+    if let Ok(guard) = scheduler.queue_lock().try_lock_owned() {
+        record_import_quota_check(db, adapter, summary, cred).await;
+        drop(guard);
+        return;
+    }
+
+    let app_bg = app.clone();
+    let db_bg = Arc::clone(db);
+    let adapter_bg = Arc::clone(adapter);
+    let summary_bg = summary.clone();
+    let cred_bg = cred.clone();
+    let scheduler_bg = Arc::clone(scheduler);
+    tokio::spawn(async move {
+        let _guard = scheduler_bg.queue_lock().lock_owned().await;
+        record_import_quota_check(&db_bg, &adapter_bg, &summary_bg, &cred_bg).await;
+        let _ = app_bg.emit("qwitch://account-updated", &summary_bg.id);
+        let _ = app_bg.emit("qwitch://logs-updated", ());
+    });
+}
+
 #[tauri::command]
 pub async fn import_local_account(
     app: AppHandle,
@@ -316,11 +349,25 @@ pub async fn import_local_account(
         .adapters
         .get(&tool_id)
         .ok_or_else(|| format!("适配器 {tool_id} 尚未注册"))?;
+    if !adapter
+        .manifest()
+        .capabilities
+        .auth_methods
+        .contains(&AuthMethod::LocalImport)
+    {
+        return Err(format!("适配器 {tool_id} 不支持本机导入"));
+    }
 
     let envelope = adapter
         .import_from_local(state.host.as_ref())
         .await
         .map_err(|e| e.to_string())?;
+    if envelope.tool_id != tool_id {
+        return Err(format!(
+            "适配器返回工具标识不匹配：期望 {tool_id}，实际 {}",
+            envelope.tool_id
+        ));
+    }
 
     let target_id = target_account_id.filter(|s| !s.trim().is_empty());
     let summary = if let Some(ref acc_id) = target_id {
@@ -342,7 +389,8 @@ pub async fn import_local_account(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    record_import_quota_check(
+    schedule_import_quota_check(
+        &app,
         &state.db,
         adapter,
         &summary,
@@ -390,11 +438,25 @@ pub async fn add_account_by_token(
         .adapters
         .get(&tool_id)
         .ok_or_else(|| format!("适配器 {tool_id} 尚未注册"))?;
+    if !adapter
+        .manifest()
+        .capabilities
+        .auth_methods
+        .contains(&AuthMethod::TokenPaste)
+    {
+        return Err(format!("适配器 {tool_id} 不支持凭据粘贴导入"));
+    }
 
     let envelope = adapter
         .parse_manual_token(&raw_input)
         .await
         .map_err(|e| e.to_string())?;
+    if envelope.tool_id != tool_id {
+        return Err(format!(
+            "适配器返回工具标识不匹配：期望 {tool_id}，实际 {}",
+            envelope.tool_id
+        ));
+    }
 
     let target_id = target_account_id.filter(|s| !s.trim().is_empty());
     let summary = if let Some(ref acc_id) = target_id {
@@ -416,7 +478,8 @@ pub async fn add_account_by_token(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    record_import_quota_check(
+    schedule_import_quota_check(
+        &app,
         &state.db,
         adapter,
         &summary,
@@ -464,6 +527,9 @@ pub async fn refresh_account_quota(
         .adapters
         .get(&summary.tool_id)
         .ok_or_else(|| format!("适配器 {} 尚未注册", summary.tool_id))?;
+    if !adapter.manifest().capabilities.supports_quota_query {
+        return Err(format!("适配器 {} 不支持额度查询", summary.tool_id));
+    }
 
     // 单账号查额同样进入串行队列，批量运行中排队等待而非并发请求平台
     let _queue_guard = state.scheduler.queue_lock().lock_owned().await;
@@ -474,6 +540,14 @@ pub async fn refresh_account_quota(
                 .db
                 .save_quota_snapshot(&summary.id, &snapshot)
                 .map_err(|e| format!("额度已查询但落盘失败: {e}"))?;
+            if matches!(
+                summary.status,
+                AccountStatus::Expired | AccountStatus::RiskPaused
+            ) {
+                let _ = state
+                    .db
+                    .update_account_status(&summary.id, AccountStatus::Active);
+            }
             let _ = state.db.append_action_log(
                 Some(&summary.id),
                 &summary.tool_id,
@@ -542,6 +616,39 @@ impl Drop for SwitchFlagGuard {
     }
 }
 
+fn log_switch_failure(
+    db: &QwitchDatabase,
+    app: &AppHandle,
+    summary: &AccountSummary,
+    code: UnifiedErrorCode,
+    message: &str,
+) {
+    let _ = db.append_action_log(
+        Some(&summary.id),
+        &summary.tool_id,
+        "switch",
+        "failed",
+        Some(&code),
+        &format!(
+            "{} ({}) 切号失败：{message}",
+            summary.label, summary.uid_masked
+        ),
+    );
+    let _ = app.emit("qwitch://logs-updated", ());
+}
+
+async fn check_client_running_async(
+    host: &Arc<dyn PlatformHost>,
+    tool_id: &str,
+) -> Result<bool, String> {
+    let h = Arc::clone(host);
+    let tid = tool_id.to_string();
+    tokio::task::spawn_blocking(move || h.is_client_running(&tid))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn switch_desktop_account(
     app: AppHandle,
@@ -560,20 +667,48 @@ pub async fn switch_desktop_account(
         .adapters
         .get(&summary.tool_id)
         .ok_or_else(|| format!("适配器 {} 尚未注册", summary.tool_id))?;
+    if !adapter.manifest().capabilities.supports_client_switch {
+        let msg = format!("适配器 {} 不支持桌面端切号", summary.tool_id);
+        log_switch_failure(
+            &state.db,
+            &app,
+            &summary,
+            UnifiedErrorCode::UnsupportedCapability,
+            &msg,
+        );
+        return Err(msg);
+    }
 
     let settings = load_app_settings(&state.db);
-    let exe = resolve_client_executable(state.host.as_ref(), &settings, &summary.tool_id)
-        .ok_or_else(|| {
-            format!(
-                "未检测到 {} 客户端安装路径，请在设置中配置自定义路径后再切换",
-                summary.tool_id
-            )
-        })?;
+    let Some(exe) = resolve_client_executable(state.host.as_ref(), &settings, &summary.tool_id)
+    else {
+        let msg = format!(
+            "未检测到 {} 客户端安装路径，请在设置中配置自定义路径后再切换",
+            summary.tool_id
+        );
+        log_switch_failure(
+            &state.db,
+            &app,
+            &summary,
+            UnifiedErrorCode::ClientNotFound,
+            &msg,
+        );
+        return Err(msg);
+    };
 
-    let running = state
-        .host
-        .is_client_running(&summary.tool_id)
-        .map_err(|e| e.to_string())?;
+    let running = match check_client_running_async(&state.host, &summary.tool_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            log_switch_failure(
+                &state.db,
+                &app,
+                &summary,
+                UnifiedErrorCode::InternalError,
+                &e,
+            );
+            return Err(e);
+        }
+    };
 
     if running && !force_kill {
         return Err("CLIENT_RUNNING".into());
@@ -587,11 +722,21 @@ pub async fn switch_desktop_account(
                 phase: "closing".into(),
             },
         );
-        state
+        if let Err(e) = state
             .host
             .terminate_client_gracefully(&summary.tool_id, 5000)
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            let msg = e.to_string();
+            log_switch_failure(
+                &state.db,
+                &app,
+                &summary,
+                UnifiedErrorCode::ClientRunning,
+                &msg,
+            );
+            return Err(msg);
+        }
     }
 
     // 终止后备份权威会话（避免读到运行中半写文件）；备份失败则重拉原客户端
@@ -601,14 +746,22 @@ pub async fn switch_desktop_account(
             if running {
                 let _ = state.host.launch_client(&exe, &[]);
             }
-            return Err(format!(
+            let msg = format!(
                 "备份客户端会话失败{}: {e}",
                 if running {
                     "，已尝试重新拉起原客户端"
                 } else {
                     "（客户端未做任何改动）"
                 }
-            ));
+            );
+            log_switch_failure(
+                &state.db,
+                &app,
+                &summary,
+                UnifiedErrorCode::InternalError,
+                &msg,
+            );
+            return Err(msg);
         }
     };
 
@@ -625,7 +778,15 @@ pub async fn switch_desktop_account(
         if running {
             let _ = state.host.launch_client(&exe, &[]);
         }
-        return Err(format!("写入新会话失败，{note}: {e}"));
+        let msg = format!("写入新会话失败，{note}: {e}");
+        log_switch_failure(
+            &state.db,
+            &app,
+            &summary,
+            UnifiedErrorCode::InternalError,
+            &msg,
+        );
+        return Err(msg);
     }
 
     let _ = app.emit(
@@ -638,9 +799,15 @@ pub async fn switch_desktop_account(
 
     if let Err(e) = state.host.launch_client(&exe, &[]) {
         let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
-        return Err(format!(
-            "拉起客户端失败，{note}（客户端当前处于关闭状态，请手动启动）: {e}"
-        ));
+        let msg = format!("拉起客户端失败，{note}（客户端当前处于关闭状态，请手动启动）: {e}");
+        log_switch_failure(
+            &state.db,
+            &app,
+            &summary,
+            UnifiedErrorCode::InternalError,
+            &msg,
+        );
+        return Err(msg);
     }
 
     // 启动存活轮询：500ms 间隔、总超时 15s、连续两次探测存活才确认，
@@ -648,15 +815,13 @@ pub async fn switch_desktop_account(
     let mut alive = false;
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if state
-            .host
-            .is_client_running(&summary.tool_id)
+        if check_client_running_async(&state.host, &summary.tool_id)
+            .await
             .unwrap_or(false)
         {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if state
-                .host
-                .is_client_running(&summary.tool_id)
+            if check_client_running_async(&state.host, &summary.tool_id)
+                .await
                 .unwrap_or(false)
             {
                 alive = true;
@@ -667,22 +832,36 @@ pub async fn switch_desktop_account(
     if !alive {
         // 迟到进程二次确认：超时后才出现的进程视为启动成功，
         // 不回滚正在读取新会话的客户端
-        alive = state
-            .host
-            .is_client_running(&summary.tool_id)
+        alive = check_client_running_async(&state.host, &summary.tool_id)
+            .await
             .unwrap_or(false);
     }
     if !alive {
         let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
-        return Err(format!(
+        let msg = format!(
             "客户端启动后 15 秒内未确认存活，{note}；客户端可能仍在启动或已退出，请手动检查"
-        ));
+        );
+        log_switch_failure(
+            &state.db,
+            &app,
+            &summary,
+            UnifiedErrorCode::InternalError,
+            &msg,
+        );
+        return Err(msg);
     }
 
-    state
-        .db
-        .set_active_on_client(&summary.tool_id, &summary.id)
-        .map_err(|e| e.to_string())?;
+    if let Err(e) = state.db.set_active_on_client(&summary.tool_id, &summary.id) {
+        let msg = e.to_string();
+        log_switch_failure(
+            &state.db,
+            &app,
+            &summary,
+            UnifiedErrorCode::InternalError,
+            &msg,
+        );
+        return Err(msg);
+    }
 
     let _ = state.db.append_action_log(
         Some(&summary.id),
@@ -707,9 +886,15 @@ pub async fn switch_desktop_account(
 
     switch_guard.disarm();
     let flag_clone = Arc::clone(&state.switching_in_progress);
+    let app_for_tray = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
         flag_clone.store(false, Ordering::SeqCst);
+        if let Some(tray) = app_for_tray.get_webview_window("tray") {
+            if tray.is_visible().unwrap_or(false) && !tray.is_focused().unwrap_or(false) {
+                let _ = tray.hide();
+            }
+        }
     });
 
     Ok(())
@@ -804,12 +989,20 @@ pub fn rename_account(
     Ok(summary)
 }
 
+fn dedup_account_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
 #[tauri::command]
 pub async fn refresh_quota_batch(
     app: AppHandle,
     state: State<'_, AppState>,
     account_ids: Vec<String>,
 ) -> Result<(), String> {
+    let account_ids = dedup_account_ids(account_ids);
     if account_ids.len() > 200 {
         return Err("单次批量最多 200 个账号".into());
     }
@@ -844,6 +1037,7 @@ pub async fn claim_daily_batch(
     state: State<'_, AppState>,
     account_ids: Vec<String>,
 ) -> Result<(), String> {
+    let account_ids = dedup_account_ids(account_ids);
     if account_ids.len() > 200 {
         return Err("单次批量最多 200 个账号".into());
     }
@@ -955,7 +1149,7 @@ pub fn export_action_logs(
     let archive_dir = data_dir.join("archives");
     std::fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
 
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f");
     let scope_tag = match target_scope {
         LogScope::Active => "active",
         LogScope::Archived => "archived",
@@ -1008,6 +1202,11 @@ const OAUTH_CAPTURE_JS: &str = r#"
   if (window.__qwitchOAuthInjected) return;
   window.__qwitchOAuthInjected = true;
   let captured = false;
+
+  function isTraeCaptureOrigin() {
+    const h = (window.location.hostname || '').toLowerCase();
+    return h === 'trae.cn' || h.endsWith('.trae.cn');
+  }
 
   const ACC_KEY = '__qwitch_oauth_acc_v2';
   function loadAcc() {
@@ -1126,7 +1325,7 @@ const OAUTH_CAPTURE_JS: &str = r#"
   }
 
   function tryEmit(sourceObj, fromTrustedEndpoint) {
-    if (captured) return;
+    if (captured || !isTraeCaptureOrigin()) return;
     // 仍在登录页或第三方 OAuth 页时，仅放行明确已登录的 GetUserToken / iCubeAuthInfo 凭据
     if (isOnLoginPage() && !fromTrustedEndpoint) return;
 
@@ -1175,7 +1374,7 @@ const OAUTH_CAPTURE_JS: &str = r#"
   }
 
   function inspectResponseText(url, text) {
-    if (captured || !text || isIgnoredUrl(url)) return;
+    if (captured || !text || !isTraeCaptureOrigin() || isIgnoredUrl(url)) return;
     const trimmed = text.trim();
     if (trimmed[0] !== '{' && trimmed[0] !== '[') return;
     try {
@@ -1184,38 +1383,40 @@ const OAUTH_CAPTURE_JS: &str = r#"
     } catch (_) {}
   }
 
-  const origFetch = window.fetch;
-  window.fetch = async function(...args) {
-    const resp = await origFetch.apply(this, args);
-    try {
-      const url = String(args[0] && args[0].url ? args[0].url : args[0] || '');
-      if (!isIgnoredUrl(url) && /GetUserToken|GetUserInfo|userinfo|user\/info|account|session|campaigns|checkin|billing/i.test(url)) {
-        resp.clone().text().then(txt => inspectResponseText(url, txt)).catch(() => {});
-      }
-    } catch (_) {}
-    return resp;
-  };
-
-  const origOpen = XMLHttpRequest.prototype.open;
-  const origSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function(method, url) {
-    this.__qwitchUrl = String(url || '');
-    return origOpen.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function() {
-    this.addEventListener('load', function() {
+  if (isTraeCaptureOrigin()) {
+    const origFetch = window.fetch;
+    window.fetch = async function(...args) {
+      const resp = await origFetch.apply(this, args);
       try {
-        const url = this.__qwitchUrl || '';
+        const url = String(args[0] && args[0].url ? args[0].url : args[0] || '');
         if (!isIgnoredUrl(url) && /GetUserToken|GetUserInfo|userinfo|user\/info|account|session|campaigns|checkin|billing/i.test(url)) {
-          inspectResponseText(url, this.responseText);
+          resp.clone().text().then(txt => inspectResponseText(url, txt)).catch(() => {});
         }
       } catch (_) {}
-    });
-    return origSend.apply(this, arguments);
-  };
+      return resp;
+    };
+
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url) {
+      this.__qwitchUrl = String(url || '');
+      return origOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function() {
+      this.addEventListener('load', function() {
+        try {
+          const url = this.__qwitchUrl || '';
+          if (!isIgnoredUrl(url) && /GetUserToken|GetUserInfo|userinfo|user\/info|account|session|campaigns|checkin|billing/i.test(url)) {
+            inspectResponseText(url, this.responseText);
+          }
+        } catch (_) {}
+      });
+      return origSend.apply(this, arguments);
+    };
+  }
 
   function scanStorage() {
-    if (captured) return;
+    if (captured || !isTraeCaptureOrigin()) return;
     for (const store of [window.localStorage, window.sessionStorage]) {
       try {
         if (!store) continue;
@@ -1265,7 +1466,9 @@ const OAUTH_CAPTURE_JS: &str = r#"
     }
   }, true);
 
-  setInterval(scanStorage, 1000);
+  if (isTraeCaptureOrigin()) {
+    setInterval(scanStorage, 1000);
+  }
 })();
 "#;
 
@@ -1300,6 +1503,62 @@ const POPUP_REDIRECT_JS: &str = r#"
 })();
 "#;
 
+#[cfg(target_os = "windows")]
+const OAUTH_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+#[cfg(not(target_os = "windows"))]
+const OAUTH_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
+    match tool_id {
+        "trae_cn" => &[
+            "trae.cn",
+            "douyin.com",
+            "bytedance.com",
+            "snssdk.com",
+            "doubao.com",
+            "feishu.cn",
+            "larkoffice.com",
+            "github.com",
+            "apple.com",
+        ],
+        "workbuddy" => &[
+            "copilot.tencent.com",
+            "workbuddy.cn",
+            "tencent.com",
+            "qq.com",
+            "weixin.qq.com",
+            "wx.qq.com",
+            "wechat.com",
+        ],
+        "qoder_cn" => &[
+            "qoder.cn",
+            "qoder.com.cn",
+            "aliyun.com",
+            "alibabacloud.com",
+            "taobao.com",
+            "alibaba.com",
+            "github.com",
+            "google.com",
+        ],
+        _ => &[],
+    }
+}
+
+fn is_allowed_oauth_url(url: &tauri::Url, allowed_hosts: &[&str]) -> bool {
+    if url.as_str() == "about:blank" {
+        return true;
+    }
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str().map(|h| h.to_ascii_lowercase()) else {
+        return false;
+    };
+    allowed_hosts
+        .iter()
+        .any(|base| host == *base || host.ends_with(&format!(".{base}")))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn persist_oauth_envelope(
     app: &AppHandle,
@@ -1310,12 +1569,33 @@ async fn persist_oauth_envelope(
     scheduler: &Arc<AntiRiskScheduler>,
     flow_seq: &Arc<AtomicU64>,
     flow_id: u64,
+    win_label: &str,
     tool_id: &str,
     label: &str,
     target_account_id: Option<&str>,
     envelope: crate::domain::CredentialEnvelope,
 ) {
+    let close_window = || {
+        if flow_seq.load(Ordering::SeqCst) == flow_id {
+            if let Some(win) = app.get_webview_window(win_label) {
+                let _ = win.close();
+            }
+        }
+    };
+
     if flow_seq.load(Ordering::SeqCst) != flow_id {
+        return;
+    }
+
+    if envelope.tool_id != tool_id {
+        let _ = app.emit(
+            "qwitch://oauth-error",
+            format!(
+                "授权返回的工具类型不匹配：期望 {tool_id}，实际 {}",
+                envelope.tool_id
+            ),
+        );
+        close_window();
         return;
     }
 
@@ -1324,6 +1604,7 @@ async fn persist_oauth_envelope(
             "qwitch://oauth-error",
             "授权返回的账号 UID 无效（疑似非字符串身份字段），已拒绝导入",
         );
+        close_window();
         return;
     }
 
@@ -1359,7 +1640,6 @@ async fn persist_oauth_envelope(
                 .get_account_credential(master_key, &summary.id)
                 .map(|(_, env)| env)
                 .unwrap_or(envelope_to_save);
-            record_import_quota_check(db, adapter, &summary, &cred_for_quota, scheduler).await;
             let log_msg = if target_account_id.is_some() {
                 format!(
                     "通过内置授权补充/更新 {} ({})",
@@ -1381,14 +1661,24 @@ async fn persist_oauth_envelope(
             );
             let _ = app.emit("qwitch://account-updated", &summary.id);
             let _ = app.emit("qwitch://logs-updated", ());
+            close_window();
+
+            if summary.has_api_token && adapter.manifest().capabilities.supports_quota_query {
+                let app_bg = app.clone();
+                let db_bg = Arc::clone(db);
+                let adapter_bg = Arc::clone(adapter);
+                let scheduler_bg = Arc::clone(scheduler);
+                tauri::async_runtime::spawn(async move {
+                    let _guard = scheduler_bg.queue_lock().lock_owned().await;
+                    record_import_quota_check(&db_bg, &adapter_bg, &summary, &cred_for_quota).await;
+                    let _ = app_bg.emit("qwitch://account-updated", &summary.id);
+                    let _ = app_bg.emit("qwitch://logs-updated", ());
+                });
+            }
         }
         Err(e) => {
             let _ = app.emit("qwitch://oauth-error", format!("保存账号失败: {e}"));
-        }
-    }
-    if flow_seq.load(Ordering::SeqCst) == flow_id {
-        if let Some(win) = app.get_webview_window("oauth-login") {
-            let _ = win.close();
+            close_window();
         }
     }
 }
@@ -1403,9 +1693,12 @@ pub async fn start_webview_oauth(
 ) -> Result<(), String> {
     let flow_id = state.oauth_flow_seq.fetch_add(1, Ordering::SeqCst) + 1;
     let flow_nonce = uuid::Uuid::new_v4().to_string();
+    let win_label = format!("oauth-login-{flow_id}");
 
-    if let Some(existing) = app.get_webview_window("oauth-login") {
-        let _ = existing.close();
+    for (existing_label, existing_win) in app.webview_windows() {
+        if existing_label == "oauth-login" || existing_label.starts_with("oauth-login-") {
+            let _ = existing_win.close();
+        }
     }
 
     enum OAuthMode {
@@ -1444,21 +1737,14 @@ pub async fn start_webview_oauth(
         _ => return Err(format!("工具 {tool_id} 暂不支持内置 WebView 授权")),
     };
 
-    // 导航白名单：授权窗口只允许停留在对应工具的官方域名，
-    // 防止被诱导跳转到第三方页面后注入脚本收集凭据
-    let allowed_auth_hosts: Vec<String> = match tool_id.as_str() {
-        "trae_cn" => vec!["trae.cn".to_string()],
-        "workbuddy" => vec![
-            "copilot.tencent.com".to_string(),
-            "workbuddy.cn".to_string(),
-        ],
-        "qoder_cn" => vec!["qoder.cn".to_string(), "qoder.com.cn".to_string()],
-        _ => vec![],
-    };
-
+    let allowed_hosts = allowed_oauth_hosts(&tool_id);
     let parsed_url: tauri::Url = login_url
         .parse()
         .map_err(|e| format!("URL 解析失败: {e}"))?;
+    if !is_allowed_oauth_url(&parsed_url, allowed_hosts) {
+        return Err(format!("授权入口地址不在官方 HTTPS 白名单内: {parsed_url}"));
+    }
+
     let adapter = state
         .adapters
         .get(&tool_id)
@@ -1476,7 +1762,7 @@ pub async fn start_webview_oauth(
     let target_id_owned = target_account_id.filter(|s| !s.trim().is_empty());
 
     let app_for_popup = app.clone();
-    let allowed_for_popup = allowed_auth_hosts.clone();
+    let win_label_popup = win_label.clone();
     let init_js: String = match mode {
         OAuthMode::TraeCapture => OAUTH_CAPTURE_JS.replace("__QWITCH_NONCE__", &flow_nonce),
         OAuthMode::WorkBuddyPoll { .. } | OAuthMode::QoderPkcePoll { .. } => {
@@ -1484,23 +1770,17 @@ pub async fn start_webview_oauth(
         }
     };
 
-    let mut builder = WebviewWindowBuilder::new(&app, "oauth-login", WebviewUrl::External(parsed_url))
+    let mut builder = WebviewWindowBuilder::new(&app, &win_label, WebviewUrl::External(parsed_url))
         .title(format!("Qwitch 内置授权登录 - {}", adapter.manifest().name))
         .inner_size(960.0, 720.0)
         .center()
         .incognito(true)
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .user_agent(OAUTH_USER_AGENT)
         .initialization_script(&init_js)
         .on_new_window(move |url, _features| {
-            if url.as_str() != "about:blank" {
-                let host = url.host_str().unwrap_or("");
-                let allowed = allowed_for_popup
-                    .iter()
-                    .any(|base| host == base || host.ends_with(&format!(".{base}")));
-                if allowed {
-                    if let Some(win) = app_for_popup.get_webview_window("oauth-login") {
-                        let _ = win.navigate(url);
-                    }
+            if url.as_str() != "about:blank" && is_allowed_oauth_url(&url, allowed_hosts) {
+                if let Some(win) = app_for_popup.get_webview_window(&win_label_popup) {
+                    let _ = win.navigate(url);
                 }
             }
             tauri::webview::NewWindowResponse::Deny
@@ -1517,11 +1797,12 @@ pub async fn start_webview_oauth(
         let tid_nav = tool_id_owned.clone();
         let lbl_nav = label_owned.clone();
         let target_nav = target_id_owned.clone();
-        let allowed_nav = allowed_auth_hosts.clone();
+        let win_label_nav = win_label.clone();
 
         builder = builder.on_navigation(move |nav_url| {
             if nav_url.host_str() == Some("qwitch.local") {
-                if nav_url.path() != "/oauth-callback"
+                if nav_url.scheme() != "https"
+                    || nav_url.path() != "/oauth-callback"
                     || flow_seq_nav.load(Ordering::SeqCst) != flow_id
                 {
                     return false;
@@ -1554,6 +1835,7 @@ pub async fn start_webview_oauth(
                     let tid = tid_nav.clone();
                     let lbl = lbl_nav.clone();
                     let target_id = target_nav.clone();
+                    let win_l = win_label_nav.clone();
 
                     tauri::async_runtime::spawn(async move {
                         match adapter_clone.parse_manual_token(&payload_str).await {
@@ -1567,6 +1849,7 @@ pub async fn start_webview_oauth(
                                     &scheduler_clone,
                                     &flow_seq_clone,
                                     flow_id,
+                                    &win_l,
                                     &tid,
                                     &lbl,
                                     target_id.as_deref(),
@@ -1578,7 +1861,7 @@ pub async fn start_webview_oauth(
                                 let _ = app_clone
                                     .emit("qwitch://oauth-error", format!("解析授权凭据失败: {e}"));
                                 if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
-                                    if let Some(win) = app_clone.get_webview_window("oauth-login") {
+                                    if let Some(win) = app_clone.get_webview_window(&win_l) {
                                         let _ = win.close();
                                     }
                                 }
@@ -1588,21 +1871,11 @@ pub async fn start_webview_oauth(
                 }
                 return false;
             }
-            let host = nav_url.host_str().unwrap_or("");
-            allowed_nav
-                .iter()
-                .any(|base| host == base || host.ends_with(&format!(".{base}")))
+            is_allowed_oauth_url(nav_url, allowed_hosts)
         });
-    }
-
-    if !matches!(mode, OAuthMode::TraeCapture) {
-        let allowed_nav = allowed_auth_hosts.clone();
-        builder = builder.on_navigation(move |nav_url| {
-            let host = nav_url.host_str().unwrap_or("");
-            allowed_nav
-                .iter()
-                .any(|base| host == base || host.ends_with(&format!(".{base}")))
-        });
+    } else {
+        builder =
+            builder.on_navigation(move |nav_url| is_allowed_oauth_url(nav_url, allowed_hosts));
     }
 
     builder
@@ -1613,15 +1886,19 @@ pub async fn start_webview_oauth(
         OAuthMode::TraeCapture => {}
         OAuthMode::WorkBuddyPoll { state_token } => {
             tauri::async_runtime::spawn(async move {
+                let mut consecutive_errors = 0u32;
+                let mut finished = false;
                 for _ in 0..180 {
                     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                     if flow_seq.load(Ordering::SeqCst) != flow_id
-                        || app_handle.get_webview_window("oauth-login").is_none()
+                        || app_handle.get_webview_window(&win_label).is_none()
                     {
+                        finished = true;
                         break;
                     }
                     match WorkBuddyAdapter::poll_oauth_result(&state_token).await {
                         Ok(Some(envelope)) => {
+                            finished = true;
                             persist_oauth_envelope(
                                 &app_handle,
                                 &db,
@@ -1631,6 +1908,7 @@ pub async fn start_webview_oauth(
                                 &scheduler_arc,
                                 &flow_seq,
                                 flow_id,
+                                &win_label,
                                 &tool_id_owned,
                                 &label_owned,
                                 target_id_owned.as_deref(),
@@ -1639,16 +1917,33 @@ pub async fn start_webview_oauth(
                             .await;
                             break;
                         }
-                        Ok(None) => {}
-                        Err(err) => {
-                            if flow_seq.load(Ordering::SeqCst) == flow_id {
-                                let _ = app_handle.emit("qwitch://oauth-error", err);
-                                if let Some(win) = app_handle.get_webview_window("oauth-login") {
-                                    let _ = win.close();
-                                }
-                            }
-                            break;
+                        Ok(None) => {
+                            consecutive_errors = 0;
                         }
+                        Err(err) => {
+                            let fatal = err.contains("无法唯一确认账号身份")
+                                || err.contains("未获取到账号 UID");
+                            consecutive_errors += 1;
+                            if fatal || consecutive_errors >= 5 {
+                                finished = true;
+                                if flow_seq.load(Ordering::SeqCst) == flow_id {
+                                    let _ = app_handle.emit("qwitch://oauth-error", err);
+                                    if let Some(win) = app_handle.get_webview_window(&win_label) {
+                                        let _ = win.close();
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !finished && flow_seq.load(Ordering::SeqCst) == flow_id {
+                    if let Some(win) = app_handle.get_webview_window(&win_label) {
+                        let _ = app_handle.emit(
+                            "qwitch://oauth-error",
+                            "WorkBuddy 内置授权登录超时（4.5 分钟未完成），请重试",
+                        );
+                        let _ = win.close();
                     }
                 }
             });
@@ -1659,16 +1954,20 @@ pub async fn start_webview_oauth(
             machine_id,
         } => {
             tauri::async_runtime::spawn(async move {
+                let mut consecutive_errors = 0u32;
+                let mut finished = false;
                 for _ in 0..180 {
                     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                     if flow_seq.load(Ordering::SeqCst) != flow_id
-                        || app_handle.get_webview_window("oauth-login").is_none()
+                        || app_handle.get_webview_window(&win_label).is_none()
                     {
+                        finished = true;
                         break;
                     }
                     match QoderAdapter::poll_pkce_device_token(&nonce, &verifier, &machine_id).await
                     {
                         Ok(Some(envelope)) => {
+                            finished = true;
                             persist_oauth_envelope(
                                 &app_handle,
                                 &db,
@@ -1678,6 +1977,7 @@ pub async fn start_webview_oauth(
                                 &scheduler_arc,
                                 &flow_seq,
                                 flow_id,
+                                &win_label,
                                 &tool_id_owned,
                                 &label_owned,
                                 target_id_owned.as_deref(),
@@ -1686,16 +1986,31 @@ pub async fn start_webview_oauth(
                             .await;
                             break;
                         }
-                        Ok(None) => {}
-                        Err(err) => {
-                            if flow_seq.load(Ordering::SeqCst) == flow_id {
-                                let _ = app_handle.emit("qwitch://oauth-error", err);
-                                if let Some(win) = app_handle.get_webview_window("oauth-login") {
-                                    let _ = win.close();
-                                }
-                            }
-                            break;
+                        Ok(None) => {
+                            consecutive_errors = 0;
                         }
+                        Err(err) => {
+                            consecutive_errors += 1;
+                            if consecutive_errors >= 5 {
+                                finished = true;
+                                if flow_seq.load(Ordering::SeqCst) == flow_id {
+                                    let _ = app_handle.emit("qwitch://oauth-error", err);
+                                    if let Some(win) = app_handle.get_webview_window(&win_label) {
+                                        let _ = win.close();
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !finished && flow_seq.load(Ordering::SeqCst) == flow_id {
+                    if let Some(win) = app_handle.get_webview_window(&win_label) {
+                        let _ = app_handle.emit(
+                            "qwitch://oauth-error",
+                            "Qoder CN 内置授权登录超时（4.5 分钟未完成），请重试",
+                        );
+                        let _ = win.close();
                     }
                 }
             });
@@ -1734,5 +2049,63 @@ mod tests {
         assert!(!flag.load(Ordering::SeqCst), "持有者结束后释放互斥");
         let _second =
             SwitchFlagGuard::try_acquire(Arc::clone(&flag)).expect("second acquires after release");
+    }
+
+    #[test]
+    fn oauth_url_whitelist_allows_official_sso_https_and_blocks_http_or_evil() {
+        let trae = allowed_oauth_hosts("trae_cn");
+        assert!(is_allowed_oauth_url(
+            &"https://www.trae.cn/login".parse().unwrap(),
+            trae
+        ));
+        assert!(is_allowed_oauth_url(
+            &"https://open.douyin.com/platform/oauth/connect"
+                .parse()
+                .unwrap(),
+            trae
+        ));
+        assert!(is_allowed_oauth_url(
+            &"https://passport.feishu.cn/suite/passport/page/login"
+                .parse()
+                .unwrap(),
+            trae
+        ));
+        assert!(!is_allowed_oauth_url(
+            &"http://www.trae.cn/login".parse().unwrap(),
+            trae
+        ));
+        assert!(!is_allowed_oauth_url(
+            &"https://evil-trae.cn/login".parse().unwrap(),
+            trae
+        ));
+
+        let wb = allowed_oauth_hosts("workbuddy");
+        assert!(is_allowed_oauth_url(
+            &"https://open.weixin.qq.com/connect/qrconnect"
+                .parse()
+                .unwrap(),
+            wb
+        ));
+        assert!(!is_allowed_oauth_url(
+            &"https://phish.example.com".parse().unwrap(),
+            wb
+        ));
+
+        let qd = allowed_oauth_hosts("qoder_cn");
+        assert!(is_allowed_oauth_url(
+            &"https://account.aliyun.com/login/login.htm"
+                .parse()
+                .unwrap(),
+            qd
+        ));
+        assert!(is_allowed_oauth_url(
+            &"https://github.com/login".parse().unwrap(),
+            qd
+        ));
+        assert!(!is_allowed_oauth_url(
+            &"http://qoder.cn/login".parse().unwrap(),
+            qd
+        ));
+        assert!(is_allowed_oauth_url(&"about:blank".parse().unwrap(), qd));
     }
 }

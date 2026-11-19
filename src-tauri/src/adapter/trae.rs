@@ -55,7 +55,11 @@ impl TraeAdapter {
                 version: "0.1.0".to_string(),
                 is_builtin: true,
                 capabilities: AdapterCapabilities {
-                    auth_methods: vec![AuthMethod::LocalImport, AuthMethod::WebviewOauth],
+                    auth_methods: vec![
+                        AuthMethod::LocalImport,
+                        AuthMethod::WebviewOauth,
+                        AuthMethod::TokenPaste,
+                    ],
                     supports_quota_query: true,
                     supports_daily_claim: is_cn,
                     supports_client_switch: true,
@@ -280,10 +284,7 @@ impl TraeAdapter {
             .get("userId")
             .or_else(|| parsed.get("uid"))
             .or_else(|| parsed.pointer("/account/uid"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+            .and_then(crate::adapter::common::json_uid_to_string)
             .unwrap_or_else(|| Self::hash_fallback_uid(tool_id, raw_for_hash));
         let email = parsed
             .get("email")
@@ -386,6 +387,7 @@ impl TraeAdapter {
                 code: UnifiedErrorCode::InternalError,
                 message: format!("打开 Trae state.vscdb 失败: {e}"),
             })?;
+        let _ = conn.busy_timeout(Duration::from_millis(5000));
         let tx = conn.transaction().map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
             message: format!("开启 Trae state.vscdb 事务失败: {e}"),
@@ -924,15 +926,13 @@ impl ToolAdapter for TraeAdapter {
                 .get("userId")
                 .or_else(|| val.get("uid"))
                 .or_else(|| val.get("user_id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .and_then(crate::adapter::common::json_uid_to_string)
                 .or_else(|| {
                     claims.as_ref().and_then(|c| {
                         c.get("userId")
                             .or_else(|| c.get("sub"))
                             .or_else(|| c.get("uid"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
+                            .and_then(crate::adapter::common::json_uid_to_string)
                     })
                 })
                 .unwrap_or_else(|| Self::hash_fallback_uid(self.tool_id(), token));
@@ -990,6 +990,12 @@ impl ToolAdapter for TraeAdapter {
             .unwrap_or(trimmed)
             .trim()
             .to_string();
+        if clean_token.is_empty() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "输入 Token 不能为空".into(),
+            });
+        }
 
         let claims = Self::extract_jwt_claims(&clean_token);
         let uid = claims
@@ -998,9 +1004,8 @@ impl ToolAdapter for TraeAdapter {
                 c.get("userId")
                     .or_else(|| c.get("sub"))
                     .or_else(|| c.get("uid"))
-                    .and_then(|v| v.as_str())
+                    .and_then(crate::adapter::common::json_uid_to_string)
             })
-            .map(|s| s.to_string())
             .unwrap_or_else(|| Self::hash_fallback_uid(self.tool_id(), &clean_token));
 
         let email = claims
@@ -1078,25 +1083,13 @@ impl ToolAdapter for TraeAdapter {
             return Ok(quota);
         }
 
-        let label = if is_encrypted_local {
-            "本地加密会话（支持冷切换）"
-        } else {
-            "会话有效（未能直连额度接口）"
-        };
-
-        Ok(QuotaSnapshot {
-            plan_name: None,
-            claim_status: ClaimStatus::Unsupported,
-            buckets: vec![QuotaBucket {
-                key: "session_health".into(),
-                label: label.into(),
-                used: 0.0,
-                total: 100.0,
-                remaining: 100.0,
-                unit: "%".into(),
-                reset_at: None,
-            }],
-            fetched_at: Utc::now().to_rfc3339(),
+        Err(AdapterError::Unified {
+            code: UnifiedErrorCode::InvalidCredential,
+            message: if is_encrypted_local {
+                "本地加密会话未能提取在线 Token，请点击「在线授权」以开启查额与签到".into()
+            } else {
+                "缺少可用于查额的在线 Token，请点击「在线授权」以开启查额与签到".into()
+            },
         })
     }
 
@@ -1169,18 +1162,21 @@ impl ToolAdapter for TraeAdapter {
             // 400/409 可能承载"今日已签"幂等响应，先识别再走通用错误
             if status.as_u16() == 400 || status.as_u16() == 409 {
                 let err_text = resp.text().await.unwrap_or_default();
-                let lower = err_text.to_lowercase();
-                if err_text.contains("已签")
-                    || err_text.contains("重复领取")
-                    || lower.contains("already claimed")
-                    || lower.contains("already checked")
-                    || lower.contains("checked in")
-                {
-                    let refreshed = self.inspect_quota(cred).await.ok();
+                if crate::adapter::common::is_idempotent_claimed_phrase(&err_text) {
+                    let mut refreshed = match self.inspect_quota(cred).await {
+                        Ok(q) => q,
+                        Err(_) => precheck.cloned().unwrap_or(QuotaSnapshot {
+                            plan_name: None,
+                            claim_status: ClaimStatus::Claimed,
+                            buckets: Vec::new(),
+                            fetched_at: Utc::now().to_rfc3339(),
+                        }),
+                    };
+                    refreshed.claim_status = ClaimStatus::Claimed;
                     return Ok(ClaimResult {
                         claimed: false,
                         reward_summary: "今日已签过".into(),
-                        updated_quota: refreshed,
+                        updated_quota: Some(refreshed),
                     });
                 }
             }
@@ -1206,17 +1202,21 @@ impl ToolAdapter for TraeAdapter {
                 .or_else(|| body.get("msg"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("签到未成功");
-            let lower = msg.to_lowercase();
-            if msg.contains("已签")
-                || msg.contains("重复")
-                || lower.contains("already")
-                || lower.contains("checked")
-            {
-                let refreshed = self.inspect_quota(cred).await.ok();
+            if crate::adapter::common::is_idempotent_claimed_phrase(msg) {
+                let mut refreshed = match self.inspect_quota(cred).await {
+                    Ok(q) => q,
+                    Err(_) => precheck.cloned().unwrap_or(QuotaSnapshot {
+                        plan_name: None,
+                        claim_status: ClaimStatus::Claimed,
+                        buckets: Vec::new(),
+                        fetched_at: Utc::now().to_rfc3339(),
+                    }),
+                };
+                refreshed.claim_status = ClaimStatus::Claimed;
                 return Ok(ClaimResult {
                     claimed: false,
                     reward_summary: "今日已签过".into(),
-                    updated_quota: refreshed,
+                    updated_quota: Some(refreshed),
                 });
             }
             return Err(AdapterError::Unified {
@@ -1311,11 +1311,24 @@ impl ToolAdapter for TraeAdapter {
 
         let storage_path = config_dir.join(STORAGE_JSON);
         let mut root_obj = if storage_path.is_file() {
-            let existing = std::fs::read(&storage_path).unwrap_or_default();
-            serde_json::from_slice::<Value>(&existing)
-                .ok()
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default()
+            let existing = std::fs::read(&storage_path).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("读取现有 Trae storage.json 失败，已中止切号以保护原配置: {e}"),
+            })?;
+            let parsed =
+                serde_json::from_slice::<Value>(&existing).map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!(
+                        "解析现有 Trae storage.json 失败，已中止切号以保护原配置: {e}"
+                    ),
+                })?;
+            parsed
+                .as_object()
+                .cloned()
+                .ok_or_else(|| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: "现有 Trae storage.json 根节点不是 JSON 对象，已中止切号".into(),
+                })?
         } else {
             Map::new()
         };
@@ -1334,14 +1347,20 @@ impl ToolAdapter for TraeAdapter {
         })?;
 
         let tmp_path = config_dir.join(".storage.json.tmp");
-        std::fs::write(&tmp_path, serialized).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("写入临时 storage.json 失败: {e}"),
-        })?;
-        std::fs::rename(&tmp_path, &storage_path).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("替换 Trae storage.json 失败: {e}"),
-        })?;
+        if let Err(e) = std::fs::write(&tmp_path, serialized) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("写入临时 storage.json 失败: {e}"),
+            });
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &storage_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("替换 Trae storage.json 失败: {e}"),
+            });
+        }
 
         let vscdb_entries = if let CredentialPayload::LocalSnapshot { files } = &cred.payload {
             files
@@ -1367,7 +1386,13 @@ impl ToolAdapter for TraeAdapter {
                     code: UnifiedErrorCode::InternalError,
                     message: e.to_string(),
                 })?;
-        crate::adapter::backup_files(&[config_dir.join(STORAGE_JSON), config_dir.join(STATE_VSCDB)])
+        crate::adapter::backup_files(&[
+            config_dir.join(STORAGE_JSON),
+            config_dir.join(STATE_VSCDB),
+            config_dir.join(format!("{STATE_VSCDB}-wal")),
+            config_dir.join(format!("{STATE_VSCDB}-shm")),
+            config_dir.join(format!("{STATE_VSCDB}-journal")),
+        ])
     }
 }
 
@@ -1398,5 +1423,114 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn trae_corrupt_storage_json_aborts_apply_session_and_missing_token_errors() {
+        let adapter = TraeAdapter::new(true);
+        assert!(adapter
+            .manifest()
+            .capabilities
+            .auth_methods
+            .contains(&AuthMethod::TokenPaste));
+
+        // 无法解出 Token 时不伪造 100% session_health 快照
+        let mut files = HashMap::new();
+        files.insert(
+            SNAPSHOT_AUTH_KEY.to_string(),
+            BASE64.encode(br#"{"iCubeAuthInfo://icube.cloudide":"encrypted-unreadable"}"#),
+        );
+        let no_tok_cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "trae_cn_123".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+        assert!(matches!(
+            adapter.inspect_quota(&no_tok_cred).await,
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                ..
+            })
+        ));
+
+        // parse_manual_token 支持数字型 userId
+        let numeric_json = serde_json::json!({ "token": "tok-abc-123", "userId": 424242 });
+        let parsed = adapter
+            .parse_manual_token(&numeric_json.to_string())
+            .await
+            .expect("numeric userId");
+        assert_eq!(parsed.uid, "424242");
+
+        // 现有 storage.json 损坏时不得覆盖为 {}
+        struct TestHost(std::path::PathBuf);
+        #[async_trait]
+        impl PlatformHost for TestHost {
+            fn qwitch_data_dir(&self) -> Result<std::path::PathBuf, crate::platform::HostError> {
+                Ok(self.0.clone())
+            }
+            fn client_config_dir(
+                &self,
+                _tool_id: &str,
+            ) -> Result<std::path::PathBuf, crate::platform::HostError> {
+                Ok(self.0.clone())
+            }
+            fn detect_client_executable(&self, _tool_id: &str) -> Option<std::path::PathBuf> {
+                None
+            }
+            fn is_client_running(
+                &self,
+                _tool_id: &str,
+            ) -> Result<bool, crate::platform::HostError> {
+                Ok(false)
+            }
+            async fn terminate_client_gracefully(
+                &self,
+                _tool_id: &str,
+                _timeout_ms: u64,
+            ) -> Result<(), crate::platform::HostError> {
+                Ok(())
+            }
+            fn launch_client(
+                &self,
+                _executable: &std::path::Path,
+                _args: &[String],
+            ) -> Result<(), crate::platform::HostError> {
+                Ok(())
+            }
+            fn get_or_create_master_key(
+                &self,
+                _expectation: &crate::platform::KeyExpectation,
+            ) -> Result<[u8; 32], crate::platform::HostError> {
+                Ok([0u8; 32])
+            }
+            fn set_launch_at_login(&self, _enabled: bool) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("qwitch_trae_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(STORAGE_JSON), b"{corrupt json").unwrap();
+        let host = TestHost(dir.clone());
+        let tok_cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u_1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "tok-1".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        assert!(adapter.apply_session(&host, &tok_cred).await.is_err());
+        assert_eq!(
+            std::fs::read(dir.join(STORAGE_JSON)).unwrap(),
+            b"{corrupt json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

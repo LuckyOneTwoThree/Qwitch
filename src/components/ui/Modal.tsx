@@ -24,6 +24,8 @@ export function Modal({
   // effect 反复重建导致焦点被归还再抢走
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const disableCloseRef = useRef(disableClose);
+  disableCloseRef.current = disableClose;
 
   useEffect(() => {
     if (!open) return;
@@ -46,7 +48,7 @@ export function Modal({
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (!disableClose) {
+        if (!disableCloseRef.current) {
           e.preventDefault();
           onCloseRef.current();
         }
@@ -86,7 +88,7 @@ export function Modal({
         previousActiveRef.current.focus();
       }
     };
-  }, [open, disableClose]);
+  }, [open]);
 
   if (!open) return null;
 

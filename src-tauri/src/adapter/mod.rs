@@ -76,30 +76,48 @@ pub fn backup_files(paths: &[std::path::PathBuf]) -> Result<SessionBackup, Adapt
 }
 
 pub fn restore_files(backup: &SessionBackup) -> Result<(), AdapterError> {
+    let mut errors = Vec::new();
     for (path, content) in &backup.files {
         match content {
             Some(bytes) => {
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let tmp = path.with_extension("qwitch-restore-tmp");
-                std::fs::write(&tmp, bytes).map_err(|e| AdapterError::Unified {
-                    code: UnifiedErrorCode::InternalError,
-                    message: format!("恢复会话文件失败 {}: {e}", path.display()),
-                })?;
-                std::fs::rename(&tmp, path).map_err(|e| AdapterError::Unified {
-                    code: UnifiedErrorCode::InternalError,
-                    message: format!("恢复会话文件失败 {}: {e}", path.display()),
-                })?;
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("session");
+                let tmp = match path.parent() {
+                    Some(parent) => parent.join(format!(".{file_name}.qwitch-restore-tmp")),
+                    None => path.with_extension("qwitch-restore-tmp"),
+                };
+                if let Err(e) = std::fs::write(&tmp, bytes) {
+                    let _ = std::fs::remove_file(&tmp);
+                    errors.push(format!("恢复会话文件失败 {}: {e}", path.display()));
+                    continue;
+                }
+                if let Err(e) = std::fs::rename(&tmp, path) {
+                    let _ = std::fs::remove_file(&tmp);
+                    errors.push(format!("恢复会话文件失败 {}: {e}", path.display()));
+                }
             }
             None => {
-                if path.exists() {
-                    let _ = std::fs::remove_file(path);
+                if let Err(e) = std::fs::remove_file(path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        errors.push(format!("清理新增会话文件失败 {}: {e}", path.display()));
+                    }
                 }
             }
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: errors.join("；"),
+        })
+    }
 }
 
 #[async_trait]
@@ -275,6 +293,29 @@ mod tests {
         assert!(backup_files(std::slice::from_ref(&locked)).is_err());
 
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_handles_wal_files_and_continues_after_error() {
+        let root =
+            std::env::temp_dir().join(format!("qwitch_restore_all_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("state.vscdb");
+        let wal = root.join("state.vscdb-wal");
+        std::fs::write(&db, b"orig-db").unwrap();
+        std::fs::write(&wal, b"orig-wal").unwrap();
+
+        let backup = backup_files(&[db.clone(), wal.clone()]).expect("backup");
+        std::fs::write(&db, b"dirty-db").unwrap();
+        std::fs::write(&wal, b"dirty-wal").unwrap();
+
+        restore_files(&backup).expect("restore wal + db");
+        assert_eq!(std::fs::read(&db).unwrap(), b"orig-db");
+        assert_eq!(std::fs::read(&wal).unwrap(), b"orig-wal");
+        assert!(!root.join(".state.vscdb.qwitch-restore-tmp").exists());
+        assert!(!root.join(".state.vscdb-wal.qwitch-restore-tmp").exists());
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

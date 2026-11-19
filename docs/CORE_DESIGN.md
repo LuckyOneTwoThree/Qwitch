@@ -350,7 +350,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_created ON action_logs(created_at DESC);
 | `refresh_quota_batch` | `accountIds: string[]`（≤200） | `()` | 防风控批量查额，与批量领取共用单队列锁；重入直接报错 |
 | `claim_daily_batch` | `accountIds: string[]`（≤200） | `()` | 串行领取；重入直接报错；工具级风控熔断 |
 | `rename_account` | `accountId, label` | `AccountSummary` | 修改备注，广播 account-updated |
-| `update_account_status` | `accountId, status` | `AccountSummary` | 停用/启用/恢复，广播 account-updated |
+| `update_account_status` | `accountId, status` | `()` | 停用/启用/恢复，广播 account-updated |
 | `quit_app` | — | `()` | 主窗口显式退出 |
 | `list_external_adapters` | — | `ExternalAdapterInfo[]` | 外部插件清单（含 trusted/reserved 标记，仅解析 manifest 不执行） |
 | `export_action_logs` | `scope, archiveAfterExport` | `ExportLogsResult` | 上限 10,000 条 |

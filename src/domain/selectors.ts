@@ -16,7 +16,7 @@ export type ClaimActionState =
 
 const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
 
-function toCstDayKey(timestampMs: number): string {
+export function toCstDayKey(timestampMs: number): string {
   const d = new Date(timestampMs + CST_OFFSET_MS);
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");

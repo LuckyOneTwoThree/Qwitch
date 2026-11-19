@@ -10,6 +10,35 @@ const KEYRING_SERVICE: &str = "dev.qwitch.app";
 const LEGACY_KEYRING_SERVICE: &str = "dev.quiver.app";
 const KEYRING_MASTER_USER: &str = "master_key_v1";
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+fn hide_console_std(cmd: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+
+#[cfg(target_os = "windows")]
+fn hide_console_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+
+#[cfg(target_os = "macos")]
+fn escape_pgrep_regex(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if matches!(
+            ch,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[derive(Debug, Error)]
 pub enum HostError {
     #[error("I/O error: {0}")]
@@ -94,6 +123,7 @@ impl NativePlatformHost {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .ok()?;
+        let _ = conn.busy_timeout(Duration::from_millis(2000));
         let json: String = conn
             .query_row(
                 "SELECT value_json FROM app_settings WHERE key = 'app.settings'",
@@ -103,7 +133,8 @@ impl NativePlatformHost {
             .ok()?;
         let val: serde_json::Value = serde_json::from_str(&json).ok()?;
         let raw = val
-            .pointer(&format!("/customClientPaths/{tool_id}"))
+            .get("customClientPaths")
+            .and_then(|m| m.get(tool_id))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())?;
@@ -176,6 +207,98 @@ impl NativePlatformHost {
         {
             let _ = (mac_apps, mac_procs, win_exes);
             (Vec::new(), Vec::new())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn is_macos_proc_running(proc_name: &str) -> Result<bool, HostError> {
+        if proc_name.len() <= 15 {
+            let status = Command::new("pgrep")
+                .args(["-x", proc_name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            return Ok(status.success());
+        }
+        let needle = format!("/Contents/MacOS/{}", escape_pgrep_regex(proc_name));
+        let status = Command::new("pgrep")
+            .args(["-f", &needle])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            return Ok(true);
+        }
+        let prefix: String = proc_name.chars().take(15).collect();
+        let fallback_status = Command::new("pgrep")
+            .args(["-x", &prefix])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        Ok(fallback_status.success())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn is_macos_app_bundle_running(app_name: &str) -> bool {
+        let bundle_needle = format!("/{}/Contents/MacOS/", escape_pgrep_regex(app_name));
+        if Command::new("pgrep")
+            .args(["-f", &bundle_needle])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return true;
+        }
+        let clean = app_name.trim_end_matches(".app");
+        Self::is_macos_proc_running(clean).unwrap_or(false)
+    }
+
+    fn is_client_running_names(
+        primary_names: &[String],
+        proc_names: &[String],
+    ) -> Result<bool, HostError> {
+        if primary_names.is_empty() && proc_names.is_empty() {
+            return Ok(false);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            for app_name in primary_names {
+                if Self::is_macos_app_bundle_running(app_name) {
+                    return Ok(true);
+                }
+            }
+            for proc_name in proc_names {
+                if Self::is_macos_proc_running(proc_name)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let _ = proc_names;
+            for exe in primary_names {
+                let mut cmd = Command::new("tasklist");
+                hide_console_std(&mut cmd);
+                let output = cmd
+                    .args(["/FI", &format!("IMAGENAME eq {exe}"), "/FO", "CSV", "/NH"])
+                    .output()?;
+                let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+                let target_quoted = format!("\"{}\"", exe.to_lowercase());
+                if stdout.contains(&target_quoted) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (primary_names, proc_names);
+            Ok(false)
         }
     }
 
@@ -601,45 +724,7 @@ impl PlatformHost for NativePlatformHost {
 
     fn is_client_running(&self, tool_id: &str) -> Result<bool, HostError> {
         let (primary_names, proc_names) = self.resolve_target_process_names(tool_id);
-        if primary_names.is_empty() && proc_names.is_empty() {
-            return Ok(false);
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            for proc_name in proc_names {
-                let status = Command::new("pgrep")
-                    .args(["-x", &proc_name])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()?;
-                if status.success() {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let _ = proc_names;
-            for exe in primary_names {
-                let output = Command::new("tasklist")
-                    .args(["/FI", &format!("IMAGENAME eq {exe}"), "/NH"])
-                    .output()?;
-                let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
-                if stdout.contains(&exe.to_lowercase()) {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = (primary_names, proc_names);
-            Ok(false)
-        }
+        Self::is_client_running_names(&primary_names, &proc_names)
     }
 
     async fn terminate_client_gracefully(
@@ -647,18 +732,45 @@ impl PlatformHost for NativePlatformHost {
         tool_id: &str,
         timeout_ms: u64,
     ) -> Result<(), HostError> {
-        if !self.is_client_running(tool_id)? {
+        let tid = tool_id.to_string();
+        let (primary_names, proc_names) = tokio::task::spawn_blocking(move || {
+            NativePlatformHost.resolve_target_process_names(&tid)
+        })
+        .await
+        .map_err(|e| HostError::OperationFailed(e.to_string()))?;
+
+        if primary_names.is_empty() && proc_names.is_empty() {
             return Ok(());
         }
 
-        let (primary_names, proc_names) = self.resolve_target_process_names(tool_id);
-        if primary_names.is_empty() && proc_names.is_empty() {
+        let check_running = |p_names: &[String], procs: &[String]| {
+            let p_clone = p_names.to_vec();
+            let proc_clone = procs.to_vec();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    NativePlatformHost::is_client_running_names(&p_clone, &proc_clone)
+                })
+                .await
+                .map_err(|e| HostError::OperationFailed(e.to_string()))?
+            }
+        };
+
+        if !check_running(&primary_names, &proc_names).await? {
             return Ok(());
         }
 
         #[cfg(target_os = "macos")]
         {
             for app_name in &primary_names {
+                let app_for_check = app_name.clone();
+                let app_running = tokio::task::spawn_blocking(move || {
+                    NativePlatformHost::is_macos_app_bundle_running(&app_for_check)
+                })
+                .await
+                .unwrap_or(false);
+                if !app_running {
+                    continue;
+                }
                 let clean = app_name
                     .trim_end_matches(".app")
                     .replace('\\', "\\\\")
@@ -675,7 +787,9 @@ impl PlatformHost for NativePlatformHost {
         #[cfg(target_os = "windows")]
         {
             for exe in &primary_names {
-                let _ = tokio::process::Command::new("taskkill")
+                let mut cmd = tokio::process::Command::new("taskkill");
+                hide_console_tokio(&mut cmd);
+                let _ = cmd
                     .args(["/IM", exe])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -686,7 +800,7 @@ impl PlatformHost for NativePlatformHost {
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1000));
         while Instant::now() < deadline {
-            if !self.is_client_running(tool_id)? {
+            if !check_running(&primary_names, &proc_names).await? {
                 // 额外等待 300ms 确保文件锁完全释放
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 return Ok(());
@@ -697,19 +811,32 @@ impl PlatformHost for NativePlatformHost {
         // 超时后尝试温和信号或强杀兜底
         #[cfg(target_os = "macos")]
         {
-            for proc_name in &proc_names {
+            for app_name in &primary_names {
+                let needle = format!("/{}/Contents/MacOS/", escape_pgrep_regex(app_name));
                 let _ = tokio::process::Command::new("pkill")
-                    .args(["-TERM", "-x", proc_name])
+                    .args(["-TERM", "-f", &needle])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status()
                     .await;
             }
+            for proc_name in &proc_names {
+                if proc_name.len() <= 15 {
+                    let _ = tokio::process::Command::new("pkill")
+                        .args(["-TERM", "-x", proc_name])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .await;
+                }
+            }
         }
         #[cfg(target_os = "windows")]
         {
             for exe in &primary_names {
-                let _ = tokio::process::Command::new("taskkill")
+                let mut cmd = tokio::process::Command::new("taskkill");
+                hide_console_tokio(&mut cmd);
+                let _ = cmd
                     .args(["/F", "/IM", exe])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -719,7 +846,7 @@ impl PlatformHost for NativePlatformHost {
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
-        if self.is_client_running(tool_id)? {
+        if check_running(&primary_names, &proc_names).await? {
             return Err(HostError::OperationFailed(format!(
                 "无法关闭正在运行的 {tool_id} 客户端，请手动退出后重试"
             )));
@@ -737,12 +864,22 @@ impl PlatformHost for NativePlatformHost {
                 if !args.is_empty() {
                     cmd.arg("--args").args(args);
                 }
-                cmd.spawn()?;
+                let status = cmd.status()?;
+                if !status.success() {
+                    return Err(HostError::OperationFailed(format!(
+                        "启动客户端失败 (open exit {}): {}",
+                        status,
+                        executable.display()
+                    )));
+                }
                 return Ok(());
             }
         }
 
-        Command::new(executable).args(args).spawn()?;
+        let mut child = Command::new(executable).args(args).spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         Ok(())
     }
 
@@ -790,7 +927,9 @@ impl PlatformHost for NativePlatformHost {
                 let exe =
                     std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {e}"))?;
                 let value = format!("\"{}\" --autostart", exe.to_string_lossy());
-                let output = Command::new("reg")
+                let mut cmd = Command::new("reg");
+                hide_console_std(&mut cmd);
+                let output = cmd
                     .args([
                         "add", RUN_KEY, "/v", "Qwitch", "/t", "REG_SZ", "/d", &value, "/f",
                     ])
@@ -803,7 +942,9 @@ impl PlatformHost for NativePlatformHost {
                     ));
                 }
             } else {
-                let _ = Command::new("reg")
+                let mut cmd = Command::new("reg");
+                hide_console_std(&mut cmd);
+                let _ = cmd
                     .args(["delete", RUN_KEY, "/v", "Qwitch", "/f"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())

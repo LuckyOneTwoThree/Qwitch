@@ -39,6 +39,16 @@ pub fn default_account_label(envelope: &CredentialEnvelope) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        if !name.contains(' ')
+            && name
+                .split_once('@')
+                .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+        {
+            return crypto::mask_email(name);
+        }
+        if name.len() == 11 && name.starts_with('1') && name.chars().all(|c| c.is_ascii_digit()) {
+            return crypto::mask_phone(name);
+        }
         return name.to_string();
     }
     if let Some(email) = envelope
@@ -304,18 +314,27 @@ impl QwitchDatabase {
         let email_masked = merged.display_email.as_deref().map(crypto::mask_email);
         let encrypted_cred = crypto::encrypt_credential(master_key, &merged)?;
         let (has_snap, has_tok) = merged.capability_flags();
+        let incoming_has_token = incoming.capability_flags().1;
         let effective_label = label_override
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(&existing_label);
 
-        conn.execute(
+        let status_sql = if incoming_has_token {
+            "CASE WHEN status = 'disabled' THEN 'disabled' ELSE 'active' END"
+        } else {
+            "CASE WHEN status IN ('disabled', 'risk_paused', 'expired') THEN status ELSE 'active' END"
+        };
+        let update_sql = format!(
             "UPDATE accounts
              SET label = ?1, uid_masked = ?2, uid_hash = ?3, email_masked = ?4,
-                 status = CASE WHEN status IN ('disabled', 'risk_paused') THEN status ELSE 'active' END,
+                 status = {status_sql},
                  encrypted_credential = ?5,
                  has_local_snapshot = ?6, has_api_token = ?7, updated_at = ?8
-             WHERE id = ?9",
+             WHERE id = ?9"
+        );
+        conn.execute(
+            &update_sql,
             params![
                 effective_label,
                 uid_masked,
@@ -437,10 +456,70 @@ impl QwitchDatabase {
         Ok((summary, envelope))
     }
 
-    /// 一次性迁移：旧版明文 PII 标签与历史日志脱敏（迁移前备份数据库）
+    /// 一次性迁移：旧版明文 PII 标签与历史日志脱敏（仅在存在待迁移记录时创建备份，并原子写入完成标记）
     pub fn migrate_legacy_pii(&self, master_key: &[u8; 32]) -> Result<(), StorageError> {
         const FLAG: &str = "migration.pii_v1";
         if self.get_setting(FLAG)?.is_some() {
+            return Ok(());
+        }
+
+        let (account_updates, log_updates) = {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let mut acc_stmt =
+                conn.prepare("SELECT id, label, encrypted_credential FROM accounts")?;
+            let acc_rows = acc_stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut acc_updates = Vec::new();
+            for (id, label, blob) in acc_rows {
+                let mut new_label = label.clone();
+                if !label.contains(' ')
+                    && label
+                        .split_once('@')
+                        .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+                    && !label.contains("***")
+                {
+                    new_label = crypto::mask_email(&label);
+                } else if label.len() == 11
+                    && label.starts_with('1')
+                    && label.chars().all(|c| c.is_ascii_digit())
+                {
+                    new_label = crypto::mask_phone(&label);
+                } else if let Ok(env) = crypto::decrypt_credential(master_key, &blob) {
+                    if !env.uid.trim().is_empty() && label == env.uid {
+                        new_label = crypto::mask_uid(&env.uid);
+                    }
+                }
+                if new_label != label {
+                    acc_updates.push((id, new_label));
+                }
+            }
+
+            let mut log_stmt = conn.prepare("SELECT id, message_sanitized FROM action_logs")?;
+            let log_rows = log_stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut lg_updates = Vec::new();
+            for (id, msg) in log_rows {
+                let sanitized = crypto::sanitize_log_message(&msg);
+                if sanitized != msg {
+                    lg_updates.push((id, sanitized));
+                }
+            }
+
+            (acc_updates, lg_updates)
+        };
+
+        if account_updates.is_empty() && log_updates.is_empty() {
+            self.set_setting(FLAG, "\"done\"")?;
             return Ok(());
         }
 
@@ -454,59 +533,29 @@ impl QwitchDatabase {
                 .map_err(|e| StorageError::Crypto(format!("迁移前备份数据库失败: {e}")))?;
         }
 
-        // 单事务批量执行，避免大历史库逐行提交卡启动
+        // 单事务原子提交数据迁移与完成标记
         let mut conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let tx = conn.transaction()?;
-
-        let accounts: Vec<(String, String, Vec<u8>)> = {
-            let mut stmt = tx.prepare("SELECT id, label, encrypted_credential FROM accounts")?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-        for (id, label, blob) in accounts {
-            let mut new_label = label.clone();
-            if label.contains('@') && !label.contains("****") {
-                new_label = crypto::mask_email(&label);
-            } else if label.len() == 11
-                && label.starts_with('1')
-                && label.chars().all(|c| c.is_ascii_digit())
-            {
-                new_label = crypto::mask_phone(&label);
-            } else if let Ok(env) = crypto::decrypt_credential(master_key, &blob) {
-                if !env.uid.trim().is_empty() && label == env.uid {
-                    new_label = crypto::mask_uid(&env.uid);
-                }
-            }
-            if new_label != label {
-                tx.execute(
-                    "UPDATE accounts SET label = ?1 WHERE id = ?2",
-                    params![new_label, id],
-                )?;
-            }
+        for (id, new_label) in account_updates {
+            tx.execute(
+                "UPDATE accounts SET label = ?1 WHERE id = ?2",
+                params![new_label, id],
+            )?;
         }
-
-        let logs: Vec<(i64, String)> = {
-            let mut stmt = tx.prepare("SELECT id, message_sanitized FROM action_logs")?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-        for (id, msg) in logs {
-            let sanitized = crypto::sanitize_log_message(&msg);
-            if sanitized != msg {
-                tx.execute(
-                    "UPDATE action_logs SET message_sanitized = ?1 WHERE id = ?2",
-                    params![sanitized, id],
-                )?;
-            }
+        for (id, sanitized) in log_updates {
+            tx.execute(
+                "UPDATE action_logs SET message_sanitized = ?1 WHERE id = ?2",
+                params![sanitized, id],
+            )?;
         }
-
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO app_settings (key, value_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![FLAG, "\"done\"", now],
+        )?;
         tx.commit()?;
-        drop(conn);
-        self.set_setting(FLAG, "\"done\"")?;
         Ok(())
     }
 
@@ -677,6 +726,10 @@ impl QwitchDatabase {
         let id = Uuid::new_v4().to_string();
         let claim_str = serialize_claim_status(&snapshot.claim_status);
         let buckets_json = serde_json::to_string(&snapshot.buckets)?;
+        let normalized_fetched_at = DateTime::parse_from_rfc3339(&snapshot.fetched_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now())
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
         conn.execute(
             "INSERT INTO quota_snapshots (id, account_id, plan_name, claim_status, buckets_json, fetched_at)
@@ -687,7 +740,7 @@ impl QwitchDatabase {
                 snapshot.plan_name,
                 claim_str,
                 buckets_json,
-                snapshot.fetched_at
+                normalized_fetched_at
             ],
         )?;
         // 单账号最多保留最近 20 条额度快照，防止长期运行导致数据库膨胀
@@ -1029,6 +1082,11 @@ pub fn is_same_cst_day(iso_str: &str, now_cst_date: NaiveDate) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_today_cst(iso_str: &str) -> bool {
+    let today_cst = Utc::now().with_timezone(&cst_offset()).date_naive();
+    is_same_cst_day(iso_str, today_cst)
+}
+
 pub fn normalize_daily_claim_status(
     raw_status: ClaimStatus,
     fetched_at: &str,
@@ -1059,7 +1117,14 @@ fn normalize_daily_claim_status_on_date(
         .map(|ts| is_same_cst_day(ts, today_cst))
         .unwrap_or(false);
     match raw_status {
-        ClaimStatus::Unsupported | ClaimStatus::Unknown => raw_status,
+        ClaimStatus::Unsupported => ClaimStatus::Unsupported,
+        ClaimStatus::Unknown => {
+            if daily_reset_tool && claimed_today {
+                ClaimStatus::Claimed
+            } else {
+                ClaimStatus::Unknown
+            }
+        }
         ClaimStatus::Claimed => {
             if is_same_cst_day(fetched_at, today_cst) || claimed_today {
                 ClaimStatus::Claimed
@@ -1752,5 +1817,109 @@ mod tests {
         assert_eq!(accs[0].label, "bob@example.com", "已标记迁移不得重复执行");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bind_recovers_paused_and_expired_with_token_clean_db_skips_bak_and_tz_snapshot_sort() {
+        // 1. 干净空库执行 PII 迁移不生成冗余 .bak，且不误伤 "Work @ Office"
+        let dir = temp_data_dir("clean_pii");
+        let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+        let key = [33u8; 32];
+        let mut work_env = token_envelope("u_work_1");
+        work_env.display_name = Some("Work @ Office".to_string());
+        let acc = db.upsert_account(&key, None, &work_env).expect("insert");
+        assert_eq!(acc.label, "Work @ Office");
+        db.migrate_legacy_pii(&key).expect("clean migrate");
+        assert!(!dir.join("qwitch.db.pre-pii-migration.bak").exists());
+        assert_eq!(
+            db.get_account_summary(&acc.id).unwrap().label,
+            "Work @ Office"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 2. bind_account_credential 带 Token 恢复 Expired / RiskPaused，保留 Disabled；无 Token 仅快照不恢复
+        let db_path = temp_db_path("bind_recover");
+        let db = QwitchDatabase::open(&db_path).expect("open");
+        let snap_only = CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid: "qoder_cn_snap999999".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot {
+                files: HashMap::from([("auth.v1.dat".into(), BASE64.encode(b"dat"))]),
+            },
+        };
+        let acc = db
+            .upsert_account(&key, Some("暂停号"), &snap_only)
+            .expect("insert");
+        db.update_account_status(&acc.id, AccountStatus::RiskPaused)
+            .expect("pause");
+        let still_paused = db
+            .bind_account_credential(&key, &acc.id, None, &snap_only)
+            .expect("bind snap");
+        assert_eq!(still_paused.status, AccountStatus::RiskPaused);
+
+        let tok_env = token_envelope("real_uid_recover");
+        let recovered = db
+            .bind_account_credential(&key, &acc.id, None, &tok_env)
+            .expect("bind token");
+        assert_eq!(recovered.status, AccountStatus::Active);
+
+        db.update_account_status(&acc.id, AccountStatus::Disabled)
+            .expect("disable");
+        let still_disabled = db
+            .bind_account_credential(&key, &acc.id, None, &tok_env)
+            .expect("bind disabled");
+        assert_eq!(still_disabled.status, AccountStatus::Disabled);
+
+        // 3. Unknown + 今日已签在每日重置型工具上返回 Claimed，Qoder 保持 Unknown
+        let today_cst = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Unknown,
+                "2026-11-18T01:00:00Z",
+                Some("2026-11-18T01:00:00Z"),
+                today_cst,
+                "trae_cn"
+            ),
+            ClaimStatus::Claimed
+        );
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Unknown,
+                "2026-11-18T01:00:00Z",
+                Some("2026-11-18T01:00:00Z"),
+                today_cst,
+                "qoder_cn"
+            ),
+            ClaimStatus::Unknown
+        );
+
+        // 4. 不同时区时间戳统一归约成 UTC，按真实时间先后排序
+        let older_later_clock = QuotaSnapshot {
+            plan_name: Some("Older".into()),
+            claim_status: ClaimStatus::Available,
+            buckets: vec![],
+            fetched_at: "2026-11-18T11:00:00+08:00".into(), // UTC 03:00
+        };
+        let newer_earlier_clock = QuotaSnapshot {
+            plan_name: Some("Newer".into()),
+            claim_status: ClaimStatus::Claimed,
+            buckets: vec![],
+            fetched_at: "2026-11-18T04:00:00Z".into(), // UTC 04:00
+        };
+        db.save_quota_snapshot(&acc.id, &older_later_clock).unwrap();
+        db.save_quota_snapshot(&acc.id, &newer_earlier_clock)
+            .unwrap();
+        let latest = db.get_account_summary(&acc.id).unwrap();
+        assert_eq!(
+            latest
+                .latest_quota
+                .as_ref()
+                .and_then(|q| q.plan_name.as_deref()),
+            Some("Newer")
+        );
+
+        let _ = std::fs::remove_file(&db_path);
     }
 }

@@ -37,8 +37,10 @@ function formatSyncTime(iso?: string): string {
 
 export const AccountCard = React.memo(function AccountCard({
   account,
+  onOpenBindModal,
 }: {
   account: AccountSummary;
+  onOpenBindModal?: (account: AccountSummary) => void;
 }) {
   const {
     refreshAccountQuota,
@@ -54,6 +56,7 @@ export const AccountCard = React.memo(function AccountCard({
   } = useQwitch();
 
   const [refreshing, setRefreshing] = useState(false);
+  const [recovering, setRecovering] = useState(false);
   const [associating, setAssociating] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [editingLabel, setEditingLabel] = useState(false);
@@ -66,6 +69,8 @@ export const AccountCard = React.memo(function AccountCard({
   const canClaim = isHealthy && Boolean(adapter?.capabilities.supportsDailyClaim);
   const canQuery = adapter?.capabilities.supportsQuotaQuery === true;
   const canSwitch = adapter?.capabilities.supportsClientSwitch === true;
+  const supportsWebviewOAuth =
+    adapter?.capabilities.authMethods.includes("webview_oauth") ?? false;
   const needsRecovery = account.status === "expired" || account.status === "risk_paused";
   const missingApiToken = account.hasApiToken === false;
   const missingLocalSnapshot = account.hasLocalSnapshot === false;
@@ -84,7 +89,20 @@ export const AccountCard = React.memo(function AccountCard({
     setRefreshing(false);
   };
 
+  const handleRecover = async () => {
+    setRecovering(true);
+    try {
+      await recoverAccount(account.id);
+    } finally {
+      setRecovering(false);
+    }
+  };
+
   const handleDirectOAuth = () => {
+    if (!supportsWebviewOAuth && onOpenBindModal) {
+      onOpenBindModal(account);
+      return;
+    }
     void importAccount(account.toolId, "", "webview_oauth", undefined, account.id).catch(() => {});
   };
 
@@ -237,34 +255,46 @@ export const AccountCard = React.memo(function AccountCard({
                   {(() => {
                     const isQoderClaimed =
                       isQoderClaimBucket && effectiveClaimStatus === "claimed";
+                    const isQoderAvailable =
+                      isQoderClaimBucket && effectiveClaimStatus === "available";
+                    const isQoderPendingVerify =
+                      isQoderClaimBucket && !isQoderClaimed && !isQoderAvailable;
                     const pct = isQoderClaimed
                       ? 100
-                      : primaryBucket.total > 0
-                        ? Math.min(
-                            100,
-                            Math.round((primaryBucket.remaining / primaryBucket.total) * 100)
-                          )
-                        : 0;
+                      : isQoderPendingVerify
+                        ? 0
+                        : primaryBucket.total > 0
+                          ? Math.min(
+                              100,
+                              Math.round((primaryBucket.remaining / primaryBucket.total) * 100)
+                            )
+                          : 0;
                     const barColor = isQoderClaimed
                       ? "bg-emerald-600 dark:bg-emerald-400"
-                      : pct <= 15
-                        ? "bg-rose-500"
-                        : pct <= 35
-                          ? "bg-amber-500"
-                          : "bg-zinc-900 dark:bg-zinc-100";
+                      : isQoderPendingVerify
+                        ? "bg-zinc-400 dark:bg-zinc-500"
+                        : pct <= 15
+                          ? "bg-rose-500"
+                          : pct <= 35
+                            ? "bg-amber-500"
+                            : "bg-zinc-900 dark:bg-zinc-100";
                     const pctBadge = isQoderClaimed
                       ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                      : pct <= 15
-                        ? "bg-rose-500/12 text-rose-700 dark:text-rose-300"
-                        : pct <= 35
-                          ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
-                          : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
+                      : isQoderPendingVerify
+                        ? "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                        : pct <= 15
+                          ? "bg-rose-500/12 text-rose-700 dark:text-rose-300"
+                          : pct <= 35
+                            ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
+                            : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
 
                     const badgeText = isQoderClaimed
                       ? "本周期已领"
-                      : isQoderClaimBucket
-                        ? "今日可领"
-                        : `剩余 ${pct}%`;
+                      : isQoderPendingVerify
+                        ? "待核实"
+                        : isQoderClaimBucket
+                          ? "今日可领"
+                          : `剩余 ${pct}%`;
 
                     return (
                       <>
@@ -383,11 +413,15 @@ export const AccountCard = React.memo(function AccountCard({
                 </button>
                 <button
                   type="button"
-                  onClick={() => void recoverAccount(account.id)}
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  disabled={recovering || isBatchRunning}
+                  onClick={() => void handleRecover()}
+                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
                 >
-                  <RotateCcw className="h-3 w-3 shrink-0" aria-hidden="true" />
-                  重试
+                  <RotateCcw
+                    className={`h-3 w-3 shrink-0 ${recovering ? "animate-spin" : ""}`}
+                    aria-hidden="true"
+                  />
+                  {recovering ? "恢复中..." : "重试"}
                 </button>
               </>
             ) : missingApiToken ? null : (

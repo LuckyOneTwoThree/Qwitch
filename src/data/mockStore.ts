@@ -7,7 +7,7 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
     version: "0.1.0",
     isBuiltin: true,
     capabilities: {
-      authMethods: ["local_import", "webview_oauth"],
+      authMethods: ["local_import", "webview_oauth", "token_paste"],
       supportsQuotaQuery: true,
       supportsDailyClaim: true,
       supportsClientSwitch: true,
@@ -20,7 +20,7 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
     version: "0.1.0",
     isBuiltin: true,
     capabilities: {
-      authMethods: ["local_import", "webview_oauth"],
+      authMethods: ["local_import", "webview_oauth", "token_paste"],
       supportsQuotaQuery: true,
       supportsDailyClaim: true,
       supportsClientSwitch: true,
@@ -33,7 +33,7 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
     version: "0.1.0",
     isBuiltin: true,
     capabilities: {
-      authMethods: ["local_import", "webview_oauth"],
+      authMethods: ["local_import", "webview_oauth", "token_paste"],
       supportsQuotaQuery: true,
       supportsDailyClaim: true,
       supportsClientSwitch: true,
@@ -53,7 +53,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     isActiveOnClient: true,
     latestQuota: {
       planName: "Pro",
-      claimStatus: "unsupported",
+      claimStatus: "claimed",
       fetchedAt: "2026-11-17T16:40:00+09:00",
       buckets: [
         {
@@ -79,7 +79,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     isActiveOnClient: false,
     latestQuota: {
       planName: "Free",
-      claimStatus: "unsupported",
+      claimStatus: "available",
       fetchedAt: "2026-11-17T15:10:00+09:00",
       buckets: [
         {
@@ -105,7 +105,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     isActiveOnClient: false,
     latestQuota: {
       planName: "Free",
-      claimStatus: "unsupported",
+      claimStatus: "available",
       fetchedAt: "2026-11-12T10:00:00+09:00",
       buckets: [
         {
@@ -281,10 +281,10 @@ export const INITIAL_LOGS: ActionLogItem[] = [
   {
     id: 4,
     accountId: "acc-trae-1",
-    toolId: "trae",
+    toolId: "trae_cn",
     actionType: "switch",
     resultStatus: "success",
-    messageSanitized: "已将本机 Trae 桌面端切换至 Trae · 主力工作号 并重启完成",
+    messageSanitized: "已将本机 Trae 桌面端切换至 Trae CN · 主力工作号 并重启完成",
     createdAt: "2026-11-16T18:12:00+09:00",
   },
 ];

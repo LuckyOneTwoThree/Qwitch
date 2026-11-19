@@ -238,6 +238,10 @@ impl AntiRiskScheduler {
                     // 2. 执行手动领取（复用前置快照，避免适配器重复查状态）
                     match adapter.claim_daily(&cred, Some(&quota)).await {
                         Ok(res) => {
+                            let is_confirmed_claimed = res
+                                .updated_quota
+                                .as_ref()
+                                .is_some_and(|q| q.claim_status == ClaimStatus::Claimed);
                             if let Some(updated_q) = res.updated_quota {
                                 let _ = db.save_quota_snapshot(&summary.id, &updated_q);
                             }
@@ -258,6 +262,17 @@ impl AntiRiskScheduler {
                                 );
                             } else {
                                 skipped_count += 1;
+                                if is_confirmed_claimed
+                                    && !summary
+                                        .last_claimed_at
+                                        .as_deref()
+                                        .is_some_and(crate::storage::is_today_cst)
+                                {
+                                    let _ = db.mark_account_claimed(
+                                        &summary.id,
+                                        &Utc::now().to_rfc3339(),
+                                    );
+                                }
                                 let _ = db.append_action_log(
                                     Some(&summary.id),
                                     &summary.tool_id,
@@ -334,6 +349,7 @@ impl AntiRiskScheduler {
                 summary_text: Some(summary_text),
             },
         );
+        let _ = app.emit("qwitch://logs-updated", ());
 
         Ok(())
     }
@@ -505,6 +521,7 @@ impl AntiRiskScheduler {
                 summary_text: Some(summary_text),
             },
         );
+        let _ = app.emit("qwitch://logs-updated", ());
 
         Ok(())
     }

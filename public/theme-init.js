@@ -1,5 +1,9 @@
 (function () {
   try {
+    var params = new URLSearchParams(window.location.search);
+    if (params.get("view") === "tray") {
+      document.documentElement.classList.add("tray-window");
+    }
     var saved = localStorage.getItem("qwitch.theme");
     var prefersDark =
       window.matchMedia &&

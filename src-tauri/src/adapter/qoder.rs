@@ -62,7 +62,11 @@ impl QoderAdapter {
                 version: "0.1.0".to_string(),
                 is_builtin: true,
                 capabilities: AdapterCapabilities {
-                    auth_methods: vec![AuthMethod::LocalImport, AuthMethod::WebviewOauth],
+                    auth_methods: vec![
+                        AuthMethod::LocalImport,
+                        AuthMethod::WebviewOauth,
+                        AuthMethod::TokenPaste,
+                    ],
                     supports_quota_query: true,
                     supports_daily_claim: true,
                     supports_client_switch: true,
@@ -81,12 +85,14 @@ impl QoderAdapter {
     }
 
     #[cfg(target_os = "windows")]
-    fn try_decrypt_windows_auth_dat(config_dir: &std::path::Path, raw_dat: &[u8]) -> Option<Value> {
+    async fn try_decrypt_windows_auth_dat(
+        config_dir: &std::path::Path,
+        raw_dat: &[u8],
+    ) -> Option<Value> {
         use aes_gcm::{
             aead::{Aead, KeyInit},
             Aes256Gcm, Nonce,
         };
-        use std::process::Command;
 
         if raw_dat.len() < 3 + 12 + 16 + 2 || &raw_dat[..3] != b"v10" {
             return None;
@@ -106,9 +112,12 @@ impl QoderAdapter {
              $u=[System.Security.Cryptography.ProtectedData]::Unprotect($b,$null,'CurrentUser'); \
              [Convert]::ToBase64String($u)"
         );
-        let out = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps_script])
-            .output()
+        let mut cmd = tokio::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_script]);
+        cmd.creation_flags(0x0800_0000);
+        let out = tokio::time::timeout(Duration::from_secs(10), cmd.output())
+            .await
+            .ok()?
             .ok()?;
         if !out.status.success() {
             return None;
@@ -467,9 +476,7 @@ impl QoderAdapter {
             .filter(|s| !s.is_empty());
         let mut uid_opt = body
             .get("user_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .and_then(crate::adapter::common::json_uid_to_string);
         let mut name_opt = body
             .get("user_name")
             .and_then(|v| v.as_str())
@@ -491,11 +498,9 @@ impl QoderAdapter {
                         .get("id")
                         .or_else(|| info.get("user_id"))
                         .or_else(|| info.get("uid"))
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
+                        .and_then(crate::adapter::common::json_uid_to_string)
                     {
-                        uid_opt = Some(u.to_string());
+                        uid_opt = Some(u);
                     }
                     if let Some(n) = info
                         .get("name")
@@ -672,13 +677,7 @@ impl ToolAdapter for QoderAdapter {
 
         #[cfg(target_os = "windows")]
         {
-            let cfg_clone = config_dir.clone();
-            let dat_clone = raw_dat.clone();
-            if let Ok(Some(sess)) = tokio::task::spawn_blocking(move || {
-                Self::try_decrypt_windows_auth_dat(&cfg_clone, &dat_clone)
-            })
-            .await
-            {
+            if let Some(sess) = Self::try_decrypt_windows_auth_dat(&config_dir, &raw_dat).await {
                 if let Some(tok) = sess.get("token").and_then(|v| v.as_str()) {
                     files.insert(
                         "decrypted_token.txt".to_string(),
@@ -734,18 +733,18 @@ impl ToolAdapter for QoderAdapter {
                 .get("token")
                 .or_else(|| val.get("accessToken"))
                 .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .ok_or_else(|| AdapterError::Unified {
                     code: UnifiedErrorCode::InvalidCredential,
                     message: "JSON 中缺少 token 字段".into(),
                 })?
-                .trim()
                 .to_string();
             let uid = val
                 .get("userId")
                 .or_else(|| val.get("uid"))
                 .or_else(|| val.get("user_id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .and_then(crate::adapter::common::json_uid_to_string);
             let email = val
                 .get("email")
                 .and_then(|v| v.as_str())
@@ -759,16 +758,18 @@ impl ToolAdapter for QoderAdapter {
                 .filter(|s| !s.is_empty());
             (tok, uid, email, name)
         } else {
-            (
-                trimmed
-                    .strip_prefix("Bearer ")
-                    .unwrap_or(trimmed)
-                    .trim()
-                    .to_string(),
-                None,
-                None,
-                None,
-            )
+            let clean = trimmed
+                .strip_prefix("Bearer ")
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
+            if clean.is_empty() {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InvalidCredential,
+                    message: "Qoder Token 不能为空".into(),
+                });
+            }
+            (clean, None, None, None)
         };
 
         let uid = uid_opt.unwrap_or_else(|| Self::hash_uid("qoder_cn", token.as_bytes()));
@@ -837,10 +838,20 @@ impl ToolAdapter for QoderAdapter {
 
         let mut total_gained = 0.0;
         let mut claimed_any = false;
-        for campaign in claimable {
+        let mut saw_already_claimed = false;
+        for (idx, campaign) in claimable.into_iter().enumerate() {
             let Some(cid) = campaign.get("campaignId").and_then(|v| v.as_str()) else {
                 continue;
             };
+            if !crate::adapter::common::is_valid_path_segment(cid) {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: "Qoder CN 活动 ID 包含非法字符，已拒绝请求".into(),
+                });
+            }
+            if idx > 0 {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
             let url = format!("{DEFAULT_BASE_URL}/sash/api/v1/me/campaigns/{cid}/claim");
             let resp = self
                 .http
@@ -857,18 +868,9 @@ impl ToolAdapter for QoderAdapter {
             if !status.is_success() {
                 if status.as_u16() == 400 || status.as_u16() == 409 {
                     let err_text = resp.text().await.unwrap_or_default();
-                    let lower = err_text.to_lowercase();
-                    if err_text.contains("已签")
-                        || err_text.contains("已领")
-                        || lower.contains("already")
-                        || lower.contains("claimed")
-                    {
-                        let refreshed = self.inspect_quota(cred).await.ok();
-                        return Ok(ClaimResult {
-                            claimed: false,
-                            reward_summary: "本周期已领取".into(),
-                            updated_quota: refreshed,
-                        });
+                    if crate::adapter::common::is_idempotent_claimed_phrase(&err_text) {
+                        saw_already_claimed = true;
+                        continue;
                     }
                 }
                 return Err(Self::map_http_status(status, "领取 Qoder CN Credits"));
@@ -910,20 +912,19 @@ impl ToolAdapter for QoderAdapter {
             }
         }
 
-        // 领取成功但领后查额失败/返回 Unknown 时合成 Claimed 快照，
+        // 领取成功或确认已领但领后查额失败/返回 Unknown 时合成 Claimed 快照，
         // 避免 UI 残留可领按钮（尽量保留查额得到的 buckets）
+        let confirmed_claimed = claimed_any || saw_already_claimed;
         let refreshed = match self.inspect_quota(cred).await {
-            Ok(q) if claimed_any && q.claim_status == ClaimStatus::Unknown => Some(QuotaSnapshot {
-                plan_name: q.plan_name,
-                claim_status: ClaimStatus::Claimed,
-                buckets: q.buckets,
-                fetched_at: q.fetched_at,
-            }),
+            Ok(mut q) if confirmed_claimed && q.claim_status != ClaimStatus::Claimed => {
+                q.claim_status = ClaimStatus::Claimed;
+                Some(q)
+            }
             Ok(q) => Some(q),
-            Err(_) if claimed_any => Some(QuotaSnapshot {
+            Err(_) if confirmed_claimed => Some(QuotaSnapshot {
                 plan_name: None,
                 claim_status: ClaimStatus::Claimed,
-                buckets: Vec::new(),
+                buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
                 fetched_at: Utc::now().to_rfc3339(),
             }),
             Err(_) => None,
@@ -977,14 +978,20 @@ impl ToolAdapter for QoderAdapter {
 
         let target = config_dir.join(AUTH_DAT_FILE);
         let tmp = config_dir.join(".auth.v1.dat.tmp");
-        std::fs::write(&tmp, &dat_bytes).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("写入临时 auth.v1.dat 失败: {e}"),
-        })?;
-        std::fs::rename(&tmp, &target).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("替换 Qoder CN 会话文件失败: {e}"),
-        })?;
+        if let Err(e) = std::fs::write(&tmp, &dat_bytes) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("写入临时 auth.v1.dat 失败: {e}"),
+            });
+        }
+        if let Err(e) = std::fs::rename(&tmp, &target) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("替换 Qoder CN 会话文件失败: {e}"),
+            });
+        }
 
         if let Some(status_b64) = files.get(APP_STATUS_SNAPSHOT_KEY) {
             if let (Ok(status_bytes), Some(dot_dir)) =
@@ -994,7 +1001,11 @@ impl ToolAdapter for QoderAdapter {
                 let status_target = dot_dir.join(".qoder-app-status.json");
                 let status_tmp = dot_dir.join(".qoder-app-status.json.tmp");
                 if std::fs::write(&status_tmp, status_bytes).is_ok() {
-                    let _ = std::fs::rename(&status_tmp, &status_target);
+                    if std::fs::rename(&status_tmp, &status_target).is_err() {
+                        let _ = std::fs::remove_file(&status_tmp);
+                    }
+                } else {
+                    let _ = std::fs::remove_file(&status_tmp);
                 }
             }
         }
@@ -1076,5 +1087,20 @@ mod tests {
         let snap_no_amount = QoderAdapter::build_quota_snapshot(&no_amount);
         assert_eq!(snap_no_amount.claim_status, ClaimStatus::Claimed);
         assert!(snap_no_amount.buckets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn qoder_numeric_uid_and_token_paste_capability() {
+        let adapter = QoderAdapter::new();
+        assert!(adapter
+            .manifest()
+            .capabilities
+            .auth_methods
+            .contains(&AuthMethod::TokenPaste));
+        let env = adapter
+            .parse_manual_token(r#"{"token":"qd-tok-123","userId":998877}"#)
+            .await
+            .expect("numeric uid");
+        assert_eq!(env.uid, "998877");
     }
 }

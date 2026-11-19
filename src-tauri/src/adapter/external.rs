@@ -73,6 +73,7 @@ struct JsonRpcError {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
+    id: Option<Value>,
     result: Option<Value>,
     error: Option<JsonRpcError>,
 }
@@ -135,10 +136,27 @@ impl ExternalAdapter {
         }
     }
 
+    fn validate_envelope_tool_id(
+        &self,
+        env: CredentialEnvelope,
+    ) -> Result<CredentialEnvelope, AdapterError> {
+        if env.tool_id != self.manifest.id {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!(
+                    "外部适配器 {} 返回的 tool_id ({}) 与插件 ID 不匹配，已拒绝导入",
+                    self.manifest.id, env.tool_id
+                ),
+            });
+        }
+        Ok(env)
+    }
+
     async fn call_rpc(&self, method: &str, params: Value) -> Result<Value, AdapterError> {
+        let req_id = Uuid::new_v4().to_string();
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
-            id: Uuid::new_v4().to_string(),
+            id: req_id.clone(),
             method,
             params,
         };
@@ -170,19 +188,39 @@ impl ExternalAdapter {
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
-        let stdout_bytes = tokio::time::timeout(timeout, async {
-            let mut out_buf = Vec::new();
-            if let Some(stdout) = stdout_pipe {
-                let mut reader = stdout.take(MAX_ADAPTER_OUTPUT_BYTES + 1);
-                reader.read_to_end(&mut out_buf).await?;
-            }
-            if let Some(stderr) = stderr_pipe {
-                let mut err_buf = Vec::new();
-                let mut reader = stderr.take(MAX_ADAPTER_OUTPUT_BYTES + 1);
-                let _ = reader.read_to_end(&mut err_buf).await;
-            }
-            let _ = child.wait().await?;
-            Ok::<Vec<u8>, std::io::Error>(out_buf)
+        let (stdout_bytes, stderr_bytes, exit_status) = tokio::time::timeout(timeout, async {
+            let read_stdout = async {
+                let mut buf = Vec::new();
+                if let Some(stdout) = stdout_pipe {
+                    let mut reader = stdout.take(MAX_ADAPTER_OUTPUT_BYTES + 1);
+                    reader.read_to_end(&mut buf).await?;
+                }
+                Ok::<Vec<u8>, std::io::Error>(buf)
+            };
+            let read_stderr = async {
+                let mut buf = Vec::new();
+                if let Some(mut stderr) = stderr_pipe {
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        match stderr.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if buf.len() < 65_536 {
+                                    let take = n.min(65_536 - buf.len());
+                                    buf.extend_from_slice(&chunk[..take]);
+                                }
+                            }
+                        }
+                    }
+                }
+                buf
+            };
+            let (out_res, err_buf, wait_res) = tokio::join!(read_stdout, read_stderr, child.wait());
+            let out_buf = out_res?;
+            let status = wait_res?;
+            Ok::<(Vec<u8>, Vec<u8>, std::process::ExitStatus), std::io::Error>((
+                out_buf, err_buf, status,
+            ))
         })
         .await
         .map_err(|_| AdapterError::Unified {
@@ -204,21 +242,48 @@ impl ExternalAdapter {
             });
         }
 
+        let stderr_snippet = || -> String {
+            let text = String::from_utf8_lossy(&stderr_bytes);
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                let clipped: String = trimmed.chars().take(200).collect();
+                format!("（stderr: {clipped}）")
+            }
+        };
+
         let stdout_str = String::from_utf8_lossy(&stdout_bytes);
-        let last_line = stdout_str
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .ok_or_else(|| AdapterError::Unified {
+        let Some(last_line) = stdout_str.lines().rev().find(|l| !l.trim().is_empty()) else {
+            return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
-                message: format!("外部适配器 {} 未返回 JSON-RPC 响应", self.manifest.id),
-            })?;
+                message: format!(
+                    "外部适配器 {} 未返回 JSON-RPC 响应 (exit: {}){}",
+                    self.manifest.id,
+                    exit_status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".to_string()),
+                    stderr_snippet()
+                ),
+            });
+        };
 
         let resp: JsonRpcResponse =
             serde_json::from_str(last_line).map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
-                message: format!("解析外部适配器响应失败: {e}"),
+                message: format!("解析外部适配器响应失败: {e}{}", stderr_snippet()),
             })?;
+
+        if let Some(resp_id) = resp.id.as_ref() {
+            let matches = resp_id.as_str() == Some(req_id.as_str());
+            if !matches {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("外部适配器 {} 返回的 JSON-RPC id 不匹配", self.manifest.id),
+                });
+            }
+        }
 
         if let Some(err) = resp.error {
             return Err(AdapterError::Unified {
@@ -226,6 +291,18 @@ impl ExternalAdapter {
                 message: err
                     .message
                     .unwrap_or_else(|| "外部适配器返回错误".to_string()),
+            });
+        }
+
+        if !exit_status.success() && resp.result.is_none() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!(
+                    "外部适配器 {} 异常退出 (code: {:?}){}",
+                    self.manifest.id,
+                    exit_status.code(),
+                    stderr_snippet()
+                ),
             });
         }
 
@@ -253,10 +330,12 @@ impl ToolAdapter for ExternalAdapter {
                 serde_json::json!({ "client_config_dir": config_dir }),
             )
             .await?;
-        serde_json::from_value(res).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InvalidCredential,
-            message: format!("外部适配器返回凭据格式无效: {e}"),
-        })
+        let env: CredentialEnvelope =
+            serde_json::from_value(res).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!("外部适配器返回凭据格式无效: {e}"),
+            })?;
+        self.validate_envelope_tool_id(env)
     }
 
     async fn parse_manual_token(
@@ -269,10 +348,12 @@ impl ToolAdapter for ExternalAdapter {
                 serde_json::json!({ "raw_input": raw_input }),
             )
             .await?;
-        serde_json::from_value(res).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InvalidCredential,
-            message: format!("外部适配器解析 Token 失败: {e}"),
-        })
+        let env: CredentialEnvelope =
+            serde_json::from_value(res).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!("外部适配器解析 Token 失败: {e}"),
+            })?;
+        self.validate_envelope_tool_id(env)
     }
 
     async fn inspect_quota(
@@ -336,11 +417,14 @@ pub fn scan_external_manifests(data_dir: &Path) -> Vec<(PathBuf, ExternalManifes
         return out;
     };
 
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+
+    for dir in dirs {
         let manifest_path = dir.join("manifest.json");
         if !manifest_path.is_file() {
             continue;
@@ -369,4 +453,117 @@ pub fn discover_external_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn To
             (id, adapter)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ext(id: &str, command: &str, args: Vec<String>) -> ExternalAdapter {
+        ExternalAdapter::from_manifest_file(
+            std::env::temp_dir(),
+            ExternalManifestFile {
+                id: id.to_string(),
+                name: format!("Ext {id}"),
+                version: "0.1.0".to_string(),
+                platforms: vec![],
+                entry: ExternalEntry {
+                    command: command.to_string(),
+                    args,
+                },
+                timeout_ms: 5000,
+                capabilities: ExternalCapabilities {
+                    auth_methods: vec![AuthMethod::TokenPaste],
+                    supports_quota_query: true,
+                    supports_daily_claim: false,
+                    supports_client_switch: false,
+                    supports_multi_instance: false,
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn external_adapter_rejects_spoofed_tool_id() {
+        let adapter = make_ext("my_plugin", "echo", vec![]);
+        let spoofed = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u_1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: crate::domain::CredentialPayload::Token {
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        assert!(adapter.validate_envelope_tool_id(spoofed).is_err());
+
+        let valid = CredentialEnvelope {
+            tool_id: "my_plugin".to_string(),
+            uid: "u_1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: crate::domain::CredentialPayload::Token {
+                access_token: "tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        assert!(adapter.validate_envelope_tool_id(valid).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn call_rpc_handles_large_stderr_without_deadlock_and_checks_id() {
+        // 1. 超过 100KB 的 stderr 与合法 JSON-RPC stdout 并发读取不死锁
+        let script = r#"
+            read req
+            i=0
+            while [ "$i" -lt 2000 ]; do
+              printf 'stderr noise line padding 0123456789abcdefghijklmnopqrstuvwxyz\n' >&2
+              i=$((i + 1))
+            done
+            id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+            printf '{"jsonrpc":"2.0","id":"%s","result":{"ok":true}}\n' "$id"
+        "#;
+        let adapter = make_ext("my_plugin", "/bin/sh", vec!["-c".into(), script.into()]);
+        let res = adapter
+            .call_rpc("ping", serde_json::json!({}))
+            .await
+            .expect("large stderr must not deadlock");
+        assert_eq!(res.get("ok").and_then(|v| v.as_bool()), Some(true));
+
+        // 2. JSON-RPC id 不匹配拒绝
+        let bad_id = make_ext(
+            "my_plugin",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                r#"read _; printf '{"jsonrpc":"2.0","id":"wrong-id","result":{}}\n'"#.into(),
+            ],
+        );
+        let err = bad_id
+            .call_rpc("ping", serde_json::json!({}))
+            .await
+            .expect_err("id mismatch must fail");
+        assert!(err.to_string().contains("id 不匹配"));
+
+        // 3. 外部插件尝试返回内置 tool_id 时被 parse_manual_token 拦截
+        let spoof = make_ext(
+            "my_plugin",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                r#"read req; id=$(printf '%s' "$req" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); printf '{"jsonrpc":"2.0","id":"%s","result":{"tool_id":"trae_cn","uid":"u1","display_email":null,"payload":{"kind":"token","access_token":"t","refresh_token":null,"expires_at":null,"extra":{}}}}\n' "$id""#.into(),
+            ],
+        );
+        let spoof_err = spoof
+            .parse_manual_token("t")
+            .await
+            .expect_err("spoofed tool_id must fail");
+        assert!(spoof_err.to_string().contains("tool_id"));
+    }
 }

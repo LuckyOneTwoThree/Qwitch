@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, PhysicalPosition, PhysicalSize, Position, WindowEvent,
+    Manager, PhysicalPosition, Position, WindowEvent,
 };
 
 use adapter::create_all_adapters;
@@ -69,9 +69,10 @@ pub fn run() {
                 let _ = host.set_launch_at_login(true);
             }
             let launched_by_autostart = std::env::args().any(|a| a == "--autostart");
-            if startup_settings.start_minimized || launched_by_autostart {
+            if !startup_settings.start_minimized && !launched_by_autostart {
                 if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.hide();
+                    let _ = win.show();
+                    let _ = win.set_focus();
                 }
             }
 
@@ -116,7 +117,52 @@ pub fn run() {
                             if win.is_visible().unwrap_or(false) {
                                 let _ = win.hide();
                             } else {
-                                let scale = win.scale_factor().unwrap_or(1.0);
+                                let monitors = win.available_monitors().unwrap_or_default();
+                                let point_in_mon = |m: &tauri::Monitor, px: f64, py: f64| -> bool {
+                                    let mx = m.position().x as f64;
+                                    let my = m.position().y as f64;
+                                    let mw = m.size().width as f64;
+                                    let mh = m.size().height as f64;
+                                    px >= mx && px < mx + mw && py >= my && py < my + mh
+                                };
+                                let target_mon = monitors
+                                    .iter()
+                                    .find(|m| {
+                                        (position.x != 0.0 || position.y != 0.0)
+                                            && point_in_mon(m, position.x, position.y)
+                                    })
+                                    .cloned()
+                                    .or_else(|| {
+                                        monitors
+                                            .iter()
+                                            .find(|m| {
+                                                let s = m.scale_factor();
+                                                let (rx, ry) = match rect.position {
+                                                    Position::Physical(p) => {
+                                                        (p.x as f64, p.y as f64)
+                                                    }
+                                                    Position::Logical(p) => (p.x * s, p.y * s),
+                                                };
+                                                point_in_mon(m, rx, ry)
+                                            })
+                                            .cloned()
+                                    })
+                                    .or_else(|| win.current_monitor().ok().flatten())
+                                    .or_else(|| app.primary_monitor().ok().flatten());
+
+                                let scale = target_mon
+                                    .as_ref()
+                                    .map(|m| m.scale_factor())
+                                    .or_else(|| win.scale_factor().ok())
+                                    .unwrap_or(1.0);
+                                let old_scale = win.scale_factor().unwrap_or(scale).max(0.5);
+                                let (win_w, win_h) = match win.outer_size() {
+                                    Ok(s) => (
+                                        (s.width as f64 / old_scale) * scale,
+                                        (s.height as f64 / old_scale) * scale,
+                                    ),
+                                    Err(_) => (384.0 * scale, 500.0 * scale),
+                                };
                                 let (icon_x, icon_y) = match rect.position {
                                     Position::Physical(p) => (p.x as f64, p.y as f64),
                                     Position::Logical(p) => (p.x * scale, p.y * scale),
@@ -125,44 +171,63 @@ pub fn run() {
                                     tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
                                     tauri::Size::Logical(s) => (s.width * scale, s.height * scale),
                                 };
-                                let size = win.outer_size().unwrap_or(PhysicalSize::new(
-                                    (384.0 * scale) as u32,
-                                    (500.0 * scale) as u32,
-                                ));
                                 let center_x = if icon_w > 0.0 {
                                     icon_x + icon_w / 2.0
                                 } else {
                                     position.x
                                 };
-                                let raw_x = center_x - (size.width as f64) / 2.0;
-                                let x = if let Some(mon) = win
-                                    .current_monitor()
-                                    .ok()
-                                    .flatten()
-                                    .or_else(|| app.primary_monitor().ok().flatten())
-                                {
-                                    let mon_x = mon.position().x as f64;
-                                    let mon_w = mon.size().width as f64;
-                                    let margin = 4.0 * scale;
-                                    let max_x = (mon_x + mon_w - (size.width as f64) - margin)
-                                        .max(mon_x + margin);
-                                    raw_x.clamp(mon_x + margin, max_x) as i32
-                                } else {
-                                    raw_x.max(8.0) as i32
-                                };
+                                let raw_x = center_x - win_w / 2.0;
 
                                 #[cfg(target_os = "macos")]
-                                let y = if icon_h > 0.0 {
-                                    (icon_y + icon_h + 2.0 * scale).max(0.0) as i32
+                                let raw_y = if icon_h > 0.0 {
+                                    icon_y + icon_h + 2.0 * scale
                                 } else {
-                                    (position.y + 18.0 * scale).max(0.0) as i32
+                                    position.y + 18.0 * scale
                                 };
                                 #[cfg(not(target_os = "macos"))]
-                                let y = if icon_h > 0.0 {
-                                    (icon_y - (size.height as f64) - 2.0 * scale).max(0.0) as i32
+                                let raw_y = {
+                                    let icon_center_y = if icon_h > 0.0 {
+                                        icon_y + icon_h / 2.0
+                                    } else {
+                                        position.y
+                                    };
+                                    let in_top_half = target_mon
+                                        .as_ref()
+                                        .map(|m| {
+                                            let my = m.position().y as f64;
+                                            let mh = m.size().height as f64;
+                                            icon_center_y < my + mh / 2.0
+                                        })
+                                        .unwrap_or(false);
+                                    if in_top_half {
+                                        if icon_h > 0.0 {
+                                            icon_y + icon_h + 2.0 * scale
+                                        } else {
+                                            position.y + 18.0 * scale
+                                        }
+                                    } else if icon_h > 0.0 {
+                                        icon_y - win_h - 2.0 * scale
+                                    } else {
+                                        position.y - win_h - 8.0 * scale
+                                    }
+                                };
+
+                                let (x, y) = if let Some(mon) = target_mon {
+                                    let mon_x = mon.position().x as f64;
+                                    let mon_y = mon.position().y as f64;
+                                    let mon_w = mon.size().width as f64;
+                                    let mon_h = mon.size().height as f64;
+                                    let margin = 4.0 * scale;
+                                    let max_x =
+                                        (mon_x + mon_w - win_w - margin).max(mon_x + margin);
+                                    let max_y =
+                                        (mon_y + mon_h - win_h - margin).max(mon_y + margin);
+                                    (
+                                        raw_x.clamp(mon_x + margin, max_x) as i32,
+                                        raw_y.clamp(mon_y + margin, max_y) as i32,
+                                    )
                                 } else {
-                                    (position.y - (size.height as f64) - 8.0 * scale).max(0.0)
-                                        as i32
+                                    (raw_x as i32, raw_y as i32)
                                 };
 
                                 let _ = win

@@ -48,7 +48,13 @@ import {
   selectScopedStats,
   type AccountFilter,
 } from "../domain/selectors";
-import type { ActionLogItem, AuthMethod, ExternalAdapterInfo, ToolId } from "../types/qwitch";
+import type {
+  AccountSummary,
+  ActionLogItem,
+  AuthMethod,
+  ExternalAdapterInfo,
+  ToolId,
+} from "../types/qwitch";
 import { invoke } from "@tauri-apps/api/core";
 
 type NavSection = "all" | "logs" | "settings" | ToolId;
@@ -176,6 +182,7 @@ export function Dashboard() {
   const [importOpen, setImportOpen] = useState(false);
   const [importDefaultMethod, setImportDefaultMethod] = useState<AuthMethod | undefined>(undefined);
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
+  const [bindTargetAccount, setBindTargetAccount] = useState<AccountSummary | null>(null);
   const [loadingMoreLogs, setLoadingMoreLogs] = useState(false);
   const [pathDrafts, setPathDrafts] = useState<Record<string, string>>({});
   const [pathDraftsDirty, setPathDraftsDirty] = useState(false);
@@ -359,6 +366,7 @@ export function Dashboard() {
   };
 
   const openImportModal = (defaultMethod?: AuthMethod, toolId?: ToolId) => {
+    setBindTargetAccount(null);
     setImportDefaultMethod(defaultMethod);
     setImportPresetTool(toolId ?? activeToolFilter);
     setImportOpen(true);
@@ -368,7 +376,7 @@ export function Dashboard() {
     ? getToolBrandMeta(activeToolFilter, adapters)
     : undefined;
   const activeToolSupportsClaim = activeToolFilter
-    ? (adapters.find((a) => a.id === activeToolFilter)?.capabilities.supportsDailyClaim ?? true)
+    ? (adapters.find((a) => a.id === activeToolFilter)?.capabilities.supportsDailyClaim ?? false)
     : true;
   const isAccountSection = nav !== "logs" && nav !== "settings";
   const isBatchBusy = Boolean(batchProgress?.running);
@@ -691,7 +699,7 @@ export function Dashboard() {
                         <span
                           key={t.id}
                           title={`${t.name}: ${accounts.filter((a) => a.toolId === t.id).length}`}
-                          className="inline-flex items-center gap-0.5 rounded bg-zinc-100 px-1 py-0.2 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                          className="inline-flex items-center gap-0.5 rounded bg-zinc-100 px-1 py-0.5 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                         >
                           <ToolBrandIcon toolId={t.id} size="xs" decorative />
                           <span className="tabular-nums">
@@ -738,7 +746,7 @@ export function Dashboard() {
                     </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.2 text-[11px] font-medium ${
+                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium ${
                       scopedStats.runningClientsCount > 0
                         ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
                         : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
@@ -789,7 +797,7 @@ export function Dashboard() {
                     </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.2 text-[11px] font-medium ${
+                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium ${
                       scopedStats.claimableCount > 0
                         ? "bg-sky-500/12 text-sky-800 dark:text-sky-300"
                         : scopedStats.unclaimedAuthMissingCount > 0
@@ -846,7 +854,7 @@ export function Dashboard() {
                     </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.2 text-[11px] font-medium ${
+                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium ${
                       scopedStats.attentionCount > 0
                         ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
                         : "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
@@ -991,7 +999,7 @@ export function Dashboard() {
                   <ScrollText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   活跃日志
                   <span
-                    className={`rounded-full px-1.5 py-0.2 text-[11px] tabular-nums ${
+                    className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
                       logScope === "active"
                         ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
                         : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
@@ -1012,7 +1020,7 @@ export function Dashboard() {
                   <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   已归档
                   <span
-                    className={`rounded-full px-1.5 py-0.2 text-[11px] tabular-nums ${
+                    className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
                       logScope === "archived"
                         ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
                         : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
@@ -1032,7 +1040,8 @@ export function Dashboard() {
                       onClick={() =>
                         void archiveLogs(
                           { scope: "active", redundantOnly: true },
-                          `已归档 ${logStats.noiseActiveCount} 条日常冗余记录（已保留签到、切号与异常）`
+                          (count) =>
+                            `已归档 ${count} 条日常冗余记录（已保留签到、切号与异常）`
                         )
                       }
                       title="将日常“额度查询成功”和“幂等跳过”归档，仅保留签到成功、切号、导入及所有异常"
@@ -1127,7 +1136,7 @@ export function Dashboard() {
                       onClick={() =>
                         void unarchiveLogs(
                           { scope: "archived" },
-                          `已恢复 ${logStats.archivedCount} 条归档日志`
+                          (count) => `已恢复 ${count} 条归档日志`
                         )
                       }
                       className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
@@ -1456,7 +1465,7 @@ export function Dashboard() {
 
                       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
                         {group.accounts.map((acc) => (
-                          <AccountCard key={acc.id} account={acc} />
+                          <AccountCard key={acc.id} account={acc} onOpenBindModal={setBindTargetAccount} />
                         ))}
 
                         {group.accounts.length === 1 && !isFiltered && (
@@ -1483,7 +1492,7 @@ export function Dashboard() {
               ) : (
                 <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2 2xl:grid-cols-3">
                   {filteredAccounts.map((acc) => (
-                    <AccountCard key={acc.id} account={acc} />
+                    <AccountCard key={acc.id} account={acc} onOpenBindModal={setBindTargetAccount} />
                   ))}
                 </div>
               )}
@@ -1579,7 +1588,10 @@ export function Dashboard() {
                                       {log.errorCode}
                                     </span>
                                   )}
-                                  <span className="truncate text-zinc-800 dark:text-zinc-200">
+                                  <span
+                                    title={log.messageSanitized}
+                                    className="truncate text-zinc-800 dark:text-zinc-200"
+                                  >
                                     {log.messageSanitized}
                                   </span>
                                 </div>
@@ -1731,7 +1743,7 @@ export function Dashboard() {
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                  在主进程后台按单队列防风控节奏静默核实额度、同步跨天签到状态。
+                  主窗口可见时按单队列防风控节奏静默核实额度、同步跨天签到状态；隐藏到托盘后将暂停周期性刷新。
                 </p>
 
                 <div className="mt-4 space-y-2.5">
@@ -1739,7 +1751,7 @@ export function Dashboard() {
                     id="qwitch-auto-refresh-startup"
                     label="启动时自动同步额度与签到状态"
                     description="应用启动完成初始化后，自动在后台串行刷新一次已授权账号的最新额度与跨天签到状态。"
-                    checked={appSettings.autoRefreshOnStartup !== false}
+                    checked={Boolean(appSettings.autoRefreshOnStartup)}
                     onChange={(next) => void saveAppSettings({ autoRefreshOnStartup: next })}
                   />
                   <SettingToggleRow
@@ -1771,7 +1783,7 @@ export function Dashboard() {
                           后台定时刷新间隔
                         </div>
                         <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
-                          常驻菜单栏期间周期性检查额度与次日新签到活动。
+                          主窗口保持可见期间周期性检查额度与次日新签到活动（隐藏到托盘后自动暂停）。
                         </p>
                       </div>
                       <div className="flex flex-wrap items-center gap-1">
@@ -1782,7 +1794,7 @@ export function Dashboard() {
                           { label: "60 分钟", value: 60 },
                           { label: "120 分钟", value: 120 },
                         ].map((opt) => {
-                          const current = appSettings.autoRefreshIntervalMinutes ?? 30;
+                          const current = appSettings.autoRefreshIntervalMinutes ?? 0;
                           const selected = current === opt.value;
                           return (
                             <button
@@ -1845,7 +1857,11 @@ export function Dashboard() {
                       type="number"
                       min={500}
                       value={jitterRangeMs[0]}
-                      onChange={(e) => setJitterRangeMs([Number(e.target.value), jitterRangeMs[1]])}
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+                        setJitterRangeMs([next, jitterRangeMs[1]]);
+                      }}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"
                     />
                   </div>
@@ -1861,7 +1877,11 @@ export function Dashboard() {
                       type="number"
                       min={500}
                       value={jitterRangeMs[1]}
-                      onChange={(e) => setJitterRangeMs([jitterRangeMs[0], Number(e.target.value)])}
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+                        setJitterRangeMs([jitterRangeMs[0], next]);
+                      }}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"
                     />
                   </div>
@@ -1904,12 +1924,14 @@ export function Dashboard() {
                       type="number"
                       min={0}
                       value={logRetention.archiveAfterDays}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
                         setLogRetention({
                           ...logRetention,
-                          archiveAfterDays: Math.max(0, Number(e.target.value)),
-                        })
-                      }
+                          archiveAfterDays: next,
+                        });
+                      }}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"
                     />
                   </div>
@@ -1925,12 +1947,14 @@ export function Dashboard() {
                       type="number"
                       min={0}
                       value={logRetention.maxActiveCount}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
                         setLogRetention({
                           ...logRetention,
-                          maxActiveCount: Math.max(0, Number(e.target.value)),
-                        })
-                      }
+                          maxActiveCount: next,
+                        });
+                      }}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"
                     />
                   </div>
@@ -1982,7 +2006,7 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={async () => {
-                        const ok = await saveAppSettings({ trustedAdapters: trustedDraft });
+                        const ok = await saveAppSettings({ trustedAdapters: trustedDraft }, true);
                         if (ok) {
                           showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
                         }
@@ -2159,11 +2183,13 @@ export function Dashboard() {
 
       <ColdSwitchModal />
       <ImportAccountModal
-        open={importOpen}
-        defaultToolId={importPresetTool ?? activeToolFilter}
+        open={importOpen || Boolean(bindTargetAccount)}
+        defaultToolId={bindTargetAccount?.toolId ?? importPresetTool ?? activeToolFilter}
         defaultMethod={importDefaultMethod}
+        targetAccount={bindTargetAccount}
         onClose={() => {
           setImportOpen(false);
+          setBindTargetAccount(null);
           setImportDefaultMethod(undefined);
           setImportPresetTool(undefined);
         }}

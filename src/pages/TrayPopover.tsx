@@ -319,7 +319,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           <>
             {displayedGroups.map((group) => {
               const adapter = adapters.find((a) => a.id === group.id);
-              const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : true;
+              const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : false;
 
               return (
                 <section key={group.id} className="space-y-1.5">
@@ -329,7 +329,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                       <span className="truncate text-[11px] font-semibold text-zinc-800 dark:text-zinc-200">
                         {group.name}
                       </span>
-                      <span className="rounded-full bg-zinc-200/80 px-1.5 py-0.2 text-[11px] font-medium tabular-nums text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                      <span className="rounded-full bg-zinc-200/80 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
                         {group.accounts.length}
                       </span>
                     </div>
@@ -358,14 +358,20 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                         group.id === "qoder_cn" && firstBucket?.key === "daily_credits";
                       const isQoderClaimed =
                         isQoderClaimBucket && effectiveClaim === "claimed";
+                      const isQoderPendingVerify =
+                        isQoderClaimBucket &&
+                        !isQoderClaimed &&
+                        effectiveClaim !== "available";
                       const pct = isQoderClaimed
                         ? 100
-                        : firstBucket && firstBucket.total > 0
-                          ? Math.min(
-                              100,
-                              Math.round((firstBucket.remaining / firstBucket.total) * 100)
-                            )
-                          : null;
+                        : isQoderPendingVerify
+                          ? 0
+                          : firstBucket && firstBucket.total > 0
+                            ? Math.min(
+                                100,
+                                Math.round((firstBucket.remaining / firstBucket.total) * 100)
+                              )
+                            : null;
 
                       const canInlineClaim =
                         supportsClaim &&
@@ -396,7 +402,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                 {acc.label}
                               </span>
                               {acc.latestQuota?.planName && (
-                                <span className="shrink-0 rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.2 text-[11px] font-medium text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                                <span className="shrink-0 rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
                                   {acc.latestQuota.planName}
                                 </span>
                               )}

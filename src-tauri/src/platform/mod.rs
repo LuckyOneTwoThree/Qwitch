@@ -795,7 +795,7 @@ impl PlatformHost for NativePlatformHost {
                     .stderr(Stdio::null())
                     .status();
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(target_os = "linux")]
@@ -821,7 +821,7 @@ impl PlatformHost for NativePlatformHost {
                 std::fs::remove_file(&desktop_path)
                     .map_err(|e| format!("移除开机自启配置失败: {e}"))?;
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

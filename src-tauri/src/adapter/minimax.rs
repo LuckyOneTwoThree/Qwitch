@@ -1075,6 +1075,17 @@ impl ToolAdapter for MiniMaxAdapter {
             crate::adapter::common::hash_fallback_uid("minimax_cn", tokens.access_token.as_bytes())
         });
 
+        // 用服务端 profile 的 user_name 作为权威昵称（本地配置 sharedUser.userName 可能
+        // 不是昵称、或是子账号名/已过时）。注意不覆盖 uid，保持账号去重稳定。
+        let mut display_email: Option<String> = None;
+        if let Ok((_p_uid, p_name, p_email)) = Self::fetch_user_profile(&tokens.access_token).await
+        {
+            if let Some(n) = p_name.filter(|s| !s.trim().is_empty()) {
+                display_name = Some(n);
+            }
+            display_email = p_email.filter(|s| !s.trim().is_empty());
+        }
+
         files.insert(
             SNAPSHOT_TOKEN_FILE.to_string(),
             BASE64.encode(tokens.access_token.as_bytes()),
@@ -1090,7 +1101,7 @@ impl ToolAdapter for MiniMaxAdapter {
             tool_id: "minimax_code_cn".to_string(),
             uid,
             display_name,
-            display_email: None,
+            display_email,
             payload: CredentialPayload::LocalSnapshot { files },
         })
     }

@@ -71,6 +71,8 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     emailMasked: "lu***@gmail.com",
     status: "active",
     isActiveOnClient: true,
+    deviceIdMasked: "9390****7536",
+    deviceType: "mac",
     latestQuota: {
       planName: "Pro",
       claimStatus: "claimed",
@@ -97,6 +99,8 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     emailMasked: "de***@outlook.com",
     status: "active",
     isActiveOnClient: false,
+    deviceIdMasked: "1102****88aa",
+    deviceType: "mac",
     latestQuota: {
       planName: "Free",
       claimStatus: "available",

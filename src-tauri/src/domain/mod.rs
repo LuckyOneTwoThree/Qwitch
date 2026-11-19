@@ -76,6 +76,8 @@ pub struct AccountSummary {
     pub is_active_on_client: bool,
     pub has_local_snapshot: bool,
     pub has_api_token: bool,
+    pub device_id_masked: Option<String>,
+    pub device_type: Option<String>,
     pub latest_quota: Option<QuotaSnapshot>,
     pub last_claimed_at: Option<String>,
     pub updated_at: String,
@@ -255,6 +257,69 @@ impl CredentialEnvelope {
                 (has_local_snapshot, has_api_token)
             }
             CredentialPayload::Cookies { .. } => (false, true),
+        }
+    }
+
+    /// 从快照提取账号绑定设备身份（仅多设备适配器写入 `trae_device.json`）。
+    /// 返回 (脱敏 device_id, 设备类型)，用于 UI 展示；无则 None。
+    pub fn device_identity(&self) -> Option<(String, Option<String>)> {
+        let CredentialPayload::LocalSnapshot { files } = &self.payload else {
+            return None;
+        };
+        let b64 = files.get("trae_device.json")?;
+        let bytes = BASE64.decode(b64).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let id = value.get("device_id")?.as_str()?.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let chars: Vec<char> = id.chars().collect();
+        let masked = if chars.len() <= 8 {
+            format!("{}****", chars.iter().take(4).collect::<String>())
+        } else {
+            let prefix: String = chars.iter().take(4).collect();
+            let suffix: String = chars[chars.len() - 4..].iter().collect();
+            format!("{prefix}****{suffix}")
+        };
+        let dtype = value
+            .get("device_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Some((masked, dtype))
+    }
+
+    /// 跨 OS 导入时覆盖快照中的设备平台，使 `x-device-type` 与设备来源一致。
+    /// `platform`: "mac" | "win" | "linux"；`drop_brand` 为真时清空设备品牌
+    /// （避免把导入机的机型错配到别的平台设备上）。返回是否发生修改。
+    pub fn override_device_platform(&mut self, platform: &str, drop_brand: bool) -> bool {
+        let CredentialPayload::LocalSnapshot { files } = &mut self.payload else {
+            return false;
+        };
+        let Some(b64) = files.get("trae_device.json").cloned() else {
+            return false;
+        };
+        let Ok(bytes) = BASE64.decode(b64) else {
+            return false;
+        };
+        let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return false;
+        };
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+        obj.insert(
+            "device_type".to_string(),
+            serde_json::Value::String(platform.to_string()),
+        );
+        if drop_brand {
+            obj.remove("device_brand");
+        }
+        match serde_json::to_vec(&value) {
+            Ok(new_bytes) => {
+                files.insert("trae_device.json".to_string(), BASE64.encode(new_bytes));
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -466,6 +531,46 @@ mod tests {
             );
         } else {
             panic!("expected LocalSnapshot after reverse merge");
+        }
+    }
+
+    #[test]
+    fn override_device_platform_sets_type_and_drops_brand() {
+        let mut files = HashMap::new();
+        files.insert(
+            "trae_device.json".to_string(),
+            BASE64.encode(
+                serde_json::to_vec(&serde_json::json!({
+                    "device_id": "93900972767536",
+                    "device_type": "mac",
+                    "device_brand": "MacBookPro18,3"
+                }))
+                .unwrap(),
+            ),
+        );
+        let mut env = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+        assert!(env.override_device_platform("win", true));
+        let (masked, dtype) = env.device_identity().expect("device");
+        assert_eq!(masked, "9390****7536");
+        assert_eq!(dtype.as_deref(), Some("win"));
+        if let CredentialPayload::LocalSnapshot { files } = &env.payload {
+            let bytes = BASE64
+                .decode(files.get("trae_device.json").unwrap())
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(value.get("device_brand").is_none());
+            assert_eq!(
+                value.get("device_id").and_then(|v| v.as_str()),
+                Some("93900972767536")
+            );
+        } else {
+            panic!("expected snapshot payload");
         }
     }
 

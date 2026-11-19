@@ -109,6 +109,8 @@ impl QwitchDatabase {
                 is_active_on_client INTEGER NOT NULL DEFAULT 0,
                 has_local_snapshot INTEGER NOT NULL DEFAULT 1,
                 has_api_token INTEGER NOT NULL DEFAULT 1,
+                device_id_masked TEXT,
+                device_type TEXT,
                 encrypted_credential BLOB NOT NULL,
                 last_claimed_at TEXT,
                 created_at TEXT NOT NULL,
@@ -157,6 +159,8 @@ impl QwitchDatabase {
             "ALTER TABLE accounts ADD COLUMN has_api_token INTEGER NOT NULL DEFAULT 1",
             [],
         );
+        let _ = conn.execute("ALTER TABLE accounts ADD COLUMN device_id_masked TEXT", []);
+        let _ = conn.execute("ALTER TABLE accounts ADD COLUMN device_type TEXT", []);
         let _ = conn.execute("ALTER TABLE action_logs ADD COLUMN archived_at TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_archived_id ON action_logs(archived_at, id DESC)",
@@ -176,39 +180,64 @@ impl QwitchDatabase {
 
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
 
-        let existing: Option<(String, Vec<u8>)> = conn
+        let existing: Option<(String, String, Vec<u8>)> = conn
             .query_row(
-                "SELECT id, encrypted_credential FROM accounts WHERE tool_id = ?1 AND uid_hash = ?2",
+                "SELECT id, label, encrypted_credential FROM accounts WHERE tool_id = ?1 AND uid_hash = ?2",
                 params![envelope.tool_id, uid_hash],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
 
         let account_id = match existing {
-            Some((id, old_blob)) => {
-                let merged = match crypto::decrypt_credential(master_key, &old_blob) {
-                    Ok(old_env) => old_env.merge_from(envelope),
-                    Err(_) => envelope.clone(),
+            Some((id, stored_label, old_blob)) => {
+                let old_env = crypto::decrypt_credential(master_key, &old_blob).ok();
+                let merged = match &old_env {
+                    Some(old_env) => old_env.merge_from(envelope),
+                    None => envelope.clone(),
                 };
                 let uid_masked = crypto::mask_uid(&merged.uid);
                 let email_masked = merged.display_email.as_deref().map(crypto::mask_email);
                 let encrypted_cred = crypto::encrypt_credential(master_key, &merged)?;
                 let (has_snap, has_tok) = merged.capability_flags();
+                let (dev_masked, dev_type) = merged
+                    .device_identity()
+                    .map(|(m, t)| (Some(m), t))
+                    .unwrap_or((None, None));
+
+                // 若旧 label 只是“自动生成”（等于旧默认昵称/UID脱敏），允许在本次拿到更准确的
+                // 昵称/邮箱后刷新；用户自定义的备注（与之不同）则保持不变。
+                let new_default = default_account_label(&merged);
+                let label_was_auto = old_env
+                    .as_ref()
+                    .map(|e| stored_label == default_account_label(e))
+                    .unwrap_or(false);
+                let effective_label: String = match label_override {
+                    Some(lo) => lo.to_string(),
+                    None => {
+                        if label_was_auto && !new_default.is_empty() {
+                            new_default
+                        } else {
+                            stored_label
+                        }
+                    }
+                };
 
                 conn.execute(
                     "UPDATE accounts
-                     SET label = COALESCE(?1, label), uid_masked = ?2, email_masked = ?3,
+                     SET label = ?1, uid_masked = ?2, email_masked = ?3,
                          status = CASE WHEN status IN ('disabled', 'risk_paused') THEN status ELSE 'active' END,
                          encrypted_credential = ?4, has_local_snapshot = ?5, has_api_token = ?6,
-                         updated_at = ?7
-                     WHERE id = ?8",
+                         device_id_masked = ?7, device_type = ?8, updated_at = ?9
+                     WHERE id = ?10",
                     params![
-                        label_override,
+                        effective_label,
                         uid_masked,
                         email_masked,
                         encrypted_cred,
                         has_snap as i64,
                         has_tok as i64,
+                        dev_masked,
+                        dev_type,
                         now,
                         id
                     ],
@@ -223,13 +252,18 @@ impl QwitchDatabase {
                 let email_masked = envelope.display_email.as_deref().map(crypto::mask_email);
                 let encrypted_cred = crypto::encrypt_credential(master_key, envelope)?;
                 let (has_snap, has_tok) = envelope.capability_flags();
+                let (dev_masked, dev_type) = envelope
+                    .device_identity()
+                    .map(|(m, t)| (Some(m), t))
+                    .unwrap_or((None, None));
 
                 conn.execute(
                     "INSERT INTO accounts (
                         id, tool_id, label, uid_masked, uid_hash, email_masked,
                         status, is_active_on_client, has_local_snapshot, has_api_token,
+                        device_id_masked, device_type,
                         encrypted_credential, last_claimed_at, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0, ?7, ?8, ?9, NULL, ?10, ?10)",
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?12)",
                     params![
                         id,
                         envelope.tool_id,
@@ -239,6 +273,8 @@ impl QwitchDatabase {
                         email_masked,
                         has_snap as i64,
                         has_tok as i64,
+                        dev_masked,
+                        dev_type,
                         encrypted_cred,
                         now
                     ],
@@ -320,11 +356,25 @@ impl QwitchDatabase {
         let email_masked = merged.display_email.as_deref().map(crypto::mask_email);
         let encrypted_cred = crypto::encrypt_credential(master_key, &merged)?;
         let (has_snap, has_tok) = merged.capability_flags();
+        let (dev_masked, dev_type) = merged
+            .device_identity()
+            .map(|(m, t)| (Some(m), t))
+            .unwrap_or((None, None));
         let incoming_has_token = incoming.capability_flags().1;
-        let effective_label = label_override
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&existing_label);
+        // 旧的自动生成 label（等于旧默认昵称/脱敏 UID）允许在拿到更准昵称后刷新；自定义备注保持。
+        let label_was_auto = existing_label == default_account_label(&old_env);
+        let new_default = default_account_label(&merged);
+        let effective_label: String = match label_override.map(str::trim).filter(|s| !s.is_empty())
+        {
+            Some(lo) => lo.to_string(),
+            None => {
+                if label_was_auto && !new_default.is_empty() {
+                    new_default
+                } else {
+                    existing_label.clone()
+                }
+            }
+        };
 
         let status_sql = if incoming_has_token {
             "CASE WHEN status = 'disabled' THEN 'disabled' ELSE 'active' END"
@@ -336,8 +386,9 @@ impl QwitchDatabase {
              SET label = ?1, uid_masked = ?2, uid_hash = ?3, email_masked = ?4,
                  status = {status_sql},
                  encrypted_credential = ?5,
-                 has_local_snapshot = ?6, has_api_token = ?7, updated_at = ?8
-             WHERE id = ?9"
+                 has_local_snapshot = ?6, has_api_token = ?7,
+                 device_id_masked = ?8, device_type = ?9, updated_at = ?10
+             WHERE id = ?11"
         );
         conn.execute(
             &update_sql,
@@ -349,6 +400,8 @@ impl QwitchDatabase {
                 encrypted_cred,
                 has_snap as i64,
                 has_tok as i64,
+                dev_masked,
+                dev_type,
                 now,
                 account_id
             ],
@@ -364,7 +417,7 @@ impl QwitchDatabase {
             "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                     a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                     a.last_claimed_at, a.updated_at,
-                    q.plan_name, q.claim_status, q.buckets_json, q.fetched_at
+                    q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type
              FROM accounts a
              LEFT JOIN quota_snapshots q ON q.id = (
                  SELECT q2.id FROM quota_snapshots q2
@@ -392,7 +445,7 @@ impl QwitchDatabase {
                 "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
-                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at
+                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type
                  FROM accounts a
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
@@ -412,7 +465,7 @@ impl QwitchDatabase {
                 "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
-                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at
+                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type
                  FROM accounts a
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
@@ -748,6 +801,16 @@ impl QwitchDatabase {
             return Err(StorageError::NotFound(active_account_id.to_string()));
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// 清除某工具下所有账号的“本机使用中”标记（当本机当前登录账号不在库中时使用）
+    pub fn clear_active_on_client(&self, tool_id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        conn.execute(
+            "UPDATE accounts SET is_active_on_client = 0 WHERE tool_id = ?1",
+            params![tool_id],
+        )?;
         Ok(())
     }
 
@@ -1120,6 +1183,8 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
         is_active_on_client: row.get::<_, i64>(6)? != 0,
         has_local_snapshot: row.get::<_, i64>(7)? != 0,
         has_api_token: row.get::<_, i64>(8)? != 0,
+        device_id_masked: row.get(15)?,
+        device_type: row.get(16)?,
         latest_quota,
         last_claimed_at,
         updated_at,
@@ -1275,6 +1340,75 @@ mod tests {
 
     fn temp_db_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("qwitch_test_{tag}_{}.db", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn reimport_refreshes_auto_label_to_nickname() {
+        let db = QwitchDatabase::open(&temp_db_path("labelrefresh")).expect("open db");
+        let mk = [3u8; 32];
+        let base = CredentialEnvelope {
+            tool_id: "workbuddy".to_string(),
+            uid: "wb_12345678".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "t".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        let created = db.upsert_account(&mk, None, &base).expect("insert");
+        assert_eq!(
+            created.label,
+            crate::storage::crypto::mask_uid("wb_12345678")
+        );
+
+        let mut with_name = base.clone();
+        with_name.display_name = Some("小明明".to_string());
+        let updated = db.upsert_account(&mk, None, &with_name).expect("reimport");
+        assert_eq!(updated.label, "小明明");
+
+        // 自定义备注不被覆盖
+        let custom = db
+            .upsert_account(&mk, Some("我的主力号"), &with_name)
+            .expect("custom label");
+        assert_eq!(custom.label, "我的主力号");
+        let again = db
+            .upsert_account(&mk, None, &with_name)
+            .expect("keep custom");
+        assert_eq!(again.label, "我的主力号");
+    }
+
+    #[test]
+    fn device_identity_persists_in_account_summary() {
+        let db = QwitchDatabase::open(&temp_db_path("device")).expect("open db");
+        let master_key = [9u8; 32];
+        let mut files = HashMap::new();
+        files.insert(
+            "trae_device.json".to_string(),
+            BASE64.encode(
+                serde_json::to_vec(&serde_json::json!({
+                    "device_id": "93900972767536",
+                    "device_type": "mac"
+                }))
+                .unwrap(),
+            ),
+        );
+        let env = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "3704729780097880".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+        let created = db
+            .upsert_account(&master_key, Some("Trae 设备B"), &env)
+            .expect("upsert");
+        assert_eq!(created.device_type.as_deref(), Some("mac"));
+        assert_eq!(created.device_id_masked.as_deref(), Some("9390****7536"));
+        let list = db.list_accounts(None).expect("list");
+        assert_eq!(list[0].device_id_masked.as_deref(), Some("9390****7536"));
     }
 
     #[test]

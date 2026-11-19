@@ -4,6 +4,7 @@ import {
   ArrowLeftRight,
   Check,
   Clock,
+  Cpu,
   Globe,
   Link2,
   PauseCircle,
@@ -269,6 +270,20 @@ export const AccountCard = React.memo(function AccountCard({
                   {account.uidMasked}
                   {account.emailMasked ? ` · ${account.emailMasked}` : ""}
                 </p>
+                {account.deviceIdMasked && (
+                  <p
+                    className={`mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] ${
+                      account.deviceType === "win"
+                        ? "bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                        : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                    title={`设备 ${account.deviceIdMasked}${account.deviceType ? ` · ${account.deviceType}` : ""}：该账号的独立设备身份，可与其它设备账号并行签到`}
+                  >
+                    <Cpu className="h-2.5 w-2.5" aria-hidden="true" />
+                    设备 {account.deviceIdMasked}
+                    {account.deviceType ? ` · ${account.deviceType}` : ""}
+                  </p>
+                )}
               </div>
             </div>
 

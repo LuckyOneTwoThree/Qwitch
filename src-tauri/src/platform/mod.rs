@@ -3,6 +3,7 @@ use keyring::Entry;
 use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -37,6 +38,39 @@ fn escape_pgrep_regex(input: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+/// 等待并（必要时）强制结束某 app 的全部辅助进程（Renderer/GPU/utility 等）。
+/// 用于切号：主进程退出后仍残留的 helper 会占用单实例锁/用户数据，导致重启秒退。
+#[cfg(target_os = "macos")]
+async fn cleanup_bundle_leftovers(app_names: &[String], extra_ms: u64) {
+    for app_name in app_names {
+        let needle = format!("/{}/Contents/", escape_pgrep_regex(app_name));
+        let deadline = Instant::now() + Duration::from_millis(extra_ms);
+        loop {
+            let running = tokio::process::Command::new("pgrep")
+                .args(["-f", &needle])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !running {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = tokio::process::Command::new("pkill")
+                    .args(["-KILL", "-f", &needle])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +148,73 @@ pub trait PlatformHost: Send + Sync {
     fn get_or_create_master_key(&self, expectation: &KeyExpectation)
         -> Result<[u8; 32], HostError>;
     fn set_launch_at_login(&self, enabled: bool) -> Result<(), String>;
+}
+
+/// 多实例 profile 作用域宿主：仅覆盖目标工具的 `client_config_dir`，
+/// 指向 `--user-data-dir` 指定的隔离 profile，用于“从某个 profile 导入并采集设备身份”。
+/// 其余能力全部委托给本机真实宿主。
+pub struct ScopedPlatformHost {
+    inner: Arc<dyn PlatformHost>,
+    tool_id: String,
+    config_dir: PathBuf,
+}
+
+impl ScopedPlatformHost {
+    pub fn new(inner: Arc<dyn PlatformHost>, tool_id: &str, config_dir: PathBuf) -> Self {
+        Self {
+            inner,
+            tool_id: tool_id.to_string(),
+            config_dir,
+        }
+    }
+}
+
+#[async_trait]
+impl PlatformHost for ScopedPlatformHost {
+    fn qwitch_data_dir(&self) -> Result<PathBuf, HostError> {
+        self.inner.qwitch_data_dir()
+    }
+
+    fn client_config_dir(&self, tool_id: &str) -> Result<PathBuf, HostError> {
+        if tool_id == self.tool_id {
+            Ok(self.config_dir.clone())
+        } else {
+            self.inner.client_config_dir(tool_id)
+        }
+    }
+
+    fn detect_client_executable(&self, tool_id: &str) -> Option<PathBuf> {
+        self.inner.detect_client_executable(tool_id)
+    }
+
+    fn is_client_running(&self, tool_id: &str) -> Result<bool, HostError> {
+        self.inner.is_client_running(tool_id)
+    }
+
+    async fn terminate_client_gracefully(
+        &self,
+        tool_id: &str,
+        timeout_ms: u64,
+    ) -> Result<(), HostError> {
+        self.inner
+            .terminate_client_gracefully(tool_id, timeout_ms)
+            .await
+    }
+
+    fn launch_client(&self, executable: &Path, args: &[String]) -> Result<(), HostError> {
+        self.inner.launch_client(executable, args)
+    }
+
+    fn get_or_create_master_key(
+        &self,
+        expectation: &KeyExpectation,
+    ) -> Result<[u8; 32], HostError> {
+        self.inner.get_or_create_master_key(expectation)
+    }
+
+    fn set_launch_at_login(&self, enabled: bool) -> Result<(), String> {
+        self.inner.set_launch_at_login(enabled)
+    }
 }
 
 pub struct NativePlatformHost;
@@ -789,6 +890,10 @@ impl PlatformHost for NativePlatformHost {
         };
 
         if !check_running(&primary_names, &proc_names).await? {
+            // 主进程已不在，但可能仍残留 Renderer/GPU/utility 等辅助进程，
+            // 它们会占用单实例锁/用户数据，导致随后的重启“秒退”，这里一并清理。
+            #[cfg(target_os = "macos")]
+            cleanup_bundle_leftovers(&primary_names, 1200).await;
             return Ok(());
         }
 
@@ -836,6 +941,8 @@ impl PlatformHost for NativePlatformHost {
             if !check_running(&primary_names, &proc_names).await? {
                 // 额外等待 300ms 确保文件锁完全释放
                 tokio::time::sleep(Duration::from_millis(300)).await;
+                #[cfg(target_os = "macos")]
+                cleanup_bundle_leftovers(&primary_names, 2500).await;
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -889,10 +996,16 @@ impl PlatformHost for NativePlatformHost {
     }
 
     fn launch_client(&self, executable: &Path, args: &[String]) -> Result<(), HostError> {
+        // 关键：避免把宿主进程的 Electron/Node 环境泄漏给被启动的客户端。
+        // 例如从某个 Electron/Node 环境（如开发工具终端）启动 Qwitch 时，
+        // 环境里可能带有 ELECTRON_RUN_AS_NODE=1，若传给客户端的 Electron 主进程，
+        // 它会以 Node 模式启动并立刻 exit(0)（表现为“重启后秒退/切号失败”）。
         #[cfg(target_os = "macos")]
         {
             if executable.extension().and_then(|e| e.to_str()) == Some("app") {
                 let mut cmd = Command::new("open");
+                cmd.env_remove("ELECTRON_RUN_AS_NODE");
+                cmd.env_remove("NODE_OPTIONS");
                 cmd.arg("-a").arg(executable);
                 if !args.is_empty() {
                     cmd.arg("--args").args(args);
@@ -909,7 +1022,11 @@ impl PlatformHost for NativePlatformHost {
             }
         }
 
-        let mut child = Command::new(executable).args(args).spawn()?;
+        let mut child = Command::new(executable)
+            .env_remove("ELECTRON_RUN_AS_NODE")
+            .env_remove("NODE_OPTIONS")
+            .args(args)
+            .spawn()?;
         std::thread::spawn(move || {
             let _ = child.wait();
         });

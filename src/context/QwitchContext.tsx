@@ -30,6 +30,7 @@ import type {
   ExportLogsResult,
   LocalAccountPreview,
   LogScope,
+  ProfileInspectResult,
   ToastState,
   ToastTone,
   ToolId,
@@ -79,6 +80,7 @@ interface QwitchContextValue {
   clientStatuses: Record<string, ClientHostStatus>;
   saveAppSettings: (next: Partial<AppSettings>, silent?: boolean) => Promise<boolean>;
   refreshClientStatuses: (toolIds?: ToolId[]) => Promise<void>;
+  reconcileActiveAccounts: () => Promise<void>;
   refreshAccountQuota: (accountId: string) => Promise<void>;
   refreshAllQuotas: (toolId?: ToolId) => Promise<boolean>;
   claimDailyBatch: (targetIds?: string[], toolId?: ToolId, includeUnknown?: boolean) => Promise<void>;
@@ -90,8 +92,13 @@ interface QwitchContextValue {
     label: string,
     method: AuthMethod,
     rawInput?: string,
-    targetAccountId?: string
+    targetAccountId?: string,
+    profileDir?: string,
+    devicePlatform?: string
   ) => Promise<void>;
+  launchToolProfile: (toolId: ToolId, profileDir: string) => Promise<string>;
+  pickFolder: (defaultPath?: string) => Promise<string | null>;
+  inspectProfileDir: (toolId: ToolId, profileDir: string) => Promise<ProfileInspectResult>;
   previewLocalAccount: (toolId: ToolId, accountId?: string) => Promise<LocalAccountPreview>;
   renameAccount: (accountId: string, label: string) => Promise<void>;
   toggleAccountDisabled: (accountId: string) => Promise<void>;
@@ -507,6 +514,16 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     [isTauriRuntime, switchableAdapterIdsKey]
   );
 
+  // 校正“本机使用中”标记：读取桌面端真实登录账号后对齐（启动时执行一次）
+  const reconcileActiveAccounts = useCallback(async () => {
+    if (!isTauriRuntime) return;
+    try {
+      await invoke("reconcile_active_accounts");
+    } catch {
+      // 尽力而为，失败不影响主流程
+    }
+  }, [isTauriRuntime]);
+
   const refreshLogs = useCallback(
     async (targetScope?: "active" | "archived") => {
       if (!isTauriRuntime) return;
@@ -598,7 +615,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!isTauriRuntime) return;
-    void syncFromBackend();
+    void (async () => {
+      await reconcileActiveAccounts();
+      await syncFromBackend();
+    })();
 
     let cancelled = false;
     const unlisteners: Array<() => void> = [];
@@ -692,7 +712,21 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         unlisten();
       }
     };
-  }, [applyIncomingSettings, isTrayWindow, isTauriRuntime, refreshLogs, showToast, syncFromBackend]);
+  }, [applyIncomingSettings, isTrayWindow, isTauriRuntime, reconcileActiveAccounts, refreshLogs, showToast, syncFromBackend]);
+
+  // 回到 Qwitch 窗口时自动复核“本机当前账号”（限频，避免频繁重读客户端文件）
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    let last = 0;
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - last < 4000) return;
+      last = now;
+      void reconcileActiveAccounts().then(() => syncFromBackend());
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [isTauriRuntime, reconcileActiveAccounts, syncFromBackend]);
 
   const appendLog = useCallback(
     (entry: Omit<ActionLogItem, "id" | "createdAt">) => {
@@ -1117,7 +1151,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       label: string,
       method: AuthMethod,
       rawInput?: string,
-      targetAccountId?: string
+      targetAccountId?: string,
+      profileDir?: string,
+      devicePlatform?: string
     ) => {
       const trimmedLabel = label.trim();
       const displayLabel = trimmedLabel || `${toolId.toUpperCase()} 新账号`;
@@ -1130,17 +1166,25 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
               toolId,
               label: trimmedLabel,
               targetAccountId: targetAccountId ?? null,
+              profileDir: profileDir ?? null,
+              devicePlatform: devicePlatform ?? null,
             });
             await syncFromBackend();
+            const devSuffix = imported.deviceIdMasked
+              ? `（设备 ${imported.deviceIdMasked}${imported.deviceType ? ` · ${imported.deviceType}` : ""}）`
+              : "";
             if (imported.hasApiToken === false) {
               showToast(
-                `已导入 ${imported.label} 切号快照，请点击卡片「在线授权」开启查额与签到`,
+                `已导入 ${imported.label}${devSuffix} 切号快照，请点击卡片「在线授权」开启查额与签到`,
                 "warning"
               );
             } else if (targetAccountId) {
-              showToast(`已关联本机快照：${imported.label}，现在可一键切号`, "success");
+              showToast(
+                `已关联本机快照：${imported.label}${devSuffix}，现在可一键切号`,
+                "success"
+              );
             } else {
-              showToast(`已导入账号：${imported.label}`, "success");
+              showToast(`已导入账号：${imported.label}${devSuffix}`, "success");
             }
             return;
           } else if (method === "token_paste") {
@@ -1247,6 +1291,34 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     [accounts, adapters, appendLog, isTauriRuntime, showToast, syncFromBackend]
   );
 
+  const launchToolProfile = useCallback(
+    async (toolId: ToolId, profileDir: string): Promise<string> => {
+      if (!isTauriRuntime) {
+        throw new Error("浏览器预览模式无法启动隔离客户端");
+      }
+      return invoke<string>("launch_tool_profile", { toolId, profileDir });
+    },
+    [isTauriRuntime]
+  );
+
+  const pickFolder = useCallback(
+    async (defaultPath?: string): Promise<string | null> => {
+      if (!isTauriRuntime) return null;
+      return invoke<string | null>("pick_folder", { defaultPath: defaultPath ?? null });
+    },
+    [isTauriRuntime]
+  );
+
+  const inspectProfileDir = useCallback(
+    async (toolId: ToolId, profileDir: string): Promise<ProfileInspectResult> => {
+      if (!isTauriRuntime) {
+        return { hasStorage: false, storagePath: "" };
+      }
+      return invoke<ProfileInspectResult>("inspect_profile_dir", { toolId, profileDir });
+    },
+    [isTauriRuntime]
+  );
+
   const previewLocalAccount = useCallback(
     async (toolId: ToolId, accountId?: string) => {
       if (!isTauriRuntime) {
@@ -1255,6 +1327,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       return invoke<LocalAccountPreview>("preview_local_account", {
         toolId,
         accountId: accountId ?? null,
+        profileDir: null,
       });
     },
     [isTauriRuntime]
@@ -1760,6 +1833,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       clientStatuses,
       saveAppSettings,
       refreshClientStatuses,
+      reconcileActiveAccounts,
       refreshAccountQuota,
       refreshAllQuotas,
       claimDailyBatch,
@@ -1767,6 +1841,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       cancelColdSwitch,
       confirmColdSwitch,
       importAccount,
+      launchToolProfile,
+      pickFolder,
+      inspectProfileDir,
       previewLocalAccount,
       renameAccount,
       toggleAccountDisabled,
@@ -1806,6 +1883,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       clientStatuses,
       saveAppSettings,
       refreshClientStatuses,
+      reconcileActiveAccounts,
       refreshAccountQuota,
       refreshAllQuotas,
       claimDailyBatch,
@@ -1813,6 +1891,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       cancelColdSwitch,
       confirmColdSwitch,
       importAccount,
+      launchToolProfile,
+      pickFolder,
+      inspectProfileDir,
       previewLocalAccount,
       renameAccount,
       toggleAccountDisabled,

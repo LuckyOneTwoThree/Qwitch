@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -12,7 +13,7 @@ use crate::domain::{
     AccountStatus, AccountSummary, ActionLogCleanupRequest, ActionLogItem, ActionLogStats,
     AppSettingsDto, AuthMethod, ExportLogsResult, LogScope, QuotaSnapshot, UnifiedErrorCode,
 };
-use crate::platform::PlatformHost;
+use crate::platform::{PlatformHost, ScopedPlatformHost};
 use crate::scheduler::{AntiRiskScheduler, JitterConfig};
 use crate::storage::QwitchDatabase;
 
@@ -86,6 +87,26 @@ fn resolve_client_executable(
     host.detect_client_executable(tool_id)
 }
 
+/// 解析导入来源宿主：指定 profile 时用 ScopedPlatformHost 把 config_dir 指向该隔离 profile，
+/// 从而采集该 profile 独立注册的设备身份（多设备方案 A）。
+fn import_host(
+    host: &Arc<dyn PlatformHost>,
+    tool_id: &str,
+    profile_dir: Option<&str>,
+) -> Arc<dyn PlatformHost> {
+    match profile_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(dir) => {
+            let config_dir = PathBuf::from(dir).join("User").join("globalStorage");
+            Arc::new(ScopedPlatformHost::new(
+                Arc::clone(host),
+                tool_id,
+                config_dir,
+            ))
+        }
+        None => Arc::clone(host),
+    }
+}
+
 pub struct AppState {
     pub db: Arc<QwitchDatabase>,
     pub master_key: [u8; 32],
@@ -94,6 +115,101 @@ pub struct AppState {
     pub scheduler: Arc<AntiRiskScheduler>,
     pub oauth_flow_seq: Arc<AtomicU64>,
     pub switching_in_progress: Arc<AtomicBool>,
+}
+
+fn read_device_id_from_storage(storage_path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read(storage_path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    value
+        .as_object()?
+        .keys()
+        .find_map(|key| key.strip_prefix("iCubeAuthInfo://icube-dc:"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn mask_device_id(id: &str) -> String {
+    let chars: Vec<char> = id.chars().collect();
+    if chars.len() <= 8 {
+        format!("{}****", chars.iter().take(4).collect::<String>())
+    } else {
+        let prefix: String = chars.iter().take(4).collect();
+        let suffix: String = chars[chars.len() - 4..].iter().collect();
+        format!("{prefix}****{suffix}")
+    }
+}
+
+/// 只读预检一个“设备 profile 目录”是否可用于导入：
+/// 是否含 storage.json、其设备 ID（脱敏）、是否与当前本机同一设备。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileInspectResult {
+    pub has_storage: bool,
+    pub storage_path: String,
+    pub device_id_masked: Option<String>,
+    pub same_as_local: Option<bool>,
+}
+
+#[tauri::command]
+pub fn inspect_profile_dir(
+    state: State<'_, AppState>,
+    tool_id: String,
+    profile_dir: String,
+) -> Result<ProfileInspectResult, String> {
+    let dir = profile_dir.trim();
+    if dir.is_empty() {
+        return Err("设备 profile 目录为空".into());
+    }
+    let storage = PathBuf::from(dir)
+        .join("User")
+        .join("globalStorage")
+        .join("storage.json");
+    let has_storage = storage.is_file();
+    let device_id = if has_storage {
+        read_device_id_from_storage(&storage)
+    } else {
+        None
+    };
+    let local_id = state
+        .host
+        .client_config_dir(&tool_id)
+        .ok()
+        .map(|d| d.join("storage.json"))
+        .and_then(|p| read_device_id_from_storage(&p));
+    let same_as_local = match (&device_id, &local_id) {
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    };
+    Ok(ProfileInspectResult {
+        has_storage,
+        storage_path: storage.to_string_lossy().to_string(),
+        device_id_masked: device_id.as_deref().map(mask_device_id),
+        same_as_local,
+    })
+}
+
+/// 原生“选择文件夹”对话框（macOS 需在主线程执行 rfd 弹窗）。
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle, default_path: Option<String>) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let default = default_path.filter(|p| !p.trim().is_empty());
+    let spawn = app.run_on_main_thread(move || {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(p) = default.as_deref() {
+            if std::path::Path::new(p).exists() {
+                dialog = dialog.set_directory(p);
+            }
+        }
+        let picked = dialog
+            .pick_folder()
+            .map(|p| p.to_string_lossy().to_string());
+        let _ = tx.send(picked);
+    });
+    if spawn.is_err() {
+        return None;
+    }
+    rx.await.ok().flatten()
 }
 
 #[tauri::command]
@@ -250,6 +366,51 @@ pub fn detect_client_status(
     })
 }
 
+/// 校正“本机使用中”标记：读取各工具本机客户端当前真实登录账号，
+/// 与本库账号比对后更新 is_active_on_client（读不到真实 uid 的工具跳过，绝不误清）。
+#[tauri::command]
+pub async fn reconcile_active_accounts(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let adapters: Vec<(String, Arc<dyn ToolAdapter>)> = state
+        .adapters
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (tool_id, adapter) in adapters {
+        if !adapter
+            .manifest()
+            .capabilities
+            .auth_methods
+            .contains(&AuthMethod::LocalImport)
+        {
+            continue;
+        }
+        let env = match adapter.import_from_local(state.host.as_ref()).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let uid = env.uid.trim();
+        if uid.is_empty() || crate::domain::CredentialEnvelope::is_fallback_uid(uid) {
+            // 未能可靠解密出真实 uid：跳过，避免把正确的标记误清
+            continue;
+        }
+        match state.db.find_account_id_by_uid(&tool_id, uid) {
+            Ok(Some((id, _))) => {
+                let _ = state.db.set_active_on_client(&tool_id, &id);
+                let _ = app.emit("qwitch://account-updated", &id);
+            }
+            Ok(None) => {
+                // 本机当前账号不在库中 → 清掉该工具下所有“使用中”标记
+                let _ = state.db.clear_active_on_client(&tool_id);
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn list_accounts(
     state: State<'_, AppState>,
@@ -368,6 +529,8 @@ pub async fn import_local_account(
     tool_id: String,
     label: String,
     target_account_id: Option<String>,
+    profile_dir: Option<String>,
+    device_platform: Option<String>,
 ) -> Result<AccountSummary, String> {
     let adapter = state
         .adapters
@@ -382,8 +545,9 @@ pub async fn import_local_account(
         return Err(format!("适配器 {tool_id} 不支持本机导入"));
     }
 
-    let envelope = adapter
-        .import_from_local(state.host.as_ref())
+    let host = import_host(&state.host, &tool_id, profile_dir.as_deref());
+    let mut envelope = adapter
+        .import_from_local(host.as_ref())
         .await
         .map_err(|e| e.to_string())?;
     if envelope.tool_id != tool_id {
@@ -391,6 +555,22 @@ pub async fn import_local_account(
             "适配器返回工具标识不匹配：期望 {tool_id}，实际 {}",
             envelope.tool_id
         ));
+    }
+
+    // 跨 OS 导入：按来源设备覆盖设备平台，避免 x-device-type 与本机不符
+    if let Some(plat) = device_platform
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| matches!(*p, "mac" | "win" | "linux"))
+    {
+        let current = if cfg!(target_os = "macos") {
+            "mac"
+        } else if cfg!(target_os = "windows") {
+            "win"
+        } else {
+            "linux"
+        };
+        envelope.override_device_platform(plat, plat != current);
     }
 
     let target_id = target_account_id.filter(|s| !s.trim().is_empty());
@@ -423,11 +603,24 @@ pub async fn import_local_account(
     )
     .await;
 
-    let _ = state.db.set_active_on_client(&tool_id, &summary.id);
+    let is_external_profile = profile_dir
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    // 仅“真·本机导入”才把该账号标记为本机使用中；外部设备 profile 只是采集设备身份，
+    // 并不代表本机客户端当前登录的是它，否则会出现“状态错 / 切号按钮被误禁”。
+    if !is_external_profile {
+        let _ = state.db.set_active_on_client(&tool_id, &summary.id);
+    }
 
     let log_msg = if target_id.is_some() {
         format!(
-            "补充/更新本机快照 {} ({})",
+            "补充/更新账号快照 {} ({})",
+            summary.label, summary.uid_masked
+        )
+    } else if is_external_profile {
+        format!(
+            "从外部设备 profile 导入 {} ({})",
             summary.label, summary.uid_masked
         )
     } else {
@@ -469,6 +662,7 @@ pub async fn preview_local_account(
     state: State<'_, AppState>,
     tool_id: String,
     account_id: Option<String>,
+    profile_dir: Option<String>,
 ) -> Result<LocalAccountPreview, String> {
     let adapter = state
         .adapters
@@ -483,8 +677,9 @@ pub async fn preview_local_account(
         return Err(format!("适配器 {tool_id} 不支持本机导入"));
     }
 
+    let host = import_host(&state.host, &tool_id, profile_dir.as_deref());
     let envelope = adapter
-        .import_from_local(state.host.as_ref())
+        .import_from_local(host.as_ref())
         .await
         .map_err(|e| e.to_string())?;
     let matched = state
@@ -509,6 +704,41 @@ pub async fn preview_local_account(
         uid: envelope.uid,
         display_name: envelope.display_name,
     })
+}
+
+/// 拉起某工具的隔离 profile（`--user-data-dir`），用于首次在该 profile 登录以注册独立设备。
+/// 返回 profile 根目录（即 `--user-data-dir` 指向目录），供后续按 profile 导入采集设备身份。
+#[tauri::command]
+pub fn launch_tool_profile(
+    state: State<'_, AppState>,
+    tool_id: String,
+    profile_dir: String,
+) -> Result<String, String> {
+    let dir = profile_dir.trim();
+    if dir.is_empty() {
+        return Err("profile_dir 不能为空".into());
+    }
+    if crate::platform::client_spec(&tool_id).is_none() {
+        return Err(format!("未知或不支持多实例的工具: {tool_id}"));
+    }
+    let settings = load_app_settings(&state.db);
+    let exe = resolve_client_executable(state.host.as_ref(), &settings, &tool_id)
+        .ok_or_else(|| format!("未检测到 {tool_id} 客户端安装路径，请先在设置中配置"))?;
+    let profile = PathBuf::from(dir);
+    std::fs::create_dir_all(&profile).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
+    let extensions_dir = profile.join("extensions");
+    std::fs::create_dir_all(&extensions_dir).ok();
+    let args = vec![
+        "--user-data-dir".to_string(),
+        profile.to_string_lossy().to_string(),
+        "--extensions-dir".to_string(),
+        extensions_dir.to_string_lossy().to_string(),
+    ];
+    state
+        .host
+        .launch_client(&exe, &args)
+        .map_err(|e| e.to_string())?;
+    Ok(profile.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -943,11 +1173,11 @@ pub async fn switch_desktop_account(
         return Err(msg);
     }
 
-    // 启动存活轮询：500ms 间隔、总超时 15s、连续两次探测存活才确认，
-    // 避免慢启动客户端被固定短延时误判失败而回滚正在启动的会话
+    // 启动存活轮询：700ms 间隔、总超时 45s、连续两次探测存活才确认，
+    // 给慢启动客户端（大量扩展/大工作区/冷启动）更充裕的时间，避免误判回滚
     let mut alive = false;
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    for _ in 0..64 {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
         if check_client_running_async(&state.host, &summary.tool_id)
             .await
             .unwrap_or(false)
@@ -971,8 +1201,13 @@ pub async fn switch_desktop_account(
     }
     if !alive {
         let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
+        // 失败后尽力把原客户端重新拉起，避免用户被留在“客户端已关闭”状态
+        let relaunch_note = match state.host.launch_client(&exe, &[]) {
+            Ok(()) => "，已尝试重新拉起客户端".to_string(),
+            Err(e) => format!("，重新拉起客户端失败（{e}）"),
+        };
         let msg = format!(
-            "客户端启动后 15 秒内未确认存活，{note}；客户端可能仍在启动或已退出，请手动检查"
+            "客户端启动后 45 秒内未确认存活，{note}{relaunch_note}；若仍无法启动请手动检查或重启系统"
         );
         log_switch_failure(
             &state.db,

@@ -68,6 +68,8 @@ export interface AccountSummary {
   isActiveOnClient: boolean;
   hasLocalSnapshot?: boolean;
   hasApiToken?: boolean;
+  deviceIdMasked?: string;
+  deviceType?: string;
   latestQuota?: QuotaSnapshot;
   lastClaimedAt?: string;
   updatedAt: string;
@@ -122,6 +124,13 @@ export interface AppSettings {
   autoRefreshIntervalMinutes?: number;
   autoClaimDaily?: boolean;
   trustedAdapters?: string[];
+}
+
+export interface ProfileInspectResult {
+  hasStorage: boolean;
+  storagePath: string;
+  deviceIdMasked?: string;
+  sameAsLocal?: boolean;
 }
 
 export interface ExternalAdapterInfo {

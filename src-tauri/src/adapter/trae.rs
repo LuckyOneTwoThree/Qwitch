@@ -30,6 +30,8 @@ const SNAPSHOT_AUTH_KEY: &str = "icube_auth_entries.json";
 const SNAPSHOT_VSCDB_KEY: &str = "icube_vscdb_entries.json";
 const SNAPSHOT_SERVERDATA_KEY: &str = "icube_serverdata_entries.json";
 const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
+/// 账号级设备身份（多设备方案）：随账号快照加密保存，用于按账号而非整机签发签到设备头
+const DEVICE_SNAPSHOT_KEY: &str = "trae_device.json";
 const PRIMARY_AUTH_KEY: &str = "iCubeAuthInfo://icube.cloudide";
 const USERTAG_KEY: &str = "iCubeAuthInfo://usertag";
 const DEVICE_CRED_PREFIX: &str = "iCubeAuthInfo://icube-dc:";
@@ -40,7 +42,7 @@ const CLAIM_CODE_DEVICE_ALREADY_CHECKED_IN: i64 = 9095;
 struct TraeDeviceHeaders {
     device_id: String,
     device_brand: Option<String>,
-    device_type: &'static str,
+    device_type: String,
     os_version: Option<String>,
     app_version: String,
 }
@@ -51,7 +53,7 @@ impl TraeDeviceHeaders {
     fn apply(&self, headers: &mut HeaderMap) {
         Self::insert(headers, "x-device-id", Some(self.device_id.as_str()));
         Self::insert(headers, "x-device-brand", self.device_brand.as_deref());
-        Self::insert(headers, "x-device-type", Some(self.device_type));
+        Self::insert(headers, "x-device-type", Some(self.device_type.as_str()));
         Self::insert(headers, "x-os-version", self.os_version.as_deref());
         Self::insert(headers, "x-app-version", Some(self.app_version.as_str()));
     }
@@ -63,6 +65,42 @@ impl TraeDeviceHeaders {
         if let Ok(header_value) = HeaderValue::from_str(&value) {
             headers.insert(HeaderName::from_static(name), header_value);
         }
+    }
+}
+
+/// 账号级设备身份的持久化形态（存入快照 `trae_device.json`，随凭据 AES-GCM 加密）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TraeDeviceIdentity {
+    device_id: String,
+    #[serde(default)]
+    device_brand: Option<String>,
+    #[serde(default)]
+    device_type: Option<String>,
+    #[serde(default)]
+    os_version: Option<String>,
+    #[serde(default)]
+    app_version: Option<String>,
+}
+
+impl TraeDeviceIdentity {
+    fn to_headers(&self) -> Option<TraeDeviceHeaders> {
+        let device_id = self.device_id.trim();
+        if device_id.is_empty() {
+            return None;
+        }
+        Some(TraeDeviceHeaders {
+            device_id: device_id.to_string(),
+            device_brand: self.device_brand.clone(),
+            device_type: self
+                .device_type
+                .clone()
+                .unwrap_or_else(|| TraeAdapter::device_type_tag().to_string()),
+            os_version: self.os_version.clone(),
+            app_version: self
+                .app_version
+                .clone()
+                .unwrap_or_else(|| DEFAULT_TRAE_APP_VERSION.to_string()),
+        })
     }
 }
 
@@ -219,7 +257,7 @@ impl TraeAdapter {
         Some(TraeDeviceHeaders {
             device_id,
             device_brand: Self::detect_device_brand(),
-            device_type: Self::device_type_tag(),
+            device_type: Self::device_type_tag().to_string(),
             os_version: Self::detect_os_version(),
             app_version: DEFAULT_TRAE_APP_VERSION.to_string(),
         })
@@ -233,6 +271,18 @@ impl TraeAdapter {
         let resolved = Arc::new(self.resolve_device_headers()?);
         let _ = self.device_cache.set(Some(Arc::clone(&resolved)));
         Some(resolved)
+    }
+
+    /// 从账号快照里取该账号自己的设备身份（多设备方案核心）。
+    /// 没有则返回 None，调用方回退到本机整机设备头（保持旧行为）。
+    fn device_from_cred(&self, cred: &CredentialEnvelope) -> Option<Arc<TraeDeviceHeaders>> {
+        let CredentialPayload::LocalSnapshot { files } = &cred.payload else {
+            return None;
+        };
+        let b64 = files.get(DEVICE_SNAPSHOT_KEY)?;
+        let bytes = BASE64.decode(b64).ok()?;
+        let identity: TraeDeviceIdentity = serde_json::from_slice(&bytes).ok()?;
+        identity.to_headers().map(Arc::new)
     }
 
     fn extract_jwt_claims(token: &str) -> Option<Value> {
@@ -586,7 +636,11 @@ impl TraeAdapter {
         }
     }
 
-    fn build_api_headers(&self, token: &str) -> Result<HeaderMap, AdapterError> {
+    fn build_api_headers(
+        &self,
+        token: &str,
+        device: Option<Arc<TraeDeviceHeaders>>,
+    ) -> Result<HeaderMap, AdapterError> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -600,7 +654,8 @@ impl TraeAdapter {
         if self.is_cn {
             headers.insert("X-User-Region", HeaderValue::from_static("CN"));
         }
-        if let Some(device) = self.device_headers() {
+        // 优先用账号自带设备身份（多设备），否则回退本机整机设备
+        if let Some(device) = device.or_else(|| self.device_headers()) {
             device.apply(&mut headers);
         }
         Ok(headers)
@@ -720,6 +775,7 @@ impl TraeAdapter {
     async fn fetch_checkin_status(
         &self,
         token: &str,
+        device: Option<Arc<TraeDeviceHeaders>>,
     ) -> Result<(ClaimStatus, Option<i64>), AdapterError> {
         if !self.is_cn {
             return Ok((ClaimStatus::Unsupported, None));
@@ -729,7 +785,7 @@ impl TraeAdapter {
             "{}/trae/api/v2/ug/checkin_credits/status",
             self.base_api_url()
         );
-        let headers = self.build_api_headers(token)?;
+        let headers = self.build_api_headers(token, device)?;
         let resp = self
             .http
             .post(&url)
@@ -761,12 +817,16 @@ impl TraeAdapter {
         Self::parse_checkin_status_from_body(&body)
     }
 
-    async fn fetch_entitlement_quota(&self, token: &str) -> Result<QuotaSnapshot, AdapterError> {
+    async fn fetch_entitlement_quota(
+        &self,
+        token: &str,
+        device: Option<Arc<TraeDeviceHeaders>>,
+    ) -> Result<QuotaSnapshot, AdapterError> {
         let url = format!(
             "{}/trae/api/v2/pay/user_current_entitlement_list",
             self.base_api_url()
         );
-        let headers = self.build_api_headers(token)?;
+        let headers = self.build_api_headers(token, device)?;
 
         let resp = self
             .http
@@ -1057,6 +1117,20 @@ impl ToolAdapter for TraeAdapter {
         Some(hex::encode(hasher.finalize()))
     }
 
+    /// 多设备方案：优先按账号自带设备身份生成本地去重 key，
+    /// 使不同设备的账号互不干扰；无账号设备时回退整机设备 key。
+    fn daily_claim_device_key_for(&self, cred: &CredentialEnvelope) -> Option<String> {
+        if !self.is_cn {
+            return None;
+        }
+        if let Some(device) = self.device_from_cred(cred) {
+            let mut hasher = Sha256::new();
+            hasher.update(device.device_id.as_bytes());
+            return Some(hex::encode(hasher.finalize()));
+        }
+        self.daily_claim_device_key()
+    }
+
     async fn import_from_local(
         &self,
         host: &dyn PlatformHost,
@@ -1119,6 +1193,25 @@ impl ToolAdapter for TraeAdapter {
                 files.insert(
                     SNAPSHOT_SERVERDATA_KEY.to_string(),
                     BASE64.encode(server_bytes),
+                );
+            }
+        }
+
+        // 采集本机（或指定 profile）的设备身份，随账号快照保存 —— 多设备签到的关键
+        let device_identity = Self::device_id_from_aha(&config_dir)
+            .or_else(|| Self::device_id_from_storage(&config_dir.join(STORAGE_JSON)))
+            .map(|device_id| TraeDeviceIdentity {
+                device_id,
+                device_brand: Self::detect_device_brand(),
+                device_type: Some(Self::device_type_tag().to_string()),
+                os_version: Self::detect_os_version(),
+                app_version: Some(DEFAULT_TRAE_APP_VERSION.to_string()),
+            });
+        if let Some(identity) = device_identity {
+            if let Ok(identity_bytes) = serde_json::to_vec(&identity) {
+                files.insert(
+                    DEVICE_SNAPSHOT_KEY.to_string(),
+                    BASE64.encode(identity_bytes),
                 );
             }
         }
@@ -1321,6 +1414,7 @@ impl ToolAdapter for TraeAdapter {
         let (token_opt, is_encrypted_local) = self.extract_token_from_cred(cred);
 
         if let Some(token) = token_opt {
+            let device = self.device_from_cred(cred);
             if let Some(claims) = Self::extract_jwt_claims(&token) {
                 if let Some(exp) = claims.get("exp").and_then(|v| v.as_i64()) {
                     if exp <= Utc::now().timestamp() {
@@ -1332,9 +1426,9 @@ impl ToolAdapter for TraeAdapter {
                 }
             }
 
-            let mut quota = self.fetch_entitlement_quota(&token).await?;
+            let mut quota = self.fetch_entitlement_quota(&token, device.clone()).await?;
             if self.is_cn {
-                match self.fetch_checkin_status(&token).await {
+                match self.fetch_checkin_status(&token, device).await {
                     Ok((cs, _)) => quota.claim_status = cs,
                     Err(
                         e @ AdapterError::Unified {
@@ -1385,11 +1479,13 @@ impl ToolAdapter for TraeAdapter {
             code: UnifiedErrorCode::InvalidCredential,
             message: "缺少可用于签到的 Trae Token".into(),
         })?;
+        // 账号自带设备身份（多设备方案）；无则回退本机整机设备
+        let device = self.device_from_cred(cred);
 
         // 调度器已完成幂等前置查时直接复用快照，避免重复请求平台
         let (current_status, credits_hint) = match precheck {
             Some(q) => (q.claim_status.clone(), None),
-            None => self.fetch_checkin_status(&token).await?,
+            None => self.fetch_checkin_status(&token, device.clone()).await?,
         };
         if current_status == ClaimStatus::Claimed {
             return Ok(ClaimResult {
@@ -1419,7 +1515,7 @@ impl ToolAdapter for TraeAdapter {
             "{}/trae/api/v2/ug/checkin_credits/claim",
             self.base_api_url()
         );
-        let headers = self.build_api_headers(&token)?;
+        let headers = self.build_api_headers(&token, device.clone())?;
         // 签到下单强依赖设备标识：缺少时请求必然返回 9004，提前给出可操作提示
         if !headers.contains_key("x-device-id") {
             return Err(AdapterError::Unified {
@@ -1953,7 +2049,7 @@ mod tests {
         .unwrap();
 
         let adapter = TraeAdapter::with_host(true, Arc::new(TestHost(dir.clone())));
-        let headers = adapter.build_api_headers("tok").expect("headers");
+        let headers = adapter.build_api_headers("tok", None).expect("headers");
         assert_eq!(
             headers.get("x-device-id").and_then(|v| v.to_str().ok()),
             Some("93900972767536")
@@ -1968,6 +2064,70 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trae_per_account_device_headers_and_key() {
+        let adapter = TraeAdapter::new(true);
+        let identity = serde_json::json!({
+            "device_id": "55500011122233",
+            "device_brand": "MacBookPro18,3",
+            "device_type": "mac",
+            "os_version": "macOS 14.2.1",
+            "app_version": "3.4.22"
+        });
+        let mut files = HashMap::new();
+        files.insert(
+            DEVICE_SNAPSHOT_KEY.to_string(),
+            BASE64.encode(serde_json::to_vec(&identity).unwrap()),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u_per_acc".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+
+        // 1) 账号设备身份被正确解析
+        let dev = adapter.device_from_cred(&cred).expect("device from cred");
+        assert_eq!(dev.device_id, "55500011122233");
+        assert_eq!(dev.device_type, "mac");
+
+        // 2) 组装请求头时用的是账号设备，而非本机整机设备
+        let headers = adapter
+            .build_api_headers("tok", adapter.device_from_cred(&cred))
+            .expect("headers");
+        assert_eq!(
+            headers.get("x-device-id").and_then(|v| v.to_str().ok()),
+            Some("55500011122233")
+        );
+        assert_eq!(
+            headers.get("x-device-brand").and_then(|v| v.to_str().ok()),
+            Some("MacBookPro18,3")
+        );
+
+        // 3) 每账号设备 key 稳定；不同设备 -> 不同 key（互不熔断）
+        let k1 = adapter.daily_claim_device_key_for(&cred).expect("key");
+        assert_eq!(k1, adapter.daily_claim_device_key_for(&cred).expect("key"));
+        let mut files2 = HashMap::new();
+        files2.insert(
+            DEVICE_SNAPSHOT_KEY.to_string(),
+            BASE64.encode(
+                serde_json::to_vec(&serde_json::json!({"device_id":"99988877766655"})).unwrap(),
+            ),
+        );
+        let cred2 = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u2".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files: files2 },
+        };
+        assert_ne!(
+            k1,
+            adapter.daily_claim_device_key_for(&cred2).expect("key2")
+        );
     }
 
     #[tokio::test]

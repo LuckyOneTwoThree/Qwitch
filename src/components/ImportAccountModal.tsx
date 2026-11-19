@@ -1,13 +1,22 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Globe, HardDriveDownload, KeyRound, Loader2, X } from "lucide-react";
+import { FolderOpen, Globe, HardDriveDownload, KeyRound, Loader2, X } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { getVisibleTools } from "../domain/toolRegistry";
 import { ToolBrandIcon } from "./ToolBrandIcon";
 import { Modal } from "./ui/Modal";
-import type { AccountSummary, AuthMethod, ToolId } from "../types/qwitch";
+import type { AccountSummary, AuthMethod, ProfileInspectResult, ToolId } from "../types/qwitch";
 
-export function ImportAccountModal({
-  open,
+type DevicePlatform = "mac" | "win";
+
+function detectImportPlatform(): DevicePlatform {
+  if (typeof navigator !== "undefined") {
+    const p = `${navigator.platform ?? ""} ${navigator.userAgent ?? ""}`;
+    if (/Win/i.test(p)) return "win";
+  }
+  return "mac";
+}
+
+export function ImportAccountModal({  open,
   onClose,
   targetAccount,
   defaultToolId,
@@ -19,7 +28,8 @@ export function ImportAccountModal({
   defaultToolId?: ToolId;
   defaultMethod?: AuthMethod;
 }) {
-  const { adapters, importAccount, showToast } = useQwitch();
+  const { adapters, importAccount, launchToolProfile, pickFolder, inspectProfileDir, showToast } =
+    useQwitch();
   const titleId = useId();
   const visibleTools = useMemo(() => getVisibleTools(adapters), [adapters]);
 
@@ -28,6 +38,12 @@ export function ImportAccountModal({
   const [method, setMethod] = useState<AuthMethod>("local_import");
   const [rawInput, setRawInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [profileMode, setProfileMode] = useState<"default" | "device">("default");
+  const [profileDir, setProfileDir] = useState("");
+  const [launching, setLaunching] = useState(false);
+  const [devicePlatform, setDevicePlatform] = useState<DevicePlatform>(detectImportPlatform);
+  const [inspectResult, setInspectResult] = useState<ProfileInspectResult | null>(null);
+  const [inspecting, setInspecting] = useState(false);
 
   const wasOpenRef = useRef(false);
   const lastTargetIdRef = useRef<string | undefined>(undefined);
@@ -62,6 +78,9 @@ export function ImportAccountModal({
     setSubmitting(false);
     setLabel("");
     setRawInput("");
+    setProfileMode("default");
+    setProfileDir("");
+    setDevicePlatform(detectImportPlatform());
 
     if (targetAccount) {
       setToolId(targetAccount.toolId);
@@ -102,6 +121,64 @@ export function ImportAccountModal({
   }, [open, toolId, method, adapters]);
 
   const supportedMethods = getSupportedMethods(toolId);
+  // 目前仅 Trae CN 支持“隔离设备 profile”多开签到；后续可依 adapter 能力位扩展
+  const supportsDeviceProfile = toolId === "trae_cn";
+
+  // 设备目录变化时做只读预检（是否含 storage.json / 设备 ID / 是否与本机相同）
+  useEffect(() => {
+    if (!open || !supportsDeviceProfile || method !== "local_import" || profileMode !== "device") {
+      setInspectResult(null);
+      return;
+    }
+    const dir = profileDir.trim();
+    if (!dir) {
+      setInspectResult(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setInspecting(true);
+      try {
+        const res = await inspectProfileDir(toolId, dir);
+        if (!cancelled) setInspectResult(res);
+      } catch {
+        if (!cancelled) setInspectResult(null);
+      } finally {
+        if (!cancelled) setInspecting(false);
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, supportsDeviceProfile, method, profileMode, profileDir, toolId, inspectProfileDir]);
+
+  const handlePickFolder = async () => {
+    try {
+      const picked = await pickFolder(profileDir.trim() || undefined);
+      if (picked) setProfileDir(picked);
+    } catch (err) {
+      showToast(`选择文件夹失败：${String(err)}`, "error");
+    }
+  };
+
+  const handleLaunchProfile = async () => {
+    const dir = profileDir.trim();
+    if (!dir) {
+      showToast("请先填写设备 profile 目录", "warning");
+      return;
+    }
+    setLaunching(true);
+    try {
+      const saved = await launchToolProfile(toolId, dir);
+      setProfileDir(saved);
+      showToast("已启动隔离客户端，请在其中登录目标账号后返回点“确认导入”", "info");
+    } catch (err) {
+      showToast(`启动隔离客户端失败：${String(err)}`, "error");
+    } finally {
+      setLaunching(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,8 +194,26 @@ export function ImportAccountModal({
         label,
         method,
         method === "token_paste" ? rawInput : undefined,
-        targetAccount?.id
+        targetAccount?.id,
+        supportsDeviceProfile && method === "local_import" && profileMode === "device"
+          ? profileDir.trim()
+          : undefined,
+        supportsDeviceProfile && method === "local_import" && profileMode === "device"
+          ? devicePlatform
+          : undefined
       );
+      if (
+        supportsDeviceProfile &&
+        method === "local_import" &&
+        profileMode === "device" &&
+        profileDir.trim()
+      ) {
+        try {
+          localStorage.setItem("qwitch.lastDeviceProfileDir", profileDir.trim());
+        } catch {
+          // ignore storage errors
+        }
+      }
       setLabel("");
       setRawInput("");
       onClose();
@@ -137,8 +232,8 @@ export function ImportAccountModal({
       disableClose={submitting}
       maxWidthClass="max-w-lg"
     >
-      <form onSubmit={handleSubmit}>
-        <div className="flex items-start justify-between gap-3 border-b border-zinc-100 pb-3 dark:border-zinc-800">
+      <form onSubmit={handleSubmit} className="flex max-h-[calc(100vh-5rem)] flex-col">
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-100 pb-3 dark:border-zinc-800">
           <div>
             <h3 id={titleId} className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
               {targetAccount ? `完善账号凭据：${targetAccount.label}` : "添加 / 导入账号"}
@@ -159,7 +254,7 @@ export function ImportAccountModal({
           </button>
         </div>
 
-        <div className="mt-4 space-y-4">
+        <div className="mt-4 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           <div>
             <span className="mb-1.5 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
               目标 AI 工具
@@ -263,6 +358,146 @@ export function ImportAccountModal({
             </div>
           </div>
 
+          {method === "local_import" && !targetAccount && supportsDeviceProfile && (
+            <div className="rounded-xl border border-zinc-200 p-3 dark:border-zinc-700">
+              <span className="mb-1.5 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                设备 profile（多设备签到）
+              </span>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setProfileMode("default")}
+                  className={`rounded-lg border px-2.5 py-2 text-left text-[11px] transition ${
+                    profileMode === "default"
+                      ? "border-zinc-900 bg-zinc-900/5 text-zinc-900 ring-1 ring-zinc-900/10 dark:border-zinc-200 dark:bg-zinc-100/10 dark:text-zinc-100"
+                      : "border-zinc-200 text-zinc-600 hover:border-zinc-300 dark:border-zinc-700 dark:text-zinc-300"
+                  }`}
+                >
+                  本机默认
+                  <span className="mt-0.5 block text-[10px] text-zinc-500 dark:text-zinc-400">
+                    直接用本机 device_id
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileMode("device");
+                    if (!profileDir.trim()) {
+                      try {
+                        const last = localStorage.getItem("qwitch.lastDeviceProfileDir");
+                        if (last) setProfileDir(last);
+                      } catch {
+                        // ignore storage errors
+                      }
+                    }
+                  }}
+                  className={`rounded-lg border px-2.5 py-2 text-left text-[11px] transition ${
+                    profileMode === "device"
+                      ? "border-zinc-900 bg-zinc-900/5 text-zinc-900 ring-1 ring-zinc-900/10 dark:border-zinc-200 dark:bg-zinc-100/10 dark:text-zinc-100"
+                      : "border-zinc-200 text-zinc-600 hover:border-zinc-300 dark:border-zinc-700 dark:text-zinc-300"
+                  }`}
+                >
+                  隔离设备 profile
+                  <span className="mt-0.5 block text-[10px] text-zinc-500 dark:text-zinc-400">
+                    每个账号独立设备身份
+                  </span>
+                </button>
+              </div>
+              {profileMode === "device" && (
+                <div className="mt-2 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="该账号 Trae CN 的 user-data 根目录（含 User/globalStorage/storage.json）"
+                      value={profileDir}
+                      onChange={(e) => setProfileDir(e.target.value)}
+                      aria-label="设备 profile 目录"
+                      className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handlePickFolder()}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                    >
+                      <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" />
+                      选择文件夹
+                    </button>
+                  </div>
+
+                  {profileDir.trim() && (
+                    <p className="text-[11px] leading-snug">
+                      {inspecting ? (
+                        <span className="text-zinc-500 dark:text-zinc-400">校验中…</span>
+                      ) : inspectResult ? (
+                        !inspectResult.hasStorage ? (
+                          <span className="text-rose-600 dark:text-rose-400">
+                            未找到 storage.json：请确认目录是该账号 Trae CN 的 user-data 根
+                          </span>
+                        ) : inspectResult.sameAsLocal ? (
+                          <span className="text-amber-600 dark:text-amber-400">
+                            ⚠️ 该设备与本机相同，无法并行签到（请换另一台设备 / 用户 / 虚拟机）
+                          </span>
+                        ) : (
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            ✅ 检测到设备 {inspectResult.deviceIdMasked ?? "（未知）"}，可用于多设备签到
+                          </span>
+                        )
+                      ) : (
+                        <span className="text-zinc-400">&nbsp;</span>
+                      )}
+                    </p>
+                  )}
+
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      来源设备平台
+                    </span>
+                    <div className="inline-flex rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800">
+                      {(["mac", "win"] as DevicePlatform[]).map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => setDevicePlatform(p)}
+                          className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                            devicePlatform === p
+                              ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100"
+                              : "text-zinc-600 dark:text-zinc-400"
+                          }`}
+                        >
+                          {p === "mac" ? "macOS" : "Windows"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {detectImportPlatform() === "win" ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleLaunchProfile()}
+                        disabled={launching || !profileDir.trim()}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                      >
+                        {launching && (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                        )}
+                        启动隔离客户端
+                      </button>
+                      <span className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
+                        先在该实例登录目标账号，再点“确认导入”采集设备身份
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
+                      在另一台设备 / 第二个 macOS 用户 / 虚拟机里登录该账号，把它的 Trae CN
+                      数据目录导出后填到上方；本机不支持多开同一客户端。
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           <div>
             <label
               htmlFor="qwitch-import-label"
@@ -312,7 +547,7 @@ export function ImportAccountModal({
           </div>
         </div>
 
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="mt-4 flex shrink-0 justify-end gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">
           <button
             type="button"
             onClick={onClose}

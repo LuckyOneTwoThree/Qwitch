@@ -93,6 +93,8 @@ impl AntiRiskScheduler {
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
         let mut device_limit_skipped_count: usize = 0;
+        // 跨设备节流：记录上一个处理过的设备作用域，切换设备身份时额外冷却
+        let mut last_device_scope: Option<String> = None;
         // 工具级熔断：同一工具出现风控/限流后，中止该工具剩余账号
         let mut risk_broken_tools: HashMap<String, ()> = HashMap::new();
         // 设备级每日额度：收到成功回包或 9095 后，阻止本机对同设备继续发领取请求。
@@ -194,7 +196,7 @@ impl AntiRiskScheduler {
                 }
             };
 
-            let device_key = adapter.daily_claim_device_key();
+            let device_key = adapter.daily_claim_device_key_for(&cred);
             let device_scope = device_key
                 .as_deref()
                 .map(|key| format!("{}:{key}", summary.tool_id));
@@ -216,6 +218,32 @@ impl AntiRiskScheduler {
                 device_limit_skipped_count += 1;
                 let _ = app.emit("qwitch://account-updated", &summary.id);
                 continue;
+            }
+
+            // 同出口 IP 多设备节流：切换到不同设备身份时额外冷却，避免短时间内
+            // 以多个 device_id 集中领取而被关联风控。
+            if let (Some(prev), Some(cur)) = (last_device_scope.as_deref(), device_scope.as_deref())
+            {
+                if prev != cur {
+                    let extra_ms = rand::thread_rng().gen_range(1200u64..=2600u64);
+                    let _ = app.emit(
+                        "qwitch://batch-progress",
+                        BatchProgressEvent {
+                            action: "claim".into(),
+                            running: true,
+                            total,
+                            completed: idx,
+                            current_label: Some(summary.label.clone()),
+                            phase: "jitter_wait".into(),
+                            jitter_seconds: Some((extra_ms as f64) / 1000.0),
+                            summary_text: Some("切换设备身份，冷却中…".into()),
+                        },
+                    );
+                    tokio::time::sleep(Duration::from_millis(extra_ms)).await;
+                }
+            }
+            if let Some(cur) = device_scope.as_ref() {
+                last_device_scope = Some(cur.clone());
             }
 
             let _ = app.emit(

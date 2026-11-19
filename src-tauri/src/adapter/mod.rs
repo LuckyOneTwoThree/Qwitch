@@ -131,6 +131,13 @@ pub trait ToolAdapter: Send + Sync {
         None
     }
 
+    /// 按账号凭据解析设备维度的每日额度 key（多设备方案：每个账号可携带自己的设备身份）。
+    /// 默认退回适配器级 `daily_claim_device_key`，只有支持多设备身份的适配器才需重写。
+    fn daily_claim_device_key_for(&self, cred: &CredentialEnvelope) -> Option<String> {
+        let _ = cred;
+        self.daily_claim_device_key()
+    }
+
     async fn import_from_local(
         &self,
         host: &dyn PlatformHost,

@@ -140,7 +140,7 @@ pub fn sanitize_log_message(message: &str) -> String {
         token.clear();
     };
     for ch in message.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '%' | '+' | '-' | '@') {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '%' | '+' | '-' | '@' | '*') {
             token.push(ch);
         } else {
             flush(&mut token, &mut out);
@@ -212,6 +212,11 @@ mod tests {
         assert_eq!(
             sanitize_log_message("已导入账号 Qoder 主力"),
             "已导入账号 Qoder 主力"
+        );
+        // 已脱敏输入不得被二次脱敏破坏
+        assert_eq!(
+            sanitize_log_message("已删除账号 al***@example.com (138****5678)"),
+            "已删除账号 al***@example.com (138****5678)"
         );
     }
 }

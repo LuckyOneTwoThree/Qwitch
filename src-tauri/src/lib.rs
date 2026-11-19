@@ -52,6 +52,9 @@ pub fn run() {
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             db.verify_or_init_key_fingerprint(&data_dir, &master_key)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            if let Err(e) = db.migrate_legacy_pii(&master_key) {
+                eprintln!("Qwitch 历史 PII 迁移失败（不影响启动）: {e}");
+            }
             let startup_settings = commands::load_app_settings(&db);
             let _ = db.apply_log_retention(
                 startup_settings.log_archive_after_days,

@@ -28,6 +28,7 @@ pub enum StorageError {
 
 pub struct QwitchDatabase {
     conn: Mutex<Connection>,
+    db_path: std::path::PathBuf,
 }
 
 /// 默认展示名：优先官方昵称，其次脱敏邮箱/手机号/UID，绝不落明文 PII
@@ -62,6 +63,7 @@ impl QwitchDatabase {
         let conn = Connection::open(db_path)?;
         let db = Self {
             conn: Mutex::new(conn),
+            db_path: db_path.to_path_buf(),
         };
         db.init_schema()?;
         Ok(db)
@@ -423,6 +425,77 @@ impl QwitchDatabase {
             }
         };
         Ok((summary, envelope))
+    }
+
+    /// 一次性迁移：旧版明文 PII 标签与历史日志脱敏（迁移前备份数据库）
+    pub fn migrate_legacy_pii(&self, master_key: &[u8; 32]) -> Result<(), StorageError> {
+        const FLAG: &str = "migration.pii_v1";
+        if self.get_setting(FLAG)?.is_some() {
+            return Ok(());
+        }
+
+        {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+        let backup = self.db_path.with_extension("db.pre-pii-migration.bak");
+        if !backup.exists() && self.db_path.exists() {
+            std::fs::copy(&self.db_path, &backup)
+                .map_err(|e| StorageError::Crypto(format!("迁移前备份数据库失败: {e}")))?;
+        }
+
+        let accounts: Vec<(String, String, Vec<u8>)> = {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let mut stmt = conn.prepare("SELECT id, label, encrypted_credential FROM accounts")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, label, blob) in accounts {
+            let mut new_label = label.clone();
+            if label.contains('@') && !label.contains("****") {
+                new_label = crypto::mask_email(&label);
+            } else if label.len() == 11
+                && label.starts_with('1')
+                && label.chars().all(|c| c.is_ascii_digit())
+            {
+                new_label = crypto::mask_phone(&label);
+            } else if let Ok(env) = crypto::decrypt_credential(master_key, &blob) {
+                if !env.uid.trim().is_empty() && label == env.uid {
+                    new_label = crypto::mask_uid(&env.uid);
+                }
+            }
+            if new_label != label {
+                let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+                conn.execute(
+                    "UPDATE accounts SET label = ?1 WHERE id = ?2",
+                    params![new_label, id],
+                )?;
+            }
+        }
+
+        let logs: Vec<(i64, String)> = {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let mut stmt = conn.prepare("SELECT id, message_sanitized FROM action_logs")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, msg) in logs {
+            let sanitized = crypto::sanitize_log_message(&msg);
+            if sanitized != msg {
+                let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+                conn.execute(
+                    "UPDATE action_logs SET message_sanitized = ?1 WHERE id = ?2",
+                    params![sanitized, id],
+                )?;
+            }
+        }
+
+        self.set_setting(FLAG, "\"done\"")?;
+        Ok(())
     }
 
     /// 取一条账号密文样本，用于无指纹旧库的主密钥匹配验证
@@ -1597,5 +1670,44 @@ mod tests {
         assert_eq!(archived.len(), 1);
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn legacy_pii_migration_masks_labels_and_logs_once() {
+        let dir = temp_data_dir("pii");
+        let db_path = dir.join("qwitch.db");
+        let db = QwitchDatabase::open(&db_path).expect("open");
+        let key = [31u8; 32];
+
+        let env = token_envelope("legacy_uid_123456");
+        db.upsert_account(&key, Some("alice@example.com"), &env)
+            .expect("insert legacy label");
+        db.append_action_log(
+            None,
+            "qoder_cn",
+            "import",
+            "success",
+            None,
+            "已导入 alice@example.com (13812345678)",
+        )
+        .expect("log");
+
+        db.migrate_legacy_pii(&key).expect("migrate");
+
+        let accs = db.list_accounts(None).expect("list");
+        assert_eq!(accs[0].label, "al***@example.com");
+        let logs = db.list_action_logs(LogScope::All, 100, 0).expect("logs");
+        assert!(!logs[0].message_sanitized.contains("alice@example.com"));
+        assert!(!logs[0].message_sanitized.contains("13812345678"));
+        assert!(dir.join("qwitch.db.pre-pii-migration.bak").exists());
+
+        // 幂等：标记后再次运行不改动（即使标签又被写成明文）
+        db.upsert_account(&key, Some("bob@example.com"), &env)
+            .expect("relabel");
+        db.migrate_legacy_pii(&key).expect("migrate again");
+        let accs = db.list_accounts(None).expect("list");
+        assert_eq!(accs[0].label, "bob@example.com", "已标记迁移不得重复执行");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

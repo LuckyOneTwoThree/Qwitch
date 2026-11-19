@@ -373,7 +373,11 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         },
         previous
       );
-      if (payload.jitterMinMs > payload.jitterMaxMs) {
+      // 仅当本次保存显式涉及抖动参数时才校验草稿合法性；
+      // 无关保存（主题/插件/路径）不被未保存的非法抖动草稿阻塞（后端 clamp 兜底）
+      const touchesJitter =
+        next.jitterMinMs !== undefined || next.jitterMaxMs !== undefined;
+      if (touchesJitter && payload.jitterMinMs > payload.jitterMaxMs) {
         showToast("保存失败：最小间隔不能大于最大间隔", "error");
         return false;
       }
@@ -387,7 +391,12 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
           if (!silent) showToast("设置已保存", "success");
           return true;
         } catch (err) {
-          applyIncomingSettings(previous);
+          // 回滚只恢复已保存字段，保留未保存的抖动/日志保留草稿
+          setAppSettings(previous);
+          appSettingsRef.current = previous;
+          setTheme(resolveTheme(previous.theme));
+          syncThemeStorage(previous.theme);
+          setCustomClientPaths(previous.customClientPaths);
           showToast(`保存设置失败：${String(err)}`, "error");
           return false;
         }

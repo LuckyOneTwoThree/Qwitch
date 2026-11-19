@@ -80,7 +80,7 @@
 ### ✅ 工程质量
 
 - 48 个 Rust 单元 / 回归测试 + 19 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、构建、测试、`cargo fmt` / `clippy -D warnings`。
-- 标签触发 Release 流水线，自动构建并发布 macOS Universal（ARM64 + Intel）与 Windows x64 安装包。
+- 标签触发 Release 流水线，自动构建并发布 macOS Apple Silicon（arm64）、macOS Intel（x64）与 Windows x64 三个独立安装包。
 
 ## 支持的工具
 
@@ -100,7 +100,7 @@
 
 | 平台 | 架构 | 产物 |
 | --- | --- | --- |
-| macOS 10.15+ | Apple Silicon | `Qwitch_*_aarch64.dmg` |
+| macOS 11+ | Apple Silicon | `Qwitch_*_aarch64.dmg` |
 | macOS 10.15+ | Intel | `Qwitch_*_x64.dmg` |
 | Windows 10+ | x64 | `Qwitch_*_x64-setup.exe` / `.msi` |
 
@@ -227,7 +227,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 **CI/CD**
 
 - `ci.yml`：push / PR 触发，macOS + Windows 双平台执行生产依赖审计、前端构建与测试、Rust fmt / clippy / test。
-- `release.yml`：`v*` 标签触发，先跑验证门禁，再构建 macOS ARM64 / Intel 与 Windows x64 三平台安装包并上传至 GitHub Release（draft，人工审核后发布）。
+- `release.yml`：`v*` 标签触发，先跑验证门禁，再构建 macOS ARM64、macOS Intel 与 Windows x64 三个独立安装包并上传至 GitHub Release（自动发布 latest）。
 
 **发布前手工清单**：空数据目录首装 · 备份恢复到冲突钥匙串环境 · 慢启动客户端切号 · 托盘 / Dock 行为。
 

@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag name (e.g. v0.2.0)"
+        description: "Release tag name (e.g. v0.2.1)"
         required: true
-        default: "v0.2.0"
+        default: "v0.2.1"
 
 jobs:
   verify:
@@ -31,12 +31,19 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
-            tauri_args: "--target universal-apple-darwin"
-            artifact_name: "release-macos-universal"
+            rust_targets: "aarch64-apple-darwin"
+            rust_target: "aarch64-apple-darwin"
+            expected_arch: "arm64"
+            artifact_name: "release-macos-arm64"
+          - platform: macos-latest
+            rust_targets: "x86_64-apple-darwin"
+            rust_target: "x86_64-apple-darwin"
+            expected_arch: "x86_64"
+            artifact_name: "release-macos-x64"
           - platform: windows-latest
             rust_targets: "x86_64-pc-windows-msvc"
-            tauri_args: "--target x86_64-pc-windows-msvc"
+            rust_target: "x86_64-pc-windows-msvc"
+            expected_arch: ""
             artifact_name: "release-windows-x64"
     runs-on: ${{ matrix.platform }}
     steps:
@@ -66,22 +73,33 @@ jobs:
         run: cargo test --all-targets
 
       - name: Build Tauri bundles
-        run: npx tauri build ${{ matrix.tauri_args }}
+        run: npx tauri build --target ${{ matrix.rust_target }}
 
-      - name: Stage macOS Universal artifacts
+      - name: Stage macOS architecture artifacts
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          TARGET: ${{ matrix.rust_target }}
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
         run: |
-          BIN="src-tauri/target/universal-apple-darwin/release/bundle/macos/Qwitch.app/Contents/MacOS/qwitch"
+          BIN="src-tauri/target/${TARGET}/release/bundle/macos/Qwitch.app/Contents/MacOS/qwitch"
           ARCHS="$(lipo -archs "$BIN")"
-          echo "macOS binary architectures: $ARCHS"
-          if [[ " $ARCHS " != *" arm64 "* ]] || [[ " $ARCHS " != *" x86_64 "* ]]; then
-            echo "Expected universal binary with both arm64 and x86_64, got: $ARCHS" >&2
+          echo "macOS binary architectures: $ARCHS (expected: $EXPECTED_ARCH)"
+          if [[ " $ARCHS " != *" $EXPECTED_ARCH "* ]]; then
+            echo "Expected $EXPECTED_ARCH slice, got: $ARCHS" >&2
+            exit 1
+          fi
+          if [[ "$EXPECTED_ARCH" == "arm64" && " $ARCHS " == *" x86_64 "* ]]; then
+            echo "arm64 build unexpectedly contains x86_64 slice" >&2
+            exit 1
+          fi
+          if [[ "$EXPECTED_ARCH" == "x86_64" && " $ARCHS " == *" arm64 "* ]]; then
+            echo "x86_64 build unexpectedly contains arm64 slice" >&2
             exit 1
           fi
           mkdir -p dist-release
           shopt -s nullglob
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg dist-release/
+          cp src-tauri/target/${TARGET}/release/bundle/dmg/*.dmg dist-release/
           ls -lh dist-release/
 
       - name: Stage Windows x64 artifacts
@@ -142,11 +160,12 @@ jobs:
           cat <<'EOF' > release-notes.md
           ### 下载说明 / Downloads
 
-          - **macOS (`*universal.dmg`)**：Universal 通用包，同时原生支持 Apple Silicon (M 系列) 与 Intel Mac，无需 Rosetta 2。
-            - 如系统提示“已损坏”或无法验证开发者（首次开源版本暂未配置 Apple 公证签名），拖入 `/Applications` 后执行：
-              ```bash
-              xattr -cr /Applications/Qwitch.app
-              ```
+          - **macOS Apple Silicon (`*aarch64.dmg`)**：适用于 M1/M2/M3/M4 等 Apple Silicon Mac，原生 arm64，无需 Rosetta 2。
+          - **macOS Intel (`*x64.dmg`)**：适用于 Intel 芯片 Mac，原生 x86_64。
+          - 两个 macOS 包均为独立架构，下载体积比 Universal 通用包更小；请按芯片类型选择。首次打开若提示“已损坏”或无法验证开发者（暂未配置 Apple 公证签名），拖入 `/Applications` 后执行：
+            ```bash
+            xattr -cr /Applications/Qwitch.app
+            ```
           - **Windows (`*x64-setup.exe` / `*x64*.msi`)**：适用于 Windows x64 桌面端安装。
           - **完整性校验**：下载后可对照 `SHA256SUMS.txt` 校验安装包哈希值。
           EOF

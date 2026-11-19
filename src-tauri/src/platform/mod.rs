@@ -432,23 +432,46 @@ impl NativePlatformHost {
             candidates.push((key, KeySource::File));
         }
 
-        for (key, source) in candidates {
+        let any_decrypts = !expectation.sample_blobs.is_empty()
+            && candidates.iter().any(|(key, _)| {
+                expectation
+                    .sample_blobs
+                    .iter()
+                    .any(|blob| crate::storage::crypto::decrypt_credential(key, blob).is_ok())
+            });
+        let any_fp_match = expectation.fingerprint.as_deref().is_some_and(|fp| {
+            candidates
+                .iter()
+                .any(|(key, _)| crate::storage::crypto::key_fingerprint(key) == fp)
+        });
+
+        for &(key, source) in &candidates {
             if Self::key_matches_expectation(&key, expectation) {
                 return Ok((key, source));
             }
         }
 
-        if expectation.requires_match() {
-            return Err(HostError::Keyring(
-                "检测到已有 Qwitch 加密数据，但没有可验证匹配的主密钥\
-                 （钥匙串/历史钥匙串/本地密钥文件均缺失或与数据库不匹配）。\
-                 已保留全部现有密钥文件并拒绝启动，请恢复正确的钥匙串条目或 master.key 备份后重试。"
-                    .into(),
-            ));
+        if !expectation.requires_match() {
+            if let Some(&(key, source)) = candidates.first() {
+                return Ok((key, source));
+            }
+            let mut key = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut key);
+            return Ok((key, KeySource::Generated));
         }
-        let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
-        Ok((key, KeySource::Generated))
+
+        let message = if any_decrypts && expectation.fingerprint.is_some() {
+            "检测到主密钥可以解密数据库凭据，但与本地 key_id 指纹文件冲突（可能是部分备份恢复遗留了旧 key_id）。\
+             已保留全部密钥与数据文件并拒绝启动，请核对后清理错误的 key_id 或恢复一致的备份。"
+        } else if any_fp_match && !expectation.sample_blobs.is_empty() {
+            "检测到 key_id 指纹与候选主密钥匹配，但无法解密数据库中的抽样凭据（数据库可能与密钥备份来自不同时期或凭据已损坏）。\
+             已保留全部文件并拒绝启动，请恢复对应时期的钥匙串条目或 master.key 备份。"
+        } else {
+            "检测到已有 Qwitch 加密数据，但没有可验证匹配的主密钥\
+             （系统钥匙串、历史钥匙串及 master.key 均缺失或与数据库不匹配）。\
+             已保留全部现有密钥文件并拒绝启动，请恢复正确的钥匙串条目或 master.key 备份后重试。"
+        };
+        Err(HostError::Keyring(message.into()))
     }
 
     fn key_matches_expectation(key: &[u8; 32], expectation: &KeyExpectation) -> bool {
@@ -456,10 +479,12 @@ impl NativePlatformHost {
             .fingerprint
             .as_deref()
             .map(|fp| crate::storage::crypto::key_fingerprint(key) == fp);
-        let sample_ok = expectation
-            .sample_blob
-            .as_deref()
-            .map(|blob| crate::storage::crypto::decrypt_credential(key, blob).is_ok());
+        let sample_ok = (!expectation.sample_blobs.is_empty()).then(|| {
+            expectation
+                .sample_blobs
+                .iter()
+                .any(|blob| crate::storage::crypto::decrypt_credential(key, blob).is_ok())
+        });
         match (fp_ok, sample_ok) {
             // 指纹与样本同时存在时必须两者都匹配，防止旧 key_id 选错钥
             (Some(f), Some(s)) => f && s,
@@ -587,19 +612,19 @@ enum KeySource {
 }
 
 /// 启动时用于验证候选主密钥是否匹配当前数据库的依据：
-/// 优先 key_id 指纹 + 密文样本双验证；无指纹的旧库用样本试解密。
+/// 优先 key_id 指纹 + 多条密文样本双验证；无指纹的旧库用样本试解密。
 /// has_encrypted_data 区分"空库首装"与"已有加密数据"——
-/// 不能以 qwitch.db 文件是否存在判断（open 会立即创建空库）
+/// 若仅有孤儿 key_id 而数据库已空（无加密账号），允许恢复/重初始化而不阻塞启动
 #[derive(Debug, Clone, Default)]
 pub struct KeyExpectation {
     pub fingerprint: Option<String>,
-    pub sample_blob: Option<Vec<u8>>,
+    pub sample_blobs: Vec<Vec<u8>>,
     pub has_encrypted_data: bool,
 }
 
 impl KeyExpectation {
     fn requires_match(&self) -> bool {
-        self.fingerprint.is_some() || self.sample_blob.is_some() || self.has_encrypted_data
+        self.has_encrypted_data || !self.sample_blobs.is_empty()
     }
 }
 
@@ -1111,7 +1136,7 @@ mod tests {
         // 冲突来源：钥匙串是旧钥、文件才是匹配 key_id 的正确钥 → 选文件
         let fp_exp = KeyExpectation {
             fingerprint: Some(crate::storage::crypto::key_fingerprint(&key)),
-            sample_blob: None,
+            sample_blobs: Vec::new(),
             has_encrypted_data: true,
         };
         let (k, src) = resolve(Some(&wrong_hex), None, Some(&hex_key), true, true, &fp_exp)
@@ -1136,7 +1161,18 @@ mod tests {
         )
         .is_err());
 
-        // 无指纹旧库：用密文样本验证，只有能解密的候选被选中
+        // 孤儿 key_id + 空库（无任何加密账号）：不阻塞启动，复用候选密钥
+        let orphan_fp_empty = KeyExpectation {
+            fingerprint: Some(crate::storage::crypto::key_fingerprint(&wrong_key)),
+            sample_blobs: Vec::new(),
+            has_encrypted_data: false,
+        };
+        let (k, src) =
+            resolve(Some(&hex_key), None, None, false, true, &orphan_fp_empty).expect("orphan fp");
+        assert_eq!(k, key);
+        assert_eq!(src, KeySource::Keyring);
+
+        // 无指纹旧库：用多条密文样本验证（第一条损坏时第二条能解密仍应匹配）
         let env = crate::domain::CredentialEnvelope {
             tool_id: "qoder_cn".to_string(),
             uid: "sample_uid".to_string(),
@@ -1150,9 +1186,10 @@ mod tests {
             },
         };
         let blob = crate::storage::crypto::encrypt_credential(&key, &env).expect("encrypt");
+        let corrupt_blob = vec![1u8; 32];
         let sample_exp = KeyExpectation {
             fingerprint: None,
-            sample_blob: Some(blob),
+            sample_blobs: vec![corrupt_blob, blob.clone()],
             has_encrypted_data: true,
         };
         let (k, src) = resolve(
@@ -1163,7 +1200,7 @@ mod tests {
             true,
             &sample_exp,
         )
-        .expect("sample picks file");
+        .expect("multi-sample picks file even when first blob corrupt");
         assert_eq!(k, key);
         assert_eq!(src, KeySource::File);
         assert!(resolve(Some(&wrong_hex), None, None, true, true, &sample_exp).is_err());
@@ -1171,7 +1208,7 @@ mod tests {
         // 双验证：指纹与样本都指向正确钥 B 时，旧钥 A（钥匙串）落选、B（文件）选中
         let dual_exp = KeyExpectation {
             fingerprint: Some(crate::storage::crypto::key_fingerprint(&key)),
-            sample_blob: sample_exp.sample_blob.clone(),
+            sample_blobs: vec![blob],
             has_encrypted_data: true,
         };
         let (k, src) = resolve(
@@ -1191,7 +1228,7 @@ mod tests {
         // 指纹与样本互相矛盾（部分备份恢复）：任何候选都无法同时通过 → Fail-Closed
         let split_exp = KeyExpectation {
             fingerprint: Some(crate::storage::crypto::key_fingerprint(&wrong_key)),
-            sample_blob: sample_exp.sample_blob.clone(),
+            sample_blobs: sample_exp.sample_blobs.clone(),
             has_encrypted_data: true,
         };
         assert!(resolve(
@@ -1290,11 +1327,11 @@ mod tests {
         let db =
             crate::storage::QwitchDatabase::open(&dir.join("qwitch.db")).expect("open creates db");
         assert!(dir.join("qwitch.db").exists());
-        let sample = db.first_credential_blob().expect("query ok");
-        assert!(sample.is_none());
+        let samples = db.credential_sample_blobs(5).expect("query ok");
+        assert!(samples.is_empty());
         let first_exp = KeyExpectation {
             fingerprint: None,
-            sample_blob: sample,
+            sample_blobs: samples,
             has_encrypted_data: false,
         };
         let first_key =
@@ -1403,7 +1440,7 @@ mod tests {
         .unwrap();
         let expectation = KeyExpectation {
             fingerprint: Some(crate::storage::crypto::key_fingerprint(&correct_key)),
-            sample_blob: None,
+            sample_blobs: Vec::new(),
             has_encrypted_data: true,
         };
         let key =

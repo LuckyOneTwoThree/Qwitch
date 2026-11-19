@@ -37,16 +37,128 @@ pub fn is_valid_path_segment(seg: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// 严格匹配"今日已签/已领"幂等文案，避免把 "already expired" / "not checked" 误判为已签
+fn collect_idempotent_candidates(val: &Value, out: &mut Vec<String>) {
+    const MESSAGE_KEYS: &[&str] = &[
+        "message",
+        "msg",
+        "error_msg",
+        "errorMessage",
+        "errMsg",
+        "detail",
+        "error",
+        "reason",
+    ];
+    let Some(obj) = val.as_object() else {
+        return;
+    };
+    for key in MESSAGE_KEYS {
+        if let Some(v) = obj.get(*key) {
+            if let Some(s) = v.as_str() {
+                let t = s.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+            } else if v.is_object() {
+                collect_idempotent_candidates(v, out);
+            }
+        }
+    }
+    if let Some(data) = obj.get("data").filter(|v| v.is_object()) {
+        collect_idempotent_candidates(data, out);
+    }
+}
+
+fn contains_claim_negation_or_failure(text: &str) -> bool {
+    const CN_NEGATIONS: &[&str] = &[
+        "失败",
+        "未签",
+        "未领",
+        "尚未",
+        "没有签",
+        "没有领",
+        "没签",
+        "没领",
+        "不可签",
+        "无法签",
+    ];
+    const EN_NEGATIONS: &[&str] = &[
+        "not checked",
+        "not claimed",
+        "not already",
+        "haven't checked",
+        "hasn't checked",
+        "has not checked",
+        "have not checked",
+        "never checked",
+        "never claimed",
+        "failed",
+        "failure",
+    ];
+    let lower = text.to_ascii_lowercase();
+    CN_NEGATIONS.iter().any(|pat| text.contains(pat))
+        || EN_NEGATIONS.iter().any(|pat| lower.contains(pat))
+}
+
+fn contains_explicit_claimed_phrase(text: &str) -> bool {
+    const CN_POSITIVES: &[&str] = &[
+        "今日已签",
+        "今天已签",
+        "已签到",
+        "已经签到",
+        "已签过",
+        "今日已领",
+        "今天已领",
+        "已领取",
+        "已经领取",
+        "已领过",
+        "重复签到",
+        "重复领取",
+        "请勿重复领",
+        "请勿重复签",
+        "不可重复领",
+        "不可重复签",
+    ];
+    const EN_POSITIVES: &[&str] = &[
+        "already claimed",
+        "already checked in",
+        "already checked",
+        "already received",
+        "duplicate claim",
+        "repeated claim",
+    ];
+    let lower = text.to_ascii_lowercase();
+    CN_POSITIVES.iter().any(|pat| text.contains(pat))
+        || EN_POSITIVES.iter().any(|pat| lower.contains(pat))
+}
+
+/// 严格匹配"今日已签/已领"幂等文案，排除 "not checked in" / "not already claimed" / "已签到失败" 等否定或失败消息
 pub fn is_idempotent_claimed_phrase(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    text.contains("已签")
-        || text.contains("已领")
-        || text.contains("重复领取")
-        || lower.contains("already claimed")
-        || lower.contains("already checked")
-        || lower.contains("checked in")
-        || lower.contains("already received")
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let mut extracted = Vec::new();
+    if trimmed.starts_with('{') {
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            collect_idempotent_candidates(&val, &mut extracted);
+        }
+    }
+    let candidates: Vec<&str> = if extracted.is_empty() {
+        vec![trimmed]
+    } else {
+        extracted.iter().map(String::as_str).collect()
+    };
+
+    if candidates
+        .iter()
+        .any(|msg| contains_claim_negation_or_failure(msg))
+    {
+        return false;
+    }
+    candidates
+        .iter()
+        .any(|msg| contains_explicit_claimed_phrase(msg))
 }
 
 /// HTTP 200 内的业务码统一映射：401/403/429 必须落到可熔断的错误码，
@@ -126,9 +238,24 @@ mod tests {
 
         assert!(is_idempotent_claimed_phrase("今日已签到"));
         assert!(is_idempotent_claimed_phrase("本周期已领取"));
+        assert!(is_idempotent_claimed_phrase("今日已领，无需重复签到"));
         assert!(is_idempotent_claimed_phrase("User already claimed today"));
         assert!(is_idempotent_claimed_phrase("Already checked in"));
+        assert!(is_idempotent_claimed_phrase(
+            r#"{"code":10001,"error":"Already claimed"}"#
+        ));
         assert!(!is_idempotent_claimed_phrase("Token already expired"));
         assert!(!is_idempotent_claimed_phrase("Not checked yet"));
+        assert!(!is_idempotent_claimed_phrase("Not checked in"));
+        assert!(!is_idempotent_claimed_phrase("User has not checked in"));
+        assert!(!is_idempotent_claimed_phrase("Not already claimed"));
+        assert!(!is_idempotent_claimed_phrase("已签到失败"));
+        assert!(!is_idempotent_claimed_phrase("尚未领取"));
+        assert!(!is_idempotent_claimed_phrase(
+            r#"{"message":"claim failed"}"#
+        ));
+        assert!(!is_idempotent_claimed_phrase(
+            r#"{"error":"Already claimed","message":"User has not checked in"}"#
+        ));
     }
 }

@@ -8,13 +8,26 @@ use sha2::{Digest, Sha256};
 use crate::domain::CredentialEnvelope;
 use crate::storage::StorageError;
 
+use std::ptr::write_volatile;
+use std::sync::atomic::{compiler_fence, Ordering};
+
 const NONCE_LEN: usize = 12;
+
+fn zeroize_bytes(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: b 是有效可写的可变引用字节，使用 volatile 防止编译器优化消除清零
+        unsafe {
+            write_volatile(b, 0);
+        }
+    }
+    compiler_fence(Ordering::SeqCst);
+}
 
 pub fn encrypt_credential(
     master_key: &[u8; 32],
     envelope: &CredentialEnvelope,
 ) -> Result<Vec<u8>, StorageError> {
-    let plaintext =
+    let mut plaintext =
         serde_json::to_vec(envelope).map_err(|e| StorageError::Crypto(e.to_string()))?;
 
     let cipher =
@@ -24,9 +37,11 @@ pub fn encrypt_credential(
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher
+    let ciphertext_res = cipher
         .encrypt(nonce, plaintext.as_ref())
-        .map_err(|e| StorageError::Crypto(format!("Encryption failed: {e}")))?;
+        .map_err(|e| StorageError::Crypto(format!("Encryption failed: {e}")));
+    zeroize_bytes(&mut plaintext);
+    let ciphertext = ciphertext_res?;
 
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     out.extend_from_slice(&nonce_bytes);
@@ -47,11 +62,14 @@ pub fn decrypt_credential(
         Aes256Gcm::new_from_slice(master_key).map_err(|e| StorageError::Crypto(e.to_string()))?;
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let plaintext = cipher
+    let mut plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|e| StorageError::Crypto(format!("Decryption failed: {e}")))?;
 
-    serde_json::from_slice(&plaintext).map_err(|e| StorageError::Crypto(e.to_string()))
+    let parsed =
+        serde_json::from_slice(&plaintext).map_err(|e| StorageError::Crypto(e.to_string()));
+    zeroize_bytes(&mut plaintext);
+    parsed
 }
 
 pub fn key_fingerprint(master_key: &[u8; 32]) -> String {
@@ -126,20 +144,22 @@ fn redact_auth_schemes(input: &str) -> String {
     let mut i = 0usize;
 
     while i < bytes.len() {
-        let rest = &input[i..];
-        let rest_lower = rest.to_ascii_lowercase();
-        let matched_scheme = ["bearer ", "cloud-ide-jwt "]
+        let rest_bytes = &bytes[i..];
+        let matched_scheme_len = ["bearer ", "cloud-ide-jwt "]
             .into_iter()
-            .find(|scheme| rest_lower.starts_with(scheme));
+            .find(|scheme| {
+                let sb = scheme.as_bytes();
+                rest_bytes.len() >= sb.len() && rest_bytes[..sb.len()].eq_ignore_ascii_case(sb)
+            })
+            .map(str::len);
 
-        if let Some(scheme) = matched_scheme {
+        if let Some(prefix_len) = matched_scheme_len {
             let at_boundary = i == 0
-                || !bytes[i - 1].is_ascii_alphanumeric()
+                || (!bytes[i - 1].is_ascii_alphanumeric()
                     && bytes[i - 1] != b'-'
-                    && bytes[i - 1] != b'_';
+                    && bytes[i - 1] != b'_');
             if at_boundary {
-                let prefix_len = scheme.len();
-                out.push_str(&rest[..prefix_len]);
+                out.push_str(&input[i..i + prefix_len]);
                 let mut j = i + prefix_len;
                 while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                     out.push(bytes[j] as char);
@@ -162,7 +182,7 @@ fn redact_auth_schemes(input: &str) -> String {
             }
         }
 
-        if let Some(ch) = rest.chars().next() {
+        if let Some(ch) = input[i..].chars().next() {
             out.push(ch);
             i += ch.len_utf8();
         } else {
@@ -312,5 +332,19 @@ mod tests {
         assert!(secrets.contains("Bearer [REDACTED]"));
         assert!(secrets.contains("Cloud-IDE-JWT [REDACTED]"));
         assert!(secrets.contains("[JWT_REDACTED]"));
+
+        // 复合标签内嵌邮箱/手机号脱敏（同时保留无邮箱意义的 Work @ Office）
+        let compound_email = sanitize_log_message("Alice (alice@example.com)");
+        assert_eq!(compound_email, "Alice (al***@example.com)");
+        let compound_phone = sanitize_log_message("WorkBuddy (13812345678)");
+        assert_eq!(compound_phone, "WorkBuddy (138****5678)");
+        assert_eq!(sanitize_log_message("Work @ Office"), "Work @ Office");
+
+        // 大文本鉴权头脱敏（验证 O(n) 扫描正确性）
+        let padding = "x ".repeat(10_000);
+        let big = format!("{padding}Authorization: BeArEr top_secret_999 tail");
+        let redacted_big = sanitize_log_message(&big);
+        assert!(!redacted_big.contains("top_secret_999"));
+        assert!(redacted_big.contains("BeArEr [REDACTED] tail"));
     }
 }

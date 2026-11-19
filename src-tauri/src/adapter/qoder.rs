@@ -160,6 +160,42 @@ impl QoderAdapter {
         Ok(headers)
     }
 
+    fn read_local_machine_id_fallback() -> Option<String> {
+        let host = crate::platform::NativePlatformHost;
+        let config_dir = host.client_config_dir("qoder_cn").ok()?;
+        std::fs::read_to_string(config_dir.join("machineid"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn merge_post_claim_quota(
+        inspected: Option<QuotaSnapshot>,
+        precheck: Option<&QuotaSnapshot>,
+        confirmed_claimed: bool,
+    ) -> Option<QuotaSnapshot> {
+        match inspected {
+            Some(mut q) => {
+                if confirmed_claimed
+                    && matches!(
+                        q.claim_status,
+                        ClaimStatus::Unknown | ClaimStatus::Unsupported
+                    )
+                {
+                    q.claim_status = ClaimStatus::Claimed;
+                }
+                Some(q)
+            }
+            None if confirmed_claimed => Some(QuotaSnapshot {
+                plan_name: None,
+                claim_status: ClaimStatus::Claimed,
+                buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
+                fetched_at: Utc::now().to_rfc3339(),
+            }),
+            None => None,
+        }
+    }
+
     fn extract_token_and_machine_id(
         cred: &CredentialEnvelope,
     ) -> Result<(String, Option<String>), AdapterError> {
@@ -168,7 +204,14 @@ impl QoderAdapter {
                 access_token,
                 extra,
                 ..
-            } => Ok((access_token.clone(), extra.get("machine_id").cloned())),
+            } => {
+                let machine_id = extra
+                    .get("machine_id")
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .or_else(Self::read_local_machine_id_fallback);
+                Ok((access_token.clone(), machine_id))
+            }
             CredentialPayload::LocalSnapshot { files } => {
                 let machine_id = files
                     .get(MACHINE_ID_FILE)
@@ -724,7 +767,7 @@ impl ToolAdapter for QoderAdapter {
             });
         }
 
-        let (token, uid_opt, email_opt, name_opt) = if trimmed.starts_with('{') {
+        let (token, uid_opt, email_opt, name_opt, machine_id_opt) = if trimmed.starts_with('{') {
             let val: Value = serde_json::from_str(trimmed).map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
                 message: format!("JSON 格式无效: {e}"),
@@ -756,7 +799,13 @@ impl ToolAdapter for QoderAdapter {
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            (tok, uid, email, name)
+            let machine_id = val
+                .get("machineId")
+                .or_else(|| val.get("machine_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            (tok, uid, email, name, machine_id)
         } else {
             let clean = trimmed
                 .strip_prefix("Bearer ")
@@ -769,10 +818,14 @@ impl ToolAdapter for QoderAdapter {
                     message: "Qoder Token 不能为空".into(),
                 });
             }
-            (clean, None, None, None)
+            (clean, None, None, None, None)
         };
 
         let uid = uid_opt.unwrap_or_else(|| Self::hash_uid("qoder_cn", token.as_bytes()));
+        let mut extra = HashMap::new();
+        if let Some(mid) = machine_id_opt {
+            extra.insert("machine_id".to_string(), mid);
+        }
 
         Ok(CredentialEnvelope {
             tool_id: "qoder_cn".to_string(),
@@ -783,7 +836,7 @@ impl ToolAdapter for QoderAdapter {
                 access_token: token,
                 refresh_token: None,
                 expires_at: None,
-                extra: HashMap::new(),
+                extra,
             },
         })
     }
@@ -839,15 +892,14 @@ impl ToolAdapter for QoderAdapter {
         let mut total_gained = 0.0;
         let mut claimed_any = false;
         let mut saw_already_claimed = false;
+        let mut skipped_invalid_cid = false;
         for (idx, campaign) in claimable.into_iter().enumerate() {
             let Some(cid) = campaign.get("campaignId").and_then(|v| v.as_str()) else {
                 continue;
             };
             if !crate::adapter::common::is_valid_path_segment(cid) {
-                return Err(AdapterError::Unified {
-                    code: UnifiedErrorCode::NetworkError,
-                    message: "Qoder CN 活动 ID 包含非法字符，已拒绝请求".into(),
-                });
+                skipped_invalid_cid = true;
+                continue;
             }
             if idx > 0 {
                 tokio::time::sleep(Duration::from_millis(400)).await;
@@ -912,23 +964,21 @@ impl ToolAdapter for QoderAdapter {
             }
         }
 
-        // 领取成功或确认已领但领后查额失败/返回 Unknown 时合成 Claimed 快照，
-        // 避免 UI 残留可领按钮（尽量保留查额得到的 buckets）
+        if skipped_invalid_cid && !claimed_any && !saw_already_claimed {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: "Qoder CN 活动 ID 包含非法字符，无法完成领取".into(),
+            });
+        }
+
+        // 领取成功或确认已领但领后查额失败/返回 Unknown/Unsupported 时合成 Claimed；
+        // 若领后查额返回 Available（多活动/新活动仍可领），必须保留 Available，不得隐藏剩余活动
         let confirmed_claimed = claimed_any || saw_already_claimed;
-        let refreshed = match self.inspect_quota(cred).await {
-            Ok(mut q) if confirmed_claimed && q.claim_status != ClaimStatus::Claimed => {
-                q.claim_status = ClaimStatus::Claimed;
-                Some(q)
-            }
-            Ok(q) => Some(q),
-            Err(_) if confirmed_claimed => Some(QuotaSnapshot {
-                plan_name: None,
-                claim_status: ClaimStatus::Claimed,
-                buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
-                fetched_at: Utc::now().to_rfc3339(),
-            }),
-            Err(_) => None,
-        };
+        let refreshed = Self::merge_post_claim_quota(
+            self.inspect_quota(cred).await.ok(),
+            precheck,
+            confirmed_claimed,
+        );
         Ok(ClaimResult {
             claimed: claimed_any,
             reward_summary: if total_gained > 0.0 {
@@ -1098,9 +1148,60 @@ mod tests {
             .auth_methods
             .contains(&AuthMethod::TokenPaste));
         let env = adapter
-            .parse_manual_token(r#"{"token":"qd-tok-123","userId":998877}"#)
+            .parse_manual_token(r#"{"token":"qd-tok-123","userId":998877,"machineId":"mid-abc"}"#)
             .await
             .expect("numeric uid");
         assert_eq!(env.uid, "998877");
+        if let CredentialPayload::Token { extra, .. } = &env.payload {
+            assert_eq!(extra.get("machine_id").map(String::as_str), Some("mid-abc"));
+        } else {
+            panic!("expected Token payload");
+        }
+    }
+
+    #[test]
+    fn qoder_post_claim_quota_preserves_available_and_upgrades_unknown() {
+        let pre = QuotaSnapshot {
+            plan_name: Some("Pro".into()),
+            claim_status: ClaimStatus::Available,
+            buckets: vec![],
+            fetched_at: "2026-11-18T00:00:00Z".into(),
+        };
+
+        // 领后查额仍返回 Available（多活动/新活动可领）：必须保留 Available
+        let inspected_avail = QuotaSnapshot {
+            plan_name: None,
+            claim_status: ClaimStatus::Available,
+            buckets: vec![],
+            fetched_at: "2026-11-18T00:01:00Z".into(),
+        };
+        assert_eq!(
+            QoderAdapter::merge_post_claim_quota(Some(inspected_avail), Some(&pre), true)
+                .unwrap()
+                .claim_status,
+            ClaimStatus::Available
+        );
+
+        // 领后查额返回 Unknown / Unsupported 且已确认领取过：升格为 Claimed
+        let inspected_unk = QuotaSnapshot {
+            plan_name: None,
+            claim_status: ClaimStatus::Unknown,
+            buckets: vec![],
+            fetched_at: "2026-11-18T00:01:00Z".into(),
+        };
+        assert_eq!(
+            QoderAdapter::merge_post_claim_quota(Some(inspected_unk), Some(&pre), true)
+                .unwrap()
+                .claim_status,
+            ClaimStatus::Claimed
+        );
+
+        // 领后查额失败（None）且已确认领取：合成 Claimed 快照
+        assert_eq!(
+            QoderAdapter::merge_post_claim_quota(None, Some(&pre), true)
+                .unwrap()
+                .claim_status,
+            ClaimStatus::Claimed
+        );
     }
 }

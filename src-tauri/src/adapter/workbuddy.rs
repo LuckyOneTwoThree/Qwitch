@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
+    Engine as _,
+};
 use chrono::Utc;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
@@ -128,6 +131,18 @@ process.stdin.on('end', () => {
     reply({ok: false, reason: e.reason || 'HELPER_PROTOCOL'});
   }
 });"#;
+
+fn decode_jwt_claims(token: &str) -> Option<Value> {
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?.trim();
+    if payload.is_empty() || parts.next().is_none() {
+        return None;
+    }
+    let unpadded = payload.trim_end_matches('=');
+    let bytes = BASE64_URL.decode(unpadded).ok()?;
+    serde_json::from_slice(&bytes).ok().filter(Value::is_object)
+}
 
 pub struct WorkBuddyAdapter {
     manifest: AdapterManifest,
@@ -671,7 +686,12 @@ impl WorkBuddyAdapter {
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or(DEFAULT_ENDPOINT);
                 let endpoint = Self::validate_endpoint(raw_endpoint)?;
-                let headers = Self::build_headers(access_token, &cred.uid, None, None)?;
+                let headers = Self::build_headers(
+                    access_token,
+                    &cred.uid,
+                    extra.get("enterprise_id").map(|s| s.as_str()),
+                    extra.get("domain").map(|s| s.as_str()),
+                )?;
                 Ok((endpoint, cred.uid.clone(), headers))
             }
             CredentialPayload::Cookies { .. } => Err(AdapterError::Unified {
@@ -698,8 +718,10 @@ impl WorkBuddyAdapter {
             }
         })?;
         headers.insert(AUTHORIZATION, auth);
-        if let Ok(v) = HeaderValue::from_str(uid) {
-            headers.insert("X-User-Id", v);
+        if !uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(uid) {
+            if let Ok(v) = HeaderValue::from_str(uid) {
+                headers.insert("X-User-Id", v);
+            }
         }
         if let Some(eid) = enterprise_id.filter(|s| !s.is_empty()) {
             if let Ok(v) = HeaderValue::from_str(eid) {
@@ -1164,16 +1186,31 @@ impl ToolAdapter for WorkBuddyAdapter {
                     code: UnifiedErrorCode::InvalidCredential,
                     message: "JSON 中缺少 token/accessToken 字段".into(),
                 })?;
+            let jwt_claims = decode_jwt_claims(token);
             let uid = val
                 .get("userId")
                 .or_else(|| val.get("uid"))
                 .and_then(crate::adapter::common::json_uid_to_string)
+                .or_else(|| {
+                    jwt_claims.as_ref().and_then(|c| {
+                        c.get("userId")
+                            .or_else(|| c.get("uid"))
+                            .or_else(|| c.get("user_id"))
+                            .or_else(|| c.get("sub"))
+                            .and_then(crate::adapter::common::json_uid_to_string)
+                    })
+                })
                 .unwrap_or_else(|| {
                     crate::adapter::common::hash_fallback_uid("wb_oauth", token.as_bytes())
                 });
             let email = val
                 .get("email")
                 .and_then(|v| v.as_str())
+                .or_else(|| {
+                    jwt_claims
+                        .as_ref()
+                        .and_then(|c| c.get("email").and_then(|v| v.as_str()))
+                })
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
@@ -1182,8 +1219,49 @@ impl ToolAdapter for WorkBuddyAdapter {
                 .or_else(|| val.get("nickName"))
                 .or_else(|| val.get("nickname"))
                 .and_then(|v| v.as_str())
+                .or_else(|| {
+                    jwt_claims.as_ref().and_then(|c| {
+                        c.get("name")
+                            .or_else(|| c.get("nickname"))
+                            .or_else(|| c.get("nickName"))
+                            .and_then(|v| v.as_str())
+                    })
+                })
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
+            let mut extra = HashMap::new();
+            if let Some(ent) = val
+                .get("enterpriseId")
+                .or_else(|| val.get("enterprise_id"))
+                .or_else(|| val.get("tenantId"))
+                .and_then(crate::adapter::common::json_uid_to_string)
+                .or_else(|| {
+                    jwt_claims.as_ref().and_then(|c| {
+                        c.get("enterpriseId")
+                            .or_else(|| c.get("enterprise_id"))
+                            .or_else(|| c.get("tenantId"))
+                            .and_then(crate::adapter::common::json_uid_to_string)
+                    })
+                })
+            {
+                extra.insert("enterprise_id".to_string(), ent);
+            }
+            if let Some(dom) = val
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                extra.insert("domain".to_string(), dom.to_string());
+            }
+            if let Some(ep) = val
+                .get("endpoint")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                extra.insert("endpoint".to_string(), Self::validate_endpoint(ep)?);
+            }
             return Ok(CredentialEnvelope {
                 tool_id: "workbuddy".to_string(),
                 uid,
@@ -1196,7 +1274,7 @@ impl ToolAdapter for WorkBuddyAdapter {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
                     expires_at: None,
-                    extra: HashMap::new(),
+                    extra,
                 },
             });
         }
@@ -1209,16 +1287,115 @@ impl ToolAdapter for WorkBuddyAdapter {
             });
         }
 
+        let jwt_claims = decode_jwt_claims(clean_token);
+        let jwt_uid = jwt_claims.as_ref().and_then(|c| {
+            c.get("userId")
+                .or_else(|| c.get("uid"))
+                .or_else(|| c.get("user_id"))
+                .or_else(|| c.get("sub"))
+                .and_then(crate::adapter::common::json_uid_to_string)
+        });
+        let jwt_email = jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("email").and_then(|v| v.as_str()))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let jwt_name = jwt_claims
+            .as_ref()
+            .and_then(|c| {
+                c.get("name")
+                    .or_else(|| c.get("nickname"))
+                    .or_else(|| c.get("nickName"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let jwt_enterprise = jwt_claims.as_ref().and_then(|c| {
+            c.get("enterpriseId")
+                .or_else(|| c.get("enterprise_id"))
+                .or_else(|| c.get("tenantId"))
+                .and_then(crate::adapter::common::json_uid_to_string)
+        });
+
+        #[cfg(not(test))]
+        let fallback_acc: Option<Value> = if jwt_uid.is_none() {
+            match shared_http_client()
+                .get(format!("{WEB_AUTH_ORIGIN}/console/accounts"))
+                .timeout(Duration::from_secs(3))
+                .header(ACCEPT, "application/json")
+                .header(USER_AGENT, "WorkBuddy")
+                .header(AUTHORIZATION, format!("Bearer {clean_token}"))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    resp.json::<Value>().await.ok().and_then(|cons_body| {
+                        cons_body
+                            .pointer("/data/accounts")
+                            .or_else(|| cons_body.pointer("/accounts"))
+                            .and_then(|v| v.as_array())
+                            .filter(|list| list.len() == 1)
+                            .map(|list| list[0].clone())
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let fallback_acc: Option<Value> = None;
+
+        let uid = jwt_uid.or_else(|| {
+            fallback_acc
+                .as_ref()
+                .and_then(|acc| acc.get("uid"))
+                .and_then(crate::adapter::common::json_uid_to_string)
+        });
+        let email = jwt_email.or_else(|| {
+            fallback_acc
+                .as_ref()
+                .and_then(|acc| acc.get("email").and_then(|v| v.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        });
+        let name = jwt_name.or_else(|| {
+            fallback_acc
+                .as_ref()
+                .and_then(|acc| {
+                    acc.get("nickname")
+                        .or_else(|| acc.get("nickName"))
+                        .and_then(|v| v.as_str())
+                })
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        });
+        let mut extra = HashMap::new();
+        if let Some(ent) = jwt_enterprise.or_else(|| {
+            fallback_acc
+                .as_ref()
+                .and_then(|acc| acc.get("enterpriseId").or_else(|| acc.get("tenantId")))
+                .and_then(crate::adapter::common::json_uid_to_string)
+        }) {
+            extra.insert("enterprise_id".to_string(), ent);
+        }
+
         Ok(CredentialEnvelope {
             tool_id: "workbuddy".to_string(),
-            uid: crate::adapter::common::hash_fallback_uid("wb_manual", clean_token.as_bytes()),
-            display_name: None,
-            display_email: None,
+            uid: uid.unwrap_or_else(|| {
+                crate::adapter::common::hash_fallback_uid("wb_manual", clean_token.as_bytes())
+            }),
+            display_name: name,
+            display_email: email,
             payload: CredentialPayload::Token {
                 access_token: clean_token.to_string(),
                 refresh_token: None,
                 expires_at: None,
-                extra: HashMap::new(),
+                extra,
             },
         })
     }
@@ -1691,5 +1868,60 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn jwt_claims_and_enterprise_headers_without_fallback_user_id() {
+        let adapter = WorkBuddyAdapter::new();
+        let header = BASE64_URL.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = BASE64_URL.encode(
+            br#"{"sub":"99001122","email":"corp@example.com","name":"CorpUser","enterpriseId":"ent-42"}"#,
+        );
+        let jwt = format!("{header}.{payload}.sig_part");
+
+        let parsed = adapter.parse_manual_token(&jwt).await.expect("parse jwt");
+        assert_eq!(parsed.uid, "99001122");
+        assert_eq!(parsed.display_email.as_deref(), Some("corp@example.com"));
+        assert_eq!(parsed.display_name.as_deref(), Some("CorpUser"));
+        if let CredentialPayload::Token { extra, .. } = &parsed.payload {
+            assert_eq!(
+                extra.get("enterprise_id").map(String::as_str),
+                Some("ent-42")
+            );
+        } else {
+            panic!("expected Token payload");
+        }
+
+        let json_env = adapter
+            .parse_manual_token(
+                r#"{"token":"tok-ent","uid":"real_88","enterpriseId":"ent-99","domain":"corp.oa"}"#,
+            )
+            .await
+            .expect("parse flat json");
+        if let CredentialPayload::Token { extra, .. } = &json_env.payload {
+            assert_eq!(
+                extra.get("enterprise_id").map(String::as_str),
+                Some("ent-99")
+            );
+            assert_eq!(extra.get("domain").map(String::as_str), Some("corp.oa"));
+        } else {
+            panic!("expected Token payload");
+        }
+
+        let headers_real =
+            WorkBuddyAdapter::build_headers("tok-1", "real_88", Some("ent-99"), Some("corp.oa"))
+                .expect("headers real");
+        assert_eq!(headers_real.get("X-User-Id").unwrap(), "real_88");
+        assert_eq!(headers_real.get("X-Enterprise-Id").unwrap(), "ent-99");
+        assert_eq!(headers_real.get("X-Tenant-Id").unwrap(), "ent-99");
+        assert_eq!(headers_real.get("X-Domain").unwrap(), "corp.oa");
+
+        let headers_fallback =
+            WorkBuddyAdapter::build_headers("tok-2", "wb_manual_abcdef123456", None, None)
+                .expect("headers fallback");
+        assert!(
+            headers_fallback.get("X-User-Id").is_none(),
+            "兜底哈希 UID 不得作为 X-User-Id 发送"
+        );
     }
 }

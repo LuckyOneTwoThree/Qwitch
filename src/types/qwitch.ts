@@ -81,7 +81,6 @@ export interface AppSettings {
   logArchiveAfterDays?: number;
   logMaxActiveCount?: number;
   closeToTray?: boolean;
-  hideDockIcon?: boolean;
   launchAtLogin?: boolean;
   startMinimized?: boolean;
   autoRefreshOnStartup?: boolean;

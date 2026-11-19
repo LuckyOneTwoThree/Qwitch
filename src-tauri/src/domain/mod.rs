@@ -116,8 +116,6 @@ pub struct AppSettingsDto {
     #[serde(default = "default_true")]
     pub close_to_tray: bool,
     #[serde(default)]
-    pub hide_dock_icon: bool,
-    #[serde(default)]
     pub launch_at_login: bool,
     #[serde(default)]
     pub start_minimized: bool,
@@ -141,7 +139,6 @@ impl Default for AppSettingsDto {
             log_archive_after_days: default_log_archive_after_days(),
             log_max_active_count: default_log_max_active_count(),
             close_to_tray: true,
-            hide_dock_icon: false,
             launch_at_login: false,
             start_minimized: false,
             auto_refresh_on_startup: false,
@@ -469,10 +466,10 @@ mod tests {
 
     #[test]
     fn app_settings_legacy_json_deserializes_with_safe_defaults() {
-        let legacy_json = r#"{"jitterMinMs":1500,"jitterMaxMs":3500,"theme":"dark"}"#;
+        let legacy_json =
+            r#"{"jitterMinMs":1500,"jitterMaxMs":3500,"theme":"dark","hideDockIcon":true}"#;
         let parsed: AppSettingsDto = serde_json::from_str(legacy_json).expect("deserialize legacy");
         assert!(parsed.close_to_tray);
-        assert!(!parsed.hide_dock_icon);
         assert!(!parsed.launch_at_login);
         assert!(!parsed.start_minimized);
         // 默认不静默后台刷新（Human-in-the-Loop 产品边界）

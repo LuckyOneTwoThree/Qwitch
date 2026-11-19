@@ -377,16 +377,20 @@ export const AccountCard = React.memo(function AccountCard({
                 </span>
               ) : (
                 <>
-                  {!missingLocalSnapshot && (
+                  {!missingLocalSnapshot && canSwitch && (
                     <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1">
                       <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
                       桌面切号就绪
                     </span>
                   )}
-                  {!missingApiToken && (
+                  {!missingApiToken && (canQuery || canClaim) && (
                     <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1">
                       <Check className="h-3 w-3 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-                      {canClaim ? "查额与签到就绪" : "在线查额就绪"}
+                      {canQuery && canClaim
+                        ? "查额与签到就绪"
+                        : canQuery
+                          ? "在线查额就绪"
+                          : "在线签到就绪"}
                     </span>
                   )}
                 </>

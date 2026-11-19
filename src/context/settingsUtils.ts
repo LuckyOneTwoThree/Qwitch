@@ -8,7 +8,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   logArchiveAfterDays: 14,
   logMaxActiveCount: 200,
   closeToTray: true,
-  hideDockIcon: false,
   launchAtLogin: false,
   startMinimized: false,
   autoRefreshOnStartup: false,
@@ -49,7 +48,6 @@ export function normalizeAppSettings(
       fallback.logMaxActiveCount ?? 200
     ),
     closeToTray: raw?.closeToTray ?? fallback.closeToTray ?? true,
-    hideDockIcon: raw?.hideDockIcon ?? fallback.hideDockIcon ?? false,
     launchAtLogin: raw?.launchAtLogin ?? fallback.launchAtLogin ?? false,
     startMinimized: raw?.startMinimized ?? fallback.startMinimized ?? false,
     autoRefreshOnStartup:

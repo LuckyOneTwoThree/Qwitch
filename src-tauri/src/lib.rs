@@ -23,33 +23,29 @@ use storage::QwitchDatabase;
 pub fn run() {
     let app_result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.unminimize();
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
+            commands::present_main_window(app);
         }))
         .setup(|app| {
             let host: Arc<dyn PlatformHost> = Arc::new(NativePlatformHost);
             let data_dir = host
                 .qwitch_data_dir()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            // 先开库（SQLite 本身不加密），取得指纹/密文样本后再选主密钥，
-            // 确保多来源密钥冲突时不会误删正确的密钥文件
+            // 先开库（SQLite 本身不加密），取得指纹/多条密文样本后再选主密钥，
+            // 确保单条密文损坏或孤儿 key_id 场景下不会误判或误删正确密钥
             let db = Arc::new(
                 QwitchDatabase::open(&data_dir.join("qwitch.db"))
                     .map_err(|e| std::io::Error::other(e.to_string()))?,
             );
-            let sample_blob = db
-                .first_credential_blob()
+            let sample_blobs = db
+                .credential_sample_blobs(5)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             let expectation = platform::KeyExpectation {
                 fingerprint: std::fs::read_to_string(data_dir.join("key_id"))
                     .ok()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty()),
-                has_encrypted_data: sample_blob.is_some(),
-                sample_blob,
+                has_encrypted_data: !sample_blobs.is_empty(),
+                sample_blobs,
             };
             let master_key = host
                 .get_or_create_master_key(&expectation)
@@ -64,16 +60,14 @@ pub fn run() {
                 startup_settings.log_archive_after_days,
                 startup_settings.log_max_active_count,
             );
-            commands::apply_runtime_app_policy(app.handle(), &startup_settings);
             if startup_settings.launch_at_login {
                 let _ = host.set_launch_at_login(true);
             }
             let launched_by_autostart = std::env::args().any(|a| a == "--autostart");
             if !startup_settings.start_minimized && !launched_by_autostart {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                commands::present_main_window(app.handle());
+            } else {
+                commands::set_macos_dock_visible(app.handle(), false);
             }
 
             let state = AppState {
@@ -240,14 +234,7 @@ pub fn run() {
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show_main" => {
-                        if let Some(tray) = app.get_webview_window("tray") {
-                            let _ = tray.hide();
-                        }
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.unminimize();
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
+                        commands::present_main_window(app);
                     }
                     "quit" => {
                         app.exit(0);
@@ -267,7 +254,7 @@ pub fn run() {
                     .unwrap_or(true);
                 if close_to_tray {
                     api.prevent_close();
-                    let _ = window.hide();
+                    commands::hide_main_window_to_tray(window.app_handle());
                 } else {
                     window.app_handle().exit(0);
                 }
@@ -321,11 +308,7 @@ pub fn run() {
             } = event
             {
                 if !has_visible_windows {
-                    if let Some(win) = app_handle.get_webview_window("main") {
-                        let _ = win.unminimize();
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
+                    commands::present_main_window(app_handle);
                 }
             }
             #[cfg(not(target_os = "macos"))]

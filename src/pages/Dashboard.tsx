@@ -56,6 +56,7 @@ import type {
   ToolId,
 } from "../types/qwitch";
 import { invoke } from "@tauri-apps/api/core";
+import packageJson from "../../package.json";
 
 type NavSection = "all" | "logs" | "settings" | ToolId;
 type AllViewMode = "grouped" | "flat";
@@ -550,12 +551,14 @@ export function Dashboard() {
                 <Lock className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
                 Local-First 加密库
               </span>
-              <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">v0.1.0</span>
+              <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                v{packageJson.version}
+              </span>
             </div>
             <p className="mt-1 leading-snug">
               凭据经系统钥匙串与 AES-256-GCM 加密落盘；
               {appSettings.closeToTray !== false
-                ? "关闭主窗将隐藏至菜单栏常驻。"
+                ? "关闭主窗将隐藏窗口并仅留菜单栏常驻。"
                 : "关闭主窗将直接退出程序。"}
             </p>
           </div>
@@ -1690,30 +1693,59 @@ export function Dashboard() {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 text-sm font-semibold">
                     <AppWindow className="h-4 w-4 text-sky-500" aria-hidden="true" />
-                    桌面常驻、程序坞与启动偏好
+                    桌面常驻与启动偏好
                   </div>
                   <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
                     即时生效
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-                  控制关闭窗口行为、macOS 程序坞图标显示及系统登录自动启动策略。
+                  控制关闭主窗口时的常驻行为及系统登录自动启动策略。
                 </p>
 
                 <div className="mt-4 space-y-2.5">
+                  <div className="rounded-xl border border-zinc-100 bg-zinc-50/70 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-800/40">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                          外观主题
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                          支持始终浅色、深色或随系统外观自动切换。
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1">
+                        {[
+                          { label: "跟随系统", value: "system" as const },
+                          { label: "浅色", value: "light" as const },
+                          { label: "深色", value: "dark" as const },
+                        ].map((opt) => {
+                          const selected = appSettings.theme === opt.value;
+                          return (
+                            <button
+                              key={opt.value}
+                              type="button"
+                              aria-pressed={selected}
+                              onClick={() => void saveAppSettings({ theme: opt.value }, true)}
+                              className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition ${
+                                selected
+                                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                                  : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
                   <SettingToggleRow
                     id="qwitch-close-to-tray"
                     label="关闭主窗口时隐藏至菜单栏常驻"
-                    description="开启后点击关闭按钮仅隐藏窗口，保留后台进程与顶部菜单栏；关闭则直接退出 Qwitch。"
+                    description="开启后点击关闭按钮将隐藏主窗口并收起程序坞/任务栏图标，仅保留顶部菜单栏常驻；关闭则直接退出 Qwitch。"
                     checked={appSettings.closeToTray !== false}
                     onChange={(next) => void saveAppSettings({ closeToTray: next })}
-                  />
-                  <SettingToggleRow
-                    id="qwitch-hide-dock-icon"
-                    label="macOS 隐藏程序坞 (Dock) 图标"
-                    description="作为纯菜单栏应用运行，不占用 Dock 栏位；仍可通过菜单栏「主面板」随时打开完整界面。"
-                    checked={Boolean(appSettings.hideDockIcon)}
-                    onChange={(next) => void saveAppSettings({ hideDockIcon: next })}
                   />
                   <SettingToggleRow
                     id="qwitch-launch-at-login"

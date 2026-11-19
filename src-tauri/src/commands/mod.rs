@@ -25,19 +25,44 @@ pub fn load_app_settings(db: &QwitchDatabase) -> AppSettingsDto {
         .unwrap_or_default()
 }
 
-pub fn apply_runtime_app_policy(app: &AppHandle, settings: &AppSettingsDto) {
+pub fn set_macos_dock_visible(app: &AppHandle, visible: bool) {
     #[cfg(target_os = "macos")]
     {
-        let policy = if settings.hide_dock_icon {
-            tauri::ActivationPolicy::Accessory
-        } else {
+        let policy = if visible {
             tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
         };
         let _ = app.set_activation_policy(policy);
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, settings);
+        let _ = (app, visible);
+    }
+}
+
+pub fn present_main_window(app: &AppHandle) {
+    if let Some(tray) = app.get_webview_window("tray") {
+        let _ = tray.hide();
+    }
+    set_macos_dock_visible(app, true);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+pub fn hide_main_window_to_tray(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    let has_other_visible = app
+        .webview_windows()
+        .iter()
+        .any(|(label, w)| label != "main" && label != "tray" && w.is_visible().unwrap_or(false));
+    if !has_other_visible {
+        set_macos_dock_visible(app, false);
     }
 }
 
@@ -86,14 +111,7 @@ pub struct ClientHostStatus {
 
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) {
-    if let Some(tray) = app.get_webview_window("tray") {
-        let _ = tray.hide();
-    }
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    present_main_window(&app);
 }
 
 #[tauri::command]
@@ -200,7 +218,6 @@ pub fn save_app_settings(
         settings.log_archive_after_days,
         settings.log_max_active_count,
     );
-    apply_runtime_app_policy(&app, &settings);
     let _ = app.emit("qwitch://settings-updated", &settings);
     let _ = app.emit("qwitch://logs-updated", ());
     Ok(settings)
@@ -281,6 +298,12 @@ async fn record_import_quota_check(
     }
     match adapter.inspect_quota(cred).await {
         Ok(snapshot) => {
+            if matches!(
+                summary.status,
+                AccountStatus::Expired | AccountStatus::RiskPaused
+            ) {
+                let _ = db.update_account_status(&summary.id, AccountStatus::Active);
+            }
             let _ = db.save_quota_snapshot(&summary.id, &snapshot);
         }
         Err(AdapterError::Unified { code, message }) => {
@@ -851,8 +874,21 @@ pub async fn switch_desktop_account(
         return Err(msg);
     }
 
-    if let Err(e) = state.db.set_active_on_client(&summary.tool_id, &summary.id) {
-        let msg = e.to_string();
+    let mut set_active_err = state
+        .db
+        .set_active_on_client(&summary.tool_id, &summary.id)
+        .err();
+    if set_active_err.is_some() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        set_active_err = state
+            .db
+            .set_active_on_client(&summary.tool_id, &summary.id)
+            .err();
+    }
+    if let Some(e) = set_active_err {
+        let msg = format!(
+            "客户端已完成切号并重启，但本地活跃状态落盘失败（{e}）；无需重复切号，请刷新界面后重试"
+        );
         log_switch_failure(
             &state.db,
             &app,
@@ -1076,7 +1112,7 @@ pub fn get_action_logs(
         .db
         .list_action_logs(
             scope.unwrap_or(LogScope::Active),
-            limit.unwrap_or(100),
+            limit.unwrap_or(100).clamp(1, 500),
             offset.unwrap_or(0),
         )
         .map_err(|e| e.to_string())
@@ -1361,7 +1397,7 @@ const OAUTH_CAPTURE_JS: &str = r#"
         name: acc.name || undefined,
         refreshToken: acc.refreshToken || undefined,
       });
-      window.location.href = 'https://qwitch.local/oauth-callback?nonce=' + encodeURIComponent('__QWITCH_NONCE__') + '&payload=' + encodeURIComponent(payloadStr);
+      window.location.href = 'https://qwitch.local/oauth-callback#nonce=' + encodeURIComponent('__QWITCH_NONCE__') + '&payload=' + encodeURIComponent(payloadStr);
     }
   }
 
@@ -1515,30 +1551,42 @@ fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
             "douyin.com",
             "bytedance.com",
             "snssdk.com",
+            "volcengine.com",
+            "bytegoofy.com",
             "doubao.com",
             "feishu.cn",
             "larkoffice.com",
             "github.com",
             "apple.com",
+            "microsoftonline.com",
+            "okta.com",
         ],
         "workbuddy" => &[
             "copilot.tencent.com",
             "workbuddy.cn",
             "tencent.com",
+            "qcloud.com",
             "qq.com",
             "weixin.qq.com",
             "wx.qq.com",
+            "work.weixin.qq.com",
             "wechat.com",
+            "microsoftonline.com",
+            "okta.com",
         ],
         "qoder_cn" => &[
             "qoder.cn",
             "qoder.com.cn",
             "aliyun.com",
             "alibabacloud.com",
+            "alipay.com",
+            "dingtalk.com",
             "taobao.com",
             "alibaba.com",
             "github.com",
             "google.com",
+            "microsoftonline.com",
+            "okta.com",
         ],
         _ => &[],
     }
@@ -1807,10 +1855,25 @@ pub async fn start_webview_oauth(
                 {
                     return false;
                 }
-                let callback_nonce = nav_url
-                    .query_pairs()
-                    .find(|(k, _)| k == "nonce")
-                    .map(|(_, v)| v.to_string());
+                let fragment_url = nav_url
+                    .fragment()
+                    .filter(|f| !f.is_empty())
+                    .and_then(|frag| {
+                        reqwest::Url::parse(&format!("https://qwitch.local/?{frag}")).ok()
+                    });
+                let find_param = |key: &str| -> Option<String> {
+                    if let Some(ref fu) = fragment_url {
+                        if let Some((_, v)) = fu.query_pairs().find(|(k, _)| k == key) {
+                            return Some(v.to_string());
+                        }
+                    }
+                    nav_url
+                        .query_pairs()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.to_string())
+                };
+
+                let callback_nonce = find_param("nonce");
                 if callback_nonce.as_deref() != Some(expected_nonce.as_str()) {
                     let _ = app_nav.emit(
                         "qwitch://oauth-error",
@@ -1819,11 +1882,7 @@ pub async fn start_webview_oauth(
                     return false;
                 }
 
-                let raw_payload = nav_url
-                    .query_pairs()
-                    .find(|(k, _)| k == "payload")
-                    .or_else(|| nav_url.query_pairs().find(|(k, _)| k == "token"))
-                    .map(|(_, v)| v.to_string());
+                let raw_payload = find_param("payload").or_else(|| find_param("token"));
 
                 if let Some(payload_str) = raw_payload {
                     let app_clone = app_nav.clone();

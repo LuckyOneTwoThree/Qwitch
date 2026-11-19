@@ -1,5 +1,25 @@
 import type { AccountSummary, ActionLogItem, AdapterManifest } from "../types/qwitch";
 
+const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+function cstTimestamp(daysAgo: number, hour: number, minute: number): string {
+  const nowCst = Date.now() + CST_OFFSET_MS;
+  const d = new Date(nowCst);
+  const utcDayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - CST_OFFSET_MS;
+  let targetMs = utcDayStart + ((-daysAgo * 24 + hour) * 60 + minute) * 60_000;
+  if (daysAgo === 0 && targetMs > Date.now()) {
+    targetMs = Math.max(utcDayStart + 60_000, Date.now() - 5 * 60_000);
+  }
+  return new Date(targetMs + CST_OFFSET_MS).toISOString().replace(/\.\d{3}Z$/, "+08:00");
+}
+
+function nextMonthResetCst(): string {
+  const d = new Date(Date.now() + CST_OFFSET_MS);
+  const y = d.getUTCMonth() === 11 ? d.getUTCFullYear() + 1 : d.getUTCFullYear();
+  const m = String(((d.getUTCMonth() + 1) % 12) + 1).padStart(2, "0");
+  return `${y}-${m}-01T00:00:00+08:00`;
+}
+
 export const MOCK_ADAPTERS: AdapterManifest[] = [
   {
     id: "trae_cn",
@@ -54,7 +74,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Pro",
       claimStatus: "claimed",
-      fetchedAt: "2026-11-17T16:40:00+09:00",
+      fetchedAt: cstTimestamp(0, 10, 40),
       buckets: [
         {
           key: "fast_requests",
@@ -63,11 +83,11 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
           total: 600,
           remaining: 380,
           unit: "次",
-          resetAt: "2026-12-01T00:00:00+09:00",
+          resetAt: nextMonthResetCst(),
         },
       ],
     },
-    updatedAt: "2026-11-17T16:40:00+09:00",
+    updatedAt: cstTimestamp(0, 10, 40),
   },
   {
     id: "acc-trae-2",
@@ -80,7 +100,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Free",
       claimStatus: "available",
-      fetchedAt: "2026-11-17T15:10:00+09:00",
+      fetchedAt: cstTimestamp(0, 9, 10),
       buckets: [
         {
           key: "fast_requests",
@@ -89,11 +109,11 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
           total: 100,
           remaining: 42,
           unit: "次",
-          resetAt: "2026-12-01T00:00:00+09:00",
+          resetAt: nextMonthResetCst(),
         },
       ],
     },
-    updatedAt: "2026-11-17T15:10:00+09:00",
+    updatedAt: cstTimestamp(0, 9, 10),
   },
   {
     id: "acc-trae-3",
@@ -106,7 +126,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Free",
       claimStatus: "available",
-      fetchedAt: "2026-11-12T10:00:00+09:00",
+      fetchedAt: cstTimestamp(5, 10, 0),
       buckets: [
         {
           key: "fast_requests",
@@ -118,7 +138,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
         },
       ],
     },
-    updatedAt: "2026-11-12T10:00:00+09:00",
+    updatedAt: cstTimestamp(5, 10, 0),
   },
   {
     id: "acc-wb-1",
@@ -131,7 +151,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Plus",
       claimStatus: "available",
-      fetchedAt: "2026-11-17T16:30:00+09:00",
+      fetchedAt: cstTimestamp(0, 10, 30),
       buckets: [
         {
           key: "credits",
@@ -143,8 +163,8 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
         },
       ],
     },
-    lastClaimedAt: "2026-11-16T09:12:00+09:00",
-    updatedAt: "2026-11-17T16:30:00+09:00",
+    lastClaimedAt: cstTimestamp(1, 9, 12),
+    updatedAt: cstTimestamp(0, 10, 30),
   },
   {
     id: "acc-wb-2",
@@ -157,7 +177,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Free",
       claimStatus: "claimed",
-      fetchedAt: "2026-11-17T11:20:00+09:00",
+      fetchedAt: cstTimestamp(0, 8, 20),
       buckets: [
         {
           key: "credits",
@@ -169,8 +189,8 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
         },
       ],
     },
-    lastClaimedAt: "2026-11-17T11:20:00+09:00",
-    updatedAt: "2026-11-17T11:20:00+09:00",
+    lastClaimedAt: cstTimestamp(0, 8, 20),
+    updatedAt: cstTimestamp(0, 8, 20),
   },
   {
     id: "acc-wb-3",
@@ -182,7 +202,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Free",
       claimStatus: "available",
-      fetchedAt: "2026-11-16T21:05:00+09:00",
+      fetchedAt: cstTimestamp(1, 21, 5),
       buckets: [
         {
           key: "credits",
@@ -194,7 +214,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
         },
       ],
     },
-    updatedAt: "2026-11-16T21:05:00+09:00",
+    updatedAt: cstTimestamp(1, 21, 5),
   },
   {
     id: "acc-qoder-1",
@@ -207,7 +227,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Community",
       claimStatus: "available",
-      fetchedAt: "2026-11-17T16:15:00+09:00",
+      fetchedAt: cstTimestamp(0, 10, 15),
       buckets: [
         {
           key: "daily_credits",
@@ -219,8 +239,8 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
         },
       ],
     },
-    lastClaimedAt: "2026-11-16T10:05:00+09:00",
-    updatedAt: "2026-11-17T16:15:00+09:00",
+    lastClaimedAt: cstTimestamp(1, 10, 5),
+    updatedAt: cstTimestamp(0, 10, 15),
   },
   {
     id: "acc-qoder-2",
@@ -232,7 +252,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     latestQuota: {
       planName: "Community",
       claimStatus: "claimed",
-      fetchedAt: "2026-11-17T09:30:00+09:00",
+      fetchedAt: cstTimestamp(0, 7, 30),
       buckets: [
         {
           key: "daily_credits",
@@ -244,8 +264,8 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
         },
       ],
     },
-    lastClaimedAt: "2026-11-17T09:30:00+09:00",
-    updatedAt: "2026-11-17T09:30:00+09:00",
+    lastClaimedAt: cstTimestamp(0, 7, 30),
+    updatedAt: cstTimestamp(0, 7, 30),
   },
 ];
 
@@ -257,7 +277,7 @@ export const INITIAL_LOGS: ActionLogItem[] = [
     actionType: "claim",
     resultStatus: "success",
     messageSanitized: "WorkBuddy · 副号 (wb_39f0****14) 成功领取今日签到 100 积分",
-    createdAt: "2026-11-17T11:20:00+09:00",
+    createdAt: cstTimestamp(0, 8, 20),
   },
   {
     id: 2,
@@ -266,7 +286,7 @@ export const INITIAL_LOGS: ActionLogItem[] = [
     actionType: "claim",
     resultStatus: "success",
     messageSanitized: "Qoder · 实验号 (qd_2b44****9a) 成功领取每日 100 Credits",
-    createdAt: "2026-11-17T09:30:00+09:00",
+    createdAt: cstTimestamp(0, 7, 30),
   },
   {
     id: 3,
@@ -276,7 +296,7 @@ export const INITIAL_LOGS: ActionLogItem[] = [
     resultStatus: "failed",
     errorCode: "RISK_TRIGGERED",
     messageSanitized: "WorkBuddy · 备用号 03 收到 403 校验挑战，已触发熔断暂停",
-    createdAt: "2026-11-16T21:05:00+09:00",
+    createdAt: cstTimestamp(1, 21, 5),
   },
   {
     id: 4,
@@ -285,6 +305,6 @@ export const INITIAL_LOGS: ActionLogItem[] = [
     actionType: "switch",
     resultStatus: "success",
     messageSanitized: "已将本机 Trae 桌面端切换至 Trae CN · 主力工作号 并重启完成",
-    createdAt: "2026-11-16T18:12:00+09:00",
+    createdAt: cstTimestamp(1, 18, 12),
   },
 ];

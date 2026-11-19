@@ -81,4 +81,15 @@ describe("settingsUtils", () => {
     expect(payload.autoRefreshIntervalMinutes).toBe(30);
     expect(payload.closeToTray).toBe(true);
   });
+
+  it("ignores legacy hideDockIcon field when normalizing persisted settings", () => {
+    const legacyRaw = {
+      ...DEFAULT_APP_SETTINGS,
+      hideDockIcon: true,
+    } as Partial<typeof DEFAULT_APP_SETTINGS>;
+    const normalized = normalizeAppSettings(legacyRaw);
+
+    expect(normalized.closeToTray).toBe(true);
+    expect("hideDockIcon" in normalized).toBe(false);
+  });
 });

@@ -293,15 +293,21 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
 
-  // system 主题运行时跟随系统深浅色切换
+  // system 主题运行时跟随系统深浅色切换（兼容旧版 WKWebView addListener）
   useEffect(() => {
     if (appSettings.theme !== "system" || typeof window === "undefined" || !window.matchMedia) {
       return;
     }
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => setTheme(mq.matches ? "dark" : "light");
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
+    if (typeof mq.addEventListener === "function") {
+      mq.addEventListener("change", onChange);
+      return () => mq.removeEventListener("change", onChange);
+    }
+    if (typeof mq.addListener === "function") {
+      mq.addListener(onChange);
+      return () => mq.removeListener(onChange);
+    }
   }, [appSettings.theme]);
 
   useEffect(() => {

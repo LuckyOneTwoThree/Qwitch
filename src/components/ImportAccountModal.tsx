@@ -306,7 +306,9 @@ export function ImportAccountModal({
                 : "将自动识别本机已登录桌面端的会话与额度信息，同一账号重复导入将自动合并，不会产生冗余记录。"
               : method === "webview_oauth"
                 ? "将拉起无痕隔离的官方授权窗口（支持扫码/短信/2FA）；登录成功后若与本机桌面端为同一账号，将自动关联切号快照并同步最新额度。"
-                : "支持导入纯 Token 或结构化 JSON；若与已有账号 UID 匹配，将自动补充双轨凭据以开启查额与签到。"}
+                : toolId === "workbuddy"
+                  ? "WorkBuddy 推荐直接粘贴完整会话 JSON（或包含用户标识的 JWT；企业版账号请附带 enterpriseId 字段），以便精准识别企业身份与接口头。"
+                  : "支持导入纯 Token 或结构化 JSON；若与已有账号 UID 匹配，将自动补充双轨凭据以开启查额与签到。"}
           </div>
         </div>
 

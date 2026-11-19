@@ -275,14 +275,19 @@ impl ExternalAdapter {
                 message: format!("解析外部适配器响应失败: {e}{}", stderr_snippet()),
             })?;
 
-        if let Some(resp_id) = resp.id.as_ref() {
-            let matches = resp_id.as_str() == Some(req_id.as_str());
-            if !matches {
-                return Err(AdapterError::Unified {
-                    code: UnifiedErrorCode::InternalError,
-                    message: format!("外部适配器 {} 返回的 JSON-RPC id 不匹配", self.manifest.id),
-                });
-            }
+        let matches = resp
+            .id
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == req_id);
+        if !matches {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!(
+                    "外部适配器 {} 返回的 JSON-RPC id 缺失或不匹配",
+                    self.manifest.id
+                ),
+            });
         }
 
         if let Some(err) = resp.error {
@@ -536,7 +541,7 @@ mod tests {
             .expect("large stderr must not deadlock");
         assert_eq!(res.get("ok").and_then(|v| v.as_bool()), Some(true));
 
-        // 2. JSON-RPC id 不匹配拒绝
+        // 2. JSON-RPC id 不匹配或缺失拒绝
         let bad_id = make_ext(
             "my_plugin",
             "/bin/sh",
@@ -549,7 +554,21 @@ mod tests {
             .call_rpc("ping", serde_json::json!({}))
             .await
             .expect_err("id mismatch must fail");
-        assert!(err.to_string().contains("id 不匹配"));
+        assert!(err.to_string().contains("id 缺失或不匹配"));
+
+        let missing_id = make_ext(
+            "my_plugin",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                r#"read _; printf '{"jsonrpc":"2.0","result":{"ok":true}}\n'"#.into(),
+            ],
+        );
+        let missing_err = missing_id
+            .call_rpc("ping", serde_json::json!({}))
+            .await
+            .expect_err("missing id must fail");
+        assert!(missing_err.to_string().contains("id 缺失或不匹配"));
 
         // 3. 外部插件尝试返回内置 tool_id 时被 parse_manual_token 拦截
         let spoof = make_ext(

@@ -363,7 +363,7 @@ impl QwitchDatabase {
              LEFT JOIN quota_snapshots q ON q.id = (
                  SELECT q2.id FROM quota_snapshots q2
                  WHERE q2.account_id = a.id
-                 ORDER BY q2.fetched_at DESC, q2.rowid DESC
+                 ORDER BY julianday(q2.fetched_at) DESC, q2.fetched_at DESC, q2.rowid DESC
                  LIMIT 1
              )
              WHERE a.id = ?1",
@@ -391,7 +391,7 @@ impl QwitchDatabase {
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
                      WHERE q2.account_id = a.id
-                     ORDER BY q2.fetched_at DESC, q2.rowid DESC
+                     ORDER BY julianday(q2.fetched_at) DESC, q2.fetched_at DESC, q2.rowid DESC
                      LIMIT 1
                  )
                  WHERE a.tool_id = ?1
@@ -411,7 +411,7 @@ impl QwitchDatabase {
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
                      WHERE q2.account_id = a.id
-                     ORDER BY q2.fetched_at DESC, q2.rowid DESC
+                     ORDER BY julianday(q2.fetched_at) DESC, q2.fetched_at DESC, q2.rowid DESC
                      LIMIT 1
                  )
                  ORDER BY a.tool_id ASC, a.updated_at DESC",
@@ -456,7 +456,8 @@ impl QwitchDatabase {
         Ok((summary, envelope))
     }
 
-    /// 一次性迁移：旧版明文 PII 标签与历史日志脱敏（仅在存在待迁移记录时创建备份，并原子写入完成标记）
+    /// 一次性迁移：旧版明文 PII 标签（含复合标签）与历史日志分页脱敏；
+    /// 仅在存在待迁移记录时创建 0600 临时备份，事务提交后清理明文备份文件并写入完成标记
     pub fn migrate_legacy_pii(&self, master_key: &[u8; 32]) -> Result<(), StorageError> {
         const FLAG: &str = "migration.pii_v1";
         if self.get_setting(FLAG)?.is_some() {
@@ -479,21 +480,9 @@ impl QwitchDatabase {
 
             let mut acc_updates = Vec::new();
             for (id, label, blob) in acc_rows {
-                let mut new_label = label.clone();
-                if !label.contains(' ')
-                    && label
-                        .split_once('@')
-                        .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
-                    && !label.contains("***")
-                {
-                    new_label = crypto::mask_email(&label);
-                } else if label.len() == 11
-                    && label.starts_with('1')
-                    && label.chars().all(|c| c.is_ascii_digit())
-                {
-                    new_label = crypto::mask_phone(&label);
-                } else if let Ok(env) = crypto::decrypt_credential(master_key, &blob) {
-                    if !env.uid.trim().is_empty() && label == env.uid {
+                let mut new_label = crypto::sanitize_log_message(&label);
+                if let Ok(env) = crypto::decrypt_credential(master_key, &blob) {
+                    if !env.uid.trim().is_empty() && new_label == env.uid {
                         new_label = crypto::mask_uid(&env.uid);
                     }
                 }
@@ -502,16 +491,26 @@ impl QwitchDatabase {
                 }
             }
 
-            let mut log_stmt = conn.prepare("SELECT id, message_sanitized FROM action_logs")?;
-            let log_rows = log_stmt
-                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-
             let mut lg_updates = Vec::new();
-            for (id, msg) in log_rows {
-                let sanitized = crypto::sanitize_log_message(&msg);
-                if sanitized != msg {
-                    lg_updates.push((id, sanitized));
+            let mut last_id = 0i64;
+            let mut log_stmt = conn.prepare(
+                "SELECT id, message_sanitized FROM action_logs WHERE id > ?1 ORDER BY id ASC LIMIT 500",
+            )?;
+            loop {
+                let batch = log_stmt
+                    .query_map(params![last_id], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                if batch.is_empty() {
+                    break;
+                }
+                for (id, msg) in batch {
+                    last_id = id;
+                    let sanitized = crypto::sanitize_log_message(&msg);
+                    if sanitized != msg {
+                        lg_updates.push((id, sanitized));
+                    }
                 }
             }
 
@@ -528,10 +527,18 @@ impl QwitchDatabase {
             let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         }
         let backup = self.db_path.with_extension("db.pre-pii-migration.bak");
-        if !backup.exists() && self.db_path.exists() {
+        let created_backup = if !backup.exists() && self.db_path.exists() {
             std::fs::copy(&self.db_path, &backup)
                 .map_err(|e| StorageError::Crypto(format!("迁移前备份数据库失败: {e}")))?;
-        }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600));
+            }
+            true
+        } else {
+            false
+        };
 
         // 单事务原子提交数据迁移与完成标记
         let mut conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
@@ -556,24 +563,30 @@ impl QwitchDatabase {
             params![FLAG, "\"done\"", now],
         )?;
         tx.commit()?;
+        drop(conn);
+
+        if created_backup || backup.exists() {
+            let _ = std::fs::remove_file(&backup);
+        }
         Ok(())
     }
 
-    /// 取一条账号密文样本，用于无指纹旧库的主密钥匹配验证。
+    /// 取最近若干条账号密文样本，用于主密钥多样本容错校验。
     /// 查询失败必须向上传播（Fail-Closed），不得与"没有账号"混淆
-    pub fn first_credential_blob(&self) -> Result<Option<Vec<u8>>, StorageError> {
+    pub fn credential_sample_blobs(&self, limit: usize) -> Result<Vec<Vec<u8>>, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        Ok(conn
-            .query_row(
-                "SELECT encrypted_credential FROM accounts LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?)
+        let lim = limit.max(1) as i64;
+        let mut stmt = conn.prepare(
+            "SELECT encrypted_credential FROM accounts ORDER BY updated_at DESC, rowid DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![lim], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
-    /// 启动时校验主密钥指纹；首次生成前必须确认当前密钥能解密既有数据，
-    /// 避免把错误密钥"祝福"为合法密钥
+    /// 启动时校验主密钥指纹与多条密文样本；首次生成或清理孤儿 key_id 前
+    /// 必须确认是否存在无法解密的既有账号数据，避免把错误密钥"祝福"为合法密钥
     pub fn verify_or_init_key_fingerprint(
         &self,
         data_dir: &Path,
@@ -581,44 +594,50 @@ impl QwitchDatabase {
     ) -> Result<(), StorageError> {
         let fingerprint = crypto::key_fingerprint(master_key);
         let path = data_dir.join("key_id");
+        let samples = self.credential_sample_blobs(5)?;
+        let has_accounts = !samples.is_empty();
+        let any_sample_decrypts = samples
+            .iter()
+            .any(|blob| crypto::decrypt_credential(master_key, blob).is_ok());
+        let data_dir_str = data_dir.display();
+
         if let Ok(existing) = std::fs::read_to_string(&path) {
-            if existing.trim() != fingerprint {
-                return Err(StorageError::Crypto(
-                    "主密钥与本地密钥指纹 (key_id) 不匹配：当前密钥无法解密既有数据。\
-                     已拒绝启动，请恢复原钥匙串条目或密钥备份。"
-                        .into(),
-                ));
+            if existing.trim() == fingerprint {
+                if has_accounts && !any_sample_decrypts {
+                    return Err(StorageError::Crypto(format!(
+                        "key_id 指纹匹配但当前主密钥无法解密任何抽样账号凭据（指纹与数据不一致）。\
+                         已拒绝启动，请检查 {data_dir_str}/key_id、{data_dir_str}/master.key 或系统钥匙串后恢复完整备份。"
+                    )));
+                }
+                return Ok(());
             }
-            // 指纹匹配仍须用密文样本复核，防止旧 key_id 与新数据库混用
-            if let Some(blob) = self.first_credential_blob()? {
-                crypto::decrypt_credential(master_key, &blob).map_err(|_| {
-                    StorageError::Crypto(
-                        "key_id 指纹匹配但主密钥无法解密既有账号凭据（指纹与数据不一致）。\
-                         已拒绝启动，请恢复正确的密钥备份。"
-                            .into(),
-                    )
-                })?;
+            if !has_accounts {
+                std::fs::write(&path, fingerprint.as_bytes())
+                    .map_err(|e| StorageError::Crypto(e.to_string()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                }
+                return Ok(());
             }
-            return Ok(());
+            if any_sample_decrypts {
+                return Err(StorageError::Crypto(format!(
+                    "当前主密钥可以解密既有凭据，但与本地指纹文件冲突：{data_dir_str}/key_id。\
+                     已拒绝启动；若刚从备份重建数据库且确认主密钥正确，请清理该 key_id 文件后重试。"
+                )));
+            }
+            return Err(StorageError::Crypto(format!(
+                "主密钥与本地密钥指纹 (key_id) 及数据库凭据均不匹配。\
+                 已拒绝启动，请从系统钥匙串或 {data_dir_str}/master.key 备份恢复原密钥。"
+            )));
         }
 
-        let sample: Option<Vec<u8>> = {
-            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-            conn.query_row(
-                "SELECT encrypted_credential FROM accounts LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?
-        };
-        if let Some(blob) = sample {
-            crypto::decrypt_credential(master_key, &blob).map_err(|_| {
-                StorageError::Crypto(
-                    "主密钥无法解密既有账号凭据且缺少密钥指纹记录。\
-                     已拒绝启动，请恢复原钥匙串条目或密钥备份。"
-                        .into(),
-                )
-            })?;
+        if has_accounts && !any_sample_decrypts {
+            return Err(StorageError::Crypto(format!(
+                "主密钥无法解密既有账号凭据且缺少密钥指纹记录。\
+                 已拒绝启动，请恢复原系统钥匙串条目或 {data_dir_str}/master.key 备份。"
+            )));
         }
 
         std::fs::write(&path, fingerprint.as_bytes())
@@ -750,7 +769,7 @@ impl QwitchDatabase {
                AND id NOT IN (
                    SELECT id FROM quota_snapshots
                    WHERE account_id = ?1
-                   ORDER BY fetched_at DESC, rowid DESC
+                   ORDER BY julianday(fetched_at) DESC, fetched_at DESC, rowid DESC
                    LIMIT 20
                )",
             params![account_id],
@@ -806,7 +825,8 @@ impl QwitchDatabase {
         );
         let mut stmt = conn.prepare(&sql)?;
 
-        let rows = stmt.query_map(params![limit, offset], |row| {
+        let clamped_limit = limit.clamp(1, 10_000);
+        let rows = stmt.query_map(params![clamped_limit, offset], |row| {
             let err_opt: Option<String> = row.get(5)?;
             Ok(ActionLogItem {
                 id: row.get(0)?,
@@ -916,6 +936,16 @@ impl QwitchDatabase {
                 params![now_str, max_active_count as i64],
             )?;
         }
+
+        const MAX_ARCHIVED_LOGS: i64 = 5_000;
+        let _ = conn.execute(
+            "DELETE FROM action_logs
+             WHERE archived_at IS NOT NULL
+               AND id NOT IN (
+                 SELECT id FROM action_logs WHERE archived_at IS NOT NULL ORDER BY id DESC LIMIT ?1
+               )",
+            params![MAX_ARCHIVED_LOGS],
+        )?;
 
         Ok(affected)
     }
@@ -1611,20 +1641,26 @@ mod tests {
         let key_a = [1u8; 32];
         let key_b = [2u8; 32];
 
-        // 空库：首次写入指纹，重复校验通过
+        // 空库：首次写入指纹，重复校验通过；空库孤儿 key_id 也允许重初始化
         db.verify_or_init_key_fingerprint(&dir, &key_a)
             .expect("init empty");
         assert!(dir.join("key_id").exists());
         db.verify_or_init_key_fingerprint(&dir, &key_a)
             .expect("same key");
+        db.verify_or_init_key_fingerprint(&dir, &key_b)
+            .expect("empty db resets orphan key_id");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("key_id")).unwrap().trim(),
+            crypto::key_fingerprint(&key_b)
+        );
+        db.verify_or_init_key_fingerprint(&dir, &key_a)
+            .expect("reset back to key_a");
 
-        // 指纹不匹配 → 拒绝
-        assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
-
-        // 解密失败不再静默标记 Expired
+        // 有加密账号后指纹不匹配 → 拒绝，且解密失败不改写账号状态
         let acc = db
             .upsert_account(&key_a, Some("指纹测试"), &token_envelope("fp_user_1"))
             .expect("insert");
+        assert!(db.verify_or_init_key_fingerprint(&dir, &key_b).is_err());
         let err = db
             .get_account_credential(&key_b, &acc.id)
             .expect_err("wrong key must fail");
@@ -1786,6 +1822,9 @@ mod tests {
         let env = token_envelope("legacy_uid_123456");
         db.upsert_account(&key, Some("alice@example.com"), &env)
             .expect("insert legacy label");
+        let env_compound = token_envelope("legacy_uid_compound");
+        db.upsert_account(&key, Some("Alice (alice@example.com)"), &env_compound)
+            .expect("insert compound label");
         // 绕过写入即脱敏，直接插入旧版明文日志行，真实覆盖迁移路径
         db.conn
             .lock()
@@ -1803,18 +1842,30 @@ mod tests {
         db.migrate_legacy_pii(&key).expect("migrate");
 
         let accs = db.list_accounts(None).expect("list");
-        assert_eq!(accs[0].label, "al***@example.com");
+        let labels: Vec<&str> = accs.iter().map(|a| a.label.as_str()).collect();
+        assert!(labels.contains(&"al***@example.com"));
+        assert!(labels.contains(&"Alice (al***@example.com)"));
         let logs = db.list_action_logs(LogScope::All, 100, 0).expect("logs");
         assert!(!logs[0].message_sanitized.contains("alice@example.com"));
         assert!(!logs[0].message_sanitized.contains("13812345678"));
-        assert!(dir.join("qwitch.db.pre-pii-migration.bak").exists());
+        assert!(
+            !dir.join("qwitch.db.pre-pii-migration.bak").exists(),
+            "迁移提交成功后必须清理含明文 PII 的临时备份"
+        );
 
         // 幂等：标记后再次运行不改动（即使标签又被写成明文）
         db.upsert_account(&key, Some("bob@example.com"), &env)
             .expect("relabel");
         db.migrate_legacy_pii(&key).expect("migrate again");
         let accs = db.list_accounts(None).expect("list");
-        assert_eq!(accs[0].label, "bob@example.com", "已标记迁移不得重复执行");
+        let target_acc = accs
+            .iter()
+            .find(|a| a.uid_masked == crypto::mask_uid("legacy_uid_123456"))
+            .expect("target acc exists");
+        assert_eq!(
+            target_acc.label, "bob@example.com",
+            "已标记迁移不得重复执行"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1895,7 +1946,7 @@ mod tests {
             ClaimStatus::Unknown
         );
 
-        // 4. 不同时区时间戳统一归约成 UTC，按真实时间先后排序
+        // 4. 不同时区时间戳统一归约成 UTC，按真实时间先后排序（含未归一化的历史原始行）
         let older_later_clock = QuotaSnapshot {
             plan_name: Some("Older".into()),
             claim_status: ClaimStatus::Available,
@@ -1920,6 +1971,83 @@ mod tests {
             Some("Newer")
         );
 
+        // 直接插入未归一化 +08:00 旧历史行，验证 julianday() 排序不被字符串字典序误导
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO quota_snapshots (id, account_id, plan_name, claim_status, buckets_json, fetched_at)
+                 VALUES ('raw-older', ?1, 'LegacyOlder', 'available', '[]', '2026-11-19T11:30:00+08:00')",
+                params![acc.id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO quota_snapshots (id, account_id, plan_name, claim_status, buckets_json, fetched_at)
+                 VALUES ('raw-newer', ?1, 'LegacyNewer', 'claimed', '[]', '2026-11-19T05:00:00Z')",
+                params![acc.id],
+            )
+            .unwrap();
+        }
+        let latest_mixed = db.get_account_summary(&acc.id).unwrap();
+        assert_eq!(
+            latest_mixed
+                .latest_quota
+                .as_ref()
+                .and_then(|q| q.plan_name.as_deref()),
+            Some("LegacyNewer")
+        );
+
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn orphan_key_id_with_empty_db_allows_reinit() {
+        let dir = temp_data_dir("orphan_fp");
+        let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open empty db");
+        let old_key = [51u8; 32];
+        let new_key = [52u8; 32];
+        std::fs::write(dir.join("key_id"), crypto::key_fingerprint(&old_key)).unwrap();
+
+        db.verify_or_init_key_fingerprint(&dir, &new_key)
+            .expect("empty db must overwrite orphan key_id");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("key_id")).unwrap().trim(),
+            crypto::key_fingerprint(&new_key)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_sample_allows_boot_when_first_row_corrupt_and_second_decrypts() {
+        let dir = temp_data_dir("multisample");
+        let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+        let key_good = [61u8; 32];
+
+        let acc_good = db
+            .upsert_account(&key_good, Some("好账号"), &token_envelope("good_uid_1"))
+            .expect("insert good");
+        let acc_bad = db
+            .upsert_account(&key_good, Some("损坏账号"), &token_envelope("bad_uid_2"))
+            .expect("insert second");
+        {
+            // 把最新一条密文写坏（确保 credential_sample_blobs DESC 首位就是坏样本）
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE accounts SET encrypted_credential = ?1, updated_at = '2099-01-01T00:00:00Z' WHERE id = ?2",
+                params![vec![9u8; 32], acc_bad.id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE accounts SET updated_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
+                params![acc_good.id],
+            )
+            .unwrap();
+        }
+
+        let samples = db.credential_sample_blobs(5).expect("samples");
+        assert_eq!(samples.len(), 2);
+        db.verify_or_init_key_fingerprint(&dir, &key_good)
+            .expect("multi-sample verification must succeed via second healthy row");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

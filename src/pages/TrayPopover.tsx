@@ -502,7 +502,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                   type="button"
                                   disabled={
                                     adapters.find((a) => a.id === acc.toolId)?.capabilities
-                                      .supportsClientSwitch === false
+                                      .supportsClientSwitch !== true
                                   }
                                   title="切换本机客户端账号"
                                   onClick={() => requestColdSwitch(acc)}

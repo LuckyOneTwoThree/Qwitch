@@ -454,9 +454,12 @@ impl QwitchDatabase {
                 .map_err(|e| StorageError::Crypto(format!("迁移前备份数据库失败: {e}")))?;
         }
 
+        // 单事务批量执行，避免大历史库逐行提交卡启动
+        let mut conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        let tx = conn.transaction()?;
+
         let accounts: Vec<(String, String, Vec<u8>)> = {
-            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-            let mut stmt = conn.prepare("SELECT id, label, encrypted_credential FROM accounts")?;
+            let mut stmt = tx.prepare("SELECT id, label, encrypted_credential FROM accounts")?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -477,8 +480,7 @@ impl QwitchDatabase {
                 }
             }
             if new_label != label {
-                let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-                conn.execute(
+                tx.execute(
                     "UPDATE accounts SET label = ?1 WHERE id = ?2",
                     params![new_label, id],
                 )?;
@@ -486,8 +488,7 @@ impl QwitchDatabase {
         }
 
         let logs: Vec<(i64, String)> = {
-            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-            let mut stmt = conn.prepare("SELECT id, message_sanitized FROM action_logs")?;
+            let mut stmt = tx.prepare("SELECT id, message_sanitized FROM action_logs")?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -496,14 +497,15 @@ impl QwitchDatabase {
         for (id, msg) in logs {
             let sanitized = crypto::sanitize_log_message(&msg);
             if sanitized != msg {
-                let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-                conn.execute(
+                tx.execute(
                     "UPDATE action_logs SET message_sanitized = ?1 WHERE id = ?2",
                     params![sanitized, id],
                 )?;
             }
         }
 
+        tx.commit()?;
+        drop(conn);
         self.set_setting(FLAG, "\"done\"")?;
         Ok(())
     }
@@ -1719,15 +1721,19 @@ mod tests {
         let env = token_envelope("legacy_uid_123456");
         db.upsert_account(&key, Some("alice@example.com"), &env)
             .expect("insert legacy label");
-        db.append_action_log(
-            None,
-            "qoder_cn",
-            "import",
-            "success",
-            None,
-            "已导入 alice@example.com (13812345678)",
-        )
-        .expect("log");
+        // 绕过写入即脱敏，直接插入旧版明文日志行，真实覆盖迁移路径
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO action_logs (account_id, tool_id, action_type, result_status, error_code, message_sanitized, created_at)
+                 VALUES (NULL, 'qoder_cn', 'import', 'success', NULL, ?1, ?2)",
+                params![
+                    "已导入 alice@example.com (13812345678)",
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .expect("insert legacy plaintext log");
 
         db.migrate_legacy_pii(&key).expect("migrate");
 

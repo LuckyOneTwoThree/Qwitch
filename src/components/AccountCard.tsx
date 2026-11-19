@@ -64,8 +64,8 @@ export const AccountCard = React.memo(function AccountCard({
   const isHealthy = account.status === "active";
   const isDisabled = account.status === "disabled";
   const canClaim = isHealthy && Boolean(adapter?.capabilities.supportsDailyClaim);
-  const canQuery = adapter ? adapter.capabilities.supportsQuotaQuery : true;
-  const canSwitch = adapter ? adapter.capabilities.supportsClientSwitch : true;
+  const canQuery = adapter?.capabilities.supportsQuotaQuery === true;
+  const canSwitch = adapter?.capabilities.supportsClientSwitch === true;
   const needsRecovery = account.status === "expired" || account.status === "risk_paused";
   const missingApiToken = account.hasApiToken === false;
   const missingLocalSnapshot = account.hasLocalSnapshot === false;

@@ -41,3 +41,4 @@
 * **核心接口**：
   * 查询活动列表：`GET /sash/api/v1/me/campaigns`（筛选 `actionType == "CLAIM_BENEFIT"` 且处于有效窗口的 `CLAIMABLE` / `CLAIMED` 项）。
   * 手动领取 Credits：`POST /sash/api/v1/me/campaigns/{campaignId}/claim`（幂等，成功返回 `status == "CLAIMED"`）。
+  * **请求数说明**：Qoder 领取主路径需重新拉取活动列表（前置快照不携带 `campaignId`，无法直接领取），领取成功后再查一次额度以刷新权威状态；这两次额外请求为已知接受的设计约束。领取成功但领后查额失败/返回 Unknown 时，合成 Claimed 快照避免 UI 残留可领按钮。

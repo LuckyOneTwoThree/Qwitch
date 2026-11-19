@@ -303,6 +303,17 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
 
+  // system 主题运行时跟随系统深浅色切换
+  useEffect(() => {
+    if (appSettings.theme !== "system" || typeof window === "undefined" || !window.matchMedia) {
+      return;
+    }
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => setTheme(mq.matches ? "dark" : "light");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [appSettings.theme]);
+
   useEffect(() => {
     return () => {
       if (toastTimerRef.current !== null) {
@@ -717,12 +728,12 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const candidates = accounts.filter(
-        (a) =>
-          (!toolId || a.toolId === toolId) &&
-          a.status === "active" &&
-          a.hasApiToken !== false
-      );
+      const candidates = accounts.filter((a) => {
+        if (toolId && a.toolId !== toolId) return false;
+        if (a.status !== "active" || a.hasApiToken === false) return false;
+        const adapter = adapters.find((ad) => ad.id === a.toolId);
+        return adapter?.capabilities.supportsQuotaQuery === true;
+      });
 
       if (candidates.length === 0) {
         showToast("当前范围下没有已完成在线授权的正常账号", "info");
@@ -805,7 +816,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         }, 250);
       }
     },
-    [accounts, appendLog, batchProgress?.running, isTauriRuntime, isTrayWindow, showToast]
+    [accounts, adapters, appendLog, batchProgress?.running, isTauriRuntime, isTrayWindow, showToast]
   );
 
   const claimDailyBatch = useCallback(

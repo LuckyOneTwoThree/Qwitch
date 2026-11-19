@@ -508,17 +508,17 @@ impl QwitchDatabase {
         Ok(())
     }
 
-    /// 取一条账号密文样本，用于无指纹旧库的主密钥匹配验证
-    pub fn first_credential_blob(&self) -> Option<Vec<u8>> {
-        let conn = self.conn.lock().ok()?;
-        conn.query_row(
-            "SELECT encrypted_credential FROM accounts LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
+    /// 取一条账号密文样本，用于无指纹旧库的主密钥匹配验证。
+    /// 查询失败必须向上传播（Fail-Closed），不得与"没有账号"混淆
+    pub fn first_credential_blob(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        Ok(conn
+            .query_row(
+                "SELECT encrypted_credential FROM accounts LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// 启动时校验主密钥指纹；首次生成前必须确认当前密钥能解密既有数据，
@@ -537,6 +537,16 @@ impl QwitchDatabase {
                      已拒绝启动，请恢复原钥匙串条目或密钥备份。"
                         .into(),
                 ));
+            }
+            // 指纹匹配仍须用密文样本复核，防止旧 key_id 与新数据库混用
+            if let Some(blob) = self.first_credential_blob()? {
+                crypto::decrypt_credential(master_key, &blob).map_err(|_| {
+                    StorageError::Crypto(
+                        "key_id 指纹匹配但主密钥无法解密既有账号凭据（指纹与数据不一致）。\
+                         已拒绝启动，请恢复正确的密钥备份。"
+                            .into(),
+                    )
+                })?;
             }
             return Ok(());
         }
@@ -1570,6 +1580,23 @@ mod tests {
         assert!(!dir.join("key_id").exists(), "错误密钥不得写入指纹");
         db.verify_or_init_key_fingerprint(&dir, &key_a)
             .expect("correct key blesses");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn key_id_matching_but_sample_undecryptable_is_rejected() {
+        let dir = temp_data_dir("fpsplit");
+        let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+        let key_a = [41u8; 32];
+        let key_b = [42u8; 32];
+        db.upsert_account(&key_a, Some("数据属于A"), &token_envelope("fp_split_uid"))
+            .expect("insert with A");
+        // 伪造指向 B 的 key_id（部分备份恢复场景）：指纹匹配 B 但数据属于 A
+        std::fs::write(dir.join("key_id"), crypto::key_fingerprint(&key_b)).unwrap();
+        assert!(
+            db.verify_or_init_key_fingerprint(&dir, &key_b).is_err(),
+            "指纹匹配但样本解不开必须拒启"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

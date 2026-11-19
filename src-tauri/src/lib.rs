@@ -40,12 +40,16 @@ pub fn run() {
                 QwitchDatabase::open(&data_dir.join("qwitch.db"))
                     .map_err(|e| std::io::Error::other(e.to_string()))?,
             );
+            let sample_blob = db
+                .first_credential_blob()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             let expectation = platform::KeyExpectation {
                 fingerprint: std::fs::read_to_string(data_dir.join("key_id"))
                     .ok()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty()),
-                sample_blob: db.first_credential_blob(),
+                has_encrypted_data: sample_blob.is_some(),
+                sample_blob,
             };
             let master_key = host
                 .get_or_create_master_key(&expectation)

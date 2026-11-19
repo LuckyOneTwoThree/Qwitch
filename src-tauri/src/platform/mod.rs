@@ -281,7 +281,6 @@ impl NativePlatformHost {
         keyring_hex: Option<&str>,
         legacy_hex: Option<&str>,
         file_hex: Option<&str>,
-        db_exists: bool,
         keyring_persistent: bool,
         expectation: &KeyExpectation,
     ) -> Result<([u8; 32], KeySource), HostError> {
@@ -316,9 +315,9 @@ impl NativePlatformHost {
             }
         }
 
-        if db_exists {
+        if expectation.requires_match() {
             return Err(HostError::Keyring(
-                "检测到已有 Qwitch 数据库，但没有可验证匹配的主密钥\
+                "检测到已有 Qwitch 加密数据，但没有可验证匹配的主密钥\
                  （钥匙串/历史钥匙串/本地密钥文件均缺失或与数据库不匹配）。\
                  已保留全部现有密钥文件并拒绝启动，请恢复正确的钥匙串条目或 master.key 备份后重试。"
                     .into(),
@@ -330,14 +329,22 @@ impl NativePlatformHost {
     }
 
     fn key_matches_expectation(key: &[u8; 32], expectation: &KeyExpectation) -> bool {
-        if let Some(fp) = expectation.fingerprint.as_deref() {
-            return crate::storage::crypto::key_fingerprint(key) == fp;
+        let fp_ok = expectation
+            .fingerprint
+            .as_deref()
+            .map(|fp| crate::storage::crypto::key_fingerprint(key) == fp);
+        let sample_ok = expectation
+            .sample_blob
+            .as_deref()
+            .map(|blob| crate::storage::crypto::decrypt_credential(key, blob).is_ok());
+        match (fp_ok, sample_ok) {
+            // 指纹与样本同时存在时必须两者都匹配，防止旧 key_id 选错钥
+            (Some(f), Some(s)) => f && s,
+            (Some(f), None) => f,
+            (None, Some(s)) => s,
+            // 无指纹也无样本（首次运行/空库）：接受候选
+            (None, None) => true,
         }
-        if let Some(blob) = expectation.sample_blob.as_deref() {
-            return crate::storage::crypto::decrypt_credential(key, blob).is_ok();
-        }
-        // 无指纹也无样本（首次运行/空库）：接受候选
-        true
     }
 
     #[cfg(test)]
@@ -358,7 +365,6 @@ impl NativePlatformHost {
         expectation: &KeyExpectation,
     ) -> Result<[u8; 32], HostError> {
         let key_file = data_dir.join("master.key");
-        let db_exists = data_dir.join("qwitch.db").exists();
 
         let write_key_file = |path: &Path, hex_key: &str| -> Result<(), std::io::Error> {
             std::fs::write(path, hex_key.as_bytes())?;
@@ -403,7 +409,6 @@ impl NativePlatformHost {
             keyring_hex.as_deref(),
             legacy_hex.as_deref(),
             file_hex.as_deref(),
-            db_exists,
             persistent,
             expectation,
         )?;
@@ -459,11 +464,20 @@ enum KeySource {
 }
 
 /// 启动时用于验证候选主密钥是否匹配当前数据库的依据：
-/// 优先 key_id 指纹；无指纹的旧库用一条账号密文样本试解密
+/// 优先 key_id 指纹 + 密文样本双验证；无指纹的旧库用样本试解密。
+/// has_encrypted_data 区分"空库首装"与"已有加密数据"——
+/// 不能以 qwitch.db 文件是否存在判断（open 会立即创建空库）
 #[derive(Debug, Clone, Default)]
 pub struct KeyExpectation {
     pub fingerprint: Option<String>,
     pub sample_blob: Option<Vec<u8>>,
+    pub has_encrypted_data: bool,
+}
+
+impl KeyExpectation {
+    fn requires_match(&self) -> bool {
+        self.fingerprint.is_some() || self.sample_blob.is_some() || self.has_encrypted_data
+    }
 }
 
 #[async_trait]
@@ -921,7 +935,9 @@ mod tests {
                        db: bool,
                        persistent: bool,
                        exp: &KeyExpectation| {
-            NativePlatformHost::resolve_master_key_logic(kr, legacy, file, db, persistent, exp)
+            let mut e = exp.clone();
+            e.has_encrypted_data = e.has_encrypted_data || db;
+            NativePlatformHost::resolve_master_key_logic(kr, legacy, file, persistent, &e)
         };
 
         // 已有数据库且所有密钥源不可用：绝不生成新密钥
@@ -955,6 +971,7 @@ mod tests {
         let fp_exp = KeyExpectation {
             fingerprint: Some(crate::storage::crypto::key_fingerprint(&key)),
             sample_blob: None,
+            has_encrypted_data: true,
         };
         let (k, src) = resolve(Some(&wrong_hex), None, Some(&hex_key), true, true, &fp_exp)
             .expect("conflict picks file");
@@ -995,6 +1012,7 @@ mod tests {
         let sample_exp = KeyExpectation {
             fingerprint: None,
             sample_blob: Some(blob),
+            has_encrypted_data: true,
         };
         let (k, src) = resolve(
             Some(&wrong_hex),
@@ -1008,6 +1026,42 @@ mod tests {
         assert_eq!(k, key);
         assert_eq!(src, KeySource::File);
         assert!(resolve(Some(&wrong_hex), None, None, true, true, &sample_exp).is_err());
+
+        // 双验证：指纹与样本都指向正确钥 B 时，旧钥 A（钥匙串）落选、B（文件）选中
+        let dual_exp = KeyExpectation {
+            fingerprint: Some(crate::storage::crypto::key_fingerprint(&key)),
+            sample_blob: sample_exp.sample_blob.clone(),
+            has_encrypted_data: true,
+        };
+        let (k, src) = resolve(
+            Some(&wrong_hex),
+            None,
+            Some(&hex_key),
+            true,
+            true,
+            &dual_exp,
+        )
+        .expect("dual verification picks file");
+        assert_eq!(k, key);
+        assert_eq!(src, KeySource::File);
+        // 只有旧钥 A（指纹/样本都不匹配）→ 拒绝
+        assert!(resolve(Some(&wrong_hex), None, None, true, true, &dual_exp).is_err());
+
+        // 指纹与样本互相矛盾（部分备份恢复）：任何候选都无法同时通过 → Fail-Closed
+        let split_exp = KeyExpectation {
+            fingerprint: Some(crate::storage::crypto::key_fingerprint(&wrong_key)),
+            sample_blob: sample_exp.sample_blob.clone(),
+            has_encrypted_data: true,
+        };
+        assert!(resolve(
+            Some(&wrong_hex),
+            None,
+            Some(&hex_key),
+            true,
+            true,
+            &split_exp
+        )
+        .is_err());
     }
 
     struct FakeCredential {
@@ -1089,6 +1143,27 @@ mod tests {
             "启用原生 feature 后平台默认钥匙串必须跨进程持久化"
         );
 
+        // --- 场景 0：生产顺序首装回归 — open 先创建空 DB，随后选钥必须成功生成 ---
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        let dir = temp_data_dir("firstboot");
+        let db =
+            crate::storage::QwitchDatabase::open(&dir.join("qwitch.db")).expect("open creates db");
+        assert!(dir.join("qwitch.db").exists());
+        let sample = db.first_credential_blob().expect("query ok");
+        assert!(sample.is_none());
+        let first_exp = KeyExpectation {
+            fingerprint: None,
+            sample_blob: sample,
+            has_encrypted_data: false,
+        };
+        let first_key =
+            NativePlatformHost::get_or_create_master_key_with_expectation(&dir, false, &first_exp)
+                .expect("空库首装必须成功生成密钥");
+        assert!(dir.join("master.key").exists());
+        db.verify_or_init_key_fingerprint(&dir, &first_key)
+            .expect("bless first key");
+        let _ = std::fs::remove_dir_all(&dir);
+
         // --- 场景 1：mock（非持久化）钥匙串下重启不得丢钥、不得删明文副本 ---
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
 
@@ -1108,10 +1183,17 @@ mod tests {
         assert!(dir.join("master.key").exists(), "重启后明文副本仍须保留");
         let _ = std::fs::remove_dir_all(&dir);
 
-        // --- 场景 2：已有数据库但密钥源全失 → 拒绝启动而非生成新钥 ---
+        // --- 场景 2：已有加密数据但密钥源全失 → 拒绝启动而非生成新钥 ---
         let dir = temp_data_dir("lost");
         std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
-        assert!(NativePlatformHost::get_or_create_master_key_with(&dir, false).is_err());
+        let lost_exp = KeyExpectation {
+            has_encrypted_data: true,
+            ..Default::default()
+        };
+        assert!(
+            NativePlatformHost::get_or_create_master_key_with_expectation(&dir, false, &lost_exp)
+                .is_err()
+        );
         assert!(!dir.join("master.key").exists());
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1181,6 +1263,7 @@ mod tests {
         let expectation = KeyExpectation {
             fingerprint: Some(crate::storage::crypto::key_fingerprint(&correct_key)),
             sample_blob: None,
+            has_encrypted_data: true,
         };
         let key =
             NativePlatformHost::get_or_create_master_key_with_expectation(&dir, true, &expectation)

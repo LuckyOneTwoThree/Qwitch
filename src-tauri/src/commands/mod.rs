@@ -325,7 +325,10 @@ pub fn save_app_settings(
             ));
         }
     }
-    state.host.set_launch_at_login(settings.launch_at_login)?;
+    // 仅当“开机自启”发生变化时才重新配置，避免每次保存设置都触碰系统注册/或误报错
+    if settings.launch_at_login != previous.launch_at_login {
+        state.host.set_launch_at_login(settings.launch_at_login)?;
+    }
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
     state
         .db

@@ -651,7 +651,8 @@ impl NativePlatformHost {
             None
         };
         let keyring_hex = entry.as_ref().and_then(|kr| kr.get_password().ok());
-        let legacy_hex = if persistent {
+        // 仅当当前钥匙串条目缺失时才探测历史条目，避免每次启动多一次钥匙串访问/授权弹窗
+        let legacy_hex = if persistent && keyring_hex.is_none() {
             Entry::new(LEGACY_KEYRING_SERVICE, KEYRING_MASTER_USER)
                 .ok()
                 .and_then(|kr| kr.get_password().ok())
@@ -1055,19 +1056,44 @@ impl PlatformHost for NativePlatformHost {
                 .ok_or_else(|| "无法读取 HOME 目录，不能配置 macOS 开机自启".to_string())?;
             let agents_dir = home.join("Library").join("LaunchAgents");
             let plist_path = agents_dir.join("dev.qwitch.app.plist");
+            let bootout = || {
+                if let Some(uid) = macos_current_uid() {
+                    let _ = Command::new("launchctl")
+                        .args(["bootout", &format!("gui/{uid}/dev.qwitch.app")])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            };
             if enabled {
                 let exe =
                     std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {e}"))?;
+                // 仅 .app 包支持真正的开机自启；开发模式(裸二进制、需 Vite)会拉起坏实例，
+                // 直接拒绝并清理可能遗留的坏自启。
+                if macos_app_bundle(&exe).is_none() {
+                    let _ = std::fs::remove_file(&plist_path);
+                    bootout();
+                    return Err(
+                        "当前为开发模式（非 .app 包），不支持开机自启；请用打包后的 Qwitch.app 开启"
+                            .to_string(),
+                    );
+                }
                 std::fs::create_dir_all(&agents_dir)
                     .map_err(|e| format!("创建 LaunchAgents 目录失败: {e}"))?;
                 let plist = render_macos_launch_agent_plist(&exe);
                 std::fs::write(&plist_path, plist.as_bytes())
                     .map_err(|e| format!("写入开机自启配置失败: {e}"))?;
-            } else if plist_path.exists() {
-                std::fs::remove_file(&plist_path)
-                    .map_err(|e| format!("移除开机自启配置失败: {e}"))?;
+                // 旧 job 若已加载，先卸下，使下次登录按新 plist 生效
+                bootout();
+                Ok(())
+            } else {
+                if plist_path.exists() {
+                    std::fs::remove_file(&plist_path)
+                        .map_err(|e| format!("移除开机自启配置失败: {e}"))?;
+                }
+                bootout();
+                Ok(())
             }
-            Ok(())
         }
 
         #[cfg(target_os = "windows")]
@@ -1147,7 +1173,19 @@ fn escape_xml(input: &str) -> String {
 }
 
 pub fn render_macos_launch_agent_plist(exe_path: &Path) -> String {
-    let escaped_exe = escape_xml(&exe_path.to_string_lossy());
+    // 若运行在 .app 包内，用 `open -a <bundle> --args --autostart` 启动：
+    // 走 LaunchServices 正常唤起 App（正确的激活策略/Dock/托盘），且 App 升级/移动后
+    // 只要 bundle 路径不变仍有效；否则退回直接执行当前可执行文件（仅开发/直跑场景）。
+    let program_args = match macos_app_bundle(exe_path) {
+        Some(bundle) => format!(
+            "    <string>/usr/bin/open</string>\n    <string>-a</string>\n    <string>{}</string>\n    <string>--args</string>\n    <string>--autostart</string>",
+            escape_xml(&bundle.to_string_lossy())
+        ),
+        None => format!(
+            "    <string>{}</string>\n    <string>--autostart</string>",
+            escape_xml(&exe_path.to_string_lossy())
+        ),
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1157,15 +1195,36 @@ pub fn render_macos_launch_agent_plist(exe_path: &Path) -> String {
   <string>dev.qwitch.app</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{escaped_exe}</string>
-    <string>--autostart</string>
+{program_args}
   </array>
   <key>RunAtLoad</key>
   <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
 </dict>
 </plist>
 "#
     )
+}
+
+/// 从可执行文件路径向上查找所属的 `.app` bundle（macOS）。
+fn macos_app_bundle(exe_path: &Path) -> Option<PathBuf> {
+    for anc in exe_path.ancestors() {
+        if anc.extension().and_then(|e| e.to_str()) == Some("app") {
+            return Some(anc.to_path_buf());
+        }
+    }
+    None
+}
+
+/// 当前登录用户的 uid（用于 launchctl gui/<uid> 域操作）。
+#[cfg(target_os = "macos")]
+fn macos_current_uid() -> Option<String> {
+    let out = Command::new("id").arg("-u").output().ok()?;
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!uid.is_empty()).then_some(uid)
 }
 
 fn find_latest_prefixed_dir(parent: &Path, prefix: &str) -> Option<PathBuf> {
@@ -1202,15 +1261,22 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn macos_launch_agent_plist_escapes_path_and_sets_autostart() {
+    fn macos_launch_agent_plist_bundle_aware_and_escaped() {
+        // .app 包内：走 `open -a <bundle> --args --autostart`，bundle 路径做 XML 转义
         let exe = PathBuf::from("/Applications/Qwitch & Tools.app/Contents/MacOS/qwitch");
         let plist = render_macos_launch_agent_plist(&exe);
         assert!(plist.contains("<string>dev.qwitch.app</string>"));
-        assert!(plist.contains(
-            "<string>/Applications/Qwitch &amp; Tools.app/Contents/MacOS/qwitch</string>"
-        ));
+        assert!(plist.contains("<string>/usr/bin/open</string>"));
+        assert!(plist.contains("<string>/Applications/Qwitch &amp; Tools.app</string>"));
         assert!(plist.contains("<string>--autostart</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
+        assert!(plist.contains("<key>LimitLoadToSessionType</key>\n  <string>Aqua</string>"));
+
+        // 非 bundle（开发/直跑）：退回直接执行当前可执行文件
+        let dev = PathBuf::from("/Users/x/dev/qwitch");
+        let p2 = render_macos_launch_agent_plist(&dev);
+        assert!(p2.contains("<string>/Users/x/dev/qwitch</string>"));
+        assert!(p2.contains("<string>--autostart</string>"));
     }
 
     #[test]

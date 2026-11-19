@@ -5,12 +5,14 @@ use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
     Engine as _,
 };
-use chrono::Utc;
+use chrono::{DateTime, SecondsFormat, Utc};
 use rand::RngCore;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256, Sha512};
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::adapter::{
@@ -26,17 +28,54 @@ const STORAGE_JSON: &str = "storage.json";
 const STATE_VSCDB: &str = "state.vscdb";
 const SNAPSHOT_AUTH_KEY: &str = "icube_auth_entries.json";
 const SNAPSHOT_VSCDB_KEY: &str = "icube_vscdb_entries.json";
+const SNAPSHOT_SERVERDATA_KEY: &str = "icube_serverdata_entries.json";
 const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
 const PRIMARY_AUTH_KEY: &str = "iCubeAuthInfo://icube.cloudide";
+const USERTAG_KEY: &str = "iCubeAuthInfo://usertag";
+const DEVICE_CRED_PREFIX: &str = "iCubeAuthInfo://icube-dc:";
+const SERVER_DATA_PREFIX: &str = "iCubeServerData://";
+const DEFAULT_TRAE_APP_VERSION: &str = "3.4.22";
+const CLAIM_CODE_DEVICE_ALREADY_CHECKED_IN: i64 = 9095;
+
+struct TraeDeviceHeaders {
+    device_id: String,
+    device_brand: Option<String>,
+    device_type: &'static str,
+    os_version: Option<String>,
+    app_version: String,
+}
+
+impl TraeDeviceHeaders {
+    /// 与 Trae CN 客户端 `ob()` 完全对齐的设备请求头。
+    /// 服务端签到下单强依赖 `x-device-id`，缺失时返回业务码 9004。
+    fn apply(&self, headers: &mut HeaderMap) {
+        Self::insert(headers, "x-device-id", Some(self.device_id.as_str()));
+        Self::insert(headers, "x-device-brand", self.device_brand.as_deref());
+        Self::insert(headers, "x-device-type", Some(self.device_type));
+        Self::insert(headers, "x-os-version", self.os_version.as_deref());
+        Self::insert(headers, "x-app-version", Some(self.app_version.as_str()));
+    }
+
+    fn insert(headers: &mut HeaderMap, name: &'static str, value: Option<&str>) {
+        let Some(value) = value.and_then(TraeAdapter::sanitize_header_value) else {
+            return;
+        };
+        if let Ok(header_value) = HeaderValue::from_str(&value) {
+            headers.insert(HeaderName::from_static(name), header_value);
+        }
+    }
+}
 
 pub struct TraeAdapter {
     is_cn: bool,
     manifest: AdapterManifest,
     http: reqwest::Client,
+    host: Option<Arc<dyn PlatformHost>>,
+    device_cache: OnceLock<Option<Arc<TraeDeviceHeaders>>>,
 }
 
 impl TraeAdapter {
-    pub fn new(is_cn: bool) -> Self {
+    fn new_inner(is_cn: bool, host: Option<Arc<dyn PlatformHost>>) -> Self {
         let (id, name) = if is_cn {
             ("trae_cn".to_string(), "Trae CN".to_string())
         } else {
@@ -67,7 +106,17 @@ impl TraeAdapter {
                 },
             },
             http,
+            host,
+            device_cache: OnceLock::new(),
         }
+    }
+
+    pub fn new(is_cn: bool) -> Self {
+        Self::new_inner(is_cn, None)
+    }
+
+    pub fn with_host(is_cn: bool, host: Arc<dyn PlatformHost>) -> Self {
+        Self::new_inner(is_cn, Some(host))
     }
 
     fn tool_id(&self) -> &str {
@@ -76,6 +125,114 @@ impl TraeAdapter {
         } else {
             "trae"
         }
+    }
+
+    fn sanitize_header_value(raw: &str) -> Option<String> {
+        let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+        let trimmed = cleaned.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+
+    /// 从 storage.json 的 `iCubeAuthInfo://icube-dc:<deviceId>` 键名解析本机设备 ID
+    fn device_id_from_storage(storage_path: &Path) -> Option<String> {
+        let raw = std::fs::read(storage_path).ok()?;
+        let value: Value = serde_json::from_slice(&raw).ok()?;
+        value
+            .as_object()?
+            .keys()
+            .find_map(|key| key.strip_prefix(DEVICE_CRED_PREFIX))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    }
+
+    /// 兜底：aha 设备注册信息（`<app>/aha/TinyStorage`，与客户端同为 tc 加密）
+    fn device_id_from_aha(config_dir: &Path) -> Option<String> {
+        let app_dir = config_dir.parent()?.parent()?;
+        let raw = std::fs::read_to_string(app_dir.join("aha").join("TinyStorage")).ok()?;
+        let value: Value = serde_json::from_str(&raw).ok()?;
+        let encoded = value
+            .get("tiny_storage_data")?
+            .get("aha.device.device_id")?
+            .as_str()?;
+        let decoded = Self::decrypt_tc_string(encoded)?;
+        decoded
+            .get("device_id_str")
+            .or_else(|| decoded.get("device_id"))
+            .and_then(crate::adapter::common::json_uid_to_string)
+            .filter(|id| id != "0" && !id.trim().is_empty())
+    }
+
+    fn device_type_tag() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "mac"
+        } else if cfg!(target_os = "windows") {
+            "win"
+        } else {
+            "linux"
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn detect_device_brand() -> Option<String> {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.model"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Self::sanitize_header_value(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn detect_device_brand() -> Option<String> {
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    fn detect_os_version() -> Option<String> {
+        let output = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if version.is_empty() {
+            return None;
+        }
+        Some(format!("macOS {version}"))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn detect_os_version() -> Option<String> {
+        None
+    }
+
+    fn resolve_device_headers(&self) -> Option<TraeDeviceHeaders> {
+        let host = self.host.as_ref()?;
+        let config_dir = host.client_config_dir(self.tool_id()).ok()?;
+        let device_id = Self::device_id_from_aha(&config_dir)
+            .or_else(|| Self::device_id_from_storage(&config_dir.join(STORAGE_JSON)))?;
+        Some(TraeDeviceHeaders {
+            device_id,
+            device_brand: Self::detect_device_brand(),
+            device_type: Self::device_type_tag(),
+            os_version: Self::detect_os_version(),
+            app_version: DEFAULT_TRAE_APP_VERSION.to_string(),
+        })
+    }
+
+    /// 仅缓存成功解析的结果：若本机尚无 Trae 设备标识，后续登录后可重新探测
+    fn device_headers(&self) -> Option<Arc<TraeDeviceHeaders>> {
+        if let Some(cached) = self.device_cache.get() {
+            return cached.clone();
+        }
+        let resolved = Arc::new(self.resolve_device_headers()?);
+        let _ = self.device_cache.set(Some(Arc::clone(&resolved)));
+        Some(resolved)
     }
 
     fn extract_jwt_claims(token: &str) -> Option<Value> {
@@ -443,6 +600,9 @@ impl TraeAdapter {
         if self.is_cn {
             headers.insert("X-User-Region", HeaderValue::from_static("CN"));
         }
+        if let Some(device) = self.device_headers() {
+            device.apply(&mut headers);
+        }
         Ok(headers)
     }
 
@@ -793,12 +953,108 @@ impl TraeAdapter {
             fetched_at: Utc::now().to_rfc3339(),
         })
     }
+
+    /// 构造与 Trae CN 客户端一致的登录态载荷。
+    /// `expiredAt` 是客户端判定"是否已登录"的硬性字段，缺失会导致启动后直接回到登录页。
+    fn build_token_auth_entry(
+        &self,
+        cred: &CredentialEnvelope,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_at: Option<i64>,
+    ) -> Result<Value, AdapterError> {
+        let expires_secs = expires_at.or_else(|| {
+            Self::extract_jwt_claims(access_token)
+                .and_then(|claims| claims.get("exp").and_then(|v| v.as_i64()))
+        });
+        let expired_at = expires_secs
+            .and_then(|secs| DateTime::from_timestamp(secs, 0))
+            .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true))
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "Token 缺少有效期（exp），无法写入 Trae 登录态；请重新授权或粘贴完整 JWT"
+                    .into(),
+            })?;
+
+        let mut account = Map::new();
+        account.insert(
+            "username".into(),
+            Value::String(cred.display_name.clone().unwrap_or_default()),
+        );
+        account.insert(
+            "email".into(),
+            Value::String(cred.display_email.clone().unwrap_or_default()),
+        );
+        if self.is_cn {
+            account.insert("scope".into(), Value::String("marscode".into()));
+            account.insert("loginScope".into(), Value::String("trae".into()));
+            account.insert("userTag".into(), Value::String("cn".into()));
+            account.insert("storeRegion".into(), Value::String("CN".into()));
+            account.insert("migrateToSG".into(), Value::Bool(false));
+        }
+
+        let mut payload = Map::new();
+        payload.insert("token".into(), Value::String(access_token.to_string()));
+        if let Some(refresh) = refresh_token {
+            payload.insert("refreshToken".into(), Value::String(refresh.to_string()));
+        }
+        payload.insert("expiredAt".into(), Value::String(expired_at));
+        payload.insert("userId".into(), Value::String(cred.uid.clone()));
+        payload.insert(
+            "host".into(),
+            Value::String(self.base_api_url().to_string()),
+        );
+        if self.is_cn {
+            payload.insert(
+                "userRegion".into(),
+                serde_json::json!({ "region": "CN", "_aiRegion": "CN" }),
+            );
+        }
+        payload.insert("account".into(), Value::Object(account));
+
+        Ok(Value::Object(payload))
+    }
+
+    fn collect_server_entries(root: &Value) -> Map<String, Value> {
+        root.as_object()
+            .map(|obj| {
+                obj.iter()
+                    .filter(|(k, _)| k.starts_with(SERVER_DATA_PREFIX))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 跨账号切换时 `iCubeServerData://*`（套餐/签到/活动缓存）必须随账号替换，
+    /// 否则新账号启动时会先展示上一个账号的套餐与签到状态。
+    fn apply_server_entries(
+        root_obj: &mut Map<String, Value>,
+        entries: Option<Map<String, Value>>,
+    ) {
+        root_obj.retain(|k, _| !k.starts_with(SERVER_DATA_PREFIX));
+        if let Some(entries) = entries {
+            for (k, v) in entries {
+                root_obj.insert(k, v);
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl ToolAdapter for TraeAdapter {
     fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    fn daily_claim_device_key(&self) -> Option<String> {
+        if !self.is_cn {
+            return None;
+        }
+        let device = self.device_headers()?;
+        let mut hasher = Sha256::new();
+        hasher.update(device.device_id.as_bytes());
+        Some(hex::encode(hasher.finalize()))
     }
 
     async fn import_from_local(
@@ -857,6 +1113,16 @@ impl ToolAdapter for TraeAdapter {
             }
         }
 
+        let server_entries = Self::collect_server_entries(&storage_val);
+        if !server_entries.is_empty() {
+            if let Ok(server_bytes) = serde_json::to_vec(&server_entries) {
+                files.insert(
+                    SNAPSHOT_SERVERDATA_KEY.to_string(),
+                    BASE64.encode(server_bytes),
+                );
+            }
+        }
+
         Ok(CredentialEnvelope {
             tool_id: self.tool_id().to_string(),
             uid,
@@ -901,6 +1167,15 @@ impl ToolAdapter for TraeAdapter {
                             DECRYPTED_TOKEN_FILE.to_string(),
                             BASE64.encode(tok.as_bytes()),
                         );
+                    }
+                    let server_entries = Self::collect_server_entries(&val);
+                    if !server_entries.is_empty() {
+                        if let Ok(server_bytes) = serde_json::to_vec(&server_entries) {
+                            files.insert(
+                                SNAPSHOT_SERVERDATA_KEY.to_string(),
+                                BASE64.encode(server_bytes),
+                            );
+                        }
                     }
                     return Ok(CredentialEnvelope {
                         tool_id: self.tool_id().to_string(),
@@ -1145,6 +1420,15 @@ impl ToolAdapter for TraeAdapter {
             self.base_api_url()
         );
         let headers = self.build_api_headers(&token)?;
+        // 签到下单强依赖设备标识：缺少时请求必然返回 9004，提前给出可操作提示
+        if !headers.contains_key("x-device-id") {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::ClientNotFound,
+                message:
+                    "未检测到本机 Trae CN 设备标识，无法签到；请先在本机登录一次 Trae CN 客户端后重试"
+                        .into(),
+            });
+        }
         let resp = self
             .http
             .post(&url)
@@ -1194,6 +1478,13 @@ impl ToolAdapter for TraeAdapter {
             });
         };
         if code != 0 {
+            // 9095：同一设备每天仅能签到一次，其他账号再签会命中该业务码
+            if code == CLAIM_CODE_DEVICE_ALREADY_CHECKED_IN {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::DeviceDailyLimitReached,
+                    message: "本机今日已使用 Trae CN 签到额度；当前账号未领取积分".into(),
+                });
+            }
             if let Some(err) = crate::adapter::common::map_business_code(code, "Trae CN 签到") {
                 return Err(err);
             }
@@ -1248,7 +1539,11 @@ impl ToolAdapter for TraeAdapter {
         host: &dyn PlatformHost,
         cred: &CredentialEnvelope,
     ) -> Result<(), AdapterError> {
-        let auth_entries: Map<String, Value> = match &cred.payload {
+        let (auth_entries, server_entries, snapshot_vscdb): (
+            Map<String, Value>,
+            Option<Map<String, Value>>,
+            Option<Map<String, Value>>,
+        ) = match &cred.payload {
             CredentialPayload::LocalSnapshot { files } => {
                 let b64 = files
                     .get(SNAPSHOT_AUTH_KEY)
@@ -1260,35 +1555,42 @@ impl ToolAdapter for TraeAdapter {
                     code: UnifiedErrorCode::InvalidCredential,
                     message: format!("快照解码失败: {e}"),
                 })?;
-                serde_json::from_slice(&bytes).map_err(|e| AdapterError::Unified {
-                    code: UnifiedErrorCode::InvalidCredential,
-                    message: format!("快照反序列化失败: {e}"),
-                })?
+                let entries: Map<String, Value> =
+                    serde_json::from_slice(&bytes).map_err(|e| AdapterError::Unified {
+                        code: UnifiedErrorCode::InvalidCredential,
+                        message: format!("快照反序列化失败: {e}"),
+                    })?;
+                let server = files
+                    .get(SNAPSHOT_SERVERDATA_KEY)
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|bytes| serde_json::from_slice::<Map<String, Value>>(&bytes).ok());
+                let vscdb = files
+                    .get(SNAPSHOT_VSCDB_KEY)
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|bytes| serde_json::from_slice::<Map<String, Value>>(&bytes).ok());
+                (entries, server, vscdb)
             }
             CredentialPayload::Token {
                 access_token,
                 refresh_token,
+                expires_at,
                 ..
             } => {
-                let mut map = Map::new();
-                let payload_json = serde_json::json!({
-                    "token": access_token,
-                    "refreshToken": refresh_token,
-                    "userId": cred.uid,
-                    "host": self.base_api_url(),
-                    "account": {
-                        "username": cred.display_name.as_deref().unwrap_or(""),
-                        "email": cred.display_email.as_deref().unwrap_or(""),
-                    }
-                });
+                let payload = self.build_token_auth_entry(
+                    cred,
+                    access_token,
+                    refresh_token.as_deref(),
+                    *expires_at,
+                )?;
                 let entry_val = if self.is_cn {
-                    Self::encrypt_tc_string(&payload_json.to_string())
-                        .unwrap_or_else(|| payload_json.to_string())
+                    Self::encrypt_tc_string(&payload.to_string())
+                        .unwrap_or_else(|| payload.to_string())
                 } else {
-                    payload_json.to_string()
+                    payload.to_string()
                 };
+                let mut map = Map::new();
                 map.insert(PRIMARY_AUTH_KEY.to_string(), Value::String(entry_val));
-                map
+                (map, None, None)
             }
             CredentialPayload::Cookies { .. } => {
                 return Err(AdapterError::Unified {
@@ -1333,18 +1635,29 @@ impl ToolAdapter for TraeAdapter {
             Map::new()
         };
 
-        // 仅清理并替换 iCubeAuthInfo://* 键，保留用户 IDE 主题与窗口设置
+        // 仅清理并替换账号级登录态；设备密钥（icube-dc）与 usertag 属于本机，
+        // Token 导入的账号没有这两类快照，需保留以免破坏设备绑定
+        let preserved: Vec<(String, Value)> = root_obj
+            .iter()
+            .filter(|(k, _)| k.starts_with(DEVICE_CRED_PREFIX) || k.as_str() == USERTAG_KEY)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         root_obj.retain(|k, _| !k.starts_with("iCubeAuthInfo://"));
+        for (k, v) in preserved {
+            if !auth_entries.contains_key(&k) {
+                root_obj.insert(k, v);
+            }
+        }
         for (k, v) in &auth_entries {
             root_obj.insert(k.clone(), v.clone());
         }
+        Self::apply_server_entries(&mut root_obj, server_entries);
 
-        let serialized = serde_json::to_vec_pretty(&Value::Object(root_obj)).map_err(|e| {
-            AdapterError::Unified {
+        let serialized =
+            serde_json::to_vec_pretty(&root_obj).map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         let tmp_path = config_dir.join(".storage.json.tmp");
         if let Err(e) = std::fs::write(&tmp_path, serialized) {
@@ -1362,15 +1675,14 @@ impl ToolAdapter for TraeAdapter {
             });
         }
 
-        let vscdb_entries = if let CredentialPayload::LocalSnapshot { files } = &cred.payload {
-            files
-                .get(SNAPSHOT_VSCDB_KEY)
-                .and_then(|b64| BASE64.decode(b64).ok())
-                .and_then(|bytes| serde_json::from_slice::<Map<String, Value>>(&bytes).ok())
-                .unwrap_or_else(|| auth_entries.clone())
-        } else {
-            auth_entries
-        };
+        // 以最终 storage.json 中的账号态为准覆盖 vscdb，同时保留快照里的历史条目
+        let mut vscdb_entries = snapshot_vscdb.unwrap_or_default();
+        for (k, v) in root_obj
+            .iter()
+            .filter(|(k, _)| k.starts_with("iCubeAuthInfo://"))
+        {
+            vscdb_entries.insert(k.clone(), v.clone());
+        }
         Self::apply_vscdb_auth_entries(&config_dir.join(STATE_VSCDB), &vscdb_entries)?;
 
         Ok(())
@@ -1399,6 +1711,50 @@ impl ToolAdapter for TraeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestHost(std::path::PathBuf);
+
+    #[async_trait]
+    impl PlatformHost for TestHost {
+        fn qwitch_data_dir(&self) -> Result<std::path::PathBuf, crate::platform::HostError> {
+            Ok(self.0.clone())
+        }
+        fn client_config_dir(
+            &self,
+            _tool_id: &str,
+        ) -> Result<std::path::PathBuf, crate::platform::HostError> {
+            Ok(self.0.clone())
+        }
+        fn detect_client_executable(&self, _tool_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        fn is_client_running(&self, _tool_id: &str) -> Result<bool, crate::platform::HostError> {
+            Ok(false)
+        }
+        async fn terminate_client_gracefully(
+            &self,
+            _tool_id: &str,
+            _timeout_ms: u64,
+        ) -> Result<(), crate::platform::HostError> {
+            Ok(())
+        }
+        fn launch_client(
+            &self,
+            _executable: &std::path::Path,
+            _args: &[String],
+        ) -> Result<(), crate::platform::HostError> {
+            Ok(())
+        }
+        fn get_or_create_master_key(
+            &self,
+            _expectation: &crate::platform::KeyExpectation,
+        ) -> Result<[u8; 32], crate::platform::HostError> {
+            Ok([0u8; 32])
+        }
+        fn set_launch_at_login(&self, _enabled: bool) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn trae_checkin_parser_is_fail_closed_when_fields_missing() {
@@ -1464,52 +1820,6 @@ mod tests {
         assert_eq!(parsed.uid, "424242");
 
         // 现有 storage.json 损坏时不得覆盖为 {}
-        struct TestHost(std::path::PathBuf);
-        #[async_trait]
-        impl PlatformHost for TestHost {
-            fn qwitch_data_dir(&self) -> Result<std::path::PathBuf, crate::platform::HostError> {
-                Ok(self.0.clone())
-            }
-            fn client_config_dir(
-                &self,
-                _tool_id: &str,
-            ) -> Result<std::path::PathBuf, crate::platform::HostError> {
-                Ok(self.0.clone())
-            }
-            fn detect_client_executable(&self, _tool_id: &str) -> Option<std::path::PathBuf> {
-                None
-            }
-            fn is_client_running(
-                &self,
-                _tool_id: &str,
-            ) -> Result<bool, crate::platform::HostError> {
-                Ok(false)
-            }
-            async fn terminate_client_gracefully(
-                &self,
-                _tool_id: &str,
-                _timeout_ms: u64,
-            ) -> Result<(), crate::platform::HostError> {
-                Ok(())
-            }
-            fn launch_client(
-                &self,
-                _executable: &std::path::Path,
-                _args: &[String],
-            ) -> Result<(), crate::platform::HostError> {
-                Ok(())
-            }
-            fn get_or_create_master_key(
-                &self,
-                _expectation: &crate::platform::KeyExpectation,
-            ) -> Result<[u8; 32], crate::platform::HostError> {
-                Ok([0u8; 32])
-            }
-            fn set_launch_at_login(&self, _enabled: bool) -> Result<(), String> {
-                Ok(())
-            }
-        }
-
         let dir = std::env::temp_dir().join(format!("qwitch_trae_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(STORAGE_JSON), b"{corrupt json").unwrap();
@@ -1522,7 +1832,8 @@ mod tests {
             payload: CredentialPayload::Token {
                 access_token: "tok-1".to_string(),
                 refresh_token: None,
-                expires_at: None,
+                // 有效期内才进入 storage.json 读取路径，保持"损坏配置中止切号"的测试意图
+                expires_at: Some(Utc::now().timestamp() + 3600),
                 extra: HashMap::new(),
             },
         };
@@ -1531,6 +1842,198 @@ mod tests {
             std::fs::read(dir.join(STORAGE_JSON)).unwrap(),
             b"{corrupt json"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trae_token_auth_entry_matches_client_required_fields() {
+        let adapter = TraeAdapter::new(true);
+        let cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "3704729780097880".to_string(),
+            display_name: Some("lemontree".to_string()),
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3OTYwMDU1MzR9.sig".to_string(),
+                refresh_token: None,
+                expires_at: Some(1796005534),
+                extra: HashMap::new(),
+            },
+        };
+        let entry = adapter
+            .build_token_auth_entry(
+                &cred,
+                "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3OTYwMDU1MzR9.sig",
+                None,
+                Some(1796005534),
+            )
+            .expect("token entry");
+        // 客户端以 expiredAt 判定是否已登录，缺失会直接回到登录页
+        assert_eq!(
+            entry.get("expiredAt").and_then(|v| v.as_str()),
+            Some("2026-11-30T02:25:34.000Z")
+        );
+        assert_eq!(
+            entry.pointer("/account/scope").and_then(|v| v.as_str()),
+            Some("marscode")
+        );
+        assert_eq!(
+            entry
+                .pointer("/userRegion/_aiRegion")
+                .and_then(|v| v.as_str()),
+            Some("CN")
+        );
+        assert_eq!(
+            entry.get("host").and_then(|v| v.as_str()),
+            Some("https://api.trae.cn")
+        );
+
+        // 无 exp 的 Token 必须失败，避免写入客户端无法识别的登录态
+        let no_exp = adapter
+            .build_token_auth_entry(&cred, "opaque-token", None, None)
+            .unwrap_err();
+        assert!(matches!(
+            no_exp,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn trae_device_id_and_server_entries_helpers() {
+        let dir = std::env::temp_dir().join(format!("qwitch_trae_dev_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = serde_json::json!({
+            "iCubeAuthInfo://icube-dc:93900972767536": "dc",
+            "iCubeAuthInfo://icube.cloudide": "auth",
+            "iCubeServerData://icube.cloudide": "{\"entitlementInfo\":{}}",
+            "iCubeLastVersion": "3.4.22"
+        });
+        std::fs::write(dir.join(STORAGE_JSON), storage.to_string()).unwrap();
+        assert_eq!(
+            TraeAdapter::device_id_from_storage(&dir.join(STORAGE_JSON)).as_deref(),
+            Some("93900972767536")
+        );
+
+        let root = serde_json::from_value::<Value>(storage).unwrap();
+        let server = TraeAdapter::collect_server_entries(&root);
+        assert_eq!(server.len(), 1);
+        assert!(server.contains_key("iCubeServerData://icube.cloudide"));
+
+        let mut merged = Map::new();
+        merged.insert(
+            "iCubeServerData://icube.cloudide".to_string(),
+            Value::String("stale".into()),
+        );
+        merged.insert("keep".to_string(), Value::Bool(true));
+        TraeAdapter::apply_server_entries(&mut merged, Some(server));
+        assert_eq!(
+            merged.get("iCubeServerData://icube.cloudide"),
+            root.get("iCubeServerData://icube.cloudide")
+        );
+        assert_eq!(merged.get("keep"), Some(&Value::Bool(true)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trae_device_headers_resolve_from_local_storage() {
+        let dir = std::env::temp_dir().join(format!("qwitch_trae_hdr_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(STORAGE_JSON),
+            serde_json::json!({
+                "iCubeAuthInfo://icube-dc:93900972767536": "dc",
+                "iCubeAuthInfo://icube.cloudide": "auth"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let adapter = TraeAdapter::with_host(true, Arc::new(TestHost(dir.clone())));
+        let headers = adapter.build_api_headers("tok").expect("headers");
+        assert_eq!(
+            headers.get("x-device-id").and_then(|v| v.to_str().ok()),
+            Some("93900972767536")
+        );
+        assert_eq!(
+            headers.get("x-device-type").and_then(|v| v.to_str().ok()),
+            Some(TraeAdapter::device_type_tag())
+        );
+        assert_eq!(
+            headers.get("x-user-region").and_then(|v| v.to_str().ok()),
+            Some("CN")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn trae_token_switch_writes_complete_session_and_preserves_device_entries() {
+        let dir = std::env::temp_dir().join(format!("qwitch_trae_switch_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = serde_json::json!({
+            "iCubeAuthInfo://icube-dc:93900972767536": "dc-keep",
+            "iCubeAuthInfo://usertag": "usertag-keep",
+            "iCubeAuthInfo://icube.cloudide": "old-primary",
+            "iCubeServerData://icube.cloudide": "stale-server",
+            "editor.fontSize": 14
+        });
+        std::fs::write(dir.join(STORAGE_JSON), existing.to_string()).unwrap();
+
+        let adapter = TraeAdapter::new(true);
+        let cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "3704729780097880".to_string(),
+            display_name: Some("lemontree".to_string()),
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3OTYwMDU1MzR9.sig".to_string(),
+                refresh_token: None,
+                expires_at: Some(1796005534),
+                extra: HashMap::new(),
+            },
+        };
+        adapter
+            .apply_session(&TestHost(dir.clone()), &cred)
+            .await
+            .expect("token switch");
+
+        let root: Value = serde_json::from_slice(&std::fs::read(dir.join(STORAGE_JSON)).unwrap())
+            .expect("storage json");
+        // 设备密钥与 usertag 保留，账号级登录态被替换
+        assert_eq!(
+            root.get("iCubeAuthInfo://icube-dc:93900972767536"),
+            Some(&Value::String("dc-keep".into()))
+        );
+        assert_eq!(
+            root.get("iCubeAuthInfo://usertag"),
+            Some(&Value::String("usertag-keep".into()))
+        );
+        // 旧账号的套餐/签到缓存必须清掉，避免新账号启动时展示旧数据
+        assert!(root.get("iCubeServerData://icube.cloudide").is_none());
+        assert_eq!(root.get("editor.fontSize"), Some(&Value::from(14)));
+
+        let primary = root
+            .get(PRIMARY_AUTH_KEY)
+            .and_then(|v| v.as_str())
+            .expect("primary auth");
+        let decoded = TraeAdapter::decrypt_tc_string(primary).expect("decrypt auth entry");
+        assert_eq!(
+            decoded.get("expiredAt").and_then(|v| v.as_str()),
+            Some("2026-11-30T02:25:34.000Z")
+        );
+        assert_eq!(
+            decoded.pointer("/account/scope").and_then(|v| v.as_str()),
+            Some("marscode")
+        );
+        assert_eq!(
+            decoded.get("userId").and_then(|v| v.as_str()),
+            Some("3704729780097880")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

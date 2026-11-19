@@ -70,14 +70,16 @@ pub fn run() {
                 commands::set_macos_dock_visible(app.handle(), false);
             }
 
+            let adapters = Arc::new(create_all_adapters(
+                &data_dir,
+                &startup_settings.trusted_adapters,
+                Arc::clone(&host),
+            ));
             let state = AppState {
                 db,
                 master_key,
                 host,
-                adapters: Arc::new(create_all_adapters(
-                    &data_dir,
-                    &startup_settings.trusted_adapters,
-                )),
+                adapters,
                 scheduler: Arc::new(AntiRiskScheduler::new()),
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
                 switching_in_progress: Arc::new(AtomicBool::new(false)),
@@ -281,6 +283,7 @@ pub fn run() {
             commands::detect_client_status,
             commands::list_accounts,
             commands::import_local_account,
+            commands::preview_local_account,
             commands::add_account_by_token,
             commands::start_webview_oauth,
             commands::refresh_account_quota,

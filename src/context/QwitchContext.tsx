@@ -27,6 +27,7 @@ import type {
   BatchActionType,
   ClientHostStatus,
   ExportLogsResult,
+  LocalAccountPreview,
   LogScope,
   ToastState,
   ToastTone,
@@ -90,6 +91,7 @@ interface QwitchContextValue {
     rawInput?: string,
     targetAccountId?: string
   ) => Promise<void>;
+  previewLocalAccount: (toolId: ToolId, accountId?: string) => Promise<LocalAccountPreview>;
   renameAccount: (accountId: string, label: string) => Promise<void>;
   toggleAccountDisabled: (accountId: string) => Promise<void>;
   recoverAccount: (accountId: string) => Promise<void>;
@@ -1134,7 +1136,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
                 "warning"
               );
             } else if (targetAccountId) {
-              showToast(`已关联本机快照：${imported.label}`, "success");
+              showToast(`已关联本机快照：${imported.label}，现在可一键切号`, "success");
             } else {
               showToast(`已导入账号：${imported.label}`, "success");
             }
@@ -1163,7 +1165,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
             "success"
           );
         } catch (err) {
-          showToast(`导入失败：${String(err)}`, "error");
+          showToast(
+            `${targetAccountId ? "关联失败" : "导入失败"}：${String(err)}`,
+            "error"
+          );
           throw err;
         }
         return;
@@ -1238,6 +1243,19 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       showToast(`已导入账号：${newAcc.label}`, "success");
     },
     [accounts, adapters, appendLog, isTauriRuntime, showToast, syncFromBackend]
+  );
+
+  const previewLocalAccount = useCallback(
+    async (toolId: ToolId, accountId?: string) => {
+      if (!isTauriRuntime) {
+        throw new Error("浏览器预览模式无法读取本机会话");
+      }
+      return invoke<LocalAccountPreview>("preview_local_account", {
+        toolId,
+        accountId: accountId ?? null,
+      });
+    },
+    [isTauriRuntime]
   );
 
   const renameAccount = useCallback(
@@ -1726,6 +1744,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       cancelColdSwitch,
       confirmColdSwitch,
       importAccount,
+      previewLocalAccount,
       renameAccount,
       toggleAccountDisabled,
       recoverAccount,
@@ -1771,6 +1790,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       cancelColdSwitch,
       confirmColdSwitch,
       importAccount,
+      previewLocalAccount,
       renameAccount,
       toggleAccountDisabled,
       recoverAccount,

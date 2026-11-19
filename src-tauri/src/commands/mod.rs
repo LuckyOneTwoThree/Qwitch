@@ -448,6 +448,68 @@ pub async fn import_local_account(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAccountPreview {
+    pub tool_id: String,
+    pub uid: String,
+    pub uid_masked: String,
+    pub display_name: Option<String>,
+    pub is_fallback_uid: bool,
+    pub matches_target: bool,
+    pub matched_account_id: Option<String>,
+    pub matched_account_label: Option<String>,
+}
+
+/// 只读预检本机客户端当前登录账号，用于「关联本机」前判断归属，
+/// 避免用户在错误的卡片上反复触发绑定失败。
+#[tauri::command]
+pub async fn preview_local_account(
+    state: State<'_, AppState>,
+    tool_id: String,
+    account_id: Option<String>,
+) -> Result<LocalAccountPreview, String> {
+    let adapter = state
+        .adapters
+        .get(&tool_id)
+        .ok_or_else(|| format!("适配器 {tool_id} 尚未注册"))?;
+    if !adapter
+        .manifest()
+        .capabilities
+        .auth_methods
+        .contains(&AuthMethod::LocalImport)
+    {
+        return Err(format!("适配器 {tool_id} 不支持本机导入"));
+    }
+
+    let envelope = adapter
+        .import_from_local(state.host.as_ref())
+        .await
+        .map_err(|e| e.to_string())?;
+    let matched = state
+        .db
+        .find_account_id_by_uid(&tool_id, &envelope.uid)
+        .map_err(|e| e.to_string())?;
+    let matches_target = account_id.as_deref().is_some_and(|id| {
+        state
+            .db
+            .get_account_credential(&state.master_key, id)
+            .map(|(_, target)| target.uid == envelope.uid)
+            .unwrap_or(false)
+    });
+
+    Ok(LocalAccountPreview {
+        uid_masked: crate::storage::crypto::mask_uid(&envelope.uid),
+        is_fallback_uid: crate::domain::CredentialEnvelope::is_fallback_uid(&envelope.uid),
+        matches_target,
+        matched_account_id: matched.as_ref().map(|(id, _)| id.clone()),
+        matched_account_label: matched.map(|(_, label)| label),
+        tool_id: envelope.tool_id,
+        uid: envelope.uid,
+        display_name: envelope.display_name,
+    })
+}
+
 #[tauri::command]
 pub async fn add_account_by_token(
     app: AppHandle,
@@ -1032,6 +1094,34 @@ fn dedup_account_ids(ids: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Trae CN 按设备限制每日签到次数；只在 Trae CN 账号内部把当前客户端账号排在前面，
+/// 并保持其他工具账号在原队列位置，避免混合批次被意外重排。
+fn prioritize_active_trae_account_on_client(db: &QwitchDatabase, ids: Vec<String>) -> Vec<String> {
+    let mut result = ids.clone();
+    let mut trae_positions = Vec::new();
+    let mut active_trae = Vec::new();
+    let mut remaining_trae = Vec::new();
+
+    for (index, id) in ids.into_iter().enumerate() {
+        if let Ok(summary) = db.get_account_summary(&id) {
+            if summary.tool_id == "trae_cn" {
+                trae_positions.push(index);
+                if summary.is_active_on_client {
+                    active_trae.push(id);
+                } else {
+                    remaining_trae.push(id);
+                }
+            }
+        }
+    }
+
+    active_trae.extend(remaining_trae);
+    for (index, id) in trae_positions.into_iter().zip(active_trae) {
+        result[index] = id;
+    }
+    result
+}
+
 #[tauri::command]
 pub async fn refresh_quota_batch(
     app: AppHandle,
@@ -1077,6 +1167,8 @@ pub async fn claim_daily_batch(
     if account_ids.len() > 200 {
         return Err("单次批量最多 200 个账号".into());
     }
+    // Trae CN 设备级每日签到仅一次：当前客户端活跃账号优先领取。
+    let account_ids = prioritize_active_trae_account_on_client(state.db.as_ref(), account_ids);
     let settings = load_app_settings(&state.db);
     let jitter = JitterConfig {
         min_ms: settings.jitter_min_ms,
@@ -2108,6 +2200,47 @@ mod tests {
         assert!(!flag.load(Ordering::SeqCst), "持有者结束后释放互斥");
         let _second =
             SwitchFlagGuard::try_acquire(Arc::clone(&flag)).expect("second acquires after release");
+    }
+
+    #[test]
+    fn claim_batch_prioritizes_active_client_account() {
+        let db_path = std::env::temp_dir().join(format!("qwitch_prio_{}.db", uuid::Uuid::new_v4()));
+        let db = QwitchDatabase::open(&db_path).expect("open db");
+        let master_key = [5u8; 32];
+        let mut ids = Vec::new();
+        for (uid, label) in [("u1", "one"), ("u2", "two"), ("u3", "three")] {
+            let env = crate::domain::CredentialEnvelope {
+                tool_id: "trae_cn".to_string(),
+                uid: uid.to_string(),
+                display_name: None,
+                display_email: None,
+                payload: crate::domain::CredentialPayload::Token {
+                    access_token: "tok".to_string(),
+                    refresh_token: None,
+                    expires_at: None,
+                    extra: Default::default(),
+                },
+            };
+            ids.push(
+                db.upsert_account(&master_key, Some(label), &env)
+                    .expect("insert")
+                    .id,
+            );
+        }
+        db.set_active_on_client("trae_cn", &ids[1])
+            .expect("set active");
+
+        let ordered =
+            prioritize_active_trae_account_on_client(
+                &db,
+                vec![ids[0].clone(), ids[1].clone(), ids[2].clone()],
+            );
+        assert_eq!(
+            ordered,
+            vec![ids[1].clone(), ids[0].clone(), ids[2].clone()]
+        );
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]

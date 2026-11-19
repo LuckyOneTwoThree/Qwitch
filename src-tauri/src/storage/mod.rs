@@ -287,8 +287,14 @@ impl QwitchDatabase {
         let incoming_uid_real =
             !incoming.uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(&incoming.uid);
         if old_uid_real && incoming_uid_real && old_env.uid != incoming.uid {
+            let incoming_name = incoming
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("未知账号");
             return Err(StorageError::Crypto(format!(
-                "凭据归属不匹配：目标账号 {}，实际授权账号 {}。已拒绝绑定，请在对应账号卡片上操作或导入为新账号。",
+                "凭据归属不匹配：目标账号 {existing_label}（{}），本机当前账号 {incoming_name}（{}）。已拒绝绑定，请先在客户端切换到目标账号，或在对应账号卡片上操作。",
                 crypto::mask_uid(&old_env.uid),
                 crypto::mask_uid(&incoming.uid)
             )));
@@ -395,7 +401,7 @@ impl QwitchDatabase {
                      LIMIT 1
                  )
                  WHERE a.tool_id = ?1
-                 ORDER BY a.updated_at DESC",
+                 ORDER BY julianday(a.created_at) ASC, a.rowid ASC",
             )?;
             let rows = stmt.query_map(params![tid], map_account_row)?;
             for row in rows {
@@ -414,7 +420,7 @@ impl QwitchDatabase {
                      ORDER BY julianday(q2.fetched_at) DESC, q2.fetched_at DESC, q2.rowid DESC
                      LIMIT 1
                  )
-                 ORDER BY a.tool_id ASC, a.updated_at DESC",
+                 ORDER BY a.tool_id ASC, julianday(a.created_at) ASC, a.rowid ASC",
             )?;
             let rows = stmt.query_map([], map_account_row)?;
             for row in rows {
@@ -423,6 +429,24 @@ impl QwitchDatabase {
         }
 
         Ok(results)
+    }
+
+    /// 按真实 UID 查找已存在的账号（用于关联本机前的归属预检）
+    pub fn find_account_id_by_uid(
+        &self,
+        tool_id: &str,
+        uid: &str,
+    ) -> Result<Option<(String, String)>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        let uid_hash = crypto::compute_uid_hash(tool_id, uid);
+        let found = conn
+            .query_row(
+                "SELECT id, label FROM accounts WHERE tool_id = ?1 AND uid_hash = ?2",
+                params![tool_id, uid_hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(found)
     }
 
     pub fn get_account_credential(
@@ -1216,6 +1240,7 @@ fn serialize_error_code(c: &UnifiedErrorCode) -> &'static str {
         UnifiedErrorCode::AuthExpired => "AUTH_EXPIRED",
         UnifiedErrorCode::RiskTriggered => "RISK_TRIGGERED",
         UnifiedErrorCode::RateLimited => "RATE_LIMITED",
+        UnifiedErrorCode::DeviceDailyLimitReached => "DEVICE_DAILY_LIMIT_REACHED",
         UnifiedErrorCode::NetworkError => "NETWORK_ERROR",
         UnifiedErrorCode::ClientRunning => "CLIENT_RUNNING",
         UnifiedErrorCode::ClientNotFound => "CLIENT_NOT_FOUND",
@@ -1230,6 +1255,7 @@ fn parse_error_code(s: &str) -> Option<UnifiedErrorCode> {
         "AUTH_EXPIRED" => Some(UnifiedErrorCode::AuthExpired),
         "RISK_TRIGGERED" => Some(UnifiedErrorCode::RiskTriggered),
         "RATE_LIMITED" => Some(UnifiedErrorCode::RateLimited),
+        "DEVICE_DAILY_LIMIT_REACHED" => Some(UnifiedErrorCode::DeviceDailyLimitReached),
         "NETWORK_ERROR" => Some(UnifiedErrorCode::NetworkError),
         "CLIENT_RUNNING" => Some(UnifiedErrorCode::ClientRunning),
         "CLIENT_NOT_FOUND" => Some(UnifiedErrorCode::ClientNotFound),
@@ -1350,6 +1376,64 @@ mod tests {
                 .as_deref(),
             Some(r#"{"jitterMinMs":2000}"#)
         );
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn list_accounts_keeps_creation_order_after_updates() {
+        let db_path = temp_db_path("order");
+        let db = QwitchDatabase::open(&db_path).expect("open db");
+        let master_key = [9u8; 32];
+
+        for (uid, label) in [
+            ("u_first", "first"),
+            ("u_second", "second"),
+            ("u_third", "third"),
+        ] {
+            let env = CredentialEnvelope {
+                tool_id: "trae_cn".to_string(),
+                uid: uid.to_string(),
+                display_name: None,
+                display_email: None,
+                payload: CredentialPayload::Token {
+                    access_token: "tok".to_string(),
+                    refresh_token: None,
+                    expires_at: None,
+                    extra: HashMap::new(),
+                },
+            };
+            db.upsert_account(&master_key, Some(label), &env)
+                .expect("insert account");
+        }
+
+        // 模拟 later 账号被频繁更新：创建顺序与更新顺序相反
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE accounts SET created_at='2026-01-01T00:00:03Z', updated_at='2026-01-03T00:00:00Z' WHERE label='third'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE accounts SET created_at='2026-01-01T00:00:02Z', updated_at='2026-01-02T00:00:00Z' WHERE label='second'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE accounts SET created_at='2026-01-01T00:00:01Z', updated_at='2026-01-01T00:00:00Z' WHERE label='first'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let labels: Vec<String> = db
+            .list_accounts(Some("trae_cn"))
+            .expect("list")
+            .into_iter()
+            .map(|a| a.label)
+            .collect();
+        assert_eq!(labels, vec!["first", "second", "third"]);
 
         let _ = std::fs::remove_file(&db_path);
     }

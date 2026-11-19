@@ -43,6 +43,24 @@ pub struct AntiRiskScheduler {
     queue_lock: Arc<Mutex<()>>,
 }
 
+fn device_claim_marker_key(tool_id: &str, device_key: &str) -> String {
+    format!("daily_claim_device_limit:{tool_id}:{device_key}")
+}
+
+fn device_claim_limit_used_today(db: &QwitchDatabase, marker_key: &str) -> bool {
+    db.get_setting(marker_key)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<String>(&json).ok())
+        .is_some_and(|claimed_at| crate::storage::is_today_cst(&claimed_at))
+}
+
+fn remember_device_claim_limit(db: &QwitchDatabase, marker_key: &str) {
+    if let Ok(value_json) = serde_json::to_string(&Utc::now().to_rfc3339()) {
+        let _ = db.set_setting(marker_key, &value_json);
+    }
+}
+
 impl AntiRiskScheduler {
     pub fn new() -> Self {
         Self {
@@ -74,8 +92,11 @@ impl AntiRiskScheduler {
         let mut claimed_count: usize = 0;
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
+        let mut device_limit_skipped_count: usize = 0;
         // 工具级熔断：同一工具出现风控/限流后，中止该工具剩余账号
         let mut risk_broken_tools: HashMap<String, ()> = HashMap::new();
+        // 设备级每日额度：收到成功回包或 9095 后，阻止本机对同设备继续发领取请求。
+        let mut device_limit_reached: HashMap<String, ()> = HashMap::new();
 
         for (idx, account_id) in account_ids.iter().enumerate() {
             let (summary, cred) = match db.get_account_credential(master_key, account_id) {
@@ -142,6 +163,30 @@ impl AntiRiskScheduler {
                     None,
                     &format!("{} 所属工具已触发风控熔断，本批次自动跳过", summary.label),
                 );
+                continue;
+            }
+
+            let device_key = adapter.daily_claim_device_key();
+            let device_scope = device_key
+                .as_deref()
+                .map(|key| format!("{}:{key}", summary.tool_id));
+            let device_marker_key = device_key
+                .as_deref()
+                .map(|key| device_claim_marker_key(&summary.tool_id, key));
+            let batch_device_limit = device_scope
+                .as_deref()
+                .is_some_and(|scope| device_limit_reached.contains_key(scope));
+            let persisted_device_limit = !batch_device_limit
+                && device_marker_key
+                    .as_deref()
+                    .is_some_and(|key| device_claim_limit_used_today(db, key));
+            if persisted_device_limit || batch_device_limit {
+                if let Some(scope) = device_scope.as_ref() {
+                    device_limit_reached.insert(scope.clone(), ());
+                }
+                skipped_count += 1;
+                device_limit_skipped_count += 1;
+                let _ = app.emit("qwitch://account-updated", &summary.id);
                 continue;
             }
 
@@ -247,6 +292,12 @@ impl AntiRiskScheduler {
                             }
                             if res.claimed {
                                 claimed_count += 1;
+                                if let (Some(scope), Some(marker_key)) =
+                                    (device_scope.as_ref(), device_marker_key.as_deref())
+                                {
+                                    device_limit_reached.insert(scope.clone(), ());
+                                    remember_device_claim_limit(db, marker_key);
+                                }
                                 let _ =
                                     db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
                                 let _ = db.append_action_log(
@@ -282,6 +333,27 @@ impl AntiRiskScheduler {
                                     &format!("{} {}", summary.label, res.reward_summary),
                                 );
                             }
+                        }
+                        Err(crate::adapter::AdapterError::Unified {
+                            code: UnifiedErrorCode::DeviceDailyLimitReached,
+                            message,
+                        }) => {
+                            skipped_count += 1;
+                            device_limit_skipped_count += 1;
+                            if let (Some(scope), Some(marker_key)) =
+                                (device_scope.as_ref(), device_marker_key.as_deref())
+                            {
+                                device_limit_reached.insert(scope.clone(), ());
+                                remember_device_claim_limit(db, marker_key);
+                            }
+                            let _ = db.append_action_log(
+                                Some(&summary.id),
+                                &summary.tool_id,
+                                "claim",
+                                "skipped",
+                                Some(&UnifiedErrorCode::DeviceDailyLimitReached),
+                                &format!("{}：{message}", summary.label),
+                            );
                         }
                         Err(err) => {
                             failed_count += 1;
@@ -333,8 +405,13 @@ impl AntiRiskScheduler {
         } else {
             format!("，{} 个工具因风控熔断中止", risk_broken_tools.len())
         };
+        let device_limit_note = if device_limit_skipped_count == 0 {
+            String::new()
+        } else {
+            format!("，设备日额度限制跳过 {device_limit_skipped_count} 个 Trae CN 账号")
+        };
         let summary_text = format!(
-            "串行领取完成：成功 {claimed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个{breaker_note}"
+            "串行领取完成：成功 {claimed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个{breaker_note}{device_limit_note}"
         );
         let _ = app.emit(
             "qwitch://batch-progress",

@@ -49,10 +49,13 @@ export const AccountCard = React.memo(function AccountCard({
     recoverAccount,
     deleteAccount,
     importAccount,
+    previewLocalAccount,
     renameAccount,
     toggleAccountDisabled,
     adapters,
     batchProgress,
+    isTauriRuntime,
+    showToast,
   } = useQwitch();
 
   const [refreshing, setRefreshing] = useState(false);
@@ -61,6 +64,10 @@ export const AccountCard = React.memo(function AccountCard({
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState(account.label);
+  const [localPreview, setLocalPreview] = useState<
+    Awaited<ReturnType<typeof previewLocalAccount>> | null
+  >(null);
+  const [confirmImportLocalOpen, setConfirmImportLocalOpen] = useState(false);
 
   const adapter = adapters.find((a) => a.id === account.toolId);
   const toolMeta = getToolBrandMeta(account.toolId, adapters);
@@ -109,9 +116,48 @@ export const AccountCard = React.memo(function AccountCard({
   const handleAssociateLocal = async () => {
     setAssociating(true);
     try {
-      await importAccount(account.toolId, "", "local_import", undefined, account.id);
-    } catch {
-      // 错误 Toast 已由 context 统一展示
+      if (!isTauriRuntime) {
+        await importAccount(account.toolId, "", "local_import", undefined, account.id).catch(
+          () => {}
+        );
+        return;
+      }
+
+      // 先只读预检本机登录账号，避免在错误卡片上反复触发后端拒绝
+      let preview: Awaited<ReturnType<typeof previewLocalAccount>>;
+      try {
+        preview = await previewLocalAccount(account.toolId, account.id);
+      } catch (err) {
+        showToast(`读取本机会话失败：${String(err)}`, "error");
+        return;
+      }
+
+      if (preview.matchesTarget) {
+        await importAccount(account.toolId, "", "local_import", undefined, account.id).catch(
+          () => {}
+        );
+        return;
+      }
+
+      const localName = preview.displayName?.trim() || preview.uidMasked;
+      if (preview.isFallbackUid) {
+        showToast(
+          "无法识别本机登录账号（客户端可能未登录或会话尚未落盘），请确认已登录后重试",
+          "warning"
+        );
+        return;
+      }
+      if (preview.matchedAccountId) {
+        showToast(
+          `本机当前登录的是「${preview.matchedAccountLabel ?? localName}」（${preview.uidMasked}），不是「${account.label}」。请先在 ${toolMeta.name} 客户端登录「${account.label}」后再关联。`,
+          "warning"
+        );
+        return;
+      }
+
+      // 本机账号尚未导入：引导用户直接把它添加为 Qwitch 账号
+      setLocalPreview(preview);
+      setConfirmImportLocalOpen(true);
     } finally {
       setAssociating(false);
     }
@@ -508,7 +554,7 @@ export const AccountCard = React.memo(function AccountCard({
               type="button"
               disabled={associating}
               onClick={() => void handleAssociateLocal()}
-              title="读取本机客户端会话并合并到该账号以启用桌面端切换"
+              title={`读取本机 ${toolMeta.name} 当前登录的会话并合并到该账号；需要客户端已登录「${account.label}」`}
               className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <Link2 className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -543,6 +589,26 @@ export const AccountCard = React.memo(function AccountCard({
         onConfirm={async () => {
           setConfirmDeleteOpen(false);
           await deleteAccount(account.id);
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmImportLocalOpen && Boolean(localPreview)}
+        title="本机当前登录的是另一个账号"
+        description={`本机 ${toolMeta.name} 当前登录：${localPreview?.displayName?.trim() || "未知账号"}（${localPreview?.uidMasked ?? ""}）；这张卡片是「${account.label}」（${account.uidMasked}）。若要让「${account.label}」可切号，请先在客户端登录它；也可以把本机账号直接导入为新的 Qwitch 账号。`}
+        confirmLabel="导入本机账号"
+        onCancel={() => {
+          setConfirmImportLocalOpen(false);
+          setLocalPreview(null);
+        }}
+        onConfirm={async () => {
+          setConfirmImportLocalOpen(false);
+          setLocalPreview(null);
+          try {
+            await importAccount(account.toolId, "", "local_import");
+          } catch {
+            // 错误 Toast 已由 context 统一展示
+          }
         }}
       />
     </>

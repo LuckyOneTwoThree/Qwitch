@@ -11,6 +11,7 @@ export type UnifiedErrorCode =
   | "AUTH_EXPIRED"
   | "RISK_TRIGGERED"
   | "RATE_LIMITED"
+  | "DEVICE_DAILY_LIMIT_REACHED"
   | "NETWORK_ERROR"
   | "CLIENT_RUNNING"
   | "CLIENT_NOT_FOUND"
@@ -71,6 +72,17 @@ export interface ClientHostStatus {
   executablePath?: string;
   configDir?: string;
   isRunning: boolean;
+}
+
+export interface LocalAccountPreview {
+  toolId: ToolId;
+  uid: string;
+  uidMasked: string;
+  displayName?: string;
+  isFallbackUid: boolean;
+  matchesTarget: boolean;
+  matchedAccountId?: string;
+  matchedAccountLabel?: string;
 }
 
 export interface AppSettings {

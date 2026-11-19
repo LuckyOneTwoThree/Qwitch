@@ -1580,14 +1580,22 @@ export function Dashboard() {
                                     {log.resultStatus === "success"
                                       ? "成功"
                                       : log.resultStatus === "skipped"
-                                        ? "幂等跳过"
+                                        ? log.errorCode === "DEVICE_DAILY_LIMIT_REACHED"
+                                          ? "设备限额"
+                                          : "已跳过"
                                         : "异常"}
                                   </span>
                                   <span className="shrink-0 whitespace-nowrap font-medium text-zinc-600 dark:text-zinc-400">
                                     {toolName}
                                   </span>
                                   {log.errorCode && (
-                                    <span className="shrink-0 rounded bg-rose-500/12 px-1.5 py-0.5 font-mono text-[11px] text-rose-700 dark:text-rose-300">
+                                    <span
+                                      className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] ${
+                                        log.resultStatus === "failed"
+                                          ? "bg-rose-500/12 text-rose-700 dark:text-rose-300"
+                                          : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                                      }`}
+                                    >
                                       {log.errorCode}
                                     </span>
                                   )}

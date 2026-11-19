@@ -124,6 +124,12 @@ pub fn restore_files(backup: &SessionBackup) -> Result<(), AdapterError> {
 pub trait ToolAdapter: Send + Sync {
     fn manifest(&self) -> &AdapterManifest;
 
+    /// Stable opaque key for a device-scoped daily claim quota, if applicable.
+    /// Implementations must not expose the raw device identifier here.
+    fn daily_claim_device_key(&self) -> Option<String> {
+        None
+    }
+
     async fn import_from_local(
         &self,
         host: &dyn PlatformHost,
@@ -167,11 +173,12 @@ pub trait ToolAdapter: Send + Sync {
 pub fn create_all_adapters(
     data_dir: &Path,
     trusted_adapters: &[String],
+    host: Arc<dyn PlatformHost>,
 ) -> HashMap<String, Arc<dyn ToolAdapter>> {
     let mut map: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
     // 优先注册国内版内置适配器（Trae 国际版无每日积分签到，暂不纳入）
     let builtins: Vec<Arc<dyn ToolAdapter>> = vec![
-        Arc::new(trae::TraeAdapter::new(true)),
+        Arc::new(trae::TraeAdapter::with_host(true, host)),
         Arc::new(workbuddy::WorkBuddyAdapter::new()),
         Arc::new(qoder::QoderAdapter::new()),
     ];
@@ -234,17 +241,23 @@ mod tests {
         write_manifest(&root, "evil_plugin");
         write_manifest(&root, "trae");
 
+        let host: Arc<dyn PlatformHost> = Arc::new(crate::platform::NativePlatformHost);
+
         // 未信任：外部插件不注册
-        let none = create_all_adapters(&root, &[]);
+        let none = create_all_adapters(&root, &[], Arc::clone(&host));
         assert!(!none.contains_key("evil_plugin"));
         assert!(none.contains_key("trae_cn"));
 
         // 显式信任后注册
-        let trusted = create_all_adapters(&root, &["evil_plugin".to_string()]);
+        let trusted = create_all_adapters(&root, &["evil_plugin".to_string()], Arc::clone(&host));
         assert!(trusted.contains_key("evil_plugin"));
 
         // 保留 ID 即使被"信任"也不允许冒名
-        let spoof = create_all_adapters(&root, &["trae".to_string(), "evil_plugin".to_string()]);
+        let spoof = create_all_adapters(
+            &root,
+            &["trae".to_string(), "evil_plugin".to_string()],
+            host,
+        );
         assert!(!spoof.contains_key("trae"));
         assert!(spoof.contains_key("trae_cn"));
 

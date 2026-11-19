@@ -34,6 +34,7 @@ pub enum UnifiedErrorCode {
     AuthExpired,
     RiskTriggered,
     RateLimited,
+    DeviceDailyLimitReached,
     NetworkError,
     ClientRunning,
     ClientNotFound,

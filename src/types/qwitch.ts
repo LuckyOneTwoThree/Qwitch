@@ -85,6 +85,23 @@ export interface LocalAccountPreview {
   matchedAccountLabel?: string;
 }
 
+export interface AppUpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseUrl: string;
+  releaseNotes: string;
+  publishedAt?: string;
+  assetName?: string;
+  assetUrl?: string;
+  assetSize?: number;
+  checksumsUrl?: string;
+  strategy: "windows_installer" | "macos_dmg" | "manual";
+  platformLabel: string;
+  canAutoInstall: boolean;
+  hint: string;
+}
+
 export interface AppSettings {
   jitterMinMs: number;
   jitterMaxMs: number;

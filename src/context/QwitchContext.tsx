@@ -23,6 +23,7 @@ import type {
   ActionLogStats,
   AdapterManifest,
   AppSettings,
+  AppUpdateInfo,
   AuthMethod,
   BatchActionType,
   ClientHostStatus,
@@ -263,6 +264,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   batchRunningRef.current = Boolean(batchProgress?.running);
   const pendingAutoClaimRef = useRef(false);
   const startupAutoRunDoneRef = useRef(false);
+  const updateCheckDoneRef = useRef(false);
   const batchDismissTimerRef = useRef<number | null>(null);
   const settingsLoadedRef = useRef(false);
   const logsDebounceTimerRef = useRef<number | null>(null);
@@ -1684,6 +1686,27 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     }, 700);
     return () => window.clearTimeout(timer);
   }, [isInitializing, isTrayWindow]);
+
+  // 启动后静默检查一次 GitHub Releases；失败不打扰用户
+  useEffect(() => {
+    if (!isTauriRuntime || isTrayWindow || isInitializing || updateCheckDoneRef.current) return;
+    updateCheckDoneRef.current = true;
+    const timer = window.setTimeout(() => {
+      void invoke<AppUpdateInfo>("check_app_update")
+        .then((info) => {
+          if (info.updateAvailable) {
+            showToast(
+              `发现新版本 v${info.latestVersion}，可在「设置 → 软件更新」查看`,
+              "info"
+            );
+          }
+        })
+        .catch(() => {
+          // 网络不可用或 GitHub 限流时静默跳过
+        });
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [isInitializing, isTauriRuntime, isTrayWindow, showToast]);
 
   useEffect(() => {
     if (isTrayWindow || isInitializing) return;

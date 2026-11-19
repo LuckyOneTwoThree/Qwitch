@@ -4,6 +4,7 @@ pub mod domain;
 pub mod platform;
 pub mod scheduler;
 pub mod storage;
+pub mod update;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -298,7 +299,10 @@ pub fn run() {
             commands::archive_action_logs,
             commands::unarchive_action_logs,
             commands::delete_action_logs,
-            commands::export_action_logs
+            commands::export_action_logs,
+            update::check_app_update,
+            update::download_and_install_update,
+            update::open_update_url
         ])
         .build(tauri::generate_context!());
 

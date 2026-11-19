@@ -38,6 +38,7 @@ import { AccountCard } from "../components/AccountCard";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
 import { ColdSwitchModal } from "../components/ColdSwitchModal";
 import { ImportAccountModal } from "../components/ImportAccountModal";
+import { UpdateCard } from "../components/UpdateCard";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
@@ -2216,6 +2217,8 @@ export function Dashboard() {
                     })}
                 </div>
               </div>
+
+              <UpdateCard />
             </div>
           )}
         </main>

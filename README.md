@@ -56,6 +56,13 @@
 - **主窗口 Dashboard**：卡片式管理面板，账号分组 / 状态诊断 / 额度进度 / 操作日志集中管理；浅色 / 深色 / 跟随系统三态主题，首帧无白闪。
 - **托盘常驻**：关闭主窗口默认收起至托盘；可选隐藏 Dock 图标、开机自启、启动最小化。
 
+### 🔄 软件更新
+
+- 启动后静默检查 GitHub Releases，设置页「软件更新」可手动检查并查看版本、发布说明与安装包大小。
+- **Windows**：下载官方 NSIS 安装包，SHA256 校验通过后拉起安装程序，Qwitch 自动退出以完成覆盖升级。
+- **macOS**：按芯片架构下载对应 DMG，提供覆盖安装与 Gatekeeper 放行指引；当前安装包未签名/公证，暂不做应用内自替换。
+- 更新检查只访问 GitHub Releases，不上传任何本机数据。
+
 ### 📊 额度与签到
 
 - 多账号额度水位与套餐周期监控，签到状态区分「可领 / 已领 / 待核实 / 不支持」，统计口径前后端统一、互斥闭合。
@@ -79,7 +86,7 @@
 
 ### ✅ 工程质量
 
-- 48 个 Rust 单元 / 回归测试 + 19 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、构建、测试、`cargo fmt` / `clippy -D warnings`。
+- 51 个 Rust 单元 / 回归测试 + 19 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、构建、测试、`cargo fmt` / `clippy -D warnings`。
 - 标签触发 Release 流水线，自动构建并发布 macOS Apple Silicon（arm64）、macOS Intel（x64）与 Windows x64 三个独立安装包。
 
 ## 支持的工具
@@ -220,7 +227,7 @@ npm run dev                  # 仅前端（浏览器 Mock 预览）
 npm run tauri dev            # 桌面应用开发模式
 npm run build                # 前端类型检查 + 生产构建
 npm test                     # 前端测试（Vitest，19 例）
-cd src-tauri && cargo test   # 后端测试（48 例）
+cd src-tauri && cargo test   # 后端测试（51 例）
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 

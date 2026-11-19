@@ -910,7 +910,17 @@ impl ToolAdapter for QoderAdapter {
             }
         }
 
-        let refreshed = self.inspect_quota(cred).await.ok();
+        // 领取成功但领后查额失败时合成 Claimed 快照，避免 UI 残留可领按钮
+        let refreshed = match self.inspect_quota(cred).await {
+            Ok(q) => Some(q),
+            Err(_) if claimed_any => Some(QuotaSnapshot {
+                plan_name: None,
+                claim_status: ClaimStatus::Claimed,
+                buckets: Vec::new(),
+                fetched_at: Utc::now().to_rfc3339(),
+            }),
+            Err(_) => None,
+        };
         Ok(ClaimResult {
             claimed: claimed_any,
             reward_summary: if total_gained > 0.0 {

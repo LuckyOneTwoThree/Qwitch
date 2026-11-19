@@ -4,6 +4,7 @@ import {
   getEffectiveClaimStatus,
   isAccountClaimable,
   isSameCstDay,
+  selectClaimCandidates,
   selectScopedStats,
 } from "./selectors";
 
@@ -148,5 +149,48 @@ describe("selectScopedStats", () => {
     const stats = selectScopedStats(accounts, adapters, {});
     expect(stats.allClaimed).toBe(true);
     expect(stats.claimBadgeText).toBe("已全签");
+  });
+});
+
+describe("selectClaimCandidates", () => {
+  const adapters = [makeAdapter("trae_cn"), makeAdapter("qoder_cn")];
+  const available = { claimStatus: "available" as const, buckets: [], fetchedAt: NOW_ISO };
+
+  it("默认仅纳入 available（自动巡检口径）", () => {
+    const accounts = [
+      makeAcc({ id: "a", latestQuota: available }),
+      makeAcc({ id: "b" }),
+    ];
+    const candidates = selectClaimCandidates(accounts, adapters);
+    expect(candidates.map((c) => c.id)).toEqual(["a"]);
+  });
+
+  it("核实并领取模式纳入 unknown（按钮实际行为回归）", () => {
+    const accounts = [
+      makeAcc({ id: "a", latestQuota: available }),
+      makeAcc({ id: "b" }),
+      makeAcc({ id: "c", latestQuota: { claimStatus: "claimed", buckets: [], fetchedAt: NOW_ISO } }),
+    ];
+    const candidates = selectClaimCandidates(accounts, adapters, { includeUnknown: true });
+    expect(candidates.map((c) => c.id)).toEqual(["a", "b"]);
+  });
+
+  it("定向 targetIds 绕过状态过滤但仍要求 active+token+能力", () => {
+    const accounts = [
+      makeAcc({ id: "a", status: "disabled", latestQuota: available }),
+      makeAcc({ id: "b", hasApiToken: false }),
+      makeAcc({ id: "c" }),
+    ];
+    const candidates = selectClaimCandidates(accounts, adapters, { targetIds: ["a", "b", "c"] });
+    expect(candidates.map((c) => c.id)).toEqual(["c"]);
+  });
+
+  it("工具作用域过滤", () => {
+    const accounts = [
+      makeAcc({ id: "a", latestQuota: available }),
+      makeAcc({ id: "b", toolId: "qoder_cn", latestQuota: available }),
+    ];
+    const candidates = selectClaimCandidates(accounts, adapters, { toolId: "qoder_cn" });
+    expect(candidates.map((c) => c.id)).toEqual(["b"]);
   });
 });

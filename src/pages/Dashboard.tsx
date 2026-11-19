@@ -622,7 +622,7 @@ export function Dashboard() {
                     ) : scopedStats.claimActionState === "verify_and_claim" ? (
                       <button
                         type="button"
-                        onClick={() => void claimDailyBatch(undefined, activeToolFilter)}
+                        onClick={() => void claimDailyBatch(undefined, activeToolFilter, true)}
                         disabled={isBatchBusy}
                         className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
                       >

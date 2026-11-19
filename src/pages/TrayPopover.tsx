@@ -157,7 +157,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       return (
         <button
           type="button"
-          onClick={() => void claimDailyBatch()}
+          onClick={() => void claimDailyBatch(undefined, undefined, true)}
           className="inline-flex min-w-0 flex-1 shrink-0 whitespace-nowrap items-center justify-center gap-1.5 rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white shadow-xs transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
         >
           <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />

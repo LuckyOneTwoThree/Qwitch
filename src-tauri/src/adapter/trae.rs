@@ -1166,6 +1166,24 @@ impl ToolAdapter for TraeAdapter {
 
         let status = resp.status();
         if !status.is_success() {
+            // 400/409 可能承载"今日已签"幂等响应，先识别再走通用错误
+            if status.as_u16() == 400 || status.as_u16() == 409 {
+                let err_text = resp.text().await.unwrap_or_default();
+                let lower = err_text.to_lowercase();
+                if err_text.contains("已签")
+                    || err_text.contains("重复领取")
+                    || lower.contains("already claimed")
+                    || lower.contains("already checked")
+                    || lower.contains("checked in")
+                {
+                    let refreshed = self.inspect_quota(cred).await.ok();
+                    return Ok(ClaimResult {
+                        claimed: false,
+                        reward_summary: "今日已签过".into(),
+                        updated_quota: refreshed,
+                    });
+                }
+            }
             return Err(Self::map_http_status(status, "Trae CN 每日签到"));
         }
 

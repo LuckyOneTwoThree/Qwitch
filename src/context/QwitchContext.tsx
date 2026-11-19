@@ -10,7 +10,7 @@ import React, {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { INITIAL_ACCOUNTS, INITIAL_LOGS, MOCK_ADAPTERS } from "../data/mockStore";
-import { getEffectiveClaimStatus } from "../domain/selectors";
+import { getEffectiveClaimStatus, selectClaimCandidates } from "../domain/selectors";
 import type {
   AccountSummary,
   ActionLogCleanupRequest,
@@ -74,7 +74,7 @@ interface QwitchContextValue {
   refreshClientStatuses: (toolIds?: ToolId[]) => Promise<void>;
   refreshAccountQuota: (accountId: string) => Promise<void>;
   refreshAllQuotas: (toolId?: ToolId) => Promise<void>;
-  claimDailyBatch: (targetIds?: string[], toolId?: ToolId) => Promise<void>;
+  claimDailyBatch: (targetIds?: string[], toolId?: ToolId, includeUnknown?: boolean) => Promise<void>;
   requestColdSwitch: (account: AccountSummary) => void;
   cancelColdSwitch: () => void;
   confirmColdSwitch: () => Promise<void>;
@@ -772,26 +772,16 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   );
 
   const claimDailyBatch = useCallback(
-    async (targetIds?: string[], toolId?: ToolId) => {
+    async (targetIds?: string[], toolId?: ToolId, includeUnknown?: boolean) => {
       if (batchProgress?.running) {
         showToast("当前已有批量任务正在执行，请稍候", "warning");
         return;
       }
 
-      const candidates = accounts.filter((acc) => {
-        if (targetIds && !targetIds.includes(acc.id)) return false;
-        if (!targetIds && toolId && acc.toolId !== toolId) return false;
-        const adapter = adapters.find((ad) => ad.id === acc.toolId);
-        if (
-          acc.status !== "active" ||
-          acc.hasApiToken === false ||
-          !adapter?.capabilities.supportsDailyClaim
-        ) {
-          return false;
-        }
-        if (targetIds) return true;
-        const effectiveClaim = getEffectiveClaimStatus(acc);
-        return effectiveClaim === "available";
+      const candidates = selectClaimCandidates(accounts, adapters, {
+        targetIds,
+        toolId,
+        includeUnknown,
       });
 
       if (candidates.length === 0) {
@@ -808,6 +798,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         const alreadyClaimedCount = eligibleAll.filter(
           (acc) => getEffectiveClaimStatus(acc) === "claimed"
         ).length;
+        const unknownCount = eligibleAll.filter(
+          (acc) => getEffectiveClaimStatus(acc) === "unknown"
+        ).length;
         const missingTokenCount = accounts.filter((acc) => {
           if (targetIds && !targetIds.includes(acc.id)) return false;
           if (!targetIds && toolId && acc.toolId !== toolId) return false;
@@ -818,14 +811,16 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
             Boolean(adapter?.capabilities.supportsDailyClaim)
           );
         }).length;
-        if (alreadyClaimedCount > 0 && missingTokenCount === 0) {
+        if (alreadyClaimedCount > 0 && missingTokenCount === 0 && unknownCount === 0) {
           showToast(`今日可签到账号已全部领取完成 (${alreadyClaimedCount} 个)`, "success");
           return;
         }
         showToast(
           missingTokenCount > 0
             ? "账号尚未完成在线授权，请先点击卡片「在线授权」后再领取"
-            : "当前范围下没有可参与领取的正常账号",
+            : unknownCount > 0
+              ? `存在 ${unknownCount} 个待核实账号，请点击「核实并领取」先查状态再领取`
+              : "当前范围下没有可参与领取的正常账号",
           missingTokenCount > 0 ? "warning" : "info"
         );
         return;

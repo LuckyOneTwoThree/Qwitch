@@ -99,6 +99,39 @@ export function selectScopeAccounts(
   return accounts.filter((a) => a.toolId === activeToolFilter);
 }
 
+export interface ClaimCandidateOptions {
+  targetIds?: string[];
+  toolId?: ToolId;
+  /** 「核实并领取」显式流程允许 unknown 进入队列（后端先查后领，Fail-Closed）；
+   *  自动巡检保持 false，仅处理 available */
+  includeUnknown?: boolean;
+}
+
+export function selectClaimCandidates(
+  accounts: AccountSummary[],
+  adapters: AdapterManifest[],
+  opts: ClaimCandidateOptions = {}
+): AccountSummary[] {
+  return accounts.filter((acc) => {
+    if (opts.targetIds && !opts.targetIds.includes(acc.id)) return false;
+    if (!opts.targetIds && opts.toolId && acc.toolId !== opts.toolId) return false;
+    const adapter = adapters.find((a) => a.id === acc.toolId);
+    if (
+      acc.status !== "active" ||
+      acc.hasApiToken === false ||
+      !adapter?.capabilities.supportsDailyClaim
+    ) {
+      return false;
+    }
+    if (opts.targetIds) return true;
+    const effectiveClaim = getEffectiveClaimStatus(acc);
+    return (
+      effectiveClaim === "available" ||
+      (opts.includeUnknown === true && effectiveClaim === "unknown")
+    );
+  });
+}
+
 export interface ScopedStats {
   total: number;
   healthyCount: number;

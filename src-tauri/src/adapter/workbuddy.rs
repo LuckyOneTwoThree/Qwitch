@@ -326,6 +326,32 @@ impl WorkBuddyAdapter {
             })
     }
 
+    /// 已签幂等契约（ADAPTER_SPEC）：null body，或 2xx/400/409 + code 10001/已签文案
+    fn checkin_claim_idempotent(status: u16, body: &Value) -> bool {
+        let idempotent_http = status == 400 || status == 409;
+        let ok_http = (200..300).contains(&status);
+        if body.is_null() {
+            return ok_http || idempotent_http;
+        }
+        if body.get("code").and_then(|v| v.as_i64()) == Some(10001) {
+            return true;
+        }
+        if !(ok_http || idempotent_http) {
+            return false;
+        }
+        let msg = body
+            .get("msg")
+            .or_else(|| body.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let lower = msg.to_lowercase();
+        msg.contains("已签")
+            || msg.contains("重复领取")
+            || lower.contains("already claimed")
+            || lower.contains("already checked")
+            || lower.contains("checked in")
+    }
+
     fn json_uid_to_string(v: &Value) -> Option<String> {
         if let Some(s) = v.as_str() {
             let t = s.trim();
@@ -1205,29 +1231,27 @@ impl ToolAdapter for WorkBuddyAdapter {
             code: UnifiedErrorCode::NetworkError,
             message: format!("读取 WorkBuddy 签到响应失败: {e}"),
         })?;
-        let body: Value = serde_json::from_str(&raw_text).map_err(|e| {
-            if !status.is_success() {
-                Self::map_http_status(status, "WorkBuddy 每日签到")
-            } else {
-                AdapterError::Unified {
-                    code: UnifiedErrorCode::NetworkError,
-                    message: format!("解析 WorkBuddy 签到响应失败: {e}"),
-                }
+        // 契约（ADAPTER_SPEC）：已签幂等可返回 null body；成功/400/409 下解析失败按 null 处理
+        let body: Value = match serde_json::from_str(&raw_text) {
+            Ok(v) => v,
+            Err(_) if status.is_success() || status.as_u16() == 400 || status.as_u16() == 409 => {
+                Value::Null
             }
-        })?;
+            Err(e) => {
+                return Err(if !status.is_success() {
+                    Self::map_http_status(status, "WorkBuddy 每日签到")
+                } else {
+                    AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        message: format!("解析 WorkBuddy 签到响应失败: {e}"),
+                    }
+                });
+            }
+        };
 
         let code = body.get("code").and_then(|v| v.as_i64());
-        let msg = body
-            .get("msg")
-            .or_else(|| body.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let msg_lower = msg.to_lowercase();
 
-        // 先按 HTTP 状态与业务码判定风控/过期，再考虑"已签"文案启发式
-        if !status.is_success() {
-            return Err(Self::map_http_status(status, "WorkBuddy 每日签到"));
-        }
+        // 业务码优先：401/403/429 无论 HTTP 状态如何都必须映射为可熔断错误
         if let Some(c) = code {
             if let Some(err) = crate::adapter::common::map_business_code(c, "WorkBuddy 每日签到")
             {
@@ -1235,13 +1259,8 @@ impl ToolAdapter for WorkBuddyAdapter {
             }
         }
 
-        let already_claimed = code == Some(10001)
-            || msg.contains("已签")
-            || msg.contains("重复领取")
-            || msg_lower.contains("already claimed")
-            || msg_lower.contains("already checked")
-            || msg_lower.contains("checked in");
-        if already_claimed {
+        // 幂等已签识别必须先于通用 HTTP 错误：HTTP 400 + code 10001 是契约内的"今日已签"
+        if Self::checkin_claim_idempotent(status.as_u16(), &body) {
             let refreshed = self
                 .fetch_quota_and_checkin(&endpoint, &headers)
                 .await
@@ -1254,15 +1273,19 @@ impl ToolAdapter for WorkBuddyAdapter {
             });
         }
 
+        if !status.is_success() {
+            return Err(Self::map_http_status(status, "WorkBuddy 每日签到"));
+        }
+
         if let Some(c) = code.filter(|&c| c != 0) {
-            let detail = if msg.is_empty() {
-                "签到未成功"
-            } else {
-                msg
-            };
+            let msg = body
+                .get("msg")
+                .or_else(|| body.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("签到未成功");
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: format!("WorkBuddy 每日签到返回异常 ({c}): {detail}"),
+                message: format!("WorkBuddy 每日签到返回异常 ({c}): {msg}"),
             });
         }
 
@@ -1454,6 +1477,36 @@ mod tests {
                 code: UnifiedErrorCode::AuthExpired,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn checkin_claim_idempotent_contract() {
+        // HTTP 400 + code 10001 = 今日已签（不得当作错误）
+        let body = serde_json::json!({ "code": 10001, "msg": "already checked in" });
+        assert!(WorkBuddyAdapter::checkin_claim_idempotent(400, &body));
+        assert!(WorkBuddyAdapter::checkin_claim_idempotent(409, &body));
+        // null body（含空响应）= 已签幂等
+        assert!(WorkBuddyAdapter::checkin_claim_idempotent(
+            200,
+            &Value::Null
+        ));
+        assert!(WorkBuddyAdapter::checkin_claim_idempotent(
+            400,
+            &Value::Null
+        ));
+        // 2xx + 已签文案
+        let msg_body = serde_json::json!({ "code": 0, "msg": "今日已签到" });
+        assert!(WorkBuddyAdapter::checkin_claim_idempotent(200, &msg_body));
+        // 正常成功响应不是幂等跳过
+        let success = serde_json::json!({ "code": 0, "data": { "credit": 100 } });
+        assert!(!WorkBuddyAdapter::checkin_claim_idempotent(200, &success));
+        // 500/403 等不得被文案启发式吞掉
+        let err = serde_json::json!({ "code": 403, "msg": "already claimed" });
+        assert!(!WorkBuddyAdapter::checkin_claim_idempotent(500, &err));
+        assert!(!WorkBuddyAdapter::checkin_claim_idempotent(
+            403,
+            &Value::Null
         ));
     }
 }

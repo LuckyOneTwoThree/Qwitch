@@ -257,6 +257,17 @@ fn is_valid_oauth_uid(uid: &str) -> bool {
     )
 }
 
+async fn restore_session_note(
+    adapter: &Arc<dyn ToolAdapter>,
+    host: &dyn PlatformHost,
+    backup: &crate::adapter::SessionBackup,
+) -> String {
+    match adapter.restore_session(host, backup).await {
+        Ok(()) => "已恢复原会话".to_string(),
+        Err(e) => format!("原会话恢复失败（{e}），请手动重新登录客户端"),
+    }
+}
+
 async fn record_import_quota_check(
     db: &Arc<QwitchDatabase>,
     adapter: &Arc<dyn ToolAdapter>,
@@ -568,12 +579,6 @@ pub async fn switch_desktop_account(
         return Err("CLIENT_RUNNING".into());
     }
 
-    // 备份必须在终止客户端之前完成：备份失败时不触碰正在运行的客户端
-    let backup = adapter
-        .backup_session(state.host.as_ref())
-        .await
-        .map_err(|e| format!("备份当前客户端会话失败（客户端未做任何改动）: {e}"))?;
-
     if running {
         let _ = app.emit(
             "qwitch://switch-progress",
@@ -589,6 +594,24 @@ pub async fn switch_desktop_account(
             .map_err(|e| e.to_string())?;
     }
 
+    // 终止后备份权威会话（避免读到运行中半写文件）；备份失败则重拉原客户端
+    let backup = match adapter.backup_session(state.host.as_ref()).await {
+        Ok(b) => b,
+        Err(e) => {
+            if running {
+                let _ = state.host.launch_client(&exe, &[]);
+            }
+            return Err(format!(
+                "备份客户端会话失败{}: {e}",
+                if running {
+                    "，已尝试重新拉起原客户端"
+                } else {
+                    "（客户端未做任何改动）"
+                }
+            ));
+        }
+    };
+
     let _ = app.emit(
         "qwitch://switch-progress",
         SwitchProgressEvent {
@@ -598,18 +621,11 @@ pub async fn switch_desktop_account(
     );
 
     if let Err(e) = adapter.apply_session(state.host.as_ref(), &cred).await {
-        let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
+        let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
         if running {
             let _ = state.host.launch_client(&exe, &[]);
         }
-        return Err(format!(
-            "写入新会话失败，已恢复原会话{}: {e}",
-            if running {
-                "并尝试重新拉起原客户端"
-            } else {
-                ""
-            }
-        ));
+        return Err(format!("写入新会话失败，{note}: {e}"));
     }
 
     let _ = app.emit(
@@ -621,9 +637,9 @@ pub async fn switch_desktop_account(
     );
 
     if let Err(e) = state.host.launch_client(&exe, &[]) {
-        let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
+        let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
         return Err(format!(
-            "拉起客户端失败，已恢复原会话（客户端当前处于关闭状态，请手动启动）: {e}"
+            "拉起客户端失败，{note}（客户端当前处于关闭状态，请手动启动）: {e}"
         ));
     }
 
@@ -649,11 +665,18 @@ pub async fn switch_desktop_account(
         }
     }
     if !alive {
-        let _ = adapter.restore_session(state.host.as_ref(), &backup).await;
-        return Err(
-            "客户端启动后 15 秒内未确认存活，已恢复原会话快照；客户端可能仍在启动或已退出，请手动检查"
-                .into(),
-        );
+        // 迟到进程二次确认：超时后才出现的进程视为启动成功，
+        // 不回滚正在读取新会话的客户端
+        alive = state
+            .host
+            .is_client_running(&summary.tool_id)
+            .unwrap_or(false);
+    }
+    if !alive {
+        let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
+        return Err(format!(
+            "客户端启动后 15 秒内未确认存活，{note}；客户端可能仍在启动或已退出，请手动检查"
+        ));
     }
 
     state

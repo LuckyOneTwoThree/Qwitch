@@ -326,18 +326,19 @@ impl WorkBuddyAdapter {
             })
     }
 
-    /// 已签幂等契约（ADAPTER_SPEC）：null body，或 2xx/400/409 + code 10001/已签文案
+    /// 已签幂等契约（ADAPTER_SPEC）：2xx null body 直接算已签；
+    /// 400/409 必须携带 code 10001 或已签文案；其余状态码一律不算
     fn checkin_claim_idempotent(status: u16, body: &Value) -> bool {
-        let idempotent_http = status == 400 || status == 409;
         let ok_http = (200..300).contains(&status);
+        let idempotent_http = status == 400 || status == 409;
         if body.is_null() {
-            return ok_http || idempotent_http;
-        }
-        if body.get("code").and_then(|v| v.as_i64()) == Some(10001) {
-            return true;
+            return ok_http;
         }
         if !(ok_http || idempotent_http) {
             return false;
+        }
+        if body.get("code").and_then(|v| v.as_i64()) == Some(10001) {
+            return true;
         }
         let msg = body
             .get("msg")
@@ -1231,12 +1232,11 @@ impl ToolAdapter for WorkBuddyAdapter {
             code: UnifiedErrorCode::NetworkError,
             message: format!("读取 WorkBuddy 签到响应失败: {e}"),
         })?;
-        // 契约（ADAPTER_SPEC）：已签幂等可返回 null body；成功/400/409 下解析失败按 null 处理
+        // 契约（ADAPTER_SPEC）：已签幂等可返回 null body；仅 2xx 下解析失败按 null 处理，
+        // 400/409 解析失败保留原始 HTTP 错误，不得吞成"已签"
         let body: Value = match serde_json::from_str(&raw_text) {
             Ok(v) => v,
-            Err(_) if status.is_success() || status.as_u16() == 400 || status.as_u16() == 409 => {
-                Value::Null
-            }
+            Err(_) if status.is_success() => Value::Null,
             Err(e) => {
                 return Err(if !status.is_success() {
                     Self::map_http_status(status, "WorkBuddy 每日签到")
@@ -1486,13 +1486,17 @@ mod tests {
         let body = serde_json::json!({ "code": 10001, "msg": "already checked in" });
         assert!(WorkBuddyAdapter::checkin_claim_idempotent(400, &body));
         assert!(WorkBuddyAdapter::checkin_claim_idempotent(409, &body));
-        // null body（含空响应）= 已签幂等
+        // null body（含空响应）= 已签幂等仅限 2xx；400/409 空 body 不得吞错
         assert!(WorkBuddyAdapter::checkin_claim_idempotent(
             200,
             &Value::Null
         ));
-        assert!(WorkBuddyAdapter::checkin_claim_idempotent(
+        assert!(!WorkBuddyAdapter::checkin_claim_idempotent(
             400,
+            &Value::Null
+        ));
+        assert!(!WorkBuddyAdapter::checkin_claim_idempotent(
+            409,
             &Value::Null
         ));
         // 2xx + 已签文案
@@ -1507,6 +1511,12 @@ mod tests {
         assert!(!WorkBuddyAdapter::checkin_claim_idempotent(
             403,
             &Value::Null
+        ));
+        // 5xx 携带 10001 也不得当作已签
+        let server_err = serde_json::json!({ "code": 10001 });
+        assert!(!WorkBuddyAdapter::checkin_claim_idempotent(
+            500,
+            &server_err
         ));
     }
 }

@@ -910,8 +910,15 @@ impl ToolAdapter for QoderAdapter {
             }
         }
 
-        // 领取成功但领后查额失败时合成 Claimed 快照，避免 UI 残留可领按钮
+        // 领取成功但领后查额失败/返回 Unknown 时合成 Claimed 快照，
+        // 避免 UI 残留可领按钮（尽量保留查额得到的 buckets）
         let refreshed = match self.inspect_quota(cred).await {
+            Ok(q) if claimed_any && q.claim_status == ClaimStatus::Unknown => Some(QuotaSnapshot {
+                plan_name: q.plan_name,
+                claim_status: ClaimStatus::Claimed,
+                buckets: q.buckets,
+                fetched_at: q.fetched_at,
+            }),
             Ok(q) => Some(q),
             Err(_) if claimed_any => Some(QuotaSnapshot {
                 plan_name: None,

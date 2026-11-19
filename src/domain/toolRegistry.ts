@@ -72,7 +72,7 @@ export const TOOL_BRAND_META: Record<string, ToolBrandMeta> = {
     name: "MiniMax Code CN",
     shortTagline: "MiniMax 桌面端",
     tagline: "MiniMax Code 桌面版（国内版）",
-    icon: "/icons/minimax-code.png",
+    icon: "/icons/minimax-code.png?v=2",
     accentDot: "bg-sky-500",
     badgeClass:
       "border-sky-500/20 bg-sky-500/10 text-sky-700 dark:text-sky-300",

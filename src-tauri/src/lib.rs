@@ -20,6 +20,26 @@ use platform::{NativePlatformHost, PlatformHost};
 use scheduler::AntiRiskScheduler;
 use storage::QwitchDatabase;
 
+/// `tauri dev` 运行的是裸可执行文件，没有 .app bundle 图标，
+/// 运行时把 Qwitch 官方图标写入 NSApplication，避免程序坞显示通用 exec 图标。
+#[cfg(target_os = "macos")]
+fn apply_macos_app_icon() {
+    use objc2::AllocAnyThread;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::{MainThreadMarker, NSData};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(include_bytes!("../icons/icon.png"));
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
+    unsafe {
+        NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_result = tauri::Builder::default()
@@ -27,6 +47,9 @@ pub fn run() {
             commands::present_main_window(app);
         }))
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            apply_macos_app_icon();
+
             let host: Arc<dyn PlatformHost> = Arc::new(NativePlatformHost);
             let data_dir = host
                 .qwitch_data_dir()

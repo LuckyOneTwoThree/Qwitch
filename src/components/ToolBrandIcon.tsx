@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useState } from "react";
 import { Layers } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { getToolBrandMeta as resolveToolBrandMeta } from "../domain/toolRegistry";
@@ -26,8 +26,14 @@ export function ToolBrandIcon({
   const { adapters } = useQwitch();
   const meta = resolveToolBrandMeta(toolId, adapters);
   const sizeClass = SIZE_CLASSES[size];
+  const [iconFailed, setIconFailed] = useState(false);
+  const iconSrc = meta.icon;
 
-  if (!meta.icon) {
+  useEffect(() => {
+    setIconFailed(false);
+  }, [iconSrc]);
+
+  if (!iconSrc || iconFailed) {
     return (
       <div
         aria-hidden={decorative || undefined}
@@ -47,17 +53,19 @@ export function ToolBrandIcon({
       className={`inline-flex shrink-0 items-center justify-center overflow-hidden bg-white shadow-2xs ring-1 ring-black/8 dark:bg-zinc-900 dark:ring-white/12 ${sizeClass} ${className}`}
     >
       <img
-        src={meta.icon}
+        src={iconSrc}
         alt={decorative ? "" : meta.name}
         className="h-full w-full object-cover select-none"
         draggable={false}
+        onError={() => setIconFailed(true)}
       />
     </div>
   );
 }
 
 export function QwitchLogo({ size = "md" }: { size?: "sm" | "md" }) {
-  const uid = useId();
+  // React useId 默认包含冒号（:r0:），作为 SVG url(#id) 引用时部分 WebKit 版本会解析失败
+  const uid = useId().replace(/:/g, "");
   const bgId = `${uid}-qwBg`;
   const glowId = `${uid}-qwGlow`;
   const silverId = `${uid}-qwSilver`;
@@ -66,7 +74,7 @@ export function QwitchLogo({ size = "md" }: { size?: "sm" | "md" }) {
   const box = size === "sm" ? "h-5 w-5 rounded-[6px]" : "h-8 w-8 rounded-xl";
   return (
     <div
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden shadow-xs ring-1 ring-black/10 dark:ring-white/15 ${box}`}
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden bg-[#0B0D11] shadow-xs ring-1 ring-black/10 dark:ring-white/15 ${box}`}
       aria-hidden="true"
     >
       <svg viewBox="0 0 1024 1024" className="h-full w-full">

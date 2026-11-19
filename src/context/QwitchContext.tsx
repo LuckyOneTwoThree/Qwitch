@@ -70,7 +70,7 @@ interface QwitchContextValue {
   setLogRetention: (next: { archiveAfterDays: number; maxActiveCount: number }) => void;
   customClientPaths: Record<string, string>;
   clientStatuses: Record<string, ClientHostStatus>;
-  saveAppSettings: (next: Partial<AppSettings>, silent?: boolean) => Promise<void>;
+  saveAppSettings: (next: Partial<AppSettings>, silent?: boolean) => Promise<boolean>;
   refreshClientStatuses: (toolIds?: ToolId[]) => Promise<void>;
   refreshAccountQuota: (accountId: string) => Promise<void>;
   refreshAllQuotas: (toolId?: ToolId) => Promise<void>;
@@ -245,6 +245,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   }>({ archiveAfterDays: 14, maxActiveCount: 200 });
   const [customClientPaths, setCustomClientPaths] = useState<Record<string, string>>({});
   const [clientStatuses, setClientStatuses] = useState<Record<string, ClientHostStatus>>({});
+  const jitterRangeMsRef = useRef(jitterRangeMs);
+  jitterRangeMsRef.current = jitterRangeMs;
+  const logRetentionRef = useRef(logRetention);
+  logRetentionRef.current = logRetention;
 
   const toastTimerRef = useRef<number | null>(null);
   const toastSeqRef = useRef(0);
@@ -345,12 +349,22 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const saveAppSettings = useCallback(
-    async (next: Partial<AppSettings>, silent = false) => {
+    async (next: Partial<AppSettings>, silent = false): Promise<boolean> => {
       const previous = appSettingsRef.current;
-      const payload = normalizeAppSettings(next, previous);
+      // 统一合并当前抖动/日志保留草稿：任何保存动作都不丢失其他未保存输入
+      const payload = normalizeAppSettings(
+        {
+          jitterMinMs: jitterRangeMsRef.current[0],
+          jitterMaxMs: jitterRangeMsRef.current[1],
+          logArchiveAfterDays: logRetentionRef.current.archiveAfterDays,
+          logMaxActiveCount: logRetentionRef.current.maxActiveCount,
+          ...next,
+        },
+        previous
+      );
       if (payload.jitterMinMs > payload.jitterMaxMs) {
         showToast("保存失败：最小间隔不能大于最大间隔", "error");
-        return;
+        return false;
       }
 
       applyIncomingSettings(payload);
@@ -360,12 +374,15 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
           const saved = await invoke<AppSettings>("save_app_settings", { settings: payload });
           applyIncomingSettings(saved);
           if (!silent) showToast("设置已保存", "success");
+          return true;
         } catch (err) {
           applyIncomingSettings(previous);
           showToast(`保存设置失败：${String(err)}`, "error");
+          return false;
         }
-      } else if (!silent) {
-        showToast("设置已保存（Mock 模式）", "success");
+      } else {
+        if (!silent) showToast("设置已保存（Mock 模式）", "success");
+        return true;
       }
     },
     [applyIncomingSettings, isTauriRuntime, showToast]

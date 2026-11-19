@@ -1754,7 +1754,9 @@ export function Dashboard() {
                           detail:
                             "开启后将在启动巡检或后台定时刷新发现可领福利时自动发起领取，属于无人值守敏感动作，可能增加平台风控概率。确认启用？",
                           danger: true,
-                          run: () => saveAppSettings({ autoClaimDaily: true }),
+                          run: async () => {
+                            await saveAppSettings({ autoClaimDaily: true });
+                          },
                         });
                       } else {
                         void saveAppSettings({ autoClaimDaily: false });
@@ -1980,8 +1982,10 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={async () => {
-                        await saveAppSettings({ trustedAdapters: trustedDraft });
-                        showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
+                        const ok = await saveAppSettings({ trustedAdapters: trustedDraft });
+                        if (ok) {
+                          showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
+                        }
                       }}
                       className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
                     >
@@ -2067,9 +2071,11 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={async () => {
-                        await saveAppSettings({ customClientPaths: pathDrafts });
-                        setPathDraftsDirty(false);
-                        await refreshClientStatuses();
+                        const ok = await saveAppSettings({ customClientPaths: pathDrafts });
+                        if (ok) {
+                          setPathDraftsDirty(false);
+                          await refreshClientStatuses();
+                        }
                       }}
                       className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
                     >

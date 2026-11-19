@@ -164,9 +164,14 @@ pub fn save_app_settings(
     // 防风控抖动下限：不允许 0ms 连发
     settings.jitter_min_ms = settings.jitter_min_ms.max(500);
     settings.jitter_max_ms = settings.jitter_max_ms.max(settings.jitter_min_ms);
+    let previous = load_app_settings(&state.db);
     for (tool, path) in &settings.custom_client_paths {
         let trimmed = path.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+        // 仅校验本次新增/修改的路径；历史失效路径不阻塞无关设置保存
+        if previous.custom_client_paths.get(tool).map(|p| p.trim()) == Some(trimmed) {
             continue;
         }
         let p = std::path::Path::new(trimmed);
@@ -250,7 +255,10 @@ async fn record_import_quota_check(
     adapter: &Arc<dyn ToolAdapter>,
     summary: &AccountSummary,
     cred: &crate::domain::CredentialEnvelope,
+    scheduler: &Arc<AntiRiskScheduler>,
 ) {
+    // 导入/授权完成后的查额同样进入串行队列，不得与批量任务并发请求平台
+    let _queue_guard = scheduler.queue_lock().lock_owned().await;
     match adapter.inspect_quota(cred).await {
         Ok(snapshot) => {
             let _ = db.save_quota_snapshot(&summary.id, &snapshot);
@@ -316,7 +324,14 @@ pub async fn import_local_account(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    record_import_quota_check(&state.db, adapter, &summary, &cred_for_quota).await;
+    record_import_quota_check(
+        &state.db,
+        adapter,
+        &summary,
+        &cred_for_quota,
+        &state.scheduler,
+    )
+    .await;
 
     let _ = state.db.set_active_on_client(&tool_id, &summary.id);
 
@@ -383,7 +398,14 @@ pub async fn add_account_by_token(
         .get_account_credential(&state.master_key, &summary.id)
         .map(|(_, env)| env)
         .unwrap_or(envelope);
-    record_import_quota_check(&state.db, adapter, &summary, &cred_for_quota).await;
+    record_import_quota_check(
+        &state.db,
+        adapter,
+        &summary,
+        &cred_for_quota,
+        &state.scheduler,
+    )
+    .await;
 
     let log_msg = if target_id.is_some() {
         format!("补充/更新凭据 {} ({})", summary.label, summary.uid_masked)
@@ -1250,6 +1272,7 @@ async fn persist_oauth_envelope(
     host: &Arc<dyn PlatformHost>,
     master_key: &[u8; 32],
     adapter: &Arc<dyn ToolAdapter>,
+    scheduler: &Arc<AntiRiskScheduler>,
     flow_seq: &Arc<AtomicU64>,
     flow_id: u64,
     tool_id: &str,
@@ -1301,7 +1324,7 @@ async fn persist_oauth_envelope(
                 .get_account_credential(master_key, &summary.id)
                 .map(|(_, env)| env)
                 .unwrap_or(envelope_to_save);
-            record_import_quota_check(db, adapter, &summary, &cred_for_quota).await;
+            record_import_quota_check(db, adapter, &summary, &cred_for_quota, scheduler).await;
             let log_msg = if target_account_id.is_some() {
                 format!(
                     "通过内置授权补充/更新 {} ({})",
@@ -1409,6 +1432,7 @@ pub async fn start_webview_oauth(
 
     let db = Arc::clone(&state.db);
     let host_arc = Arc::clone(&state.host);
+    let scheduler_arc = Arc::clone(&state.scheduler);
     let master_key = state.master_key;
     let flow_seq = Arc::clone(&state.oauth_flow_seq);
     let app_handle = app.clone();
@@ -1450,6 +1474,7 @@ pub async fn start_webview_oauth(
     if matches!(mode, OAuthMode::TraeCapture) {
         let app_nav = app_handle.clone();
         let db_nav = Arc::clone(&db);
+        let scheduler_nav = Arc::clone(&scheduler_arc);
         let host_nav = Arc::clone(&host_arc);
         let adapter_nav = Arc::clone(&adapter);
         let flow_seq_nav = Arc::clone(&flow_seq);
@@ -1487,6 +1512,7 @@ pub async fn start_webview_oauth(
                 if let Some(payload_str) = raw_payload {
                     let app_clone = app_nav.clone();
                     let db_clone = Arc::clone(&db_nav);
+                    let scheduler_clone = Arc::clone(&scheduler_nav);
                     let host_clone = Arc::clone(&host_nav);
                     let adapter_clone = Arc::clone(&adapter_nav);
                     let flow_seq_clone = Arc::clone(&flow_seq_nav);
@@ -1503,6 +1529,7 @@ pub async fn start_webview_oauth(
                                     &host_clone,
                                     &master_key,
                                     &adapter_clone,
+                                    &scheduler_clone,
                                     &flow_seq_clone,
                                     flow_id,
                                     &tid,
@@ -1566,6 +1593,7 @@ pub async fn start_webview_oauth(
                                 &host_arc,
                                 &master_key,
                                 &adapter,
+                                &scheduler_arc,
                                 &flow_seq,
                                 flow_id,
                                 &tool_id_owned,
@@ -1612,6 +1640,7 @@ pub async fn start_webview_oauth(
                                 &host_arc,
                                 &master_key,
                                 &adapter,
+                                &scheduler_arc,
                                 &flow_seq,
                                 flow_id,
                                 &tool_id_owned,

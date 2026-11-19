@@ -29,6 +29,25 @@
 
 > **产品边界**：Qwitch 坚持 Human-in-the-Loop——查询、领取、切号均由用户主动触发；后台自动刷新与自动签到**默认关闭**，开启需显式确认。不内置高频轮询、不做无人值守挂机，最大程度规避平台风控。
 
+## 产品截图
+
+> 截图来自浏览器 Mock 预览模式，账号与额度均为示例数据。
+
+| 主窗口 · 浅色 | 主窗口 · 深色 |
+| :---: | :---: |
+| ![Dashboard 浅色](docs/assets/screenshots/dashboard-light.png) | ![Dashboard 深色](docs/assets/screenshots/dashboard-dark.png) |
+
+| 系统托盘 · 浅色 | 系统托盘 · 深色 |
+| :---: | :---: |
+| <img src="docs/assets/screenshots/tray-light.png" width="380" alt="托盘弹层 浅色" /> | <img src="docs/assets/screenshots/tray-dark.png" width="380" alt="托盘弹层 深色" /> |
+
+<details>
+<summary><b>设置与环境（深色）</b>：常驻偏好、自动化策略、防风控调度、日志保留、适配器与客户端路径</summary>
+
+![设置页 深色](docs/assets/screenshots/settings-dark.png)
+
+</details>
+
 ## 功能特性
 
 ### 🖥️ 双态交互

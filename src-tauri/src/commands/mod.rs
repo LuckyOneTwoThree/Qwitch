@@ -2230,11 +2230,10 @@ mod tests {
         db.set_active_on_client("trae_cn", &ids[1])
             .expect("set active");
 
-        let ordered =
-            prioritize_active_trae_account_on_client(
-                &db,
-                vec![ids[0].clone(), ids[1].clone(), ids[2].clone()],
-            );
+        let ordered = prioritize_active_trae_account_on_client(
+            &db,
+            vec![ids[0].clone(), ids[1].clone(), ids[2].clone()],
+        );
         assert_eq!(
             ordered,
             vec![ids[1].clone(), ids[0].clone(), ids[2].clone()]

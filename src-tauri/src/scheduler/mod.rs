@@ -394,6 +394,11 @@ impl AntiRiskScheduler {
                 continue;
             };
 
+            if !adapter.manifest().capabilities.supports_quota_query {
+                skipped_count += 1;
+                continue;
+            }
+
             if risk_broken_tools.contains_key(&summary.tool_id) {
                 skipped_count += 1;
                 let _ = db.append_action_log(

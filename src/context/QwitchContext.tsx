@@ -120,7 +120,7 @@ const getInitialTheme = (): "light" | "dark" => {
   return "light";
 };
 
-const syncThemeStorage = (nextTheme: "light" | "dark") => {
+const syncThemeStorage = (nextTheme: "light" | "dark" | "system") => {
   try {
     window.localStorage.setItem("qwitch.theme", nextTheme);
   } catch {
@@ -128,10 +128,20 @@ const syncThemeStorage = (nextTheme: "light" | "dark") => {
   }
 };
 
+const resolveTheme = (t: "light" | "dark" | "system"): "light" | "dark" => {
+  if (t === "system") {
+    return typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+  return t;
+};
+
 const DEFAULT_APP_SETTINGS: AppSettings = {
   jitterMinMs: 1500,
   jitterMaxMs: 3500,
-  theme: getInitialTheme(),
+  theme: "system",
   customClientPaths: {},
   logArchiveAfterDays: 14,
   logMaxActiveCount: 200,
@@ -156,7 +166,9 @@ const normalizeAppSettings = (
       ? "dark"
       : raw?.theme === "light"
         ? "light"
-        : fallback.theme,
+        : raw?.theme === "system"
+          ? "system"
+          : fallback.theme,
   customClientPaths: raw?.customClientPaths ?? fallback.customClientPaths,
   logArchiveAfterDays:
     raw?.logArchiveAfterDays ?? fallback.logArchiveAfterDays ?? 14,
@@ -278,7 +290,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     setAppSettings(normalized);
     appSettingsRef.current = normalized;
     setJitterRangeMs([normalized.jitterMinMs, normalized.jitterMaxMs]);
-    setTheme(normalized.theme);
+    setTheme(resolveTheme(normalized.theme));
     syncThemeStorage(normalized.theme);
     setCustomClientPaths(normalized.customClientPaths);
     setLogRetention({
@@ -289,7 +301,6 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
-    syncThemeStorage(theme);
   }, [theme]);
 
   useEffect(() => {

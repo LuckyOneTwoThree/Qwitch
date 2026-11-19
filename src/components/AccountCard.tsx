@@ -64,6 +64,8 @@ export const AccountCard = React.memo(function AccountCard({
   const isHealthy = account.status === "active";
   const isDisabled = account.status === "disabled";
   const canClaim = isHealthy && Boolean(adapter?.capabilities.supportsDailyClaim);
+  const canQuery = adapter ? adapter.capabilities.supportsQuotaQuery : true;
+  const canSwitch = adapter ? adapter.capabilities.supportsClientSwitch : true;
   const needsRecovery = account.status === "expired" || account.status === "risk_paused";
   const missingApiToken = account.hasApiToken === false;
   const missingLocalSnapshot = account.hasLocalSnapshot === false;
@@ -393,8 +395,14 @@ export const AccountCard = React.memo(function AccountCard({
                 <button
                   type="button"
                   onClick={() => void handleRefresh()}
-                  disabled={refreshing || isDisabled || isBatchRunning}
-                  title={isBatchRunning ? "批量任务进行中，查额已排队禁用" : "刷新额度"}
+                  disabled={refreshing || isDisabled || isBatchRunning || !canQuery}
+                  title={
+                    !canQuery
+                      ? "该适配器声明不支持查额"
+                      : isBatchRunning
+                        ? "批量任务进行中，查额已排队禁用"
+                        : "刷新额度"
+                  }
                   className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
                 >
                   <RefreshCw
@@ -471,7 +479,8 @@ export const AccountCard = React.memo(function AccountCard({
           ) : (
             <button
               type="button"
-              disabled={account.isActiveOnClient}
+              disabled={account.isActiveOnClient || !canSwitch}
+              title={!canSwitch ? "该适配器声明不支持切号" : undefined}
               onClick={() => requestColdSwitch(account)}
               className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium transition ${
                 account.isActiveOnClient

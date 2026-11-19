@@ -88,6 +88,10 @@ fn default_auto_refresh_interval_minutes() -> u32 {
     0
 }
 
+fn default_theme() -> String {
+    "system".to_string()
+}
+
 fn default_log_archive_after_days() -> u32 {
     14
 }
@@ -101,6 +105,7 @@ fn default_log_max_active_count() -> u32 {
 pub struct AppSettingsDto {
     pub jitter_min_ms: u64,
     pub jitter_max_ms: u64,
+    #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default)]
     pub custom_client_paths: HashMap<String, String>,
@@ -131,7 +136,7 @@ impl Default for AppSettingsDto {
         Self {
             jitter_min_ms: 1500,
             jitter_max_ms: 3500,
-            theme: "light".to_string(),
+            theme: "system".to_string(),
             custom_client_paths: HashMap::new(),
             log_archive_after_days: default_log_archive_after_days(),
             log_max_active_count: default_log_max_active_count(),

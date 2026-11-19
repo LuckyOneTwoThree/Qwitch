@@ -106,7 +106,7 @@ impl ExternalAdapter {
         }
     }
 
-    fn current_platform_tag() -> &'static str {
+    pub(crate) fn current_platform_tag() -> &'static str {
         #[cfg(target_os = "macos")]
         {
             "macos"

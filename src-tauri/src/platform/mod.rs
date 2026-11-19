@@ -471,6 +471,11 @@ impl PlatformHost for NativePlatformHost {
     fn qwitch_data_dir(&self) -> Result<PathBuf, HostError> {
         let (dir, legacy_dir) = Self::resolve_data_dirs()?;
         std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         Self::migrate_legacy_data_dir(&legacy_dir, &dir);
         Ok(dir)
     }

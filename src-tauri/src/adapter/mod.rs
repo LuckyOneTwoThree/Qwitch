@@ -163,7 +163,7 @@ pub fn create_all_adapters(
 
     // 外部适配器必须经用户显式信任后才注册；内置及历史保留 ID 一律不允许冒名
     for (id, ext) in external::discover_external_adapters(data_dir) {
-        if RESERVED_ADAPTER_IDS.contains(&id.as_str()) {
+        if !is_valid_adapter_id(&id) || RESERVED_ADAPTER_IDS.contains(&id.as_str()) {
             continue;
         }
         if !trusted_adapters.iter().any(|t| t == &id) {
@@ -173,6 +173,16 @@ pub fn create_all_adapters(
     }
 
     map
+}
+
+/// 适配器 ID 字符集校验：防止路径穿越/注入形态的恶意 ID
+pub fn is_valid_adapter_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// 内置与历史数据保留的适配器 ID，外部插件不得使用（防止冒名接收旧账号凭据）

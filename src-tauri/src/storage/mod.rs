@@ -66,6 +66,16 @@ impl QwitchDatabase {
             db_path: db_path.to_path_buf(),
         };
         db.init_schema()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for suffix in ["", "-wal", "-shm"] {
+                let p = std::path::PathBuf::from(format!("{}{suffix}", db_path.display()));
+                if p.exists() {
+                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
         Ok(db)
     }
 

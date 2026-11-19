@@ -500,8 +500,13 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                               ) : (
                                 <button
                                   type="button"
+                                  disabled={
+                                    adapters.find((a) => a.id === acc.toolId)?.capabilities
+                                      .supportsClientSwitch === false
+                                  }
+                                  title="切换本机客户端账号"
                                   onClick={() => requestColdSwitch(acc)}
-                                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
                                 >
                                   <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                                   切换

@@ -76,7 +76,7 @@ export interface ClientHostStatus {
 export interface AppSettings {
   jitterMinMs: number;
   jitterMaxMs: number;
-  theme: "light" | "dark";
+  theme: "light" | "dark" | "system";
   customClientPaths: Record<string, string>;
   logArchiveAfterDays?: number;
   logMaxActiveCount?: number;

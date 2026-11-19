@@ -21,7 +21,7 @@ use storage::QwitchDatabase;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app_result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.unminimize();
@@ -241,9 +241,10 @@ pub fn run() {
             commands::delete_action_logs,
             commands::export_action_logs
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building Qwitch application")
-        .run(|app_handle, event| {
+        .build(tauri::generate_context!());
+
+    match app_result {
+        Ok(app) => app.run(|app_handle, event| {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
@@ -260,5 +261,18 @@ pub fn run() {
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (app_handle, event);
-        });
+        }),
+        Err(e) => {
+            // GUI 下 panic 用户看不到原因：用原生错误弹窗展示恢复指引
+            rfd::MessageDialog::new()
+                .set_title("Qwitch 启动失败")
+                .set_description(format!(
+                    "{e}\n\n若为密钥相关错误，请恢复正确的系统钥匙串条目或 master.key 备份后重试；\
+                     数据目录中的密钥文件与数据库均已被保留。"
+                ))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            std::process::exit(1);
+        }
+    }
 }

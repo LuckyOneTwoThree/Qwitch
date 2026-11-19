@@ -127,6 +127,13 @@ pub fn list_external_adapters(
     let mut list: Vec<ExternalAdapterInfo> =
         crate::adapter::external::scan_external_manifests(&data_dir)
             .into_iter()
+            .filter(|(_, m)| {
+                crate::adapter::is_valid_adapter_id(&m.id)
+                    && (m.platforms.is_empty()
+                        || m.platforms.iter().any(|p| {
+                            p == crate::adapter::external::ExternalAdapter::current_platform_tag()
+                        }))
+            })
             .map(|(_, m)| {
                 let reserved = crate::adapter::RESERVED_ADAPTER_IDS.contains(&m.id.as_str());
                 ExternalAdapterInfo {
@@ -941,6 +948,11 @@ pub fn export_action_logs(
     });
     let pretty = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
     std::fs::write(&file_path, pretty).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600));
+    }
 
     let mut archived_count = 0usize;
     if archive_after_export.unwrap_or(false) && target_scope == LogScope::Active {

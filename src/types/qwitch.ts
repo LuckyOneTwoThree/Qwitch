@@ -1,4 +1,10 @@
-export type BuiltinToolId = "trae" | "trae_cn" | "workbuddy" | "qoder" | "qoder_cn";
+export type BuiltinToolId =
+  | "trae"
+  | "trae_cn"
+  | "workbuddy"
+  | "qoder"
+  | "qoder_cn"
+  | "minimax_code_cn";
 export type ToolId = BuiltinToolId | (string & {});
 
 export type AuthMethod = "webview_oauth" | "local_import" | "token_paste";

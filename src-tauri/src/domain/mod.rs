@@ -243,6 +243,9 @@ impl CredentialEnvelope {
                     // 不再无条件虚报"查额与签到就绪"
                     "workbuddy" => files.contains_key("decrypted_token.txt"),
                     "qoder" | "qoder_cn" => files.contains_key("decrypted_token.txt"),
+                    "minimax_code_cn" => {
+                        files.contains_key("decrypted_token.txt") || files.contains_key("auth.json")
+                    }
                     "trae" | "trae_cn" => {
                         files.contains_key("decrypted_token.txt")
                             || Self::snapshot_has_trae_token(files)
@@ -291,6 +294,7 @@ impl CredentialEnvelope {
             || uid.starts_with("qoder_cn_")
             || uid.starts_with("wb_manual_")
             || uid.starts_with("wb_oauth_")
+            || uid.starts_with("minimax_cn_")
     }
 
     pub fn merge_from(&self, incoming: &CredentialEnvelope) -> CredentialEnvelope {

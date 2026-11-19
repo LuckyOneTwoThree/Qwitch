@@ -67,9 +67,25 @@ export const TOOL_BRAND_META: Record<string, ToolBrandMeta> = {
       "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300",
     softBgClass: "bg-amber-500/8",
   },
+  minimax_code_cn: {
+    id: "minimax_code_cn",
+    name: "MiniMax Code CN",
+    shortTagline: "MiniMax 桌面端",
+    tagline: "MiniMax Code 桌面版（国内版）",
+    icon: "/icons/minimax-code.png",
+    accentDot: "bg-sky-500",
+    badgeClass:
+      "border-sky-500/20 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+    softBgClass: "bg-sky-500/8",
+  },
 };
 
-export const BUILTIN_TOOL_ORDER: ToolId[] = ["trae_cn", "workbuddy", "qoder_cn"];
+export const BUILTIN_TOOL_ORDER: ToolId[] = [
+  "trae_cn",
+  "workbuddy",
+  "qoder_cn",
+  "minimax_code_cn",
+];
 
 export function getToolBrandMeta(
   toolId: string,

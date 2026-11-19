@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::adapter::{
-    qoder::QoderAdapter, workbuddy::WorkBuddyAdapter, AdapterError, AdapterManifest, ToolAdapter,
+    minimax::MiniMaxAdapter, qoder::QoderAdapter, workbuddy::WorkBuddyAdapter, AdapterError,
+    AdapterManifest, ToolAdapter,
 };
 use crate::domain::{
     AccountStatus, AccountSummary, ActionLogCleanupRequest, ActionLogItem, ActionLogStats,
@@ -618,6 +619,53 @@ pub async fn refresh_account_quota(
 
     // 单账号查额同样进入串行队列，批量运行中排队等待而非并发请求平台
     let _queue_guard = state.scheduler.queue_lock().lock_owned().await;
+
+    // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），刷新结果立即加密落盘
+    let cred = match adapter.refresh_credential(&cred).await {
+        Ok(Some(updated)) => {
+            if let Err(e) =
+                state
+                    .db
+                    .bind_account_credential(&state.master_key, &summary.id, None, &updated)
+            {
+                let _ = state.db.append_action_log(
+                    Some(&summary.id),
+                    &summary.tool_id,
+                    "query",
+                    "failed",
+                    Some(&UnifiedErrorCode::InternalError),
+                    &format!("{} 刷新后的凭据落盘失败：{e}", summary.label),
+                );
+            }
+            updated
+        }
+        Ok(None) => cred,
+        Err(AdapterError::Unified { code, message }) => {
+            if matches!(code, UnifiedErrorCode::AuthExpired) {
+                let _ = state
+                    .db
+                    .update_account_status(&summary.id, AccountStatus::Expired);
+            } else if matches!(
+                code,
+                UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+            ) {
+                let _ = state
+                    .db
+                    .update_account_status(&summary.id, AccountStatus::RiskPaused);
+            }
+            let _ = state.db.append_action_log(
+                Some(&summary.id),
+                &summary.tool_id,
+                "query",
+                "failed",
+                Some(&code),
+                &format!("{} 刷新凭据失败：{message}", summary.label),
+            );
+            let _ = app.emit("qwitch://account-updated", &summary.id);
+            let _ = app.emit("qwitch://logs-updated", ());
+            return Err(message);
+        }
+    };
 
     match adapter.inspect_quota(&cred).await {
         Ok(snapshot) => {
@@ -1680,6 +1728,24 @@ fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
             "microsoftonline.com",
             "okta.com",
         ],
+        "minimax_code_cn" => &[
+            "minimax.cn",
+            "minimaxi.com",
+            "xaminim.com",
+            // 登录页资源与滑块验证码 iframe（腾讯 TCaptcha 及其 CDN）
+            "hailuoai.com",
+            "hailuo.ai",
+            "qcloud.com",
+            "gtimg.com",
+            "tencentcs.com",
+            "tencentrio.com",
+            "qq.com",
+            "github.com",
+            "google.com",
+            "microsoftonline.com",
+            "apple.com",
+            "weixin.qq.com",
+        ],
         _ => &[],
     }
 }
@@ -1851,6 +1917,9 @@ pub async fn start_webview_oauth(
             verifier: String,
             machine_id: String,
         },
+        MiniMaxDevicePoll {
+            auth: crate::adapter::minimax::MiniMaxDeviceAuth,
+        },
     }
 
     let (login_url, mode) = match tool_id.as_str() {
@@ -1873,6 +1942,13 @@ pub async fn start_webview_oauth(
                     machine_id,
                 },
             )
+        }
+        "minimax_code_cn" => {
+            let auth = MiniMaxAdapter::create_device_authorization()
+                .await
+                .map_err(|e| format!("{e}"))?;
+            let auth_url = auth.login_url().to_string();
+            (auth_url, OAuthMode::MiniMaxDevicePoll { auth })
         }
         _ => return Err(format!("工具 {tool_id} 暂不支持内置 WebView 授权")),
     };
@@ -1908,6 +1984,8 @@ pub async fn start_webview_oauth(
         OAuthMode::WorkBuddyPoll { .. } | OAuthMode::QoderPkcePoll { .. } => {
             POPUP_REDIRECT_JS.to_string()
         }
+        // MiniMax 官方登录页依赖自身 window.open / 验证码 iframe，注入任何脚本都可能干扰
+        OAuthMode::MiniMaxDevicePoll { .. } => String::new(),
     };
 
     let mut builder = WebviewWindowBuilder::new(&app, &win_label, WebviewUrl::External(parsed_url))
@@ -1916,7 +1994,6 @@ pub async fn start_webview_oauth(
         .center()
         .incognito(true)
         .user_agent(OAUTH_USER_AGENT)
-        .initialization_script(&init_js)
         .on_new_window(move |url, _features| {
             if url.as_str() != "about:blank" && is_allowed_oauth_url(&url, allowed_hosts) {
                 if let Some(win) = app_for_popup.get_webview_window(&win_label_popup) {
@@ -1925,6 +2002,10 @@ pub async fn start_webview_oauth(
             }
             tauri::webview::NewWindowResponse::Deny
         });
+
+    if !init_js.is_empty() {
+        builder = builder.initialization_script(&init_js);
+    }
 
     if matches!(mode, OAuthMode::TraeCapture) {
         let app_nav = app_handle.clone();
@@ -2166,6 +2247,72 @@ pub async fn start_webview_oauth(
                 }
             });
         }
+        OAuthMode::MiniMaxDevicePoll { auth } => {
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    if flow_seq.load(Ordering::SeqCst) != flow_id
+                        || app_handle.get_webview_window(&win_label).is_none()
+                    {
+                        break;
+                    }
+                    if auth.is_expired() {
+                        if flow_seq.load(Ordering::SeqCst) == flow_id {
+                            let _ = app_handle.emit(
+                                "qwitch://oauth-error",
+                                "MiniMax 内置授权登录已超时，请重新发起授权",
+                            );
+                            if let Some(win) = app_handle.get_webview_window(&win_label) {
+                                let _ = win.close();
+                            }
+                        }
+                        break;
+                    }
+                    match MiniMaxAdapter::poll_device_authorization(&auth, host_arc.as_ref()).await
+                    {
+                        Ok(crate::adapter::minimax::DeviceAuthPoll::Pending) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                auth.poll_interval_ms(),
+                            ))
+                            .await;
+                        }
+                        Ok(crate::adapter::minimax::DeviceAuthPoll::SlowDown) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                auth.poll_interval_ms() + 5_000,
+                            ))
+                            .await;
+                        }
+                        Ok(crate::adapter::minimax::DeviceAuthPoll::Ready(envelope)) => {
+                            persist_oauth_envelope(
+                                &app_handle,
+                                &db,
+                                &host_arc,
+                                &master_key,
+                                &adapter,
+                                &scheduler_arc,
+                                &flow_seq,
+                                flow_id,
+                                &win_label,
+                                &tool_id_owned,
+                                &label_owned,
+                                target_id_owned.as_deref(),
+                                *envelope,
+                            )
+                            .await;
+                            break;
+                        }
+                        Err(err) => {
+                            if flow_seq.load(Ordering::SeqCst) == flow_id {
+                                let _ = app_handle.emit("qwitch://oauth-error", format!("{err}"));
+                                if let Some(win) = app_handle.get_webview_window(&win_label) {
+                                    let _ = win.close();
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+        }
     }
 
     Ok(())
@@ -2298,5 +2445,29 @@ mod tests {
             qd
         ));
         assert!(is_allowed_oauth_url(&"about:blank".parse().unwrap(), qd));
+    }
+
+    #[test]
+    fn minimax_oauth_whitelist_covers_captcha_iframe_domains() {
+        // on_navigation 会校验 iframe 导航：腾讯 TCaptcha 的 iframe 必须在白名单内，
+        // 否则登录页会一直停在“获取验证码/验证组件加载失败”。
+        let mm = allowed_oauth_hosts("minimax_code_cn");
+        for url in [
+            "https://account.minimax.cn/oauth-authorize?user_code=ABCD-EFGH",
+            "https://account.minimax.cn/unified-login?login_redirect=%2Foauth-authorize",
+            "https://turing.captcha.qcloud.com/TCaptcha.js",
+            "https://ca.turing.captcha.qcloud.com/",
+            "https://cloudcache.tencentcs.com/",
+            "https://static.hailuoai.com/app.js",
+        ] {
+            assert!(
+                is_allowed_oauth_url(&url.parse().unwrap(), mm),
+                "应允许 {url}"
+            );
+        }
+        assert!(!is_allowed_oauth_url(
+            &"https://evil.example.com/steal".parse().unwrap(),
+            mm
+        ));
     }
 }

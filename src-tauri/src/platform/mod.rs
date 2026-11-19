@@ -89,6 +89,12 @@ pub fn client_spec(tool_id: &str) -> Option<ClientSpec> {
             win_exe_names: &["Qoder CN.exe", "Qoder.exe"],
             win_folder_names: &["Qoder CN", "Qoder"],
         }),
+        "minimax_code_cn" => Some(ClientSpec {
+            mac_app_names: &["MiniMax Code.app"],
+            mac_process_names: &["MiniMax Code"],
+            win_exe_names: &["MiniMax Code.exe"],
+            win_folder_names: &["MiniMax Code", "MiniMax"],
+        }),
         _ => None,
     }
 }
@@ -657,6 +663,7 @@ impl PlatformHost for NativePlatformHost {
                     .unwrap_or_else(|| app_support.join("com.qoder.app")),
                 "qoder_cn" => find_latest_prefixed_dir(&app_support, "com.qodercn.app")
                     .unwrap_or_else(|| app_support.join("com.qodercn.app")),
+                "minimax_code_cn" => app_support.join("MiniMax"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)
@@ -681,6 +688,7 @@ impl PlatformHost for NativePlatformHost {
                     .unwrap_or_else(|| roaming.join("com.qoder.app")),
                 "qoder_cn" => find_latest_prefixed_dir(&roaming, "com.qodercn.app")
                     .unwrap_or_else(|| roaming.join("com.qodercn.app")),
+                "minimax_code_cn" => roaming.join("MiniMax"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)

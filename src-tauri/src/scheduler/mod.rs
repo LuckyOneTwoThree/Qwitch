@@ -166,6 +166,34 @@ impl AntiRiskScheduler {
                 continue;
             }
 
+            // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），避免过期后整批 401
+            let cred = match adapter.refresh_credential(&cred).await {
+                Ok(Some(updated)) => {
+                    let _ = db.bind_account_credential(master_key, &summary.id, None, &updated);
+                    updated
+                }
+                Ok(None) => cred,
+                Err(err) => {
+                    failed_count += 1;
+                    let code = handle_adapter_failure(
+                        db,
+                        &summary.id,
+                        &summary.tool_id,
+                        &summary.label,
+                        "claim",
+                        err,
+                    );
+                    if matches!(
+                        code,
+                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+                    ) {
+                        risk_broken_tools.insert(summary.tool_id.clone(), ());
+                    }
+                    let _ = app.emit("qwitch://account-updated", &summary.id);
+                    continue;
+                }
+            };
+
             let device_key = adapter.daily_claim_device_key();
             let device_scope = device_key
                 .as_deref()
@@ -504,6 +532,34 @@ impl AntiRiskScheduler {
                 );
                 continue;
             }
+
+            // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken）
+            let cred = match adapter.refresh_credential(&cred).await {
+                Ok(Some(updated)) => {
+                    let _ = db.bind_account_credential(master_key, &summary.id, None, &updated);
+                    updated
+                }
+                Ok(None) => cred,
+                Err(err) => {
+                    failed_count += 1;
+                    let code = handle_adapter_failure(
+                        db,
+                        &summary.id,
+                        &summary.tool_id,
+                        &summary.label,
+                        "query",
+                        err,
+                    );
+                    if matches!(
+                        code,
+                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+                    ) {
+                        risk_broken_tools.insert(summary.tool_id.clone(), ());
+                    }
+                    let _ = app.emit("qwitch://account-updated", &summary.id);
+                    continue;
+                }
+            };
 
             let _ = app.emit(
                 "qwitch://batch-progress",

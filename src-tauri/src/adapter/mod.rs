@@ -1,5 +1,6 @@
 pub mod common;
 pub mod external;
+pub mod minimax;
 pub mod qoder;
 pub mod trae;
 pub mod workbuddy;
@@ -147,6 +148,16 @@ pub trait ToolAdapter: Send + Sync {
         precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError>;
 
+    /// 请求前按需刷新凭据（如 OAuth refresh token）。
+    /// 返回 Some 表示凭据已更新，调用方需持久化并继续使用新凭据；None 表示无需刷新。
+    async fn refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let _ = cred;
+        Ok(None)
+    }
+
     async fn apply_session(
         &self,
         host: &dyn PlatformHost,
@@ -181,6 +192,7 @@ pub fn create_all_adapters(
         Arc::new(trae::TraeAdapter::with_host(true, host)),
         Arc::new(workbuddy::WorkBuddyAdapter::new()),
         Arc::new(qoder::QoderAdapter::new()),
+        Arc::new(minimax::MiniMaxAdapter::new()),
     ];
     for adapter in builtins {
         map.insert(adapter.manifest().id.clone(), adapter);
@@ -211,7 +223,14 @@ pub fn is_valid_adapter_id(id: &str) -> bool {
 }
 
 /// 内置与历史数据保留的适配器 ID，外部插件不得使用（防止冒名接收旧账号凭据）
-pub const RESERVED_ADAPTER_IDS: &[&str] = &["trae", "qoder", "trae_cn", "workbuddy", "qoder_cn"];
+pub const RESERVED_ADAPTER_IDS: &[&str] = &[
+    "trae",
+    "qoder",
+    "trae_cn",
+    "workbuddy",
+    "qoder_cn",
+    "minimax_code_cn",
+];
 
 #[cfg(test)]
 mod tests {

@@ -24,20 +24,20 @@ jobs:
       - run: npm run build
       - run: npm test
 
-  release:
+  build:
     needs: verify
-    permissions:
-      contents: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
+            rust_targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+            tauri_args: "--target universal-apple-darwin"
+            artifact_name: "release-macos-universal"
           - platform: windows-latest
-            args: "--target x86_64-pc-windows-msvc"
+            rust_targets: "x86_64-pc-windows-msvc"
+            tauri_args: "--target x86_64-pc-windows-msvc"
+            artifact_name: "release-windows-x64"
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
+          targets: ${{ matrix.rust_targets }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -62,18 +62,107 @@ jobs:
         run: npm ci
 
       - name: Rust tests
-        if: matrix.args != '--target x86_64-apple-darwin'
         working-directory: src-tauri
         run: cargo test --all-targets
 
-      - name: Build and upload Tauri bundle
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Tauri bundles
+        run: npx tauri build ${{ matrix.tauri_args }}
+
+      - name: Stage macOS Universal artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          BIN="src-tauri/target/universal-apple-darwin/release/bundle/macos/Qwitch.app/Contents/MacOS/qwitch"
+          ARCHS="$(lipo -archs "$BIN")"
+          echo "macOS binary architectures: $ARCHS"
+          if [[ " $ARCHS " != *" arm64 "* ]] || [[ " $ARCHS " != *" x86_64 "* ]]; then
+            echo "Expected universal binary with both arm64 and x86_64, got: $ARCHS" >&2
+            exit 1
+          fi
+          mkdir -p dist-release
+          shopt -s nullglob
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg dist-release/
+          ls -lh dist-release/
+
+      - name: Stage Windows x64 artifacts
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          shopt -s nullglob
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe dist-release/
+          cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi dist-release/
+          ls -lh dist-release/
+
+      - name: Upload platform release artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-          releaseName: "Qwitch ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}"
-          releaseBody: "Qwitch desktop installers for macOS and Windows (draft release — review and publish)."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          name: ${{ matrix.artifact_name }}
+          path: dist-release/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish formal GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag_name }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+
+          if [[ "$TAG" == *-* ]]; then
+            RELEASE_FLAG="--prerelease"
+          else
+            RELEASE_FLAG="--latest"
+          fi
+
+          cat <<'EOF' > release-notes.md
+          ### 下载说明 / Downloads
+
+          - **macOS (`*universal.dmg`)**：Universal 通用包，同时原生支持 Apple Silicon (M 系列) 与 Intel Mac，无需 Rosetta 2。
+            - 如系统提示“已损坏”或无法验证开发者（首次开源版本暂未配置 Apple 公证签名），拖入 `/Applications` 后执行：
+              ```bash
+              xattr -cr /Applications/Qwitch.app
+              ```
+          - **Windows (`*x64-setup.exe` / `*x64*.msi`)**：适用于 Windows x64 桌面端安装。
+          - **完整性校验**：下载后可对照 `SHA256SUMS.txt` 校验安装包哈希值。
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+            gh release edit "$TAG" \
+              --draft=false \
+              "$RELEASE_FLAG" \
+              --title "Qwitch $TAG" \
+              --notes-file release-notes.md
+          else
+            gh release create "$TAG" release-assets/* \
+              --target "${{ github.sha }}" \
+              --title "Qwitch $TAG" \
+              --notes "$(cat release-notes.md)" \
+              --generate-notes \
+              "$RELEASE_FLAG"
+          fi

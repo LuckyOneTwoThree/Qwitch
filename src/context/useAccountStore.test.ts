@@ -297,4 +297,33 @@ describe("useAccountStore", () => {
     expect(registered).toContain("qwitch://account-updated");
     expect(registered).toContain("qwitch://settings-updated");
   });
+
+  it("托盘窗口同样触发更新检查（否则更新条带永远不显示）", async () => {
+    const { deps } = makeDeps({ isTauriRuntime: true, isTrayWindow: true });
+    const checkAppUpdate = vi.fn().mockResolvedValue(null);
+    h.invoke.mockResolvedValue([]);
+
+    // 用短超时加速：托盘分支为 1500ms
+    vi.useFakeTimers();
+    try {
+      renderHook(() =>
+        useAccountStore({
+          ...deps,
+          checkAppUpdate,
+        })
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1600);
+        await Promise.resolve();
+      });
+      // 主窗口与托盘是两个独立 webview，updateInfo 不跨窗口共享，
+      // 因此托盘必须自己发起检查，否则条带恒不显示
+      expect(checkAppUpdate).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

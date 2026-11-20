@@ -1311,21 +1311,29 @@ export function useAccountStore({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
   }, [isInitializing, isTrayWindow]);
 
-  // 启动后静默检查一次 GitHub Releases；失败不打扰用户
+  // 启动后静默检查一次 GitHub Releases；失败不打扰用户。
+  //
+  // **托盘窗口同样需要检查**：主窗口与托盘是两个独立 webview，各自持有自己的
+  // `updateInfo` 状态，不会跨窗口共享。此前这里用 `isTrayWindow` 直接跳过，
+  // 导致托盘的 `updateInfo` 恒为 null —— 更新条带永远不显示，用户只有在主窗口
+  // 才能看到更新提示。
+  //
+  // 差异仅在提示方式：主窗口用 Toast 告知；托盘不加 Toast（避免高频弹出打扰），
+  // 只让顶部条带自然出现。托盘窗口更早触发（1.5s vs 4s），因为它是高频入口。
   useEffect(() => {
-    if (!isTauriRuntime || isTrayWindow || isInitializing || updateCheckDoneRef.current) return;
+    if (!isTauriRuntime || isInitializing || updateCheckDoneRef.current) return;
     const timer = window.setTimeout(() => {
       if (updateCheckDoneRef.current) return;
       updateCheckDoneRef.current = true;
       void checkAppUpdate({ silent: true }).then((info) => {
-        if (info?.updateAvailable) {
+        if (info?.updateAvailable && !isTrayWindow) {
           showToast(
             `发现新版本 v${info.latestVersion}，可在「设置 → 软件更新」查看`,
             "info"
           );
         }
       });
-    }, 4000);
+    }, isTrayWindow ? 1500 : 4000);
     return () => window.clearTimeout(timer);
   }, [checkAppUpdate, isInitializing, isTauriRuntime, isTrayWindow, showToast]);
 

@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -87,23 +87,164 @@ fn resolve_client_executable(
     host.detect_client_executable(tool_id)
 }
 
-/// 解析导入来源宿主：指定 profile 时用 ScopedPlatformHost 把 config_dir 指向该隔离 profile，
+/// 在目录（含至多 4 层子目录）中查找 Trae CN 的 user-data 根：
+/// 即存在 `<root>/User/globalStorage/storage.json` 的目录。
+fn find_storage_root(dir: &Path, depth: u32) -> Option<PathBuf> {
+    if depth > 4 {
+        return None;
+    }
+    if dir
+        .join("User")
+        .join("globalStorage")
+        .join("storage.json")
+        .is_file()
+    {
+        return Some(dir.to_path_buf());
+    }
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(root) = find_storage_root(&p, depth + 1) {
+                return Some(root);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn extract_zip_to(_zip: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("创建解压目录失败: {e}"))?;
+    let z = _zip.to_string_lossy().to_string();
+    let d = dest.to_string_lossy().to_string();
+    // 优先 ditto（保留结构），回退 unzip
+    let ok1 = std::process::Command::new("ditto")
+        .args(["-x", "-k", &z, &d])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok1 {
+        return Ok(());
+    }
+    let ok2 = std::process::Command::new("unzip")
+        .args(["-o", "-q", &z, "-d", &d])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok2 {
+        return Ok(());
+    }
+    Err("解压 zip 失败：请安装 unzip，或改用“选择文件夹”".into())
+}
+
+#[cfg(target_os = "windows")]
+fn extract_zip_to(_zip: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("创建解压目录失败: {e}"))?;
+    let z = _zip.to_string_lossy().to_string();
+    let d = dest.to_string_lossy().to_string();
+    let ps = format!(
+        "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+        z.replace('\'', "''"),
+        d.replace('\'', "''")
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps]);
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err("解压 zip 失败（PowerShell Expand-Archive）".into())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn extract_zip_to(_zip: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("创建解压目录失败: {e}"))?;
+    let z = _zip.to_string_lossy().to_string();
+    let d = dest.to_string_lossy().to_string();
+    let ok = std::process::Command::new("unzip")
+        .args(["-o", "-q", &z, "-d", &d])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        Err("解压 zip 失败：请安装 unzip".into())
+    }
+}
+
+/// 把用户给的「导出包」解析成 Trae CN 的 user-data 根目录。
+/// 支持三种输入，尽量傻瓜化、不用用户理解内部结构：
+/// - `.zip` 导出包（自动解压、递归定位）
+/// - 文件夹（自动在其及子目录里找 `User/globalStorage/storage.json`）
+/// - 直接选中 `storage.json`
+///
+/// 返回 (根目录, 需要清理的临时目录)。
+fn resolve_profile_root_input(input: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let p = PathBuf::from(input.trim());
+    if !p.exists() {
+        return Err(format!("路径不存在：{}", p.display()));
+    }
+    if p.is_file() {
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if name.ends_with(".zip") {
+            let dest =
+                std::env::temp_dir().join(format!("qwitch-profile-{}", uuid::Uuid::new_v4()));
+            extract_zip_to(&p, &dest)?;
+            match find_storage_root(&dest, 0) {
+                Some(root) => return Ok((root, Some(dest))),
+                None => {
+                    let _ = std::fs::remove_dir_all(&dest);
+                    return Err("导出包内未找到 Trae CN 的 User/globalStorage/storage.json".into());
+                }
+            }
+        }
+        if name == "storage.json" {
+            if let Some(root) = p.parent().and_then(|g| g.parent()).and_then(|u| u.parent()) {
+                return Ok((root.to_path_buf(), None));
+            }
+        }
+        return Err("请选择 .zip 导出包，或包含 Trae CN 数据的文件夹".into());
+    }
+    let root = find_storage_root(&p, 0).ok_or_else(|| {
+        "未在该文件夹（及其子目录）中找到 Trae CN 的 User/globalStorage/storage.json".to_string()
+    })?;
+    Ok((root, None))
+}
+
+/// 解析导入来源宿主：指定导出包/文件夹时用 ScopedPlatformHost 把 config_dir 指向它，
 /// 从而采集该 profile 独立注册的设备身份（多设备方案 A）。
-fn import_host(
+fn resolve_import_host(
     host: &Arc<dyn PlatformHost>,
     tool_id: &str,
-    profile_dir: Option<&str>,
-) -> Arc<dyn PlatformHost> {
-    match profile_dir.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(dir) => {
-            let config_dir = PathBuf::from(dir).join("User").join("globalStorage");
-            Arc::new(ScopedPlatformHost::new(
-                Arc::clone(host),
-                tool_id,
-                config_dir,
+    profile: Option<&str>,
+) -> Result<(Arc<dyn PlatformHost>, Option<PathBuf>), String> {
+    match profile.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(input) => {
+            let (root, temp) = resolve_profile_root_input(input)?;
+            let config_dir = root.join("User").join("globalStorage");
+            Ok((
+                Arc::new(ScopedPlatformHost::new(
+                    Arc::clone(host),
+                    tool_id,
+                    config_dir,
+                )),
+                temp,
             ))
         }
-        None => Arc::clone(host),
+        None => Ok((Arc::clone(host), None)),
     }
 }
 
@@ -157,14 +298,12 @@ pub fn inspect_profile_dir(
     tool_id: String,
     profile_dir: String,
 ) -> Result<ProfileInspectResult, String> {
-    let dir = profile_dir.trim();
-    if dir.is_empty() {
-        return Err("设备 profile 目录为空".into());
+    let input = profile_dir.trim();
+    if input.is_empty() {
+        return Err("设备导出包/目录为空".into());
     }
-    let storage = PathBuf::from(dir)
-        .join("User")
-        .join("globalStorage")
-        .join("storage.json");
+    let (root, temp) = resolve_profile_root_input(input)?;
+    let storage = root.join("User").join("globalStorage").join("storage.json");
     let has_storage = storage.is_file();
     let device_id = if has_storage {
         read_device_id_from_storage(&storage)
@@ -181,6 +320,9 @@ pub fn inspect_profile_dir(
         (Some(a), Some(b)) => Some(a == b),
         _ => None,
     };
+    if let Some(t) = temp {
+        let _ = std::fs::remove_dir_all(&t);
+    }
     Ok(ProfileInspectResult {
         has_storage,
         storage_path: storage.to_string_lossy().to_string(),
@@ -204,6 +346,28 @@ pub async fn pick_folder(app: AppHandle, default_path: Option<String>) -> Option
         let picked = dialog
             .pick_folder()
             .map(|p| p.to_string_lossy().to_string());
+        let _ = tx.send(picked);
+    });
+    if spawn.is_err() {
+        return None;
+    }
+    rx.await.ok().flatten()
+}
+
+/// 原生“选择文件”对话框（用于选择导出的 zip 包）。
+#[tauri::command]
+pub async fn pick_file(app: AppHandle, default_path: Option<String>) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let def = default_path.filter(|p| !p.trim().is_empty());
+    let spawn = app.run_on_main_thread(move || {
+        let mut dialog = rfd::FileDialog::new().add_filter("Trae CN 导出包", &["zip"]);
+        if let Some(p) = def.as_deref() {
+            let path = std::path::Path::new(p);
+            if path.is_dir() {
+                dialog = dialog.set_directory(path);
+            }
+        }
+        let picked = dialog.pick_file().map(|p| p.to_string_lossy().to_string());
         let _ = tx.send(picked);
     });
     if spawn.is_err() {
@@ -548,11 +712,14 @@ pub async fn import_local_account(
         return Err(format!("适配器 {tool_id} 不支持本机导入"));
     }
 
-    let host = import_host(&state.host, &tool_id, profile_dir.as_deref());
+    let (host, temp_import) = resolve_import_host(&state.host, &tool_id, profile_dir.as_deref())?;
     let mut envelope = adapter
         .import_from_local(host.as_ref())
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(t) = temp_import.as_ref() {
+        let _ = std::fs::remove_dir_all(t);
+    }
     if envelope.tool_id != tool_id {
         return Err(format!(
             "适配器返回工具标识不匹配：期望 {tool_id}，实际 {}",
@@ -680,11 +847,14 @@ pub async fn preview_local_account(
         return Err(format!("适配器 {tool_id} 不支持本机导入"));
     }
 
-    let host = import_host(&state.host, &tool_id, profile_dir.as_deref());
+    let (host, temp_import) = resolve_import_host(&state.host, &tool_id, profile_dir.as_deref())?;
     let envelope = adapter
         .import_from_local(host.as_ref())
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(t) = temp_import.as_ref() {
+        let _ = std::fs::remove_dir_all(t);
+    }
     let matched = state
         .db
         .find_account_id_by_uid(&tool_id, &envelope.uid)
@@ -2707,5 +2877,37 @@ mod tests {
             &"https://evil.example.com/steal".parse().unwrap(),
             mm
         ));
+    }
+}
+
+#[cfg(test)]
+mod profile_resolve_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_profile_root_supports_dir_nested_and_storage_json() {
+        let base = std::env::temp_dir().join(format!("qw_profile_{}", uuid::Uuid::new_v4()));
+        let root = base.join("Trae CN");
+        std::fs::create_dir_all(root.join("User/globalStorage")).unwrap();
+        std::fs::write(root.join("User/globalStorage/storage.json"), b"{}").unwrap();
+
+        // 直接选 user-data 根
+        let (r1, t1) = resolve_profile_root_input(root.to_str().unwrap()).unwrap();
+        assert_eq!(r1, root);
+        assert!(t1.is_none());
+
+        // 选上级目录（递归定位）
+        let (r2, _) = resolve_profile_root_input(base.to_str().unwrap()).unwrap();
+        assert_eq!(r2, root);
+
+        // 直接选 storage.json
+        let sj = root.join("User/globalStorage/storage.json");
+        let (r3, _) = resolve_profile_root_input(sj.to_str().unwrap()).unwrap();
+        assert_eq!(r3, root);
+
+        // 不存在的路径报错
+        assert!(resolve_profile_root_input("/no/such/path/xyz").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { FolderOpen, Globe, HardDriveDownload, KeyRound, Loader2, X } from "lucide-react";
+import { Copy, FileArchive, FolderOpen, Globe, HardDriveDownload, KeyRound, Loader2, X } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { getVisibleTools } from "../domain/toolRegistry";
 import { ToolBrandIcon } from "./ToolBrandIcon";
@@ -28,7 +28,7 @@ export function ImportAccountModal({  open,
   defaultToolId?: ToolId;
   defaultMethod?: AuthMethod;
 }) {
-  const { adapters, importAccount, launchToolProfile, pickFolder, inspectProfileDir, showToast } =
+  const { adapters, importAccount, pickFolder, pickFile, inspectProfileDir, showToast } =
     useQwitch();
   const titleId = useId();
   const visibleTools = useMemo(() => getVisibleTools(adapters), [adapters]);
@@ -40,7 +40,6 @@ export function ImportAccountModal({  open,
   const [submitting, setSubmitting] = useState(false);
   const [profileMode, setProfileMode] = useState<"default" | "device">("default");
   const [profileDir, setProfileDir] = useState("");
-  const [launching, setLaunching] = useState(false);
   const [devicePlatform, setDevicePlatform] = useState<DevicePlatform>(detectImportPlatform);
   const [inspectResult, setInspectResult] = useState<ProfileInspectResult | null>(null);
   const [inspecting, setInspecting] = useState(false);
@@ -162,21 +161,26 @@ export function ImportAccountModal({  open,
     }
   };
 
-  const handleLaunchProfile = async () => {
-    const dir = profileDir.trim();
-    if (!dir) {
-      showToast("请先填写设备 profile 目录", "warning");
-      return;
-    }
-    setLaunching(true);
+  const handlePickFile = async () => {
     try {
-      const saved = await launchToolProfile(toolId, dir);
-      setProfileDir(saved);
-      showToast("已启动隔离客户端，请在其中登录目标账号后返回点“确认导入”", "info");
+      const picked = await pickFile(profileDir.trim() || undefined);
+      if (picked) setProfileDir(picked);
     } catch (err) {
-      showToast(`启动隔离客户端失败：${String(err)}`, "error");
-    } finally {
-      setLaunching(false);
+      showToast(`选择导出包失败：${String(err)}`, "error");
+    }
+  };
+
+  const exportCommand = (os: DevicePlatform): string =>
+    os === "win"
+      ? `$d="$env:APPDATA\\Trae CN"; $t="$env:TEMP\\TraeCN-profile\\Trae CN"; Remove-Item -Recurse -Force "$env:TEMP\\TraeCN-profile" -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force "$t\\User\\globalStorage","$t\\aha" | Out-Null; Copy-Item "$d\\User\\globalStorage\\storage.json" "$t\\User\\globalStorage\\" -Force; if(Test-Path "$d\\User\\globalStorage\\state.vscdb"){Copy-Item "$d\\User\\globalStorage\\state.vscdb" "$t\\User\\globalStorage\\" -Force}; if(Test-Path "$d\\aha"){Copy-Item "$d\\aha\\*" "$t\\aha\\" -Recurse -Force}; $o="$env:USERPROFILE\\Desktop\\TraeCN-profile.zip"; if(Test-Path $o){Remove-Item $o}; Compress-Archive -Path "$t\\*" -DestinationPath $o -Force; Write-Host "已导出 -> $o"`
+      : `D="$HOME/Library/Application Support/Trae CN"; T="$(mktemp -d)/Trae CN"; mkdir -p "$T/User/globalStorage" "$T/aha"; cp "$D/User/globalStorage/storage.json" "$T/User/globalStorage/" 2>/dev/null; [ -f "$D/User/globalStorage/state.vscdb" ] && cp "$D/User/globalStorage/state.vscdb" "$T/User/globalStorage/"; cp -R "$D/aha/." "$T/aha/" 2>/dev/null; O="$HOME/Desktop/TraeCN-profile.zip"; rm -f "$O"; ditto -c -k --sequesterRsrc "$T" "$O"; echo "已导出 -> $O"`;
+
+  const handleCopyExport = async () => {
+    try {
+      await navigator.clipboard.writeText(exportCommand(devicePlatform));
+      showToast("导出命令已复制，去那台设备粘贴执行即可", "success");
+    } catch {
+      showToast("复制失败，请手动选中命令复制", "error");
     }
   };
 
@@ -404,95 +408,72 @@ export function ImportAccountModal({  open,
                 </button>
               </div>
               {profileMode === "device" && (
-                <div className="mt-2 space-y-2">
-                  <div className="flex items-center gap-2">
+                <div className="mt-2 space-y-3">
+                  <div className="rounded-lg bg-zinc-50 p-2.5 dark:bg-zinc-800/40">
+                    <div className="mb-1.5 text-[11px] font-medium text-zinc-700 dark:text-zinc-200">
+                      第 1 步 · 在装有 Trae CN 的那台设备上导出
+                    </div>
+                    <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">那台设备系统</span>
+                      <div className="inline-flex rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-700/70">
+                        {(["mac", "win"] as DevicePlatform[]).map((p) => (
+                          <button key={p} type="button" onClick={() => setDevicePlatform(p)}
+                            className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${devicePlatform === p ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-800 dark:text-zinc-100" : "text-zinc-600 dark:text-zinc-300"}`}>
+                            {p === "mac" ? "macOS" : "Windows"}
+                          </button>
+                        ))}
+                      </div>
+                      <button type="button" onClick={() => void handleCopyExport()}
+                        className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900">
+                        <Copy className="h-3 w-3" aria-hidden="true" /> 复制导出命令
+                      </button>
+                    </div>
+                    <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-zinc-200 bg-white p-2 text-[10px] leading-snug text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">{exportCommand(devicePlatform)}</pre>
+                    <p className="mt-1 text-[10px] leading-snug text-zinc-500 dark:text-zinc-400">
+                      先完全退出那台设备的 Trae CN，把上面的命令粘贴到 {devicePlatform === "win" ? "PowerShell" : "终端"} 执行；会在桌面生成 TraeCN-profile.zip，把它拷到本机。
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="mb-1.5 text-[11px] font-medium text-zinc-700 dark:text-zinc-200">
+                      第 2 步 · 把 zip（或整个文件夹）选进来
+                    </div>
                     <input
                       type="text"
-                      placeholder="该账号 Trae CN 的 user-data 根目录（含 User/globalStorage/storage.json）"
+                      placeholder="已选的 .zip / 文件夹路径（通常点下面按钮选择即可）"
                       value={profileDir}
                       onChange={(e) => setProfileDir(e.target.value)}
-                      aria-label="设备 profile 目录"
-                      className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      aria-label="设备导出包路径"
+                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-[11px] text-zinc-900 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                     />
-                    <button
-                      type="button"
-                      onClick={() => void handlePickFolder()}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-2 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                    >
-                      <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" />
-                      选择文件夹
-                    </button>
-                  </div>
-
-                  {profileDir.trim() && (
-                    <p className="text-[11px] leading-snug">
-                      {inspecting ? (
-                        <span className="text-zinc-500 dark:text-zinc-400">校验中…</span>
-                      ) : inspectResult ? (
-                        !inspectResult.hasStorage ? (
-                          <span className="text-rose-600 dark:text-rose-400">
-                            未找到 storage.json：请确认目录是该账号 Trae CN 的 user-data 根
-                          </span>
-                        ) : inspectResult.sameAsLocal ? (
-                          <span className="text-amber-600 dark:text-amber-400">
-                            ⚠️ 该设备与本机相同，无法并行签到（请换另一台设备 / 用户 / 虚拟机）
-                          </span>
-                        ) : (
-                          <span className="text-emerald-600 dark:text-emerald-400">
-                            ✅ 检测到设备 {inspectResult.deviceIdMasked ?? "（未知）"}，可用于多设备签到
-                          </span>
-                        )
-                      ) : (
-                        <span className="text-zinc-400">&nbsp;</span>
-                      )}
-                    </p>
-                  )}
-
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                      来源设备平台
-                    </span>
-                    <div className="inline-flex rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800">
-                      {(["mac", "win"] as DevicePlatform[]).map((p) => (
-                        <button
-                          key={p}
-                          type="button"
-                          onClick={() => setDevicePlatform(p)}
-                          className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                            devicePlatform === p
-                              ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100"
-                              : "text-zinc-600 dark:text-zinc-400"
-                          }`}
-                        >
-                          {p === "mac" ? "macOS" : "Windows"}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {detectImportPlatform() === "win" ? (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => void handleLaunchProfile()}
-                        disabled={launching || !profileDir.trim()}
-                        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                      >
-                        {launching && (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                        )}
-                        启动隔离客户端
+                    <div className="mt-1.5 flex flex-wrap gap-2">
+                      <button type="button" onClick={() => void handlePickFile()}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900">
+                        <FileArchive className="h-3.5 w-3.5" aria-hidden="true" /> 选择导出包(.zip)
                       </button>
-                      <span className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
-                        先在该实例登录目标账号，再点“确认导入”采集设备身份
-                      </span>
+                      <button type="button" onClick={() => void handlePickFolder()}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">
+                        <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" /> 选择文件夹
+                      </button>
                     </div>
-                  ) : (
-                    <p className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
-                      在另一台设备 / 第二个 macOS 用户 / 虚拟机里登录该账号，把它的 Trae CN
-                      数据目录导出后填到上方；本机不支持多开同一客户端。
-                    </p>
-                  )}
+                    {profileDir.trim() && (
+                      <p className="mt-1.5 text-[11px] leading-snug">
+                        {inspecting ? (
+                          <span className="text-zinc-500 dark:text-zinc-400">校验中…</span>
+                        ) : inspectResult ? (
+                          !inspectResult.hasStorage ? (
+                            <span className="text-rose-600 dark:text-rose-400">无法识别：请选 Trae CN 导出的 zip，或含 User/globalStorage/storage.json 的文件夹</span>
+                          ) : inspectResult.sameAsLocal ? (
+                            <span className="text-amber-600 dark:text-amber-400">⚠️ 该设备与本机相同（同一台设备），无法并行签到；请换另一台设备/用户/虚拟机</span>
+                          ) : (
+                            <span className="text-emerald-600 dark:text-emerald-400">✅ 已识别设备 {inspectResult.deviceIdMasked ?? "（未知）"}，可添加</span>
+                          )
+                        ) : (
+                          <span className="text-zinc-400">&nbsp;</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

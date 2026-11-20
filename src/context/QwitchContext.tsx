@@ -98,6 +98,7 @@ interface QwitchContextValue {
   ) => Promise<void>;
   launchToolProfile: (toolId: ToolId, profileDir: string) => Promise<string>;
   pickFolder: (defaultPath?: string) => Promise<string | null>;
+  pickFile: (defaultPath?: string) => Promise<string | null>;
   inspectProfileDir: (toolId: ToolId, profileDir: string) => Promise<ProfileInspectResult>;
   previewLocalAccount: (toolId: ToolId, accountId?: string) => Promise<LocalAccountPreview>;
   renameAccount: (accountId: string, label: string) => Promise<void>;
@@ -1309,6 +1310,14 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     [isTauriRuntime]
   );
 
+  const pickFile = useCallback(
+    async (defaultPath?: string): Promise<string | null> => {
+      if (!isTauriRuntime) return null;
+      return invoke<string | null>("pick_file", { defaultPath: defaultPath ?? null });
+    },
+    [isTauriRuntime]
+  );
+
   const inspectProfileDir = useCallback(
     async (toolId: ToolId, profileDir: string): Promise<ProfileInspectResult> => {
       if (!isTauriRuntime) {
@@ -1843,6 +1852,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       importAccount,
       launchToolProfile,
       pickFolder,
+      pickFile,
       inspectProfileDir,
       previewLocalAccount,
       renameAccount,
@@ -1893,6 +1903,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       importAccount,
       launchToolProfile,
       pickFolder,
+      pickFile,
       inspectProfileDir,
       previewLocalAccount,
       renameAccount,

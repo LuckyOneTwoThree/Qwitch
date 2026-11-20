@@ -312,6 +312,7 @@ pub fn run() {
             commands::launch_tool_profile,
             commands::inspect_profile_dir,
             commands::pick_folder,
+            commands::pick_file,
             commands::add_account_by_token,
             commands::start_webview_oauth,
             commands::refresh_account_quota,

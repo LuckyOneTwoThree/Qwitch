@@ -470,6 +470,12 @@ impl NativePlatformHost {
         }
     }
 
+    /// 按进程名判断是否运行。
+    ///
+    /// **注意**：`pgrep -x` 对 Electron 应用的 Native Messaging Host 同样会命中
+    /// —— 该进程的 `comm` 字段就是主二进制路径（如
+    /// `/Applications/Qoder CN.app/Contents/MacOS/Qoder CN`），只是 argv 多了
+    /// 一个 `.cjs` 脚本参数。因此这里在命中后必须复核 argv，排除辅助进程。
     #[cfg(target_os = "macos")]
     fn is_macos_proc_running(proc_name: &str) -> Result<bool, HostError> {
         if proc_name.len() <= 15 {
@@ -478,7 +484,11 @@ impl NativePlatformHost {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()?;
-            return Ok(status.success());
+            if !status.success() {
+                return Ok(false);
+            }
+            // 命中后复核：仅当存在非辅助进程的实例时才判定为运行中
+            return Ok(Self::has_non_helper_instance(proc_name));
         }
         let needle = format!("/Contents/MacOS/{}", escape_pgrep_regex(proc_name));
         let status = Command::new("pgrep")
@@ -498,20 +508,122 @@ impl NativePlatformHost {
         Ok(fallback_status.success())
     }
 
+    /// 在 `pgrep -x <proc_name>` 命中的进程里，筛选是否存在**非辅助**实例。
+    ///
+    /// 用于排除 Native Messaging Host / Renderer / GPU 等共享同名 `comm` 的辅助进程。
+    #[cfg(target_os = "macos")]
+    fn has_non_helper_instance(proc_name: &str) -> bool {
+        let Ok(output) = Command::new("pgrep")
+            .args(["-x", proc_name])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            // pgrep 二次调用失败时保守返回 false（不误报运行中）
+            return false;
+        };
+        let pids = String::from_utf8_lossy(&output.stdout);
+        for pid in pids.split_whitespace() {
+            let Ok(ps_out) = Command::new("ps")
+                .args(["-p", pid, "-o", "command="])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+            else {
+                continue;
+            };
+            let command = String::from_utf8_lossy(&ps_out.stdout);
+            let command = command.trim();
+            if command.is_empty() {
+                continue;
+            }
+            // 去掉 argv[0]（即 comm 对应的主二进制），只看额外参数
+            let rest = match command.find(' ') {
+                Some(idx) => command[idx + 1..].trim(),
+                None => "",
+            };
+            if rest.is_empty() || !Self::is_macos_helper_argv(rest) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 判断 Electron 系 macOS 应用的**主进程**是否在运行。
+    ///
+    /// 不能用 `pgrep -f "/X.app/Contents/MacOS/"` 直接判定：该模式会同时匹配到
+    /// 大量辅助进程，最典型的是 Chrome Native Messaging Host —— 官方客户端注册
+    /// 的浏览器扩展配套进程，其命令行形如：
+    ///
+    /// ```text
+    /// /Applications/Qoder CN.app/Contents/MacOS/Qoder CN \
+    ///   /Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs
+    /// ```
+    ///
+    /// 只要 Chrome 在运行且装了对应扩展，该进程就常驻，导致 Qwitch 把「浏览器扩展
+    /// 通道存活」误判为「客户端正在运行」，进而：UI 显示运行中、切号前触发不必要的
+    /// 终止流程、`force_kill` 提示误导用户。
+    ///
+    /// 因此这里改为解析 `ps` 的完整 argv，排除已知辅助进程形态后，仅当存在
+    /// 「argv[0] 即主二进制且无辅助标识」的进程时才判定为运行中。
     #[cfg(target_os = "macos")]
     fn is_macos_app_bundle_running(app_name: &str) -> bool {
-        let bundle_needle = format!("/{}/Contents/MacOS/", escape_pgrep_regex(app_name));
-        if Command::new("pgrep")
-            .args(["-f", &bundle_needle])
-            .stdout(Stdio::null())
+        let clean = app_name.trim_end_matches(".app");
+        let main_bin = format!("/{}/Contents/MacOS/{}", app_name, clean);
+
+        let Ok(output) = Command::new("ps")
+            .args(["-axo", "pid=,command="])
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-        {
+            .output()
+        else {
+            // ps 不可用时退回保守判定（宁可报「未运行」也不误报运行中，
+            // 避免用户被引导去终止一个并未运行的主进程）
+            return false;
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let mut parts = line.trim_start().splitn(2, ' ');
+            let Some(_pid) = parts.next() else { continue };
+            let Some(command) = parts.next() else {
+                continue;
+            };
+            let command = command.trim();
+            if !command.starts_with(&main_bin) {
+                continue;
+            }
+
+            // 主二进制之后的部分：为空 → 主进程；否则需排除辅助进程形态
+            let rest = command[main_bin.len()..].trim();
+            if rest.is_empty() {
+                return true;
+            }
+            if Self::is_macos_helper_argv(rest) {
+                continue;
+            }
+            // 非辅助参数的额外 argv（如 --no-sandbox / 打开的工程路径）视为主进程
             return true;
         }
-        let clean = app_name.trim_end_matches(".app");
-        Self::is_macos_proc_running(clean).unwrap_or(false)
+        false
+    }
+
+    /// 判断 Electron 应用主二进制之后的 argv 是否属于**辅助进程**。
+    ///
+    /// 覆盖两类已知形态：
+    /// - 显式脚本参数：`.../native-messaging-host/qoder-app-host.cjs`、
+    ///   `--type=renderer`、`--type=gpu-process` 等；
+    /// - 路径参数指向 Resources 下的辅助资源。
+    #[cfg(target_os = "macos")]
+    fn is_macos_helper_argv(rest: &str) -> bool {
+        const HELPER_MARKERS: &[&str] = &[
+            "native-messaging-host",
+            "--type=",
+            "Helper",
+            "crashpad",
+            "GPU Process",
+        ];
+        HELPER_MARKERS.iter().any(|marker| rest.contains(marker))
     }
 
     fn is_client_running_names(
@@ -2015,6 +2127,98 @@ mod client_executable_validation_tests {
         }
         if checked == 0 {
             eprintln!("跳过：本机未安装任何受支持客户端");
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_process_detection_tests {
+    use super::{NativePlatformHost, PlatformHost};
+
+    /// 复刻线上误判场景：Qoder 官方客户端注册的 Chrome Native Messaging Host
+    /// 命令行形如 `<主二进制> <Resources>/native-messaging-host/qoder-app-host.cjs`。
+    /// 该进程在 Chrome 运行期间常驻，曾被误判为「客户端正在运行」。
+    #[test]
+    fn native_messaging_host_is_treated_as_helper_not_main_process() {
+        let rest = "/Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs";
+        assert!(
+            NativePlatformHost::is_macos_helper_argv(rest),
+            "Native Messaging Host 必须被识别为辅助进程"
+        );
+    }
+
+    #[test]
+    fn electron_renderer_and_gpu_helpers_are_excluded() {
+        for rest in [
+            "--type=renderer --enable-sandbox",
+            "--type=gpu-process",
+            "--type=utility --utility-sub-type=network.mojom.NetworkService",
+            "/Applications/X.app/Contents/Frameworks/X Helper.app/Contents/MacOS/X Helper",
+            "--product-version=1.2.3 --type=crashpad-handler",
+        ] {
+            assert!(
+                NativePlatformHost::is_macos_helper_argv(rest),
+                "辅助进程参数应被排除：{rest}"
+            );
+        }
+    }
+
+    #[test]
+    fn main_process_argv_forms_are_not_excluded() {
+        // 无额外参数：标准主进程
+        assert!(!NativePlatformHost::is_macos_helper_argv(""));
+        // 常见 Electron 启动参数，仍属主进程
+        assert!(!NativePlatformHost::is_macos_helper_argv("--no-sandbox"));
+        // 打开工程路径（Trae/Qoder 常见），仍属主进程
+        assert!(!NativePlatformHost::is_macos_helper_argv(
+            "/Users/me/project"
+        ));
+        assert!(!NativePlatformHost::is_macos_helper_argv(
+            "--no-sandbox /Users/me/my-workspace"
+        ));
+    }
+
+    /// 端到端：真实探测本机 Qoder 主进程。
+    ///
+    /// 该断言只验证「不 panic 且结果稳定」，因为 CI 环境未必安装 Qoder；
+    /// 关键在于当仅有 Native Messaging Host 存活时必须返回 false。
+    #[test]
+    fn detection_does_not_report_running_for_helper_only_state() {
+        // 仅当本机确实存在该 host 进程时验证；否则跳过（CI 环境无客户端）
+        let has_helper_only = std::process::Command::new("ps")
+            .args(["-axo", "command="])
+            .output()
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.contains("native-messaging-host")
+            })
+            .unwrap_or(false);
+
+        let host = NativePlatformHost;
+        // 只要不 panic 即视为通过；结果取决于本机是否真的开着 Qoder 主进程。
+        // 核心断言在上面的 `is_macos_helper_argv` 单元测试中已精确覆盖。
+        let _running = host
+            .is_client_running("qoder_cn")
+            .expect("detection should not fail");
+
+        // 仅当本机存在 host 且**不存在**真实主进程时，才要求判定为未运行
+        if has_helper_only {
+            let has_real_main = std::process::Command::new("ps")
+                .args(["-axo", "command="])
+                .output()
+                .map(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout);
+                    s.lines().any(|l| {
+                        let t = l.trim();
+                        t.starts_with("/Applications/Qoder CN.app/Contents/MacOS/Qoder CN")
+                            && !t.contains("native-messaging-host")
+                            && !t.contains("--type=")
+                    })
+                })
+                .unwrap_or(false);
+            if !has_real_main {
+                assert!(!_running, "仅有 Native Messaging Host 时不得判定为运行中");
+            }
         }
     }
 }

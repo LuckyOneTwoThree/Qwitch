@@ -54,7 +54,7 @@ export function OverflowMenu({
         <div
           role="menu"
           aria-label={label}
-          className="absolute right-0 bottom-full z-30 mb-1 min-w-[8.5rem] animate-pop rounded-xl border border-zinc-200 bg-white p-1 shadow-float dark:border-zinc-700 dark:bg-zinc-800"
+          className="absolute left-0 bottom-full z-30 mb-1 min-w-[8rem] animate-pop rounded-xl border border-zinc-200 bg-white p-1 shadow-float dark:border-zinc-700 dark:bg-zinc-800"
         >
           {items.map((item) => (
             <button

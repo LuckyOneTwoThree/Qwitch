@@ -107,7 +107,7 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={labelledBy}
         tabIndex={-1}
-        className={`w-full ${maxWidthClass} animate-pop rounded-2xl border border-zinc-200 bg-white p-5 shadow-float outline-none dark:border-zinc-800 dark:bg-zinc-900`}
+        className={`w-full ${maxWidthClass} max-h-[calc(100vh-2rem)] animate-pop overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-5 shadow-float outline-none dark:border-zinc-800 dark:bg-zinc-900`}
       >
         {children}
       </div>

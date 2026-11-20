@@ -332,7 +332,7 @@ export function ImportAccountModal({  open,
                   >
                     <ToolBrandIcon toolId={tool.id} size="sm" decorative />
                     <div className="min-w-0">
-                      <div className="truncate whitespace-nowrap text-xs font-semibold">
+                      <div className="text-xs font-semibold leading-tight">
                         {tool.name}
                       </div>
                       <div

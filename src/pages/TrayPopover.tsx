@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowLeftRight,
   CheckCircle2,
+  Download,
   ExternalLink,
   Loader2,
   Moon,
@@ -42,9 +44,42 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     theme,
     toggleTheme,
     quitApp,
+    updateInfo,
+    updateChecking,
+    checkAppUpdate,
+    isTauriRuntime,
   } = useQwitch();
 
   const [toolFilter, setToolFilter] = useState<"all" | ToolId>("all");
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+
+  // 托盘内的更新入口：此前托盘完全没有更新提醒，用户只能进设置页才能发现新版本。
+  // 这里提供「检查 / 下载 / 安装」的最小闭环，详情仍引导至主窗口设置页。
+  const openUpdateDownload = useCallback(async () => {
+    if (!updateInfo) return;
+    const url = updateInfo.assetUrl ?? updateInfo.releaseUrl;
+    if (!url) return;
+    try {
+      await invoke("open_update_url", { url });
+    } catch {
+      /* 打开失败时静默：托盘空间不足以展示错误，主窗口设置页有完整反馈 */
+    }
+  }, [updateInfo]);
+
+  const installUpdateFromTray = useCallback(async () => {
+    if (!updateInfo?.assetUrl || !updateInfo.assetName || !updateInfo.checksumsUrl) return;
+    if (updateInstalling) return;
+    setUpdateInstalling(true);
+    try {
+      await invoke<string>("download_and_install_update", {
+        assetUrl: updateInfo.assetUrl,
+        assetName: updateInfo.assetName,
+        checksumsUrl: updateInfo.checksumsUrl,
+      });
+    } catch {
+      setUpdateInstalling(false);
+    }
+  }, [updateInfo, updateInstalling]);
 
   useEffect(() => {
     void refreshClientStatuses();
@@ -195,6 +230,45 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden rounded-[18px] border border-black/[0.08] bg-zinc-50/95 text-zinc-900 shadow-float backdrop-blur-xl dark:border-white/[0.12] dark:bg-zinc-950/95 dark:text-zinc-100">
       {/* 顶部栏 */}
+      {/* 更新条带：仅在确实有新版本时出现，占据托盘顶部一行 */}
+      {isTauriRuntime && updateInfo?.updateAvailable && (
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-indigo-500/20 bg-indigo-500/[0.08] px-3.5 py-1.5 text-[11px] text-indigo-900 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-100">
+          <Sparkles className="h-3 w-3 shrink-0 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate leading-snug">
+            新版本{" "}
+            <span className="font-mono font-semibold">v{updateInfo.latestVersion}</span>
+          </span>
+          {updateInfo.canAutoInstall && updateInfo.assetUrl ? (
+            <button
+              type="button"
+              disabled={updateInstalling}
+              onClick={() => void installUpdateFromTray()}
+              className="shrink-0 rounded-md px-1.5 py-0.5 font-medium transition hover:bg-indigo-500/15 disabled:opacity-60"
+            >
+              {updateInstalling ? "安装中" : "立即更新"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void openUpdateDownload()}
+              className="inline-flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 font-medium transition hover:bg-indigo-500/15"
+            >
+              <Download className="h-2.5 w-2.5" aria-hidden="true" />
+              下载
+            </button>
+          )}
+          {onOpenMain && (
+            <button
+              type="button"
+              onClick={onOpenMain}
+              className="shrink-0 rounded-md px-1.5 py-0.5 font-medium transition hover:bg-indigo-500/15"
+            >
+              详情
+            </button>
+          )}
+        </div>
+      )}
+
       <header className="shrink-0 border-b border-zinc-200/80 bg-white/90 px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
@@ -554,6 +628,25 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       {/* 底部智能操作栏 */}
       <footer className="flex shrink-0 items-center gap-2 border-t border-zinc-200/80 bg-white/90 px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
         {renderFooterClaimButton()}
+
+        {/* 无新版本时也保留手动检查入口：托盘是高频入口，用户不应被迫进设置页 */}
+        <button
+          type="button"
+          onClick={() => void checkAppUpdate({ force: true, silent: false })}
+          disabled={updateChecking || !isTauriRuntime}
+          title={updateInfo?.updateAvailable ? `新版本 v${updateInfo.latestVersion}` : "检查更新"}
+          aria-label="检查更新"
+          className={`btn btn-md btn-secondary shrink-0 gap-1 whitespace-nowrap ${
+            updateInfo?.updateAvailable ? "text-indigo-600 dark:text-indigo-300" : ""
+          }`}
+        >
+          {updateChecking ? (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          )}
+          {updateChecking ? "检查中" : "更新"}
+        </button>
 
         <button
           type="button"

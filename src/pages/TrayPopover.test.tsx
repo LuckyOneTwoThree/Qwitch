@@ -30,6 +30,10 @@ beforeEach(() => {
     theme: "light",
     toggleTheme: vi.fn(),
     quitApp: vi.fn(),
+    updateInfo: null,
+    updateChecking: false,
+    checkAppUpdate: vi.fn().mockResolvedValue(null),
+    isTauriRuntime: true,
   };
   h.useQwitch.mockReturnValue(ctx);
 });
@@ -51,5 +55,42 @@ describe("TrayPopover", () => {
     expect(ctx.toggleTheme).toHaveBeenCalled();
     fireEvent.click(screen.getByLabelText("退出 Qwitch"));
     expect(ctx.quitApp).toHaveBeenCalled();
+  });
+
+  it("无新版本时 footer 仍提供「更新」检查入口", () => {
+    render(<TrayPopover onOpenMain={vi.fn()} />);
+    // 托盘是高频入口，不应强制用户进设置页才能检查更新
+    expect(screen.getByLabelText("检查更新")).toBeTruthy();
+  });
+
+  it("有新版本时顶部出现更新条带并展示版本号", () => {
+    ctx.updateInfo = {
+      updateAvailable: true,
+      currentVersion: "0.4.0",
+      latestVersion: "0.5.0",
+      releaseUrl: "https://github.com/x/releases",
+      assetUrl: "https://github.com/x/a.dmg",
+      assetName: "Qwitch_0.5.0_aarch64.dmg",
+      checksumsUrl: "https://github.com/x/SHA256SUMS.txt",
+      canAutoInstall: false,
+      releaseNotes: "",
+      strategy: "manual",
+      platformLabel: "macOS",
+      hint: "",
+    };
+    render(<TrayPopover onOpenMain={vi.fn()} />);
+    expect(screen.getByText("v0.5.0")).toBeTruthy();
+    expect(screen.getByText(/新版本/)).toBeTruthy();
+  });
+
+  it("无新版本时不出现更新条带", () => {
+    render(<TrayPopover onOpenMain={vi.fn()} />);
+    expect(screen.queryByText(/新版本/)).toBeNull();
+  });
+
+  it("点击托盘「更新」触发强制检查", () => {
+    render(<TrayPopover onOpenMain={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText("检查更新"));
+    expect(ctx.checkAppUpdate).toHaveBeenCalledWith({ force: true, silent: false });
   });
 });

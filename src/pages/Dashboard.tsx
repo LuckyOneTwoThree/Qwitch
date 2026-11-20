@@ -28,6 +28,7 @@ import { ColdSwitchModal } from "../components/ColdSwitchModal";
 import { ImportAccountModal } from "../components/ImportAccountModal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
+import { UpdateBanner } from "../components/UpdateBanner";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import {
   isAccountClaimable,
@@ -77,6 +78,7 @@ export function Dashboard() {
     theme,
     toggleTheme,
     quitApp,
+    updateInfo,
   } = useQwitch();
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
@@ -476,6 +478,14 @@ export function Dashboard() {
                     <Settings className="h-4 w-4 shrink-0" aria-hidden="true" />
                     <span className="truncate">设置与环境</span>
                   </span>
+                  {/* 有新版本时在设置项上给出提示点：更新详情页在此入口内 */}
+                  {updateInfo?.updateAvailable && (
+                    <span
+                      className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500"
+                      title={`发现新版本 v${updateInfo.latestVersion}`}
+                      aria-label={`发现新版本 v${updateInfo.latestVersion}`}
+                    />
+                  )}
                 </button>
               </nav>
             </div>
@@ -932,6 +942,14 @@ export function Dashboard() {
         )}
 
         <main ref={mainScrollRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-3.5">
+          {/* 更新提示：放在账号区顶部，日常使用路径（账号池 / 工具页）即可见，
+              无需进入设置页才能发现新版本 */}
+          {isAccountSection && (
+            <div className="mb-3">
+              <UpdateBanner onOpenSettings={() => setNav("settings")} />
+            </div>
+          )}
+
           {isAccountSection && (
             <>
 

@@ -256,7 +256,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           <div
             role="tablist"
             aria-label="快捷工具筛选"
-            className="mask-fade-r scrollbar-none mt-2 flex items-center gap-1 overflow-x-auto pr-6 pb-0.5"
+            className="mask-fade-r scrollbar-none mt-2 flex items-center gap-1 overflow-x-auto scroll-smooth pr-6 pb-0.5"
           >
             <button
               type="button"
@@ -290,7 +290,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       </header>
 
       {/* 账号列表滚动画布 */}
-      <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
+      <div className="mask-fade-b min-h-0 flex-1 space-y-2.5 overflow-y-auto scroll-smooth p-3 pb-5">
         <BatchClaimBanner compact />
 
         {isInitializing ? (
@@ -517,7 +517,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                   }
                                   title="切换本机客户端账号"
                                   onClick={() => requestColdSwitch(acc)}
-                                  className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
+                                  className="btn btn-xs btn-brand-soft shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
                                 >
                                   <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                                   切换

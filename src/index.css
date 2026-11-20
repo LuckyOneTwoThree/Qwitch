@@ -178,7 +178,7 @@
       transform 0.12s var(--ease-soft);
   }
   .btn:active:not(:disabled) {
-    transform: scale(0.97);
+    transform: scale(0.985);
   }
   .btn:disabled {
     cursor: not-allowed;
@@ -547,10 +547,27 @@
     mask-image: linear-gradient(to right, #000 82%, transparent 100%);
   }
 
+  .mask-fade-b {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5rem), transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5rem), transparent 100%);
+  }
+
   .scrollbar-none {
     scrollbar-width: none;
   }
   .scrollbar-none::-webkit-scrollbar {
     display: none;
+  }
+}
+
+/* 尊重「减少动态效果」偏好：覆盖骨架 shimmer、旋转、进度条、入场与悬停位移 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

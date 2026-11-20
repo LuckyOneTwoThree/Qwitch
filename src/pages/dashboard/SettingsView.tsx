@@ -89,7 +89,7 @@ export function SettingsView({
     showToast,
   } = useQwitch();
   return (
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 @lg:grid-cols-2">
         <div className="surface-card p-5">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
@@ -404,12 +404,12 @@ export function SettingsView({
           </div>
         </div>
 
-        <div className="surface-card p-5 lg:col-span-2">
+        <div className="surface-card p-5 @lg:col-span-2">
           <div className="flex items-center gap-2 text-sm font-semibold">
             <Puzzle className="h-4 w-4 text-sky-500" aria-hidden="true" />
             已注册适配器（内置 + 外部扩展）
           </div>
-          <div className="mt-3 grid grid-cols-1 gap-2.5 md:grid-cols-3">
+          <div className="mt-3 grid grid-cols-1 gap-2.5 @md:grid-cols-3">
             {adapters.map((ad) => (
               <div
                 key={ad.id}
@@ -426,8 +426,11 @@ export function SettingsView({
                     </div>
                   </div>
                 </div>
-                <span className="badge badge-neutral shrink-0">
-                  v{ad.version} · {ad.capabilities.supportsDailyClaim ? "查额与签到" : "仅查额与切号"}
+                <span
+                  className="badge badge-neutral shrink-0"
+                  title={ad.capabilities.supportsDailyClaim ? "查额与签到" : "仅查额与切号"}
+                >
+                  v{ad.version}
                 </span>
               </div>
             ))}
@@ -435,7 +438,7 @@ export function SettingsView({
         </div>
 
         {isTauriRuntime && (
-          <div className="surface-card p-5 lg:col-span-2">
+          <div className="surface-card p-5 @lg:col-span-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div className="flex items-center gap-2 text-sm font-semibold">
@@ -534,7 +537,7 @@ export function SettingsView({
           </div>
         )}
 
-        <div className="surface-card p-5 lg:col-span-2">
+        <div className="surface-card p-5 @lg:col-span-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <div className="flex items-center gap-2 text-sm font-semibold">
@@ -605,7 +608,7 @@ export function SettingsView({
                       </span>
                     </div>
 
-                    <div className="mt-2.5 grid grid-cols-1 gap-1.5 text-xs text-zinc-600 dark:text-zinc-400 md:grid-cols-2">
+                    <div className="mt-2.5 grid grid-cols-1 gap-1.5 text-xs text-zinc-600 dark:text-zinc-400 @md:grid-cols-2">
                       <div className="truncate">
                         <span className="text-zinc-500 dark:text-zinc-400">探测应用：</span>
                         <span className="font-mono text-zinc-800 dark:text-zinc-200">

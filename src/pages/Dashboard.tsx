@@ -943,7 +943,7 @@ export function Dashboard() {
               {isInitializing && scopeAccounts.length === 0 ? (
                 <div
                   aria-label="正在加载本地账号库"
-                  className="grid grid-cols-1 gap-3.5 @lg:grid-cols-2 @5xl:grid-cols-3"
+                  className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]"
                 >
                   {[0, 1, 2].map((idx) => (
                     <div
@@ -1068,7 +1068,7 @@ export function Dashboard() {
                         </button>
                       </div>
 
-                      <div className="grid grid-cols-1 gap-3 @lg:grid-cols-2 @5xl:grid-cols-3">
+                      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
                         {group.accounts.map((acc) => (
                           <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                         ))}
@@ -1095,7 +1095,7 @@ export function Dashboard() {
                   ))}
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-3.5 @lg:grid-cols-2 @5xl:grid-cols-3">
+                <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
                   {filteredAccounts.map((acc) => (
                     <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                   ))}

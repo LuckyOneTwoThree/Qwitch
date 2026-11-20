@@ -192,7 +192,7 @@ export const AccountCard = React.memo(function AccountCard({
   return (
     <>
       <div
-        className={`group surface-card surface-interactive flex h-full flex-col justify-between p-3.5 ${
+        className={`group surface-card surface-interactive flex h-full flex-col p-3.5 ${
           account.isActiveOnClient
             ? "border-emerald-500/45 ring-1 ring-emerald-500/15 dark:border-emerald-400/35 dark:ring-emerald-400/15"
             : isDisabled
@@ -200,26 +200,17 @@ export const AccountCard = React.memo(function AccountCard({
               : ""
         }`}
       >
-        <div className="flex flex-1 flex-col">
+        <div className="flex flex-col">
           <div className="flex items-start justify-between gap-2">
             <div className="flex min-w-0 flex-1 items-start gap-2.5">
               <ToolBrandIcon toolId={account.toolId} size="md" className="mt-0.5" decorative />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="shrink-0 whitespace-nowrap text-xs font-medium tracking-wide text-zinc-500 dark:text-zinc-400">
-                    {toolMeta.name}
-                  </span>
                   {account.latestQuota?.planName && (
                     <span
                       className={`badge shrink-0 whitespace-nowrap ${toolMeta.badgeClass}`}
                     >
                       {account.latestQuota.planName}
-                    </span>
-                  )}
-                  {account.isActiveOnClient && (
-                    <span className="badge shrink-0 whitespace-nowrap border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-800 dark:text-emerald-300">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      本机使用中
                     </span>
                   )}
                 </div>
@@ -266,7 +257,7 @@ export const AccountCard = React.memo(function AccountCard({
                   </div>
                 ) : (
                   <div className="mt-0.5 flex items-center gap-1">
-                    <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    <h3 className="truncate text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">
                       {account.label}
                     </h3>
                     <button
@@ -287,21 +278,19 @@ export const AccountCard = React.memo(function AccountCard({
                 <p className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                   {account.uidMasked}
                   {account.emailMasked ? ` · ${account.emailMasked}` : ""}
+                  {account.deviceIdMasked && (
+                    <span
+                      className={`inline-flex items-center gap-0.5 ${
+                        account.deviceType === "win" ? "text-sky-700 dark:text-sky-300" : ""
+                      }`}
+                      title={`设备 ${account.deviceIdMasked}${account.deviceType ? ` · ${account.deviceType}` : ""}：该账号的独立设备身份，可与其它设备账号并行签到`}
+                    >
+                      {" · "}
+                      <Cpu className="h-2.5 w-2.5" aria-hidden="true" />
+                      {account.deviceIdMasked}
+                    </span>
+                  )}
                 </p>
-                {account.deviceIdMasked && (
-                  <p
-                    className={`mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[11px] ${
-                      account.deviceType === "win"
-                        ? "bg-sky-500/10 text-sky-700 dark:text-sky-300"
-                        : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                    }`}
-                    title={`设备 ${account.deviceIdMasked}${account.deviceType ? ` · ${account.deviceType}` : ""}：该账号的独立设备身份，可与其它设备账号并行签到`}
-                  >
-                    <Cpu className="h-2.5 w-2.5" aria-hidden="true" />
-                    设备 {account.deviceIdMasked}
-                    {account.deviceType ? ` · ${account.deviceType}` : ""}
-                  </p>
-                )}
               </div>
             </div>
 
@@ -313,7 +302,7 @@ export const AccountCard = React.memo(function AccountCard({
             </div>
           </div>
 
-          <div className="mt-3 flex flex-1 flex-col justify-center space-y-2">
+          <div className="mt-3 flex flex-col space-y-2">
             {missingApiToken ? (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs">
                 <span className="leading-snug text-amber-900 dark:text-amber-200">
@@ -378,6 +367,13 @@ export const AccountCard = React.memo(function AccountCard({
                           : pct <= 35
                             ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
                             : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
+                    const pctTextClass = isQoderClaimed
+                      ? "text-emerald-700 dark:text-emerald-300"
+                      : pct <= 15
+                        ? "text-rose-600 dark:text-rose-400"
+                        : pct <= 35
+                          ? "text-amber-700 dark:text-amber-300"
+                          : "text-zinc-500 dark:text-zinc-400";
 
                     const badgeText = isQoderClaimed
                       ? "本周期已领"
@@ -394,11 +390,13 @@ export const AccountCard = React.memo(function AccountCard({
                             <span className="truncate text-zinc-600 dark:text-zinc-400">
                               {primaryBucket.label}
                             </span>
-                            <span
-                              className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${pctBadge}`}
-                            >
-                              {badgeText}
-                            </span>
+                            {isQoderClaimBucket && (
+                              <span
+                                className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-semibold ${pctBadge}`}
+                              >
+                                {badgeText}
+                              </span>
+                            )}
                           </div>
                           <span className="shrink-0 whitespace-nowrap font-medium tabular-nums text-zinc-900 dark:text-zinc-100">
                             {isQoderClaimBucket ? (
@@ -409,6 +407,9 @@ export const AccountCard = React.memo(function AccountCard({
                               <>
                                 {formatQuotaNumber(primaryBucket.remaining)} /{" "}
                                 {formatQuotaNumber(primaryBucket.total)} {primaryBucket.unit}
+                                <span className={`ml-1 font-semibold ${pctTextClass}`}>
+                                  · {pct}%
+                                </span>
                               </>
                             )}
                           </span>
@@ -470,24 +471,20 @@ export const AccountCard = React.memo(function AccountCard({
                   已停用（跳过批量任务）
                 </span>
               ) : (
-                <>
-                  {!missingLocalSnapshot && canSwitch && (
-                    <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1">
-                      <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-                      桌面切号就绪
-                    </span>
-                  )}
-                  {!missingApiToken && (canQuery || canClaim) && (
-                    <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1">
-                      <Check className="h-3 w-3 text-sky-600 dark:text-sky-400" aria-hidden="true" />
-                      {canQuery && canClaim
-                        ? "查额与签到就绪"
-                        : canQuery
-                          ? "在线查额就绪"
-                          : "在线签到就绪"}
-                    </span>
-                  )}
-                </>
+                <span
+                  className="inline-flex shrink-0 items-center gap-1 text-zinc-500 dark:text-zinc-400"
+                  title="该账号当前已具备的能力"
+                >
+                  <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                  {(() => {
+                    const caps = [
+                      !missingLocalSnapshot && canSwitch ? "切号" : null,
+                      !missingApiToken && canQuery ? "查额" : null,
+                      !missingApiToken && canClaim ? "签到" : null,
+                    ].filter(Boolean);
+                    return caps.length ? `${caps.join(" · ")}就绪` : "就绪";
+                  })()}
+                </span>
               )}
             </div>
             <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 tabular-nums">
@@ -497,7 +494,7 @@ export const AccountCard = React.memo(function AccountCard({
           </div>
         </div>
 
-        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200/70 pt-2.5 dark:border-zinc-800/70">
+        <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200/70 pt-2.5 dark:border-zinc-800/70">
           <div className="flex flex-wrap items-center gap-1.5">
             {needsRecovery ? (
               <>
@@ -566,16 +563,9 @@ export const AccountCard = React.memo(function AccountCard({
                           : "领取今日签到福利"
                       }
                       onClick={() => void claimDailyBatch([account.id])}
-                      className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
-                        isBatchRunning
-                          ? "cursor-default border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-400"
-                          : "border-zinc-200 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                      }`}
+                      className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap"
                     >
-                      <Sparkles
-                        className="h-3 w-3 shrink-0 text-sky-600 dark:text-sky-400"
-                        aria-hidden="true"
-                      />
+                      <Sparkles className="h-3 w-3 shrink-0" aria-hidden="true" />
                       领取
                     </button>
                   )}
@@ -628,20 +618,23 @@ export const AccountCard = React.memo(function AccountCard({
               {associating ? "关联中..." : "关联本机"}
             </button>
           ) : (
-            <button
-              type="button"
-              disabled={account.isActiveOnClient || !canSwitch}
-              title={!canSwitch ? "该适配器声明不支持切号" : undefined}
-              onClick={() => requestColdSwitch(account)}
-              className={`btn btn-sm gap-1 whitespace-nowrap ${
-                account.isActiveOnClient
-                  ? "btn-secondary cursor-default"
-                  : "btn-primary"
-              }`}
-            >
-              <ArrowLeftRight className="h-3 w-3 shrink-0" aria-hidden="true" />
-              {account.isActiveOnClient ? "当前使用中" : "切至桌面端"}
-            </button>
+            account.isActiveOnClient ? (
+              <span className="badge shrink-0 whitespace-nowrap border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-800 dark:text-emerald-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                本机使用中
+              </span>
+            ) : (
+              <button
+                type="button"
+                disabled={!canSwitch}
+                title={!canSwitch ? "该适配器声明不支持切号" : undefined}
+                onClick={() => requestColdSwitch(account)}
+                className="btn btn-sm btn-brand-soft gap-1 whitespace-nowrap"
+              >
+                <ArrowLeftRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+                切至桌面端
+              </button>
+            )
           )}
         </div>
       </div>

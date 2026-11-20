@@ -32,6 +32,8 @@
 ## 产品截图
 
 > 截图来自浏览器 Mock 预览模式，账号与额度均为示例数据。
+>
+> **注意**：截图拍摄于视觉体系重构（设计令牌 / 配色 / 字号阶梯）之前，界面细节与当前版本存在差异，功能布局与信息层级仍具参考价值。
 
 | 主窗口 · 浅色 | 主窗口 · 深色 |
 | :---: | :---: |
@@ -54,6 +56,7 @@
 
 - **系统托盘 / 菜单栏弹层**：高频轻量入口，随时查看各工具活跃账号与剩余额度，一键切号、快速领取，操作结果分级 Toast 即时反馈。
 - **主窗口 Dashboard**：卡片式管理面板，账号分组 / 状态诊断 / 额度进度 / 操作日志集中管理；浅色 / 深色 / 跟随系统三态主题，首帧无白闪。
+- **两种账号视图**：分组视图按工具聚合；平铺视图按「待处理 → 可领取 → 挂载中 → 其余」分层排序，层内工具顺序与分组视图一致，切换视图时卡片不跳位。
 - **托盘常驻**：关闭主窗口默认收起至托盘；可选隐藏 Dock 图标、开机自启、启动最小化。
 
 ### 🔄 软件更新
@@ -86,7 +89,7 @@
 
 ### ✅ 工程质量
 
-- 106 个 Rust 单元 / 回归测试 + 67 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、构建、测试、`cargo fmt` / `clippy -D warnings`。
+- 109 个 Rust 单元 / 回归测试 + 89 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、ESLint、构建、测试、`cargo fmt` / `clippy -D warnings` / `cargo audit`。
 - 标签触发 Release 流水线，自动构建并发布 macOS Apple Silicon（arm64）、macOS Intel（x64）与 Windows x64 三个独立安装包。
 
 ## 支持的工具
@@ -148,7 +151,7 @@ npm run tauri build    # 构建本地安装包
 | 抖动间隔 | 1500–3500ms | 后端强制下限 500ms |
 | 日志归档 / 活跃上限 | 14 天 / 200 条 | 超期自动归档，可恢复 / 导出 |
 | 自定义客户端路径 | 自动探测 | 按工具覆盖，全链路生效 |
-| 外部插件信任 | 全部未信任 | 显式启用，重启生效 |
+| 外部插件信任 | 全部未信任 | 需经系统原生对话框确认（签发一次性票据），重启生效 |
 
 ## 安全与隐私
 
@@ -157,8 +160,12 @@ npm run tauri build    # 构建本地安装包
 - **加密落盘**：业务凭据 AES-256-GCM 加密（随机 nonce），明文缓冲区用后即清零（zeroize）；SQLite 启用 WAL，数据库 / 导出文件 `0600`、数据目录 `0700`。
 - **PII 脱敏**：默认账号标签与审计日志自动脱敏邮箱 / 手机号 / UID，旧版数据一次性迁移修复。
 - **严格 CSP**：`script-src 'self'`，禁用内联脚本与外部加载，`object-src 'none'` / `base-uri 'self'` / `frame-ancestors 'none'`。
-- **授权隔离**：内置 OAuth 窗口校验一次性 nonce + 精确回调路径 + 流程序号，导航限定官方域名白名单。
-- **插件零信任**：外部适配器默认不加载、不接收凭据，显式信任后方可启用。
+- **授权隔离**：内置 OAuth 窗口校验一次性 nonce + 精确回调路径 + 流程序号，导航限定官方域名白名单；nonce **一次性消费**，同一回调重复投递会被拒绝。
+- **插件零信任**：外部适配器默认不加载、不接收凭据；信任需经**系统原生确认对话框**签发一次性票据（120 秒有效、用后即焚），前端无法自我批准。插件入口命令必须落在插件目录内（fail-closed），裸命令名按协议保留。
+- **IPC 最小权限**：35 个应用命令经 `build.rs` 声明并逐一授权（命令级 ACL），渲染进程无法调用未授权能力。
+- **可执行文件白名单**：自定义客户端路径在保存与启动两个环节校验名称、bundle 结构与受信任安装目录，避免「写入任意路径 → 启动执行」链路。
+- **更新防降级**：安装前重新拉取最新版本，校验版本单调性与资产 / 校验和地址逐字一致，阻断降级安装与跨版本替换。
+- **失败熔断**：401 → 凭据过期、403/429 → 风控暂停并熔断该工具；5xx / 网络错误连续 3 次同样熔断，避免平台整体不可用时逐个账号硬打。
 
 **数据目录**
 
@@ -181,8 +188,8 @@ npm run tauri build    # 构建本地安装包
 │  Rust Core                                                             │
 │  commands ── scheduler（串行 + Jitter + 幂等 + 工具级熔断）            │
 │     └─ ToolAdapter trait                                               │
-│          ├─ trae_cn / workbuddy / qoder_cn 内置适配器                  │
-│          └─ external：JSON-RPC 2.0 插件（显式信任门禁）                │
+│          ├─ trae_cn / workbuddy / qoder_cn / minimax_code_cn 内置适配器│
+│          └─ external：JSON-RPC 2.0 插件（原生确认 + 内容哈希固定）     │
 │  platform（钥匙串 / 进程探测 / 路径解析）                              │
 │  storage（SQLite WAL + AES-256-GCM + 日志归档 + PII 迁移）             │
 └────────────────────────────────────────────────────────────────────────┘
@@ -193,7 +200,7 @@ npm run tauri build    # 构建本地安装包
 | 桌面框架 | Tauri v2（tray-icon、macOS private API、single-instance） |
 | 前端 | React 18 · TypeScript（strict）· Tailwind CSS 4 · Vite 6 · Vitest |
 | 后端 | Rust · tokio · rusqlite（bundled SQLite）· reqwest（rustls）· keyring v3（原生后端）· aes-gcm |
-| 质量 | cargo fmt / clippy `-D warnings` / test · tsc · Vitest · npm audit（生产依赖） |
+| 质量 | cargo fmt / clippy `-D warnings` / test · cargo audit · tsc · ESLint · Vitest · wiremock · npm audit |
 
 <details>
 <summary><b>目录结构</b></summary>
@@ -227,14 +234,15 @@ npm install                  # 安装前端依赖
 npm run dev                  # 仅前端（浏览器 Mock 预览）
 npm run tauri dev            # 桌面应用开发模式
 npm run build                # 前端类型检查 + 生产构建
-npm test                     # 前端测试（Vitest，67 例）
-cd src-tauri && cargo test   # 后端测试（106 例）
+npm run lint                 # ESLint（含 react-hooks/exhaustive-deps 作为 error）
+npm test                     # 前端测试（Vitest，89 例）
+cd src-tauri && cargo test   # 后端测试（109 例）
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
 **CI/CD**
 
-- `ci.yml`：push / PR 触发，macOS + Windows 双平台执行生产依赖审计、前端构建与测试、Rust fmt / clippy / test。
+- `ci.yml`：push / PR 触发，macOS + Windows 双平台执行生产依赖审计、ESLint、前端构建与测试、`shellcheck`（Linux）、Rust `cargo audit` / fmt / clippy / test。
 - `release.yml`：`v*` 标签触发，先跑验证门禁，再构建 macOS ARM64、macOS Intel 与 Windows x64 三个独立安装包并上传至 GitHub Release（自动发布 latest）。
 
 **发布前手工清单**：空数据目录首装 · 备份恢复到冲突钥匙串环境 · 慢启动客户端切号 · 托盘 / Dock 行为。
@@ -252,6 +260,8 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 | [前端体验审计](docs/FRONTEND_UX_AUDIT.md) | 历史基线问题表与修复状态标注 |
 | [后端安全审计](docs/BACKEND_ARCH_REVIEW.md) | 历史基线问题表与修复状态标注 |
 | [综合优化路线图](docs/OPTIMIZATION_ROADMAP.md) | 四阶段 Sprint 排期、完成度与接口变更总表 |
+| [项目理解报告](docs/PROJECT_UNDERSTANDING_REPORT.md) | 全项目深度认知基线：目标、模块、流程、实测质量基线、问题分级与待确认事项 |
+| [优化执行计划](docs/OPTIMIZATION_EXECUTION_PLAN.md) | A/B/C/D 四阶段落地记录：实现要点、回归测试与延后项依据 |
 
 ## 路线图
 
@@ -262,7 +272,13 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 - [x] 归档日志自动清底（归档超保留窗口自动清除 + 5000 上限）
 - [x] Context 按更新频次拆分（Account/Log/Settings/Feedback 四 store）+ 单账号增量同步
 - [x] 组件级测试与 Tauri bundle CI 构建校验
+- [x] IPC 命令级 ACL（35 命令逐一授权）、插件信任原生确认票据、客户端可执行文件白名单
+- [x] 更新防降级（版本单调性 + 资产一致性校验）、OAuth nonce 一次性消费、5xx 连续熔断
+- [x] WAL 增长治理、日志统计覆盖索引与命令异步化、mock 数据隔离出生产包
+- [x] ESLint 接入 CI、wiremock HTTP 测试基建、核心 store 与 Modal 组件测试
+- [x] 平铺视图语义排序（待处理 → 可领取 → 挂载中 → 其余），工具顺序与分组视图对齐
 - [ ] 代码签名 / 公证与自动更新（release.yml 已接入可选 Apple 签名 secrets；**需提供 Apple Developer 证书/凭证**方可真正签名公证；Windows 自动安装已具备）
+- [ ] Context 订阅粒度拆分、`julianday` 索引重建、日志列表虚拟化（当前 ≤10 账号规模下无感，按需启动）
 
 ## 贡献
 

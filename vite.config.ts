@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -28,5 +28,15 @@ export default defineConfig(async () => ({
     watch: {
       ignored: ["**/src-tauri/**"],
     },
+  },
+  test: {
+    // 显式限定测试范围：不依赖默认 glob（默认会扫描整个工作目录，
+    // 曾导致未跟踪的同名副本 qwitch/src 被一并执行，测试数虚高约一倍）
+    include: ["src/**/*.test.{ts,tsx}"],
+    exclude: ["**/node_modules/**", "**/dist/**", "**/src-tauri/**"],
+    // 组件测试通过文件级 `// @vitest-environment jsdom` 声明环境，
+    // 默认保持 node，避免纯函数测试承担 jsdom 启动开销
+    environment: "node",
+    restoreMocks: true,
   },
 }));

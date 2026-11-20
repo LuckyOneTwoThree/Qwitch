@@ -1177,6 +1177,7 @@ export function useAccountStore({
         try {
           await invoke("delete_account", { accountId });
           await syncFromBackend();
+          void refreshClientStatuses([target.toolId]);
           showToast(`已删除账号：${target.label}`, "success");
         } catch (err) {
           showToast(`删除失败：${String(err)}`, "error");
@@ -1185,6 +1186,7 @@ export function useAccountStore({
       }
 
       setAccounts((prev) => prev.filter((acc) => acc.id !== accountId));
+      void refreshClientStatuses([target.toolId]);
       appendLog({
         accountId,
         toolId: target.toolId,
@@ -1194,7 +1196,7 @@ export function useAccountStore({
       });
       showToast(`已删除账号：${target.label}`, "success");
     },
-    [accounts, appendLog, isTauriRuntime, showToast, syncFromBackend]
+    [accounts, appendLog, isTauriRuntime, showToast, syncFromBackend, refreshClientStatuses]
   );
 
 

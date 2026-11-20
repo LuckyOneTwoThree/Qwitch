@@ -148,6 +148,12 @@ export function Dashboard() {
   }, [refreshClientStatuses]);
 
   useEffect(() => {
+    const onFocus = () => void refreshClientStatuses();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshClientStatuses]);
+
+  useEffect(() => {
     if (nav === "settings") {
       void refreshClientStatuses();
     }
@@ -404,7 +410,7 @@ export function Dashboard() {
                       <span className="flex min-w-0 items-center gap-2">
                         <ToolBrandIcon toolId={tool.id} size="xs" decorative />
                         <span className="truncate">{tool.name}</span>
-                        {isRunning && (
+                        {isRunning && count > 0 && (
                           <span
                             title="本机客户端运行中"
                             className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
@@ -662,16 +668,18 @@ export function Dashboard() {
                   </div>
                   <span
                     className={`badge shrink-0 whitespace-nowrap ${
-                      scopedStats.runningClientsCount > 0
+                      scopedStats.total > 0 && scopedStats.runningClientsCount > 0
                         ? "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
                         : "badge-neutral"
                     }`}
                   >
-                    {scopedStats.runningClientsCount > 0
-                      ? activeToolFilter
-                        ? "运行中"
-                        : `${scopedStats.runningClientsCount} 运行`
-                      : "未启动"}
+                    {scopedStats.total === 0
+                      ? "无账号"
+                      : scopedStats.runningClientsCount > 0
+                        ? activeToolFilter
+                          ? "运行中"
+                          : `${scopedStats.runningClientsCount} 运行`
+                        : "未启动"}
                   </span>
                 </div>
 

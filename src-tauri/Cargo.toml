@@ -1,6 +1,6 @@
 [package]
 name = "qwitch"
-version = "0.4.5"
+version = "0.4.6"
 description = "Local-first multi-account session and daily quota manager for AI tools"
 authors = ["Qwitch Contributors"]
 edition = "2021"

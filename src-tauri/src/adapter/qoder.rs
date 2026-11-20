@@ -866,16 +866,18 @@ impl ToolAdapter for QoderAdapter {
                     }
                 }
                 None => {
-                    // 已加密但本平台无解密实现：明确告知用户改走在线授权，
-                    // 避免其反复尝试一个注定失败的本地导入。
-                    if Self::macos_auth_is_encrypted_but_unsupported(&raw_dat) {
-                        return Err(AdapterError::Unified {
-                            code: UnifiedErrorCode::UnsupportedCapability,
-                            message: "macOS 版 Qoder 的本地凭据为 Chromium Safe Storage 加密，\
-                                      当前版本尚未实现该平台的本地解密。请改用「在线授权」导入 Qoder 账号。"
-                                .into(),
-                        });
-                    }
+                    // macOS 上 auth.v1.dat 为 Chromium Safe Storage 加密，本项目未实现
+                    // 解密，因此拿不到 decrypted_token（→ has_api_token = false，
+                    // 无法查额/签到）。
+                    //
+                    // **但这不妨碍本地导入与切号**：LocalSnapshot 的 can_switch 无条件
+                    // 为 true，apply_session 也只是原样写回 auth.v1.dat 字节。
+                    // 因此这里不返回错误，而是继续走「仅快照」路径 —— 用户仍可通过
+                    // 本地导入纳管该账号并一键切回它。
+                    //
+                    // 需要查额/签到时，再对该账号做一次在线授权补充 Token 即可
+                    // （两轨凭据会自动合并：Token 提供 API 能力，快照提供切号能力）。
+                    let _ = Self::macos_auth_is_encrypted_but_unsupported(&raw_dat);
                 }
             }
         }
@@ -1448,6 +1450,60 @@ mod capture_snapshot_tests {
                 );
             }
             Ok(_) => panic!("不匹配的 UID 绝不能采集成功"),
+        }
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    mod local_import_regression_tests {
+        use super::QoderAdapter;
+        use crate::adapter::ToolAdapter;
+        use crate::domain::{CredentialEnvelope, CredentialPayload};
+        use crate::platform::{NativePlatformHost, PlatformHost};
+
+        /// 回归：macOS 上 auth.v1.dat 为 v10 加密，但**不得阻断本地导入**。
+        ///
+        /// 历史缺陷：曾在此返回 UnsupportedCapability，导致本地导入彻底不可用。
+        /// 实际上 LocalSnapshot 的 can_switch 无条件为 true，apply_session 也只做
+        /// 原样写回字节，因此本地导入本应可用（只是无法查额/签到）。
+        #[tokio::test]
+        async fn encrypted_auth_dat_does_not_block_local_import() {
+            let host = NativePlatformHost;
+            let config_dir = match host.client_config_dir("qoder_cn") {
+                Ok(d) => d,
+                Err(_) => return, // CI 环境无客户端，跳过
+            };
+            if !config_dir.join("auth.v1.dat").is_file() {
+                return; // 本机未安装/未登录 Qoder，跳过
+            }
+
+            let adapter = QoderAdapter::new();
+            let env = adapter
+                .import_from_local(&host)
+                .await
+                .expect("v10 加密不应阻断本地导入");
+
+            // 必须产出 LocalSnapshot（而非报错），且携带 auth.v1.dat 原始字节
+            match &env.payload {
+                CredentialPayload::LocalSnapshot { files } => {
+                    assert!(
+                        files.contains_key("auth.v1.dat"),
+                        "快照必须包含 auth.v1.dat 原始字节"
+                    );
+                }
+                _ => panic!("本地导入应产出 LocalSnapshot"),
+            }
+
+            // 关键：LocalSnapshot 必须可切号（can_switch = true）
+            let (can_switch, _has_token) = env.capability_flags();
+            assert!(can_switch, "本地导入的账号必须支持切号");
+
+            // uid 必须能解析出来（来自 main.sqlite 或 status 文件），不能是空
+            assert!(!env.uid.trim().is_empty(), "本地导入必须解析出 uid");
+            assert!(
+                !CredentialEnvelope::is_fallback_uid(&env.uid) || env.uid.starts_with("qoder_cn_"),
+                "uid 解析结果异常: {}",
+                env.uid
+            );
         }
     }
 }

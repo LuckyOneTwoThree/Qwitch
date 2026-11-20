@@ -74,6 +74,7 @@ interface QwitchContextValue {
   renameAccount: (accountId: string, label: string) => Promise<void>;
   toggleAccountDisabled: (accountId: string) => Promise<void>;
   recoverAccount: (accountId: string) => Promise<void>;
+  captureLocalSession: (accountId: string) => Promise<boolean>;
   deleteAccount: (accountId: string) => Promise<void>;
   archiveLogs: (
     request: ActionLogCleanupRequest,
@@ -215,6 +216,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     renameAccount,
     toggleAccountDisabled,
     recoverAccount,
+    captureLocalSession,
     deleteAccount,
     quitApp,
   } = accountStore;
@@ -262,6 +264,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       renameAccount,
       toggleAccountDisabled,
       recoverAccount,
+      captureLocalSession,
       deleteAccount,
       archiveLogs,
       unarchiveLogs,
@@ -319,6 +322,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       renameAccount,
       toggleAccountDisabled,
       recoverAccount,
+      captureLocalSession,
       deleteAccount,
       archiveLogs,
       unarchiveLogs,

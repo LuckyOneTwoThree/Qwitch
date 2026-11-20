@@ -335,6 +335,63 @@ pub async fn add_account_by_token(
         .map_err(|e| e.to_string())
 }
 
+/// 采集「本机当前登录账号」的会话快照，绑定到指定账号上。
+///
+/// 用途：Qoder 的 `auth.v1.dat` 为 Chromium Safe Storage 加密，本项目不实现
+/// 该加密链路，因此「在线授权得到的 Token 账号」无法自动获得可写入的快照。
+/// 本命令让用户在 Qoder 客户端里手动登录目标账号后，采集当时的原始字节存为
+/// 该账号的 LocalSnapshot —— `apply_session` 只做原样写回，无需解密即可切号。
+///
+/// 安全：采集前校验本机当前登录 uid 与目标账号一致，避免把 A 的快照绑到 B 上。
+#[tauri::command]
+pub async fn capture_local_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<(), String> {
+    let (summary, cred) = state
+        .db
+        .get_account_credential(&state.master_key, &account_id)
+        .map_err(|e| e.to_string())?;
+
+    if summary.tool_id != "qoder_cn" {
+        return Err(format!("{} 暂不支持采集本机会话快照", summary.tool_id));
+    }
+
+    // 采集需要读取客户端文件，放到阻塞线程池
+    let host_for_capture = Arc::clone(&state.host);
+    let target_uid = cred.uid.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let adapter = crate::adapter::qoder::QoderAdapter::with_host(Arc::clone(&host_for_capture));
+        adapter.capture_session_snapshot(host_for_capture.as_ref(), &target_uid)
+    })
+    .await
+    .map_err(|e| format!("采集任务失败: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    // 合并进既有凭据：保留 Token（查额/签到用），补上 LocalSnapshot（切号用）
+    let merged = cred.merge_from(&snapshot);
+    state
+        .db
+        .bind_account_credential(&state.master_key, &summary.id, None, &merged)
+        .map_err(|e| e.to_string())?;
+
+    let _ = state.db.append_action_log(
+        Some(&summary.id),
+        &summary.tool_id,
+        "import",
+        "success",
+        None,
+        &format!(
+            "已采集 {} ({}) 的本机会话快照",
+            summary.label, summary.uid_masked
+        ),
+    );
+    let _ = app.emit("qwitch://account-updated", &summary.id);
+    let _ = app.emit("qwitch://logs-updated", ());
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn refresh_account_quota(
     app: AppHandle,

@@ -1157,6 +1157,38 @@ export function useAccountStore({
     [accounts, isTauriRuntime, showToast, syncFromBackend]
   );
 
+  /**
+   * 采集本机当前登录账号的会话快照，绑定到指定账号。
+   *
+   * 用于 Qoder：其 auth.v1.dat 为 Chromium Safe Storage 加密，无法由在线授权的
+   * Token 生成可写入快照。用户需先在客户端里登录目标账号，再由本方法采集原始字节
+   * ——apply_session 只做原样写回，因此无需解密即可实现切号。
+   *
+   * 后端会校验本机登录 uid 与目标账号一致，不一致直接拒绝。
+   */
+  const captureLocalSession = useCallback(
+    async (accountId: string): Promise<boolean> => {
+      const target = accounts.find((a) => a.id === accountId);
+      if (!target) return false;
+
+      if (!isTauriRuntime) {
+        showToast("浏览器预览模式无法采集本机会话", "info");
+        return false;
+      }
+
+      try {
+        await invoke("capture_local_session", { accountId });
+        await syncFromBackend();
+        showToast(`${target.label} 已采集本机会话，现在可以切换该账号`, "success");
+        return true;
+      } catch (err) {
+        showToast(`采集失败：${String(err)}`, "error");
+        return false;
+      }
+    },
+    [accounts, isTauriRuntime, showToast, syncFromBackend]
+  );
+
   const recoverAccount = useCallback(
     async (accountId: string) => {
       const target = accounts.find((a) => a.id === accountId);
@@ -1386,6 +1418,7 @@ export function useAccountStore({
     renameAccount,
     toggleAccountDisabled,
     recoverAccount,
+    captureLocalSession,
     deleteAccount,
     quitApp,
   };

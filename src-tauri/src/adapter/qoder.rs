@@ -52,6 +52,94 @@ impl QoderAdapter {
         adapter
     }
 
+    /// 采集「当前本机客户端登录账号」的会话快照，用于后续冷切换。
+    ///
+    /// 背景：Qoder 的 `auth.v1.dat` 是 Chromium Safe Storage 加密（`v10` 前缀），
+    /// 本项目不实现该加密链路，因此无法为「在线授权得到的 Token 账号」生成可写入
+    /// 的快照。但 `apply_session` 的实现是**原样写回字节**，并不需要解密——
+    /// 于是可行的路径是：让用户在 Qoder 客户端里手动登录目标账号，再由本方法
+    /// 采集当时的 `auth.v1.dat` 字节，存为该账号的 LocalSnapshot。
+    ///
+    /// **安全前提**：必须确认本机当前登录的正是目标账号，否则会把 A 账号的快照
+    /// 错误绑定到 B 账号上（切号时会把 B 登成 A）。因此这里比对
+    /// `detect_local_active_uid` 与 `expected_uid`，不一致即拒绝采集。
+    pub fn capture_session_snapshot(
+        &self,
+        host: &dyn PlatformHost,
+        expected_uid: &str,
+    ) -> Result<CredentialEnvelope, AdapterError> {
+        let expected = expected_uid.trim();
+        if expected.is_empty() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "缺少目标账号 UID，无法校验本机登录态".into(),
+            });
+        }
+
+        // 1. 身份校验：本机当前登录的必须是目标账号
+        let local_uid =
+            self.detect_local_active_uid(host)
+                .ok_or_else(|| AdapterError::Unified {
+                    code: UnifiedErrorCode::ClientNotFound,
+                    message: "无法识别本机 Qoder 当前登录账号，请确认客户端已登录后再试".into(),
+                })?;
+
+        if local_uid != expected {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!(
+                    "本机当前登录的不是目标账号（本机 {local_uid}，目标 {expected}）。\
+                     请先在 Qoder 客户端中切换到该账号，再执行采集。"
+                ),
+            });
+        }
+
+        // 2. 采集原始字节（不解密，直接作为快照保存）
+        let config_dir = host
+            .client_config_dir("qoder_cn")
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: e.to_string(),
+            })?;
+        let auth_path = config_dir.join(AUTH_DAT_FILE);
+        if !auth_path.is_file() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::ClientNotFound,
+                message: format!("未找到 Qoder CN 登录态文件: {}", auth_path.display()),
+            });
+        }
+
+        let raw_dat = std::fs::read(&auth_path).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("读取 Qoder CN auth.v1.dat 失败: {e}"),
+        })?;
+
+        let mut files = HashMap::new();
+        files.insert(AUTH_DAT_FILE.to_string(), BASE64.encode(&raw_dat));
+
+        if let Ok(mid_bytes) = std::fs::read(config_dir.join(MACHINE_ID_FILE)) {
+            files.insert(MACHINE_ID_FILE.to_string(), BASE64.encode(mid_bytes));
+        }
+
+        // 状态快照（含头像 URL 等）在切号时一并写回，保证 UI 一致
+        if let Some(dot_dir) = Self::qoder_dot_dir() {
+            if let Ok(status_bytes) = std::fs::read(dot_dir.join(".qoder-app-status.json")) {
+                files.insert(
+                    APP_STATUS_SNAPSHOT_KEY.to_string(),
+                    BASE64.encode(&status_bytes),
+                );
+            }
+        }
+
+        Ok(CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid: expected.to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        })
+    }
+
     /// 优先使用注入的宿主，否则回退到本机实现。
     fn host_or_native(&self) -> Arc<dyn PlatformHost> {
         self.host
@@ -1315,5 +1403,51 @@ mod macos_auth_tests {
             QoderAdapter::macos_auth_is_encrypted_but_unsupported(&raw),
             "v10 + 非 JSON 必须被识别为「加密但本平台不支持」"
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_snapshot_tests {
+    use super::QoderAdapter;
+    use crate::adapter::AdapterError;
+    use crate::domain::UnifiedErrorCode;
+
+    /// 空 UID 必须在读取任何文件前就被拒绝（否则会把任意快照绑到空账号）。
+    #[test]
+    fn empty_expected_uid_is_rejected() {
+        let host = crate::platform::NativePlatformHost;
+        let adapter = QoderAdapter::new();
+        let err = adapter
+            .capture_session_snapshot(&host, "   ")
+            .expect_err("空 UID 必须拒绝");
+        match err {
+            AdapterError::Unified { code, .. } => {
+                assert_eq!(code, UnifiedErrorCode::InvalidCredential);
+            }
+        }
+    }
+
+    /// UID 不匹配时必须拒绝采集 —— 这是防止「把 A 的快照绑到 B 上」的核心保护。
+    /// 用一个几乎不可能与本机真实账号相同的 UID 来触发该分支。
+    #[test]
+    fn mismatched_uid_is_rejected_before_writing() {
+        let host = crate::platform::NativePlatformHost;
+        let adapter = QoderAdapter::new();
+        let result =
+            adapter.capture_session_snapshot(&host, "00000000-0000-0000-0000-000000000000");
+        // 本机未登录时返回 ClientNotFound；已登录时返回 InvalidCredential（不匹配）。
+        // 两种情况都必须失败，绝不能成功。
+        match result {
+            Err(AdapterError::Unified { code, .. }) => {
+                assert!(
+                    matches!(
+                        code,
+                        UnifiedErrorCode::InvalidCredential | UnifiedErrorCode::ClientNotFound
+                    ),
+                    "不匹配的 UID 必须以凭据/客户端错误拒绝，实际 {code:?}"
+                );
+            }
+            Ok(_) => panic!("不匹配的 UID 绝不能采集成功"),
+        }
     }
 }

@@ -50,6 +50,7 @@ export const AccountCard = React.memo(function AccountCard({
     claimDailyBatch,
     requestColdSwitch,
     recoverAccount,
+    captureLocalSession,
     deleteAccount,
     importAccount,
     previewLocalAccount,
@@ -130,6 +131,14 @@ export const AccountCard = React.memo(function AccountCard({
   const handleAssociateLocal = async () => {
     setAssociating(true);
     try {
+      // Qoder 的 auth.v1.dat 为 Chromium Safe Storage 加密，import_from_local
+      // 无法解密，因此走专用采集路径：后端原样读取字节 + 校验本机登录 uid，
+      // 成功后该账号即获得 LocalSnapshot，可正常切号。
+      if (account.toolId === "qoder_cn" && isTauriRuntime) {
+        await captureLocalSession(account.id);
+        return;
+      }
+
       if (!isTauriRuntime) {
         await importAccount(account.toolId, "", "local_import", undefined, account.id).catch(
           () => {}
@@ -609,11 +618,19 @@ export const AccountCard = React.memo(function AccountCard({
               type="button"
               disabled={associating}
               onClick={() => void handleAssociateLocal()}
-              title={`读取本机 ${toolMeta.name} 当前登录的会话并合并到该账号；需要客户端已登录「${account.label}」`}
+              title={
+                account.toolId === "qoder_cn"
+                  ? `读取本机 Qoder 当前登录会话的原始字节并绑定到该账号；请先在 Qoder 客户端中登录「${account.label}」`
+                  : `读取本机 ${toolMeta.name} 当前登录的会话并合并到该账号；需要客户端已登录「${account.label}」`
+              }
               className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:opacity-50"
             >
               <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              {associating ? "关联中..." : "关联本机"}
+              {associating
+                ? "关联中..."
+                : account.toolId === "qoder_cn"
+                  ? "采集本机会话"
+                  : "关联本机"}
             </button>
           ) : (
             account.isActiveOnClient ? (

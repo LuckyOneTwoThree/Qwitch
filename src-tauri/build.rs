@@ -29,6 +29,7 @@ fn main() {
         "add_account_by_token",
         "start_webview_oauth",
         "refresh_account_quota",
+        "capture_local_session",
         "refresh_quota_batch",
         "switch_desktop_account",
         "delete_account",

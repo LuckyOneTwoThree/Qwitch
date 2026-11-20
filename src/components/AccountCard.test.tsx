@@ -81,4 +81,32 @@ describe("AccountCard", () => {
     fireEvent.click(screen.getByText("删除账号"));
     expect(screen.getByText(/确认删除账号/)).toBeTruthy();
   });
+
+  it("Qoder 账号缺本机快照时展示「采集本机会话」，并调用采集而非导入", async () => {
+    const captureLocalSession = vi.fn().mockResolvedValue(true);
+    h.useQwitch.mockReturnValue({
+      ...h.useQwitch(),
+      captureLocalSession,
+      importAccount: vi.fn(),
+    });
+
+    const qoderAccount: AccountSummary = {
+      ...account,
+      id: "acc-qoder-1",
+      toolId: "qoder_cn" as never,
+      label: "Qoder 账号甲",
+      hasLocalSnapshot: false,
+      hasApiToken: true,
+    };
+
+    render(<AccountCard account={qoderAccount} />);
+
+    // 文案必须区分：Qoder 走「采集」而非「关联」，因为其快照是加密字节
+    const btn = screen.getByRole("button", { name: /采集本机会话/ });
+    fireEvent.click(btn);
+
+    await Promise.resolve();
+    // 关键：Qoder 不得走 importAccount(local_import)——macOS 上无法解密必然失败
+    expect(captureLocalSession).toHaveBeenCalledWith("acc-qoder-1");
+  });
 });

@@ -400,6 +400,7 @@ pub fn run() {
             commands::add_account_by_token,
             commands::start_webview_oauth,
             commands::refresh_account_quota,
+            commands::capture_local_session,
             commands::refresh_quota_batch,
             commands::switch_desktop_account,
             commands::delete_account,

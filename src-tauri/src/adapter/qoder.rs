@@ -10,10 +10,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::adapter::common::{map_http_status, shared_http_client};
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
 };
@@ -33,16 +33,6 @@ const APP_STATUS_SNAPSHOT_KEY: &str = "qoder_app_status.json";
 #[cfg(target_os = "windows")]
 const LOCAL_STATE_FILE: &str = "Local State";
 
-fn shared_http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
-}
-
 pub struct QoderAdapter {
     manifest: AdapterManifest,
     http: reqwest::Client,
@@ -50,10 +40,7 @@ pub struct QoderAdapter {
 
 impl QoderAdapter {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = shared_http_client().clone();
 
         Self {
             manifest: AdapterManifest {
@@ -256,27 +243,6 @@ impl QoderAdapter {
         }
     }
 
-    fn map_http_status(status: reqwest::StatusCode, context: &str) -> AdapterError {
-        match status.as_u16() {
-            401 => AdapterError::Unified {
-                code: UnifiedErrorCode::AuthExpired,
-                message: format!("{context}: 登录态已过期 (HTTP 401)"),
-            },
-            403 => AdapterError::Unified {
-                code: UnifiedErrorCode::RiskTriggered,
-                message: format!("{context}: 服务端拒绝访问 (HTTP 403)"),
-            },
-            429 => AdapterError::Unified {
-                code: UnifiedErrorCode::RateLimited,
-                message: format!("{context}: 请求过于频繁 (HTTP 429)"),
-            },
-            code => AdapterError::Unified {
-                code: UnifiedErrorCode::NetworkError,
-                message: format!("{context}: HTTP {code}"),
-            },
-        }
-    }
-
     async fn fetch_campaigns(&self, headers: &HeaderMap) -> Result<Value, AdapterError> {
         let url = format!("{DEFAULT_BASE_URL}/sash/api/v1/me/campaigns");
         let resp = self
@@ -292,7 +258,7 @@ impl QoderAdapter {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(Self::map_http_status(status, "查询 Qoder CN 活动"));
+            return Err(map_http_status(status, "查询 Qoder CN 活动"));
         }
 
         resp.json::<Value>()
@@ -975,7 +941,7 @@ impl ToolAdapter for QoderAdapter {
                         continue;
                     }
                 }
-                let err = Self::map_http_status(status, "领取 Qoder CN Credits");
+                let err = map_http_status(status, "领取 Qoder CN Credits");
                 if claimed_any || saw_already_claimed {
                     partial_failure_note = Some(format!(
                         "后续活动返回异常（HTTP {}），已保留已领取进度",

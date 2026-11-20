@@ -522,7 +522,14 @@ pub fn open_update_url(url: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("打开下载页失败：{e}"))?;
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(parsed.as_str())
+            .spawn()
+            .map_err(|e| format!("打开下载页失败：{e}"))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         return Err("当前平台不支持打开下载页".into());
     }
@@ -657,6 +664,44 @@ zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz  Qwitch_0.2.1_b
             assert_eq!(info.published_at.as_deref(), Some("2026-11-20T01:00:00Z"));
             assert_eq!(info.asset_size, Some(12_345_678));
             assert_eq!(info.asset_name.as_deref(), Some("Qwitch_0.2.4_aarch64.dmg"));
+            assert!(info.checksums_url.is_some());
         }
+    }
+
+    #[test]
+    fn official_repo_url_and_missing_checksums_metadata() {
+        assert!(validate_official_repo_url(
+            "https://github.com/LuckyOneTwoThree/Qwitch/releases/latest"
+        )
+        .is_ok());
+        assert!(validate_official_repo_url(
+            "http://github.com/LuckyOneTwoThree/Qwitch/releases/latest"
+        )
+        .is_err());
+        assert!(validate_official_repo_url("https://example.com/Qwitch/releases").is_err());
+        assert!(
+            validate_official_repo_url("https://github.com/OtherUser/Qwitch/releases/latest")
+                .is_err()
+        );
+
+        let release_no_sum = GithubRelease {
+            tag_name: "v0.3.0".to_string(),
+            body: None,
+            html_url: format!("https://github.com/{REPO}/releases/tag/v0.3.0"),
+            published_at: None,
+            assets: vec![GithubAsset {
+                name: "Qwitch_0.3.0_x64-setup.exe".to_string(),
+                browser_download_url: format!(
+                    "https://github.com/{REPO}/releases/download/v0.3.0/Qwitch_0.3.0_x64-setup.exe"
+                ),
+                size: 1024,
+            }],
+        };
+        let info = build_update_info_from_release(release_no_sum, "0.2.3", "windows", "x86_64")
+            .expect("parse release without checksums");
+        assert!(info.update_available);
+        assert!(info.checksums_url.is_none());
+        let expected_can_auto_install = cfg!(target_os = "windows");
+        assert_eq!(info.can_auto_install, expected_can_auto_install);
     }
 }

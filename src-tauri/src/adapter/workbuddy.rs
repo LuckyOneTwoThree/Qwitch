@@ -9,11 +9,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::adapter::common::{map_http_status, shared_http_client};
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
 };
@@ -27,16 +27,6 @@ const DEFAULT_ENDPOINT: &str = "https://copilot.tencent.com";
 const WEB_AUTH_ORIGIN: &str = "https://www.workbuddy.cn";
 const AUTH_FILENAME: &str = "workbuddy-desktop.info";
 const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
-
-fn shared_http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
-}
 
 const AUTH_HELPER_JS: &str = r#"'use strict';
 const crypto = require('crypto');
@@ -151,10 +141,7 @@ pub struct WorkBuddyAdapter {
 
 impl WorkBuddyAdapter {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = shared_http_client().clone();
 
         Self {
             manifest: AdapterManifest {
@@ -396,7 +383,7 @@ impl WorkBuddyAdapter {
         }
         serde_json::from_str(raw_text).map_err(|e| {
             if !status.is_success() {
-                Self::map_http_status(status, "WorkBuddy 每日签到")
+                map_http_status(status, "WorkBuddy 每日签到")
             } else {
                 AdapterError::Unified {
                     code: UnifiedErrorCode::NetworkError,
@@ -805,27 +792,6 @@ impl WorkBuddyAdapter {
         Ok(headers)
     }
 
-    fn map_http_status(status: reqwest::StatusCode, context: &str) -> AdapterError {
-        match status.as_u16() {
-            401 => AdapterError::Unified {
-                code: UnifiedErrorCode::AuthExpired,
-                message: format!("{context}: 登录态已过期 (HTTP 401)"),
-            },
-            403 => AdapterError::Unified {
-                code: UnifiedErrorCode::RiskTriggered,
-                message: format!("{context}: 服务端拒绝访问 (HTTP 403)"),
-            },
-            429 => AdapterError::Unified {
-                code: UnifiedErrorCode::RateLimited,
-                message: format!("{context}: 请求过于频繁 (HTTP 429)"),
-            },
-            code => AdapterError::Unified {
-                code: UnifiedErrorCode::NetworkError,
-                message: format!("{context}: HTTP {code}"),
-            },
-        }
-    }
-
     fn parse_checkin_status_from_body(
         body: &Value,
     ) -> Result<(ClaimStatus, f64, i64), AdapterError> {
@@ -896,7 +862,7 @@ impl WorkBuddyAdapter {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(Self::map_http_status(status, "查询 WorkBuddy 状态"));
+            return Err(map_http_status(status, "查询 WorkBuddy 状态"));
         }
 
         let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
@@ -929,7 +895,7 @@ impl WorkBuddyAdapter {
         {
             let sum_status = sum_resp.status();
             if matches!(sum_status.as_u16(), 401 | 403 | 429) {
-                return Err(Self::map_http_status(sum_status, "查询 WorkBuddy 额度汇总"));
+                return Err(map_http_status(sum_status, "查询 WorkBuddy 额度汇总"));
             }
             if sum_status.is_success() {
                 if let Ok(sum_body) = sum_resp.json::<Value>().await {
@@ -1533,7 +1499,7 @@ impl ToolAdapter for WorkBuddyAdapter {
 
         let status = resp.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Err(Self::map_http_status(status, "WorkBuddy 每日签到"));
+            return Err(map_http_status(status, "WorkBuddy 每日签到"));
         }
 
         let raw_text = resp.text().await.map_err(|e| AdapterError::Unified {
@@ -1574,7 +1540,7 @@ impl ToolAdapter for WorkBuddyAdapter {
         }
 
         if !status.is_success() {
-            return Err(Self::map_http_status(status, "WorkBuddy 每日签到"));
+            return Err(map_http_status(status, "WorkBuddy 每日签到"));
         }
 
         if let Some(c) = code.filter(|&c| c != 0) {

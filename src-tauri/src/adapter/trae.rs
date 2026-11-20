@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use crate::adapter::common::{map_http_status, shared_http_client};
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
 };
@@ -119,10 +120,7 @@ impl TraeAdapter {
         } else {
             ("trae".to_string(), "Trae".to_string())
         };
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = shared_http_client().clone();
 
         Self {
             is_cn,
@@ -670,27 +668,6 @@ impl TraeAdapter {
         Ok(headers)
     }
 
-    fn map_http_status(status: reqwest::StatusCode, context: &str) -> AdapterError {
-        match status.as_u16() {
-            401 => AdapterError::Unified {
-                code: UnifiedErrorCode::AuthExpired,
-                message: format!("{context}: 登录态已过期 (HTTP 401)"),
-            },
-            403 => AdapterError::Unified {
-                code: UnifiedErrorCode::RiskTriggered,
-                message: format!("{context}: 服务端拒绝访问 (HTTP 403)"),
-            },
-            429 => AdapterError::Unified {
-                code: UnifiedErrorCode::RateLimited,
-                message: format!("{context}: 请求过于频繁 (HTTP 429)"),
-            },
-            code => AdapterError::Unified {
-                code: UnifiedErrorCode::NetworkError,
-                message: format!("{context}: HTTP {code}"),
-            },
-        }
-    }
-
     fn extract_token_from_cred(&self, cred: &CredentialEnvelope) -> (Option<String>, bool) {
         let mut token_opt: Option<String> = None;
         let mut is_encrypted_local = false;
@@ -809,7 +786,7 @@ impl TraeAdapter {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(Self::map_http_status(status, "查询 Trae CN 签到状态"));
+            return Err(map_http_status(status, "查询 Trae CN 签到状态"));
         }
 
         let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
@@ -854,7 +831,7 @@ impl TraeAdapter {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(Self::map_http_status(status, "查询 Trae 额度"));
+            return Err(map_http_status(status, "查询 Trae 额度"));
         }
 
         let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
@@ -1622,7 +1599,7 @@ impl ToolAdapter for TraeAdapter {
                     });
                 }
             }
-            return Err(Self::map_http_status(status, "Trae CN 每日签到"));
+            return Err(map_http_status(status, "Trae CN 每日签到"));
         }
 
         let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {

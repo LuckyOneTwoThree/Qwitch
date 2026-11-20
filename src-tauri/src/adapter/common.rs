@@ -1,8 +1,43 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::adapter::AdapterError;
 use crate::domain::UnifiedErrorCode;
+
+/// 内置适配器共享的 HTTP 客户端（连接池复用 + 20s 请求超时）
+pub fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// 统一 HTTP 状态码到 `AdapterError` 的映射（401 过期 / 403 风控 / 429 限流 / 其余网络异常）
+pub fn map_http_status(status: reqwest::StatusCode, context: &str) -> AdapterError {
+    match status.as_u16() {
+        401 => AdapterError::Unified {
+            code: UnifiedErrorCode::AuthExpired,
+            message: format!("{context}: 登录态已过期 (HTTP 401)"),
+        },
+        403 => AdapterError::Unified {
+            code: UnifiedErrorCode::RiskTriggered,
+            message: format!("{context}: 服务端拒绝访问 (HTTP 403)"),
+        },
+        429 => AdapterError::Unified {
+            code: UnifiedErrorCode::RateLimited,
+            message: format!("{context}: 请求过于频繁 (HTTP 429)"),
+        },
+        code => AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("{context}: HTTP {code}"),
+        },
+    }
+}
 
 /// 从 JSON 字段安全提取 UID 字符串（兼容正整型数字与非空非哨兵字符串，拒绝 `0` / `-1` / 布尔 / 对象）
 pub fn json_uid_to_string(v: &Value) -> Option<String> {

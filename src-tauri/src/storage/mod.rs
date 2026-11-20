@@ -91,6 +91,27 @@ impl QwitchDatabase {
         Ok(db)
     }
 
+    /// 执行一次 PASSIVE checkpoint（不阻塞读者，不强制截断）。
+    ///
+    /// 由调用方按周期或事件驱动触发；失败不影响业务（返回 bool 供日志）。
+    pub fn checkpoint_wal_passive(&self) -> bool {
+        let Ok(conn) = self.conn.lock() else {
+            return false;
+        };
+        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
+            .is_ok()
+    }
+
+    /// 退出前 TRUNCATE checkpoint：把 WAL 内容全部合并回主库并清空 -wal，
+    /// 让下次启动直接读主库，也避免残留的 -wal 长期占用磁盘。
+    pub fn checkpoint_wal_truncate(&self) -> bool {
+        let Ok(conn) = self.conn.lock() else {
+            return false;
+        };
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .is_ok()
+    }
+
     fn init_schema(&self) -> Result<(), StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         conn.execute_batch(
@@ -99,6 +120,13 @@ impl QwitchDatabase {
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA busy_timeout = 5000;
+            -- WAL 增长治理：限制单次 WAL 文件大小，配合周期性 PASSIVE checkpoint，
+            -- 避免长时间运行后 -wal 无限增长（实测曾达主库体积的 20 倍）。
+            PRAGMA journal_size_limit = 4194304;
+            -- 每 1000 页（约 4MB，默认页大小 4096）触发一次自动 checkpoint
+            PRAGMA wal_autocheckpoint = 1000;
+            -- 删除的记录所在页用 0 覆写，避免已删除的凭据/日志残留在空闲页
+            PRAGMA secure_delete = ON;
 
             CREATE TABLE IF NOT EXISTS accounts (
                 id TEXT PRIMARY KEY,
@@ -166,6 +194,11 @@ impl QwitchDatabase {
         let _ = conn.execute("ALTER TABLE action_logs ADD COLUMN archived_at TEXT", []);
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_archived_id ON action_logs(archived_at, id DESC)",
+            [],
+        );
+        // 支撑日志统计的 COUNT(*) 子查询（archived_at + result_status 覆盖扫描）
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_logs_archived_status ON action_logs(archived_at, result_status)",
             [],
         );
         Ok(())
@@ -608,17 +641,32 @@ impl QwitchDatabase {
         Ok(())
     }
 
-    /// 将历史无 AAD 的旧格式密文一次性重加密为带 `tool_id:account_id` AAD 的
-    /// `QWA1` 新格式（跨账号密文替换防护）。以 `storage.cred_aad` 标记保证幂等；
-    /// 已是新格式的行跳过；无法解密的历史密文保持原样交由密钥恢复流程处理。
+    /// 旧格式（无 AAD）密文的账号 id 列表设置键。
+    ///
+    /// 迁移时解密失败的行无法重封装，会**永久**停留在「解密忽略 AAD」的兼容路径上，
+    /// 即跨账号密文移植仍可成功。此处显式记录这些行，供启动告警与后续重试，
+    /// 而不是静默 `continue` 后假装迁移完成。
+    const LEGACY_CRED_IDS_KEY: &str = "storage.cred_aad_legacy_ids";
+
+    /// 返回仍未升级到 AAD 格式的账号 id（供启动告警与 UI 提示）。
+    pub fn legacy_aad_account_ids(&self) -> Vec<String> {
+        self.get_setting(Self::LEGACY_CRED_IDS_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+            .unwrap_or_default()
+    }
+
     pub fn migrate_credential_aad(&self, master_key: &[u8; 32]) -> Result<(), StorageError> {
         const FLAG: &str = "storage.cred_aad";
         const ALGO: &str = "aad-v1";
-        if self.get_setting(FLAG)?.as_deref() == Some(ALGO) {
+        let already_done = self.get_setting(FLAG)?.as_deref() == Some(ALGO);
+        // 已完成迁移也要重试此前失败的行（可能因临时密钥问题失败）
+        if already_done && self.legacy_aad_account_ids().is_empty() {
             return Ok(());
         }
 
-        let updates: Vec<(String, Vec<u8>)> = {
+        let (updates, failed_ids): (Vec<(String, Vec<u8>)>, Vec<String>) = {
             let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
             let mut stmt =
                 conn.prepare("SELECT id, tool_id, encrypted_credential FROM accounts")?;
@@ -633,6 +681,7 @@ impl QwitchDatabase {
                 .collect::<Result<Vec<_>, _>>()?;
 
             let mut updates = Vec::new();
+            let mut failed_ids = Vec::new();
             for (id, tool_id, blob) in rows {
                 if crypto::is_aad_sealed(&blob) {
                     continue;
@@ -640,12 +689,16 @@ impl QwitchDatabase {
                 let aad = crypto::credential_aad(&tool_id, &id);
                 let env = match crypto::decrypt_credential(master_key, &aad, &blob) {
                     Ok(env) => env,
-                    Err(_) => continue,
+                    Err(_) => {
+                        // 记录而非静默跳过：该行仍处于「AAD 可被绕过」状态
+                        failed_ids.push(id);
+                        continue;
+                    }
                 };
                 let new_blob = crypto::encrypt_credential(master_key, &aad, &env)?;
                 updates.push((id, new_blob));
             }
-            updates
+            (updates, failed_ids)
         };
 
         if !updates.is_empty() {
@@ -661,6 +714,10 @@ impl QwitchDatabase {
             tx.commit()?;
         }
         self.set_setting(FLAG, ALGO)?;
+        // 记录仍未升级的行：这些行仍可被跨账号密文移植解密，
+        // 启动时会据此告警，且下次启动继续尝试重封装。
+        let failed_json = serde_json::to_string(&failed_ids)?;
+        self.set_setting(Self::LEGACY_CRED_IDS_KEY, &failed_json)?;
         Ok(())
     }
 
@@ -813,6 +870,72 @@ impl QwitchDatabase {
         Ok(rows)
     }
 
+    /// 严格解析 `key_id` 文件内容。
+    ///
+    /// 只有「32 位小写十六进制」才被视为有效指纹；空文件、截断内容、编码损坏、
+    /// 写入中途断电留下的半截数据一律返回 `None`，按「指纹缺失」处理。
+    /// 这避免了把损坏文件误判成「指纹冲突」而拒绝启动（密钥其实完全正确）。
+    fn parse_key_fingerprint(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.len() == 32 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Some(trimmed.to_ascii_lowercase())
+        } else {
+            None
+        }
+    }
+
+    /// 原子写入 `key_id`：同目录临时文件 + `fsync` + `rename`。
+    ///
+    /// 直接 `fs::write` 在断电/崩溃时会留下空文件或截断内容，随后被误判为指纹冲突。
+    /// 临时文件以 `0600` 创建，`rename` 在同一文件系统内是原子的，因此读者要么看到
+    /// 旧内容，要么看到完整新内容，不会看到中间态。
+    fn write_key_fingerprint_atomic(
+        data_dir: &Path,
+        fingerprint: &str,
+    ) -> Result<(), StorageError> {
+        use std::io::Write;
+
+        let path = data_dir.join("key_id");
+        let tmp = data_dir.join(format!(".key_id.tmp-{}", Uuid::new_v4()));
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = opts.open(&tmp)?;
+            file.write_all(fingerprint.as_bytes())?;
+            file.sync_all()?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(StorageError::Crypto(format!(
+                "写入密钥指纹临时文件失败: {e}"
+            )));
+        }
+
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(StorageError::Crypto(format!("替换密钥指纹文件失败: {e}")));
+        }
+
+        // rename 后同步目录项，确保崩溃后目录条目也落盘（Unix 有效，Windows 忽略）
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = std::fs::File::open(data_dir) {
+                let _ = dir.sync_all();
+            }
+        }
+
+        Ok(())
+    }
+
     /// 启动时校验主密钥指纹与多条密文样本；首次生成或清理孤儿 key_id 前
     /// 必须确认是否存在无法解密的既有账号数据，避免把错误密钥"祝福"为合法密钥
     pub fn verify_or_init_key_fingerprint(
@@ -829,8 +952,14 @@ impl QwitchDatabase {
             .any(|(aad, blob)| crypto::decrypt_credential(master_key, aad, blob).is_ok());
         let data_dir_str = data_dir.display();
 
-        if let Ok(existing) = std::fs::read_to_string(&path) {
-            if existing.trim() == fingerprint {
+        // 严格解析既有指纹：空文件/截断/非 hex 一律视为「缺失」而非「冲突」，
+        // 否则一次写入中断就会让正确的主密钥永久无法启动。
+        let existing = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| Self::parse_key_fingerprint(&raw));
+
+        if let Some(existing) = existing {
+            if existing == fingerprint {
                 if has_accounts && !any_sample_decrypts {
                     return Err(StorageError::Crypto(format!(
                         "key_id 指纹匹配但当前主密钥无法解密任何抽样账号凭据（指纹与数据不一致）。\
@@ -840,13 +969,7 @@ impl QwitchDatabase {
                 return Ok(());
             }
             if !has_accounts {
-                std::fs::write(&path, fingerprint.as_bytes())
-                    .map_err(|e| StorageError::Crypto(e.to_string()))?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-                }
+                Self::write_key_fingerprint_atomic(data_dir, &fingerprint)?;
                 return Ok(());
             }
             if any_sample_decrypts {
@@ -868,13 +991,7 @@ impl QwitchDatabase {
             )));
         }
 
-        std::fs::write(&path, fingerprint.as_bytes())
-            .map_err(|e| StorageError::Crypto(e.to_string()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
+        Self::write_key_fingerprint_atomic(data_dir, &fingerprint)?;
         Ok(())
     }
 

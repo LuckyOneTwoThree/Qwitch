@@ -1195,3 +1195,208 @@ fn apply_log_retention_purges_archived_beyond_window() {
     );
     assert_eq!(db.get_action_log_stats().unwrap().archived_count, 0);
 }
+
+#[test]
+fn corrupted_key_id_is_treated_as_missing_instead_of_conflict() {
+    let dir = temp_data_dir("corrupt_keyid");
+    let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+    let key = [7u8; 32];
+    let expected = crypto::key_fingerprint(&key);
+
+    // 建立真实账号，使「指纹冲突」分支真正可达（空库会走重置路径，测不到问题）
+    db.upsert_account(&key, Some("损坏指纹"), &token_envelope("corrupt_uid"))
+        .expect("insert");
+    db.verify_or_init_key_fingerprint(&dir, &key)
+        .expect("init fingerprint");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("key_id")).unwrap().trim(),
+        expected
+    );
+
+    // 模拟写入中途断电留下的各种损坏形态：均应按「指纹缺失」重建，而不是拒绝启动
+    for corrupted in [
+        "",                                 // 空文件
+        &expected[..16],                    // 截断一半
+        &expected[..31],                    // 少一个字符
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", // 非十六进制
+        "\0\0\0\0",                         // 二进制垃圾
+    ] {
+        std::fs::write(dir.join("key_id"), corrupted.as_bytes()).expect("write corrupted");
+        db.verify_or_init_key_fingerprint(&dir, &key)
+            .unwrap_or_else(|e| panic!("损坏 key_id {corrupted:?} 不应导致拒启: {e}"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("key_id")).unwrap().trim(),
+            expected,
+            "损坏内容 {corrupted:?} 应被原子重建为正确指纹"
+        );
+    }
+
+    // 重建后仍能正常解密既有凭据（证明未被误判为冲突而丢数据）
+    let accounts = db.list_accounts(None).expect("list");
+    assert_eq!(accounts.len(), 1);
+    db.get_account_credential(&key, &accounts[0].id)
+        .expect("credential still decryptable");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn key_id_write_leaves_no_temp_file_and_is_0600() {
+    let dir = temp_data_dir("keyid_atomic");
+    let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+    let key = [9u8; 32];
+
+    db.verify_or_init_key_fingerprint(&dir, &key)
+        .expect("init fingerprint");
+
+    // 原子写不得残留临时文件
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".key_id.tmp-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "原子写不应残留临时文件，实际残留: {leftovers:?}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("key_id"))
+            .expect("stat key_id")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "key_id 必须是 0600，实际 {mode:o}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn aad_migration_records_undecryptable_rows_and_retries_next_boot() {
+    let dir = temp_data_dir("aad_legacy_track");
+    let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+    let key = [3u8; 32];
+
+    // 一个正常账号 + 一个用「错误密钥」加密的坏行（模拟历史损坏/密钥错配）
+    let good = db
+        .upsert_account(&key, Some("正常"), &token_envelope("aad_good"))
+        .expect("good");
+    let bad = db
+        .upsert_account(&key, Some("损坏"), &token_envelope("aad_bad"))
+        .expect("bad");
+
+    // 把 bad 的密文替换成无法用当前密钥解密的旧格式字节
+    {
+        let conn = db.conn.lock().expect("lock");
+        conn.execute(
+            "UPDATE accounts SET encrypted_credential = ?1 WHERE id = ?2",
+            rusqlite::params![
+                vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+                &bad.id
+            ],
+        )
+        .expect("corrupt blob");
+    }
+
+    db.migrate_credential_aad(&key).expect("migrate");
+
+    // 正常行已升级为 AAD 格式
+    {
+        let conn = db.conn.lock().expect("lock");
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT encrypted_credential FROM accounts WHERE id = ?1",
+                rusqlite::params![&good.id],
+                |r| r.get(0),
+            )
+            .expect("read good");
+        assert!(crypto::is_aad_sealed(&blob), "可解密行必须升级为 QWA1");
+    }
+
+    // 坏行被显式记录，而不是静默跳过
+    let legacy = db.legacy_aad_account_ids();
+    assert_eq!(legacy, vec![bad.id.clone()], "无法解密的历史行必须被记录");
+
+    // 再次调用迁移应继续尝试（不因已完成标志而提前返回）
+    db.migrate_credential_aad(&key).expect("retry migrate");
+    assert_eq!(
+        db.legacy_aad_account_ids(),
+        vec![bad.id.clone()],
+        "仍无法解密的行应继续留在待升级列表"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wal_checkpoint_keeps_wal_bounded_under_many_writes() {
+    let dir = temp_data_dir("wal_bound");
+    let db_path = dir.join("qwitch.db");
+    let db = QwitchDatabase::open(&db_path).expect("open");
+    let key = [11u8; 32];
+
+    // 大量写入制造 WAL 增长
+    for i in 0..300 {
+        db.upsert_account(
+            &key,
+            Some(&format!("acc{i}")),
+            &token_envelope(&format!("wal_uid_{i}")),
+        )
+        .expect("write");
+    }
+
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    let wal_before = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+
+    // TRUNCATE checkpoint 后 WAL 应被清空/显著缩小
+    assert!(db.checkpoint_wal_truncate(), "checkpoint 应成功");
+    let wal_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+
+    assert!(
+        wal_after < wal_before.max(1),
+        "TRUNCATE checkpoint 后 WAL 应收缩：before={wal_before} after={wal_after}"
+    );
+    assert!(
+        wal_after <= 4096,
+        "TRUNCATE 后 WAL 应接近空（当前 {wal_after} 字节）"
+    );
+
+    // 数据未丢失
+    assert_eq!(db.list_accounts(None).expect("list").len(), 300);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn wal_pragmas_are_applied() {
+    let dir = temp_data_dir("wal_pragma");
+    let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+    let conn = db.conn.lock().expect("lock");
+
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .expect("journal_mode");
+    assert_eq!(mode.to_lowercase(), "wal");
+
+    let secure: i64 = conn
+        .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+        .expect("secure_delete");
+    assert_eq!(secure, 1, "secure_delete 必须开启，避免删除数据残留空闲页");
+
+    let limit: i64 = conn
+        .query_row("PRAGMA journal_size_limit", [], |r| r.get(0))
+        .expect("journal_size_limit");
+    assert_eq!(limit, 4_194_304);
+
+    let autockpt: i64 = conn
+        .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
+        .expect("wal_autocheckpoint");
+    assert_eq!(autockpt, 1000);
+
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&dir);
+}

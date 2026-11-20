@@ -91,6 +91,130 @@ pub struct ClientSpec {
     pub win_folder_names: &'static [&'static str],
 }
 
+/// 校验「将被启动的客户端可执行文件」是否可信。
+///
+/// 背景：`custom_client_paths` 允许用户覆盖客户端路径，历史实现只校验
+/// 「绝对路径且存在」，随后该路径被 `launch_client` 直接 `Command::new(...)`
+/// 执行。这使一次渲染进程污染即可升级为任意代码执行（写入 `/bin/sh` 之类的
+/// 路径再触发启动）。
+///
+/// 本函数不改变「自定义路径」这一合法能力，只在真正启动前复核三点：
+/// 1. 名称必须匹配该工具的官方客户端名（`ClientSpec` 的 app/exe 白名单）；
+/// 2. macOS 必须是 `.app` bundle，且其 `Contents/MacOS/<name>` 存在；
+/// 3. 父目录必须位于受信任的安装位置（`/Applications`、`~/Applications`、
+///    `%LOCALAPPDATA%\Programs`、`%ProgramFiles%`）或用户主目录之下。
+///
+/// 说明：此处**不做**代码签名校验（本项目暂不做 Apple 签名），因此它挡的是
+/// 「指向系统二进制的劫持」，不是「用户主目录内被植入的恶意同名程序」。
+pub fn validate_client_executable(tool_id: &str, executable: &Path) -> Result<(), String> {
+    let spec = client_spec(tool_id).ok_or_else(|| format!("未知或不支持的工具: {tool_id}"))?;
+
+    let Some(file_name) = executable.file_name().and_then(|n| n.to_str()) else {
+        return Err(format!("客户端路径非法: {}", executable.display()));
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let name_ok = spec.mac_app_names.iter().any(|n| n == &file_name);
+        if !name_ok {
+            return Err(format!(
+                "客户端可执行文件名不受支持：{file_name}（{tool_id} 允许：{}）",
+                spec.mac_app_names.join(" / ")
+            ));
+        }
+        if executable.extension().and_then(|e| e.to_str()) != Some("app") {
+            return Err(format!(
+                "客户端路径必须是 .app bundle：{}",
+                executable.display()
+            ));
+        }
+        let macos_dir = executable.join("Contents/MacOS");
+        let has_binary = std::fs::read_dir(&macos_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|e| e.path().is_file() && e.path().extension().is_none())
+            })
+            .unwrap_or(false);
+        if !has_binary {
+            return Err(format!(
+                "客户端 bundle 内缺少可执行文件：{}",
+                macos_dir.display()
+            ));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let name_ok = spec
+            .win_exe_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(file_name));
+        if !name_ok {
+            return Err(format!(
+                "客户端可执行文件名不受支持：{file_name}（{tool_id} 允许：{}）",
+                spec.win_exe_names.join(" / ")
+            ));
+        }
+        if executable
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| !e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(true)
+        {
+            return Err(format!("客户端路径必须是 .exe：{}", executable.display()));
+        }
+    }
+
+    // 目录白名单：仅允许受信任的安装位置或用户主目录之下
+    let canonical = std::fs::canonicalize(executable)
+        .map_err(|e| format!("客户端路径无法解析（{}）：{e}", executable.display()))?;
+    let mut allowed_roots: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        allowed_roots.push(PathBuf::from("/Applications"));
+        if let Some(home) = std::env::var_os("HOME") {
+            allowed_roots.push(PathBuf::from(&home).join("Applications"));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            allowed_roots.push(PathBuf::from(&local).join("Programs"));
+        }
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            allowed_roots.push(PathBuf::from(pf));
+        }
+        if let Some(pf86) = std::env::var_os("ProgramFiles(x86)") {
+            allowed_roots.push(PathBuf::from(pf86));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        allowed_roots.push(PathBuf::from(home));
+    }
+
+    if allowed_roots.is_empty() {
+        return Err("无法确定受信任的安装目录，已拒绝启动客户端".into());
+    }
+    if !allowed_roots.iter().any(|root| {
+        std::fs::canonicalize(root)
+            .map(|r| canonical.starts_with(&r))
+            .unwrap_or(false)
+    }) {
+        return Err(format!(
+            "客户端路径不在受信任的安装目录内：{}（允许的根目录：{}）",
+            canonical.display(),
+            allowed_roots
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn client_spec(tool_id: &str) -> Option<ClientSpec> {
     match tool_id {
         "trae" => Some(ClientSpec {
@@ -662,18 +786,45 @@ impl NativePlatformHost {
     ) -> Result<[u8; 32], HostError> {
         let key_file = data_dir.join("master.key");
 
+        // 原子写入明文密钥副本：临时文件（0600）→ fsync → rename。
+        // 避免断电/崩溃留下截断的 master.key，进而让「唯一密钥源」不可用。
         let write_key_file = |path: &Path, hex_key: &str| -> Result<(), std::io::Error> {
-            std::fs::write(path, hex_key.as_bytes())?;
+            use std::io::Write;
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let tmp = parent.join(format!(".master.key.tmp-{}", uuid::Uuid::new_v4()));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let write_res = (|| -> std::io::Result<()> {
+                let mut f = opts.open(&tmp)?;
+                f.write_all(hex_key.as_bytes())?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            if let Err(e) = write_res {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            if let Err(e) = std::fs::rename(&tmp, path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
             }
             Ok(())
         };
-        let remove_key_file = || {
-            if key_file.exists() {
-                let _ = std::fs::remove_file(&key_file);
+        // 兜底镜像：钥匙串托管成功后**保留**一份 0600 明文副本，而不是删除。
+        //
+        // 原因：本项目暂不做 macOS 代码签名，每次覆盖升级都会让钥匙串 ACL 失效，
+        // 用户若在弹窗中误点「拒绝」，或重装系统/清理钥匙串，主密钥将再无副本，
+        // 全部账号凭据永久不可恢复（见 verify_or_init_key_fingerprint 的拒启分支）。
+        // 保留镜像后，钥匙串失效时仍可正常启动；镜像本身仍受 0600 文件权限保护。
+        let keep_backup_copy = |hex_key: &str| {
+            if let Err(e) = write_key_file(&key_file, hex_key) {
+                // 镜像写入失败不应阻断启动：钥匙串已是有效来源
+                eprintln!("Qwitch 主密钥兜底副本写入失败（不影响本次启动）: {e}");
             }
         };
         let persist_in_keyring = |kr: &Entry, hex_key: &str| -> bool {
@@ -713,14 +864,14 @@ impl NativePlatformHost {
         let hex_key = hex::encode(key);
 
         match source {
-            KeySource::Keyring => remove_key_file(),
+            KeySource::Keyring => keep_backup_copy(&hex_key),
             KeySource::LegacyKeyring => {
                 let migrated = entry
                     .as_ref()
                     .map(|kr| persist_in_keyring(kr, &hex_key))
                     .unwrap_or(false);
                 if migrated {
-                    remove_key_file();
+                    keep_backup_copy(&hex_key);
                 } else if write_key_file(&key_file, &hex_key).is_err() {
                     return Err(HostError::Keyring(
                         "历史钥匙串密钥迁移落盘失败，为避免重启后密钥不可用已中止启动".into(),
@@ -731,7 +882,7 @@ impl NativePlatformHost {
                 // 仅在钥匙串可靠持久化时才迁移并清理明文副本，否则保留文件作为唯一密钥源
                 if let Some(kr) = entry.as_ref() {
                     if persist_in_keyring(kr, &hex_key) {
-                        remove_key_file();
+                        keep_backup_copy(&hex_key);
                     }
                 }
             }
@@ -741,7 +892,7 @@ impl NativePlatformHost {
                     .map(|kr| persist_in_keyring(kr, &hex_key))
                     .unwrap_or(false);
                 if persisted {
-                    remove_key_file();
+                    keep_backup_copy(&hex_key);
                 } else if write_key_file(&key_file, &hex_key).is_err() {
                     return Err(HostError::Keyring(
                         "无法持久化主密钥到钥匙串或数据目录".into(),
@@ -1625,7 +1776,29 @@ mod tests {
         let dir = temp_data_dir("persistent");
         let key1 =
             NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("first boot");
-        assert!(!dir.join("master.key").exists(), "持久化钥匙串不应落明文");
+        // 钥匙串托管成功后仍保留 0600 兜底镜像：本项目不做代码签名，
+        // 覆盖升级会使钥匙串 ACL 失效，无镜像则密钥丢失即凭据永久不可恢复。
+        assert!(
+            dir.join("master.key").exists(),
+            "持久化钥匙串应保留 0600 兜底镜像"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("master.key"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "兜底镜像必须是 0600，实际 {mode:o}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("master.key"))
+                .unwrap()
+                .trim(),
+            hex::encode(key1),
+            "兜底镜像必须与钥匙串中的密钥一致"
+        );
         let key2 = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("restart");
         assert_eq!(key1, key2);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1638,10 +1811,38 @@ mod tests {
         std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
         let key = NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("migrate");
         assert_eq!(key, legacy_key);
-        assert!(!dir.join("master.key").exists(), "迁移成功后清理明文");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("master.key"))
+                .unwrap()
+                .trim(),
+            hex::encode(legacy_key),
+            "迁移成功后兜底镜像内容须与迁移的密钥一致"
+        );
         let key_again =
             NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("restart");
         assert_eq!(key_again, legacy_key);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 4b：钥匙串丢失（模拟覆盖升级后 ACL 失效/重装系统）→ 兜底镜像救回启动 ---
+        fake_store().lock().unwrap().clear();
+        let dir = temp_data_dir("keyring_lost_backup");
+        let key_first =
+            NativePlatformHost::get_or_create_master_key_with(&dir, true).expect("first boot");
+        let backup_hex = std::fs::read_to_string(dir.join("master.key"))
+            .expect("兜底镜像必须存在")
+            .trim()
+            .to_string();
+        assert_eq!(backup_hex, hex::encode(key_first));
+
+        // 模拟钥匙串条目消失（用户误点拒绝 / 系统重装 / ACL 失效）
+        fake_store().lock().unwrap().clear();
+
+        let key_recovered = NativePlatformHost::get_or_create_master_key_with(&dir, true)
+            .expect("recover from backup");
+        assert_eq!(
+            key_recovered, key_first,
+            "钥匙串丢失后必须从兜底镜像恢复同一主密钥，而不是生成新钥"
+        );
         let _ = std::fs::remove_dir_all(&dir);
 
         // --- 场景 5：旧版 Quiver 钥匙串迁移 ---
@@ -1762,5 +1963,58 @@ mod tests {
 
         // 恢复 mock，避免影响后续可能使用 keyring 的测试
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+    }
+}
+
+#[cfg(test)]
+mod client_executable_validation_tests {
+    use super::validate_client_executable;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn rejects_paths_outside_trusted_install_roots_and_wrong_names() {
+        // 指向系统二进制：名称不匹配即拒绝
+        assert!(validate_client_executable("trae_cn", Path::new("/bin/sh")).is_err());
+        assert!(validate_client_executable("workbuddy", Path::new("/bin/echo")).is_err());
+
+        // 未知工具
+        assert!(
+            validate_client_executable("not_a_tool", Path::new("/Applications/X.app")).is_err()
+        );
+
+        // 名称正确但不在受信任目录：拒绝
+        let tmp_app = std::env::temp_dir().join("Trae CN.app");
+        let _ = std::fs::create_dir_all(tmp_app.join("Contents/MacOS"));
+        let _ = std::fs::write(tmp_app.join("Contents/MacOS/Trae CN"), b"#!/bin/sh\n");
+        // /tmp 不在 /Applications、~/Applications 或 HOME 之下（macOS 上 /tmp 是 /private/tmp）
+        assert!(
+            validate_client_executable("trae_cn", &tmp_app).is_err(),
+            "非受信任安装目录内的同名 bundle 必须被拒绝"
+        );
+        let _ = std::fs::remove_dir_all(&tmp_app);
+    }
+
+    #[test]
+    fn accepts_real_installed_clients_when_present() {
+        // 白名单不得过严：本机真实安装的客户端必须通过校验
+        let cases: &[(&str, &str)] = &[
+            ("trae_cn", "/Applications/Trae CN.app"),
+            ("workbuddy", "/Applications/WorkBuddy.app"),
+            ("qoder_cn", "/Applications/Qoder CN.app"),
+            ("minimax_code_cn", "/Applications/MiniMax Code.app"),
+        ];
+        let mut checked = 0usize;
+        for (tool, path) in cases {
+            let p = PathBuf::from(path);
+            if !p.exists() {
+                continue;
+            }
+            checked += 1;
+            validate_client_executable(tool, &p)
+                .unwrap_or_else(|e| panic!("真实客户端 {path} 应通过校验，实际被拒: {e}"));
+        }
+        if checked == 0 {
+            eprintln!("跳过：本机未安装任何受支持客户端");
+        }
     }
 }

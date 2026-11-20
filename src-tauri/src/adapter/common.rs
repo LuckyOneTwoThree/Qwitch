@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::adapter::AdapterError;
-use crate::domain::UnifiedErrorCode;
+use crate::domain::{ClaimStatus, QuotaSnapshot, UnifiedErrorCode};
 
 /// 内置适配器共享的 HTTP 客户端（连接池复用 + 20s 请求超时）
 pub fn shared_http_client() -> &'static reqwest::Client {
@@ -208,6 +208,44 @@ pub fn is_idempotent_claimed_phrase(text: &str) -> bool {
                 !contains_clause_failure(clause) && contains_explicit_claimed_phrase(clause)
             })
     })
+}
+
+/// 领取成功后合并额度快照（三个适配器共用）。
+///
+/// 语义：
+/// - 有领后快照：若服务端返回 `Unknown`/`Unsupported` 但领取动作已确认成功，
+///   合成为 `Claimed`，避免 UI 残留「可领」按钮；
+/// - 无领后快照但领取已确认：用前置快照的套餐与桶信息合成一条 `Claimed` 快照，
+///   保证状态闭合（否则调度器可能重复尝试领取）；
+/// - 其余情况返回 `None`，交由调用方保持原状。
+///
+/// 历史实现中 `trae.rs` / `qoder.rs` / `minimax.rs` 各有一份**字节级相同**的副本，
+/// 已收敛到此处；任何语义调整只需改这一处，避免继续分叉。
+pub fn merge_post_claim_quota(
+    inspected: Option<QuotaSnapshot>,
+    precheck: Option<&QuotaSnapshot>,
+    confirmed_claimed: bool,
+) -> Option<QuotaSnapshot> {
+    match inspected {
+        Some(mut q) => {
+            if confirmed_claimed
+                && matches!(
+                    q.claim_status,
+                    ClaimStatus::Unknown | ClaimStatus::Unsupported
+                )
+            {
+                q.claim_status = ClaimStatus::Claimed;
+            }
+            Some(q)
+        }
+        None if confirmed_claimed => Some(QuotaSnapshot {
+            plan_name: precheck.and_then(|p| p.plan_name.clone()),
+            claim_status: ClaimStatus::Claimed,
+            buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+        }),
+        None => None,
+    }
 }
 
 /// HTTP 200 内的业务码统一映射：401/403/429 必须落到可熔断的错误码，

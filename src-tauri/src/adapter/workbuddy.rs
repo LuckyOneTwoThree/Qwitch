@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -137,13 +138,34 @@ fn decode_jwt_claims(token: &str) -> Option<Value> {
 pub struct WorkBuddyAdapter {
     manifest: AdapterManifest,
     http: reqwest::Client,
+    /// 注入的平台宿主。为 None 时回退到 `NativePlatformHost`。
+    ///
+    /// 历史实现直接在 `inspect_quota` / `claim_daily` 内自造
+    /// `NativePlatformHost`，导致多实例 profile 导入使用的 `ScopedPlatformHost`
+    /// 无法影响这两条路径（读取的是真实本机配置而非隔离 profile）。
+    host: Option<Arc<dyn PlatformHost>>,
 }
 
 impl WorkBuddyAdapter {
+    /// 注入平台宿主（用于多实例 profile 等隔离场景）。
+    pub fn with_host(host: Arc<dyn PlatformHost>) -> Self {
+        let mut adapter = Self::new();
+        adapter.host = Some(host);
+        adapter
+    }
+
+    /// 优先使用注入的宿主，否则回退到本机实现。
+    fn host_or_native(&self) -> Arc<dyn PlatformHost> {
+        self.host
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::platform::NativePlatformHost))
+    }
+
     pub fn new() -> Self {
         let http = shared_http_client().clone();
 
         Self {
+            host: None,
             manifest: AdapterManifest {
                 id: "workbuddy".to_string(),
                 name: "WorkBuddy".to_string(),
@@ -191,18 +213,17 @@ impl WorkBuddyAdapter {
         {
             if detected.extension().and_then(|e| e.to_str()) == Some("app") || detected.is_dir() {
                 let macos_dir = detected.join("Contents/MacOS");
+                // 仅接受已知的官方可执行文件名。
+                //
+                // 历史实现在此有「取 Contents/MacOS 下第一个普通文件」的兜底，
+                // 会把同一目录内的任意二进制（可能来自自定义客户端路径，或被
+                // 替换/植入的文件）当作 Electron 运行时执行，并经由 stdin 喂入
+                // 明文凭据。该兜底已移除：解析失败一律返回 None，由调用方报
+                // CLIENT_NOT_FOUND 并提示用户在设置中修正客户端路径。
                 for name in ["WorkBuddy", "Electron"] {
                     let candidate = macos_dir.join(name);
                     if candidate.is_file() {
                         return Some(candidate);
-                    }
-                }
-                if let Ok(entries) = std::fs::read_dir(&macos_dir) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if p.is_file() {
-                            return Some(p);
-                        }
                     }
                 }
                 return None;
@@ -1452,8 +1473,8 @@ impl ToolAdapter for WorkBuddyAdapter {
         &self,
         cred: &CredentialEnvelope,
     ) -> Result<QuotaSnapshot, AdapterError> {
-        let host = crate::platform::NativePlatformHost;
-        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&host)).await?;
+        let host = self.host_or_native();
+        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&*host)).await?;
         self.fetch_quota_and_checkin(&endpoint, &headers).await
     }
 
@@ -1462,8 +1483,8 @@ impl ToolAdapter for WorkBuddyAdapter {
         cred: &CredentialEnvelope,
         precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
-        let host = crate::platform::NativePlatformHost;
-        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&host)).await?;
+        let host = self.host_or_native();
+        let (endpoint, _uid, headers) = Self::extract_api_context(cred, Some(&*host)).await?;
 
         // 复用调度器前置快照，避免重复查状态
         let current = match precheck {

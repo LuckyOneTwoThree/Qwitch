@@ -10,6 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -36,13 +37,33 @@ const LOCAL_STATE_FILE: &str = "Local State";
 pub struct QoderAdapter {
     manifest: AdapterManifest,
     http: reqwest::Client,
+    /// 注入的平台宿主。为 None 时回退到 `NativePlatformHost`。
+    ///
+    /// 历史实现在 `read_local_machine_id_fallback` 内自造 `NativePlatformHost`，
+    /// 使多实例 profile 隔离场景读不到目标 profile 的 machine-id。
+    host: Option<Arc<dyn PlatformHost>>,
 }
 
 impl QoderAdapter {
+    /// 注入平台宿主（用于多实例 profile 等隔离场景）。
+    pub fn with_host(host: Arc<dyn PlatformHost>) -> Self {
+        let mut adapter = Self::new();
+        adapter.host = Some(host);
+        adapter
+    }
+
+    /// 优先使用注入的宿主，否则回退到本机实现。
+    fn host_or_native(&self) -> Arc<dyn PlatformHost> {
+        self.host
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::platform::NativePlatformHost))
+    }
+
     pub fn new() -> Self {
         let http = shared_http_client().clone();
 
         Self {
+            host: None,
             manifest: AdapterManifest {
                 id: "qoder_cn".to_string(),
                 name: "Qoder CN".to_string(),
@@ -128,14 +149,33 @@ impl QoderAdapter {
         serde_json::from_slice::<Value>(&plaintext).ok()
     }
 
+    /// macOS 上解析 Qoder 的 `auth.v1.dat`。
+    ///
+    /// 真实 Qoder macOS 客户端用 Chromium Safe Storage 加密（`v10` 前缀 +
+    /// Keychain 派生的 AES-128-CBC），本适配器**尚未实现**该解密链路：
+    /// 这里只处理未加密的明文 JSON（部分开发版/降级版本会落明文）。
+    ///
+    /// 因此当返回 `None` 且原始数据以 `v10` 开头时，调用方必须明确告知用户
+    /// 「本平台本地导入不可用，请改用在线授权」，而不是笼统提示「未完成授权」——
+    /// 后者会让用户反复重试一个不可能成功的操作。
     #[cfg(target_os = "macos")]
     fn try_decrypt_macos_auth_dat(raw_dat: &[u8]) -> Option<Value> {
         if raw_dat.len() > 3 && &raw_dat[..3] == b"v10" {
+            // 加密载荷：当前未实现 Safe Storage 解密
             if let Ok(val) = serde_json::from_slice::<Value>(&raw_dat[3..]) {
                 return Some(val);
             }
+            return None;
         }
         serde_json::from_slice::<Value>(raw_dat).ok()
+    }
+
+    /// 判断 macOS 上的 `auth.v1.dat` 是否为「已加密但本平台无法解密」的形态。
+    #[cfg(target_os = "macos")]
+    fn macos_auth_is_encrypted_but_unsupported(raw_dat: &[u8]) -> bool {
+        raw_dat.len() > 3
+            && &raw_dat[..3] == b"v10"
+            && serde_json::from_slice::<Value>(&raw_dat[3..]).is_err()
     }
 
     fn build_headers(token: &str, machine_id: Option<&str>) -> Result<HeaderMap, AdapterError> {
@@ -158,8 +198,7 @@ impl QoderAdapter {
         Ok(headers)
     }
 
-    fn read_local_machine_id_fallback() -> Option<String> {
-        let host = crate::platform::NativePlatformHost;
+    fn read_local_machine_id_fallback(host: &dyn PlatformHost) -> Option<String> {
         let config_dir = host.client_config_dir("qoder_cn").ok()?;
         for name in [MACHINE_ID_FILE, "machineid"] {
             if let Ok(raw) = std::fs::read_to_string(config_dir.join(name)) {
@@ -172,35 +211,19 @@ impl QoderAdapter {
         None
     }
 
+    /// 转发到共享实现（见 `adapter::common::merge_post_claim_quota`）。
+    /// 保留此薄封装以免改动调用点与既有测试。
     fn merge_post_claim_quota(
         inspected: Option<QuotaSnapshot>,
         precheck: Option<&QuotaSnapshot>,
         confirmed_claimed: bool,
     ) -> Option<QuotaSnapshot> {
-        match inspected {
-            Some(mut q) => {
-                if confirmed_claimed
-                    && matches!(
-                        q.claim_status,
-                        ClaimStatus::Unknown | ClaimStatus::Unsupported
-                    )
-                {
-                    q.claim_status = ClaimStatus::Claimed;
-                }
-                Some(q)
-            }
-            None if confirmed_claimed => Some(QuotaSnapshot {
-                plan_name: precheck.and_then(|p| p.plan_name.clone()),
-                claim_status: ClaimStatus::Claimed,
-                buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
-                fetched_at: Utc::now().to_rfc3339(),
-            }),
-            None => None,
-        }
+        crate::adapter::common::merge_post_claim_quota(inspected, precheck, confirmed_claimed)
     }
 
     fn extract_token_and_machine_id(
         cred: &CredentialEnvelope,
+        host: &dyn PlatformHost,
     ) -> Result<(String, Option<String>), AdapterError> {
         match &cred.payload {
             CredentialPayload::Token {
@@ -212,7 +235,7 @@ impl QoderAdapter {
                     .get("machine_id")
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
-                    .or_else(Self::read_local_machine_id_fallback);
+                    .or_else(|| Self::read_local_machine_id_fallback(host));
                 Ok((access_token.clone(), machine_id))
             }
             CredentialPayload::LocalSnapshot { files } => {
@@ -741,14 +764,30 @@ impl ToolAdapter for QoderAdapter {
         }
 
         #[cfg(target_os = "macos")]
-        if let Some(sess) = Self::try_decrypt_macos_auth_dat(&raw_dat) {
-            if let Some(tok) = sess.get("token").and_then(|v| v.as_str()) {
-                files.insert(
-                    "decrypted_token.txt".to_string(),
-                    BASE64.encode(tok.as_bytes()),
-                );
-                if uid.starts_with("qoder_cn_") {
-                    uid = Self::hash_uid("qoder_cn", tok.as_bytes());
+        {
+            match Self::try_decrypt_macos_auth_dat(&raw_dat) {
+                Some(sess) => {
+                    if let Some(tok) = sess.get("token").and_then(|v| v.as_str()) {
+                        files.insert(
+                            "decrypted_token.txt".to_string(),
+                            BASE64.encode(tok.as_bytes()),
+                        );
+                        if uid.starts_with("qoder_cn_") {
+                            uid = Self::hash_uid("qoder_cn", tok.as_bytes());
+                        }
+                    }
+                }
+                None => {
+                    // 已加密但本平台无解密实现：明确告知用户改走在线授权，
+                    // 避免其反复尝试一个注定失败的本地导入。
+                    if Self::macos_auth_is_encrypted_but_unsupported(&raw_dat) {
+                        return Err(AdapterError::Unified {
+                            code: UnifiedErrorCode::UnsupportedCapability,
+                            message: "macOS 版 Qoder 的本地凭据为 Chromium Safe Storage 加密，\
+                                      当前版本尚未实现该平台的本地解密。请改用「在线授权」导入 Qoder 账号。"
+                                .into(),
+                        });
+                    }
                 }
             }
         }
@@ -852,7 +891,8 @@ impl ToolAdapter for QoderAdapter {
         &self,
         cred: &CredentialEnvelope,
     ) -> Result<QuotaSnapshot, AdapterError> {
-        let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
+        let host = self.host_or_native();
+        let (token, machine_id) = Self::extract_token_and_machine_id(cred, &*host)?;
         let headers = Self::build_headers(&token, machine_id.as_deref())?;
         let payload = self.fetch_campaigns(&headers).await?;
         Ok(Self::build_quota_snapshot(&payload))
@@ -863,7 +903,8 @@ impl ToolAdapter for QoderAdapter {
         cred: &CredentialEnvelope,
         precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
-        let (token, machine_id) = Self::extract_token_and_machine_id(cred)?;
+        let host = self.host_or_native();
+        let (token, machine_id) = Self::extract_token_and_machine_id(cred, &*host)?;
         let headers = Self::build_headers(&token, machine_id.as_deref())?;
         let payload = self.fetch_campaigns(&headers).await?;
         let has_campaigns = payload
@@ -1246,5 +1287,33 @@ mod tests {
         });
         let fresh_snap = QoderAdapter::build_quota_snapshot(&fresh_payload);
         assert_eq!(fresh_snap.claim_status, ClaimStatus::Claimed);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_auth_tests {
+    use super::QoderAdapter;
+
+    #[test]
+    fn plaintext_auth_dat_still_parses() {
+        let raw = br#"{"token":"plain-token-abc"}"#.to_vec();
+        let parsed = QoderAdapter::try_decrypt_macos_auth_dat(&raw).expect("plaintext json");
+        assert_eq!(
+            parsed.get("token").and_then(|v| v.as_str()),
+            Some("plain-token-abc")
+        );
+        assert!(!QoderAdapter::macos_auth_is_encrypted_but_unsupported(&raw));
+    }
+
+    #[test]
+    fn v10_encrypted_payload_is_detected_as_unsupported() {
+        // v10 前缀 + 非 JSON 的二进制密文（真实 Chromium Safe Storage 形态）
+        let mut raw = b"v10".to_vec();
+        raw.extend_from_slice(&[0x9f, 0x2a, 0x00, 0xff, 0x13, 0x88, 0x44, 0x01]);
+        assert!(QoderAdapter::try_decrypt_macos_auth_dat(&raw).is_none());
+        assert!(
+            QoderAdapter::macos_auth_is_encrypted_but_unsupported(&raw),
+            "v10 + 非 JSON 必须被识别为「加密但本平台不支持」"
+        );
     }
 }

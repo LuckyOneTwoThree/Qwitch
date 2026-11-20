@@ -44,6 +44,62 @@ pub struct ExternalAdapterInfo {
     pub hash_mismatch: bool,
 }
 
+/// 请求用户确认信任某个外部插件（原生对话框，不经渲染进程）。
+///
+/// 返回一次性票据，前端需在 `save_app_settings` 的
+/// `trustedAdapterTickets` 中回传该票据，后端校验并消费后才允许写入
+/// `trusted_adapters`。这样即使渲染进程被完全控制，也无法单方面完成
+/// 「信任插件 → 加载插件 → 插件读取本机凭据」的链路。
+#[tauri::command]
+pub async fn request_plugin_trust(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    adapter_id: String,
+) -> Result<String, String> {
+    let id = adapter_id.trim().to_string();
+    if !crate::adapter::is_valid_adapter_id(&id)
+        || crate::adapter::RESERVED_ADAPTER_IDS.contains(&id.as_str())
+    {
+        return Err(format!("非法或保留的外部插件 ID：{id}"));
+    }
+    let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
+    let plugins = crate::adapter::external::scan_external_manifests(&data_dir);
+    let found = plugins
+        .iter()
+        .find(|(_, m)| m.id == id)
+        .map(|(_, m)| m.clone())
+        .ok_or_else(|| format!("未找到外部插件 {id}"))?;
+
+    let store = Arc::clone(&state.plugin_trust_tickets);
+    let id_for_dialog = id.clone();
+    let display = format!("{} ({})", found.name, found.version);
+
+    // 原生模态对话框必须在主线程执行，且是阻塞调用 → 放到阻塞线程池
+    let confirmed = tokio::task::spawn_blocking(move || {
+        let result = rfd::MessageDialog::new()
+            .set_title("确认信任外部插件")
+            .set_description(format!(
+                "插件：{display}\nID：{id_for_dialog}\n\n\
+                 信任后，该插件将随 Qwitch 启动并被授予访问本机客户端凭据的能力，\
+                 可读取当前用户目录下的文件。\n\n\
+                 仅在你确认该插件来源可信时继续。"
+            ))
+            .set_level(rfd::MessageLevel::Warning)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        result == rfd::MessageDialogResult::Yes
+    })
+    .await
+    .map_err(|e| format!("信任确认对话框执行失败: {e}"))?;
+
+    let _ = app.emit("qwitch://logs-updated", ());
+    if !confirmed {
+        return Err("已取消：未授予该插件的信任".into());
+    }
+
+    Ok(super::issue_plugin_trust_ticket(&store, &id))
+}
+
 #[tauri::command]
 pub fn list_external_adapters(
     state: State<'_, AppState>,
@@ -101,6 +157,9 @@ pub fn save_app_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     mut settings: AppSettingsDto,
+    // 每个「本次新增信任」的插件都必须携带原生确认签发的一次性票据。
+    // 未提供时视为空表，等价于「无票据」，由下方逐项校验拒绝。
+    trusted_adapter_tickets: Option<HashMap<String, String>>,
 ) -> Result<AppSettingsDto, String> {
     // 防风控抖动下限：不允许 0ms 连发
     settings.jitter_min_ms = settings.jitter_min_ms.max(500);
@@ -121,6 +180,10 @@ pub fn save_app_settings(
                 "工具 {tool} 的自定义客户端路径不存在或不是绝对路径：{trimmed}"
             ));
         }
+        // 与启动前的复核保持一致：此处提前拒绝「指向系统二进制」等危险路径，
+        // 让用户在设置保存阶段就得到明确反馈，而不是等到切号/启动时才失败。
+        crate::platform::validate_client_executable(tool, p)
+            .map_err(|e| format!("工具 {tool} 的自定义客户端路径不可用：{e}"))?;
     }
     // 仅当“开机自启”发生变化时才重新配置，避免每次保存设置都触碰系统注册/或误报错
     if settings.launch_at_login != previous.launch_at_login {
@@ -139,6 +202,16 @@ pub fn save_app_settings(
             || !crate::adapter::is_valid_adapter_id(id)
         {
             return Err(format!("非法或保留的外部插件 ID，无法加入信任列表：{id}"));
+        }
+        // 仅「本次新增信任」需要原生确认票据；取消信任或保持既有信任无需票据，
+        // 避免用户每次保存无关设置都被弹窗打断。
+        let already_trusted = previous.trusted_adapters.iter().any(|t| t == id);
+        if !already_trusted {
+            let tickets = trusted_adapter_tickets.as_ref();
+            let ticket = tickets.and_then(|t| t.get(id)).ok_or_else(|| {
+                format!("插件 {id} 缺少原生信任确认：请在设置页重新点击启用并在系统弹窗中确认")
+            })?;
+            super::consume_plugin_trust_ticket(&state.plugin_trust_tickets, id, ticket)?;
         }
         if seen_trusted.insert(id.to_string()) {
             normalized_trusted.push(id.to_string());
@@ -320,4 +393,66 @@ pub async fn reconcile_active_accounts(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod plugin_trust_ticket_tests {
+    use super::super::{
+        consume_plugin_trust_ticket, issue_plugin_trust_ticket, PLUGIN_TRUST_TICKET_TTL_MS,
+    };
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[test]
+    fn ticket_is_single_use_and_bound_to_adapter_id() {
+        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
+        let ticket = issue_plugin_trust_ticket(&store, "my_plugin");
+
+        // 错配 adapter id 无效
+        assert!(consume_plugin_trust_ticket(&store, "other_plugin", &ticket).is_err());
+        // 错配票据无效
+        assert!(consume_plugin_trust_ticket(&store, "my_plugin", "bogus").is_err());
+        // 正确票据首次消费成功
+        consume_plugin_trust_ticket(&store, "my_plugin", &ticket).expect("first consume");
+        // 二次消费失败（一次性）
+        assert!(
+            consume_plugin_trust_ticket(&store, "my_plugin", &ticket).is_err(),
+            "票据必须一次性，重放应被拒绝"
+        );
+    }
+
+    #[test]
+    fn reissuing_invalidates_previous_ticket() {
+        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
+        let first = issue_plugin_trust_ticket(&store, "p1");
+        let second = issue_plugin_trust_ticket(&store, "p1");
+        assert_ne!(first, second);
+        assert!(consume_plugin_trust_ticket(&store, "p1", &first).is_err());
+        consume_plugin_trust_ticket(&store, "p1", &second).expect("latest ticket valid");
+    }
+
+    #[test]
+    fn expired_ticket_is_rejected() {
+        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
+        let ticket = issue_plugin_trust_ticket(&store, "p2");
+        // 手动把签发时间回拨到超过 TTL
+        {
+            let mut map = store.lock().unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            map.insert(
+                "p2".to_string(),
+                (ticket.clone(), now - PLUGIN_TRUST_TICKET_TTL_MS - 1_000),
+            );
+        }
+        assert!(consume_plugin_trust_ticket(&store, "p2", &ticket).is_err());
+    }
+
+    #[test]
+    fn missing_ticket_is_rejected() {
+        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
+        assert!(consume_plugin_trust_ticket(&store, "never_issued", "x").is_err());
+    }
 }

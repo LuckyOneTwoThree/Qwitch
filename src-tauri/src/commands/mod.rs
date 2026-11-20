@@ -76,6 +76,12 @@ pub fn hide_main_window_to_tray(app: &AppHandle) {
     }
 }
 
+/// 解析客户端可执行文件路径（自定义路径优先，其次自动探测）。
+///
+/// **安全**：无论来自设置还是自动探测，返回前都经
+/// `platform::validate_client_executable` 复核（名称白名单 + bundle 结构 +
+/// 受信任安装目录）。校验不通过的自定义路径会被忽略并回退到自动探测，
+/// 避免「设置里写入任意二进制 → 启动时执行」的路径。
 pub(crate) fn resolve_client_executable(
     host: &dyn PlatformHost,
     settings: &AppSettingsDto,
@@ -88,11 +94,17 @@ pub(crate) fn resolve_client_executable(
         .filter(|s| !s.is_empty())
     {
         let p = PathBuf::from(custom);
-        if p.exists() {
+        if p.exists() && crate::platform::validate_client_executable(tool_id, &p).is_ok() {
             return Some(p);
         }
     }
-    host.detect_client_executable(tool_id)
+    let detected = host.detect_client_executable(tool_id)?;
+    if crate::platform::validate_client_executable(tool_id, &detected).is_ok() {
+        Some(detected)
+    } else {
+        // 自动探测结果同样不可信（例如被同名程序污染的 PATH）
+        None
+    }
 }
 
 pub struct AppState {
@@ -102,9 +114,71 @@ pub struct AppState {
     pub adapters: Arc<HashMap<String, Arc<dyn ToolAdapter>>>,
     pub scheduler: Arc<AntiRiskScheduler>,
     pub oauth_flow_seq: Arc<AtomicU64>,
+    /// 已被消费的 OAuth 回调 nonce 集合。
+    ///
+    /// `oauth_flow_seq` 只能判定「是否为最新流」，无法阻止同一个 nonce 被重复投递：
+    /// 授权页内任意脚本都能读到 nonce 并反复构造回调，从而向凭据库注入不同 token
+    /// （账号投毒）。此集合记录已消费的 nonce，命中即拒绝，实现一次性语义。
+    pub consumed_oauth_nonces: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub switching_in_progress: Arc<AtomicBool>,
     pub last_reconcile_ms: Arc<AtomicU64>,
     pub tray_blur_suppress_until_ms: Arc<AtomicU64>,
+    /// 外部插件信任的一次性挑战票据：`adapter_id -> (challenge, 签发时间 ms)`。
+    ///
+    /// 信任决策不能只凭渲染进程的入参，否则一次前端污染即可自我批准插件加载。
+    /// 流程：前端请求 → 后端弹原生确认框 → 用户确认后签发短时效票据 →
+    /// 前端携带票据保存设置。票据一次性消费，防止重放。
+    pub plugin_trust_tickets: Arc<std::sync::Mutex<HashMap<String, (String, u64)>>>,
+}
+
+/// 信任票据有效期（毫秒）。用户从「点击启用」到「保存设置」通常数秒内完成。
+pub const PLUGIN_TRUST_TICKET_TTL_MS: u64 = 120_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 签发一次性信任票据（覆盖该插件此前未消费的票据）。
+pub fn issue_plugin_trust_ticket(
+    store: &std::sync::Mutex<HashMap<String, (String, u64)>>,
+    adapter_id: &str,
+) -> String {
+    let ticket = uuid::Uuid::new_v4().to_string();
+    if let Ok(mut map) = store.lock() {
+        map.insert(adapter_id.to_string(), (ticket.clone(), now_ms()));
+    }
+    ticket
+}
+
+/// 校验并消费信任票据。票据必须匹配、未过期、且仅能使用一次。
+pub fn consume_plugin_trust_ticket(
+    store: &std::sync::Mutex<HashMap<String, (String, u64)>>,
+    adapter_id: &str,
+    ticket: &str,
+) -> Result<(), String> {
+    let mut map = store
+        .lock()
+        .map_err(|_| "信任票据存储不可用，请重试".to_string())?;
+    let Some((expected, issued_at)) = map.get(adapter_id).cloned() else {
+        return Err(format!(
+            "插件 {adapter_id} 缺少信任确认记录，请重新点击启用并在系统弹窗中确认"
+        ));
+    };
+    if expected != ticket.trim() {
+        return Err(format!("插件 {adapter_id} 的信任确认票据无效，请重新确认"));
+    }
+    if now_ms().saturating_sub(issued_at) > PLUGIN_TRUST_TICKET_TTL_MS {
+        map.remove(adapter_id);
+        return Err(format!(
+            "插件 {adapter_id} 的信任确认已超时，请重新点击启用并在系统弹窗中确认"
+        ));
+    }
+    // 一次性消费
+    map.remove(adapter_id);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]

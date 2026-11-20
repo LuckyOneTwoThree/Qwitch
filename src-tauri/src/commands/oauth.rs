@@ -664,6 +664,7 @@ pub async fn start_webview_oauth(
         let adapter_nav = Arc::clone(&adapter);
         let flow_seq_nav = Arc::clone(&flow_seq);
         let expected_nonce = flow_nonce.clone();
+        let consumed_nonces = Arc::clone(&state.consumed_oauth_nonces);
         let tid_nav = tool_id_owned.clone();
         let lbl_nav = label_owned.clone();
         let target_nav = target_id_owned.clone();
@@ -701,6 +702,28 @@ pub async fn start_webview_oauth(
                         "内置授权回调校验失败（会话状态不匹配），已拒绝该请求",
                     );
                     return false;
+                }
+
+                // 一次性消费：同一个 nonce 只允许成功回调一次。
+                // 否则授权页内的脚本可反复投递不同 payload，向凭据库注入任意 token。
+                {
+                    match consume_oauth_nonce(&consumed_nonces, &expected_nonce) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let _ = app_nav.emit(
+                                "qwitch://oauth-error",
+                                "该授权回调已被使用过，已拒绝重复提交",
+                            );
+                            return false;
+                        }
+                        Err(()) => {
+                            let _ = app_nav.emit(
+                                "qwitch://oauth-error",
+                                "内置授权回调校验失败（内部状态不可用），已拒绝该请求",
+                            );
+                            return false;
+                        }
+                    }
                 }
 
                 let raw_payload = find_param("payload").or_else(|| find_param("token"));
@@ -984,6 +1007,18 @@ pub async fn start_webview_oauth(
     Ok(())
 }
 
+/// 尝试消费一个 OAuth 回调 nonce（一次性语义）。
+///
+/// 返回 `true` 表示首次消费成功；`false` 表示该 nonce 已被使用过。
+/// 独立成函数以便单元测试覆盖「重放被拒」这一安全属性。
+pub(crate) fn consume_oauth_nonce(
+    consumed: &std::sync::Mutex<std::collections::HashSet<String>>,
+    nonce: &str,
+) -> Result<bool, ()> {
+    let mut guard = consumed.lock().map_err(|_| ())?;
+    Ok(guard.insert(nonce.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,5 +1118,21 @@ mod tests {
             &"https://evil.example.com/steal".parse().unwrap(),
             mm
         ));
+    }
+
+    #[test]
+    fn oauth_nonce_is_single_use() {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        let consumed: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+
+        // 首次消费成功
+        assert_eq!(consume_oauth_nonce(&consumed, "nonce-A"), Ok(true));
+        // 重放被拒（这正是防止授权页内脚本注入任意 token 的关键）
+        assert_eq!(consume_oauth_nonce(&consumed, "nonce-A"), Ok(false));
+        assert_eq!(consume_oauth_nonce(&consumed, "nonce-A"), Ok(false));
+        // 不同 nonce 互不影响
+        assert_eq!(consume_oauth_nonce(&consumed, "nonce-B"), Ok(true));
     }
 }

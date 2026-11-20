@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeftRight,
   Check,
+  ClipboardPaste,
   Clock,
   Cpu,
   Globe,
@@ -23,6 +24,7 @@ import { getToolBrandMeta } from "../domain/toolRegistry";
 import { getEffectiveClaimStatus } from "../domain/selectors";
 import { useQwitch } from "../context/QwitchContext";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
+import { OverflowMenu } from "./ui/OverflowMenu";
 
 function formatQuotaNumber(value: number): string {
   const rounded = Math.round(value * 100) / 100;
@@ -511,22 +513,25 @@ export const AccountCard = React.memo(function AccountCard({
                   <button
                     type="button"
                     onClick={() => onOpenBindModal(account, "token_paste")}
-                    className="inline-flex shrink-0 whitespace-nowrap items-center rounded-lg border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                    title="粘贴凭据（Token 或 JSON）"
+                    aria-label={`粘贴凭据 ${account.label}`}
+                    className="btn btn-icon btn-secondary shrink-0"
                   >
-                    粘贴凭据
+                    <ClipboardPaste className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
                 )}
                 <button
                   type="button"
                   disabled={recovering || isBatchRunning}
                   onClick={() => void handleRecover()}
-                  className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
+                  title={recovering ? "恢复中..." : "重试恢复"}
+                  aria-label={recovering ? "恢复中" : `重试恢复 ${account.label}`}
+                  className="btn btn-icon btn-secondary shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <RotateCcw
-                    className={`h-3.5 w-3.5 shrink-0 ${recovering ? "animate-spin" : ""}`}
+                    className={`h-3.5 w-3.5 ${recovering ? "animate-spin" : ""}`}
                     aria-hidden="true"
                   />
-                  {recovering ? "恢复中..." : "重试"}
                 </button>
               </>
             ) : missingApiToken ? null : (
@@ -572,38 +577,31 @@ export const AccountCard = React.memo(function AccountCard({
               </>
             )}
 
-            <button
-              type="button"
-              disabled={togglingStatus}
-              onClick={async () => {
-                if (togglingStatus) return;
-                setTogglingStatus(true);
-                try {
-                  await toggleAccountDisabled(account.id);
-                } finally {
-                  setTogglingStatus(false);
-                }
-              }}
-              title={isDisabled ? "恢复启用" : "停用账号（跳过批量队列）"}
-              aria-label={isDisabled ? `恢复启用 ${account.label}` : `停用 ${account.label}`}
-              className="btn btn-icon btn-secondary shrink-0 disabled:opacity-50"
-            >
-              {isDisabled ? (
-                <PlayCircle className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-              ) : (
-                <PauseCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setConfirmDeleteOpen(true)}
-              title="删除账号"
-              aria-label={`删除账号 ${account.label}`}
-              className="btn btn-icon btn-secondary shrink-0 border-zinc-200 text-zinc-400 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600 dark:border-zinc-700 dark:text-zinc-500 dark:hover:border-rose-800 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
-            >
-              <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            </button>
+            <OverflowMenu
+              label={`账号管理 ${account.label}`}
+              items={[
+                {
+                  label: isDisabled ? "恢复启用" : "停用账号",
+                  icon: isDisabled ? PlayCircle : PauseCircle,
+                  disabled: togglingStatus,
+                  onSelect: async () => {
+                    if (togglingStatus) return;
+                    setTogglingStatus(true);
+                    try {
+                      await toggleAccountDisabled(account.id);
+                    } finally {
+                      setTogglingStatus(false);
+                    }
+                  },
+                },
+                {
+                  label: "删除账号",
+                  icon: Trash2,
+                  danger: true,
+                  onSelect: () => setConfirmDeleteOpen(true),
+                },
+              ]}
+            />
           </div>
 
           {missingLocalSnapshot ? (

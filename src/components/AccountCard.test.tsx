@@ -68,9 +68,17 @@ describe("AccountCard", () => {
     expect(ctx.claimDailyBatch).toHaveBeenCalledWith([account.id]);
   });
 
-  it("点击停用按钮触发 toggleAccountDisabled", () => {
+  it("通过账号管理菜单停用账号", () => {
     render(<AccountCard account={account} />);
-    fireEvent.click(screen.getByLabelText(`停用 ${account.label}`));
+    fireEvent.click(screen.getByLabelText(`账号管理 ${account.label}`));
+    fireEvent.click(screen.getByText("停用账号"));
     expect(ctx.toggleAccountDisabled).toHaveBeenCalledWith(account.id);
+  });
+
+  it("通过账号管理菜单打开删除确认", () => {
+    render(<AccountCard account={account} />);
+    fireEvent.click(screen.getByLabelText(`账号管理 ${account.label}`));
+    fireEvent.click(screen.getByText("删除账号"));
+    expect(screen.getByText(/确认删除账号/)).toBeTruthy();
   });
 });

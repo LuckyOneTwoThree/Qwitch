@@ -58,10 +58,12 @@ describe("TrayPopover", () => {
     expect(ctx.quitApp).toHaveBeenCalled();
   });
 
-  it("无新版本时 footer 仍提供「更新」检查入口", () => {
+  it("无新版本时不显示任何更新入口（避免噪音）", () => {
     render(<TrayPopover onOpenMain={vi.fn()} />);
-    // 托盘是高频入口，不应强制用户进设置页才能检查更新
-    expect(screen.getByLabelText("检查更新")).toBeTruthy();
+    // footer 只保留「领取」与「退出」两个主要动作；
+    // 无更新时的「检查更新」入口已移除——点了只会得到「已是最新」
+    expect(screen.queryByLabelText(/检查更新/)).toBeNull();
+    expect(screen.queryByLabelText(/立即更新|下载 v/)).toBeNull();
   });
 
   it("有新版本时顶部出现更新条带并展示版本号", () => {
@@ -89,10 +91,26 @@ describe("TrayPopover", () => {
     expect(screen.queryByText(/新版本/)).toBeNull();
   });
 
-  it("点击托盘「更新」触发强制检查", () => {
+  it("有新版本时展示图标按钮（安装 / 详情），无文字标签", () => {
+    ctx.updateInfo = {
+      updateAvailable: true,
+      currentVersion: "0.4.2",
+      latestVersion: "0.5.0",
+      releaseUrl: "https://github.com/x/releases",
+      assetUrl: "https://github.com/x/a.dmg",
+      assetName: "Qwitch_0.5.0_aarch64.dmg",
+      checksumsUrl: "https://github.com/x/SHA256SUMS.txt",
+      canAutoInstall: false,
+      releaseNotes: "",
+      strategy: "manual",
+      platformLabel: "macOS",
+      hint: "",
+    };
     render(<TrayPopover onOpenMain={vi.fn()} />);
-    fireEvent.click(screen.getByLabelText("检查更新"));
-    expect(ctx.checkAppUpdate).toHaveBeenCalledWith({ force: true, silent: false });
+    // 384px 宽度下用图标而非文字，避免与 footer 主按钮争抢空间
+    expect(screen.getByLabelText(/下载 v0\.5\.0/)).toBeTruthy();
+    expect(screen.getByLabelText("查看更新详情")).toBeTruthy();
+    expect(screen.queryByText("立即更新")).toBeNull();
   });
 
   it("托盘内安装失败时给出 Toast 提示，而非静默吞掉", async () => {

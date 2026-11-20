@@ -45,8 +45,6 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     toggleTheme,
     quitApp,
     updateInfo,
-    updateChecking,
-    checkAppUpdate,
     isTauriRuntime,
     showToast,
   } = useQwitch();
@@ -235,40 +233,61 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden rounded-[18px] border border-black/[0.08] bg-zinc-50/95 text-zinc-900 shadow-float backdrop-blur-xl dark:border-white/[0.12] dark:bg-zinc-950/95 dark:text-zinc-100">
       {/* 顶部栏 */}
-      {/* 更新条带：仅在确实有新版本时出现，占据托盘顶部一行 */}
+      {/* 更新条带：仅在确实有新版本时出现。
+          设计要点：
+          - 动作使用**纯图标按钮**（与 header 的刷新/主题按钮同构），避免在
+            384px 宽度下与文字标签争抢空间；
+          - 整条可点击，主行为是「获取更新」（Windows 应用内安装 / macOS 打开
+            下载页），右侧箭头按钮引导至主面板查看完整更新说明；
+          - 不再提供「检查更新」入口：无更新时该入口只会得到「已是最新」，
+            属于噪音；手动检查保留在主面板设置页。 */}
       {isTauriRuntime && updateInfo?.updateAvailable && (
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-indigo-500/20 bg-indigo-500/[0.08] px-3.5 py-1.5 text-[11px] text-indigo-900 dark:border-indigo-400/20 dark:bg-indigo-400/10 dark:text-indigo-100">
-          <Sparkles className="h-3 w-3 shrink-0 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
-          <span className="min-w-0 flex-1 truncate leading-snug">
+        <div className="flex shrink-0 items-center gap-2 border-b border-indigo-500/20 bg-indigo-500/[0.07] px-3.5 py-1.5 dark:border-indigo-400/20 dark:bg-indigo-400/[0.09]">
+          <Sparkles
+            className="h-3.5 w-3.5 shrink-0 text-indigo-600 dark:text-indigo-300"
+            aria-hidden="true"
+          />
+          <span className="min-w-0 flex-1 truncate text-[11px] leading-snug text-indigo-900 dark:text-indigo-100">
             新版本{" "}
             <span className="font-mono font-semibold">v{updateInfo.latestVersion}</span>
           </span>
-          {updateInfo.canAutoInstall && updateInfo.assetUrl ? (
-            <button
-              type="button"
-              disabled={updateInstalling}
-              onClick={() => void installUpdateFromTray()}
-              className="shrink-0 rounded-md px-1.5 py-0.5 font-medium transition hover:bg-indigo-500/15 disabled:opacity-60"
-            >
-              {updateInstalling ? "安装中" : "立即更新"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => void openUpdateDownload()}
-              className="inline-flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 font-medium transition hover:bg-indigo-500/15"
-            >
-              <Download className="h-2.5 w-2.5" aria-hidden="true" />
-              下载
-            </button>
-          )}
+
+          <button
+            type="button"
+            disabled={updateInstalling}
+            onClick={() =>
+              updateInfo.canAutoInstall && updateInfo.assetUrl
+                ? void installUpdateFromTray()
+                : void openUpdateDownload()
+            }
+            title={
+              updateInfo.canAutoInstall
+                ? `立即更新到 v${updateInfo.latestVersion}`
+                : `下载 v${updateInfo.latestVersion}`
+            }
+            aria-label={
+              updateInfo.canAutoInstall
+                ? `立即更新到 v${updateInfo.latestVersion}`
+                : `下载 v${updateInfo.latestVersion}`
+            }
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-600 text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+          >
+            {updateInstalling ? (
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+            ) : (
+              <Download className="h-3 w-3" aria-hidden="true" />
+            )}
+          </button>
+
           {onOpenMain && (
             <button
               type="button"
               onClick={onOpenMain}
-              className="shrink-0 rounded-md px-1.5 py-0.5 font-medium transition hover:bg-indigo-500/15"
+              title="查看更新详情"
+              aria-label="查看更新详情"
+              className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-indigo-700 transition hover:bg-indigo-500/15 dark:text-indigo-200"
             >
-              详情
+              <ExternalLink className="h-3 w-3" aria-hidden="true" />
             </button>
           )}
         </div>
@@ -633,25 +652,6 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       {/* 底部智能操作栏 */}
       <footer className="flex shrink-0 items-center gap-2 border-t border-zinc-200/80 bg-white/90 px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
         {renderFooterClaimButton()}
-
-        {/* 无新版本时也保留手动检查入口：托盘是高频入口，用户不应被迫进设置页 */}
-        <button
-          type="button"
-          onClick={() => void checkAppUpdate({ force: true, silent: false })}
-          disabled={updateChecking || !isTauriRuntime}
-          title={updateInfo?.updateAvailable ? `新版本 v${updateInfo.latestVersion}` : "检查更新"}
-          aria-label="检查更新"
-          className={`btn btn-md btn-secondary shrink-0 gap-1 whitespace-nowrap ${
-            updateInfo?.updateAvailable ? "text-indigo-600 dark:text-indigo-300" : ""
-          }`}
-        >
-          {updateChecking ? (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
-          ) : (
-            <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          )}
-          {updateChecking ? "检查中" : "更新"}
-        </button>
 
         <button
           type="button"

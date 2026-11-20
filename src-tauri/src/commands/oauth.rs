@@ -684,15 +684,14 @@ pub async fn start_webview_oauth(
                         reqwest::Url::parse(&format!("https://qwitch.local/?{frag}")).ok()
                     });
                 let find_param = |key: &str| -> Option<String> {
-                    if let Some(ref fu) = fragment_url {
-                        if let Some((_, v)) = fu.query_pairs().find(|(k, _)| k == key) {
-                            return Some(v.to_string());
-                        }
-                    }
-                    nav_url
-                        .query_pairs()
-                        .find(|(k, _)| k == key)
-                        .map(|(_, v)| v.to_string())
+                    // 凭据只允许经 URL fragment 传递（fragment 不会发送到任何服务器），
+                    // 且经 nonce/flow/path 校验后在进程内被拦截；不再回退读取 URL query，
+                    // 避免凭据出现在真实服务器可见的 query string 中。
+                    fragment_url.as_ref().and_then(|fu| {
+                        fu.query_pairs()
+                            .find(|(k, _)| k == key)
+                            .map(|(_, v)| v.to_string())
+                    })
                 };
 
                 let callback_nonce = find_param("nonce");

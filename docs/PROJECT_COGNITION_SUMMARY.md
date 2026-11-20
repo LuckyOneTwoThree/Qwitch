@@ -37,7 +37,7 @@ Qwitch/
 │  ├─ main.tsx             # React 入口（StrictMode + ErrorBoundary）
 │  ├─ pages/Dashboard.tsx  # 主窗口（账号池/导航/KPI），~1178 行；日志/设置视图拆至 pages/dashboard/{LogsView,SettingsView,types}
 │  ├─ pages/TrayPopover.tsx# 托盘弹层
-│  ├─ context/QwitchContext.tsx  # 全局状态中枢，~1998 行（+ settingsUtils.ts、logStateUtils.ts、useToast.ts、useAppUpdate.ts）
+│  ├─ context/QwitchContext.tsx  # 全局 Provider（仅装配，~344 行）+ 四 store：useAccountStore/useLogStore/useSettingsStore/useFeedbackStore
 │  ├─ domain/              # selectors.ts（统计口径）、toolRegistry.ts（工具品牌/可见工具）
 │  ├─ components/          # AccountCard/ImportAccountModal/ColdSwitchModal/UpdateCard/... + ui/ 基座
 │  ├─ data/mockStore.ts    # 浏览器预览 Mock 数据
@@ -124,11 +124,11 @@ Qwitch/
 
 **SQLite Schema**（`storage/mod.rs`）：`accounts`（`uid_hash` 唯一防重绑、`encrypted_credential` BLOB、能力标记列）、`quota_snapshots`（`buckets_json`，单账号保留清理）、`action_logs`（脱敏、`archived_at`）、`app_settings`（KV JSON）。
 
-**Tauri Commands（已注册 28 个）**：`show_main_window`、`quit_app`、`get/save_app_settings`、`list_adapters`、`list_external_adapters`、`detect_client_status`、`list_accounts`、`import_local_account`、`preview_local_account`、`add_account_by_token`、`start_webview_oauth`、`refresh_account_quota`、`refresh_quota_batch`、`switch_desktop_account`、`delete_account`、`update_account_status`、`rename_account`、`claim_daily_batch`、`get_action_logs`、`get_action_log_stats`、`archive/unarchive/delete_action_logs`、`export_action_logs`、`check_app_update`、`download_and_install_update`、`open_update_url`。
+**Tauri Commands（已注册 34 个）**：`show_main_window`、`quit_app`、`get_app_settings`、`save_app_settings`、`list_adapters`、`list_external_adapters`、`detect_client_status`、`reconcile_active_accounts`、`list_accounts`、`get_account_summary`、`import_local_account`、`preview_local_account`、`launch_tool_profile`、`inspect_profile_dir`、`pick_folder`、`pick_file`、`add_account_by_token`、`start_webview_oauth`、`refresh_account_quota`、`refresh_quota_batch`、`switch_desktop_account`、`delete_account`、`update_account_status`、`rename_account`、`claim_daily_batch`、`get_action_logs`、`get_action_log_stats`、`archive_action_logs`、`unarchive_action_logs`、`delete_action_logs`、`export_action_logs`、`check_app_update`、`download_and_install_update`、`open_update_url`。
 
 **Tauri Events**（后端→前端）：`qwitch://batch-progress`（`action: "claim"|"refresh"`、`running`、`total`、`completed`、`current_label`、`phase: checking|claiming|jitter_wait|done`、`jitter_seconds`、`summary_text`）、`qwitch://account-updated`、`qwitch://logs-updated`、`qwitch://settings-updated`、`qwitch://switch-progress`、`qwitch://oauth-error`。
 
-> 注意：`get_account_summary(accountId)` 单行增量同步**尚未实现**；前端目前每个事件都全量 `syncFromBackend()`（120ms 去抖）。
+> 说明：已实现 `get_account_summary(accountId)` 单账号增量同步——前端在 `qwitch://account-updated` 后按 id 定向刷新（多个事件 100ms 去抖），取不到 id 时回退全量 `syncFromBackend()`；批量进度等其余事件仍全量刷新（120ms 去抖）。
 
 ---
 
@@ -178,7 +178,7 @@ npx tauri build        # 打包安装包
 
 **仍存在的债（优先级从高到低）**：
 1. ~~`commands/mod.rs` 职责过重~~ 已在第三阶段拆分；`storage/mod.rs`（约 2406 行）仍偏大。
-2. **`QwitchContext.tsx` 约 1998 行单体 Context**——每次事件全量 `syncFromBackend`；建议拆 `Account/Log/Settings/Feedback` store + 增量 `get_account_summary(accountId)` + 150ms 去抖合并。
+2. ~~`QwitchContext.tsx` 单体 Context~~ **已按更新频次拆为四 store**：`useAccountStore`（账号/切号/查额/领签/事件编排，依赖注入）、`useLogStore`（日志/分页/归档）、`useSettingsStore`（设置/主题/抖动）、`useFeedbackStore`（toast/更新/批量进度/切号弹窗）；`QwitchContext.tsx` 仅剩 store 组合与装配（~344 行），并新增 `get_account_summary(accountId)` 单账号增量 IPC + `account-updated` 定向刷新。
 3. **`uid_hash` 仍为无盐 `SHA-256(tool_id:uid)`**——建议升级 `HMAC-SHA256(master_key, …)` 并平滑迁移。
 4. **AES-GCM 未绑定 AAD**（未绑定 account/tool 上下文）——建议引入 AAD，防跨账号密文替换。
 5. **异步上下文仍有同步 `std::process::Command`**（如 `trae.rs` 的 `sysctl`/`sw_vers`，platform 探测分支）——建议 `tokio::process` 或 `spawn_blocking`，避免阻塞 Tokio。

@@ -64,3 +64,8 @@ jobs:
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test --locked --all-targets
+
+      - name: Tauri build (no-bundle smoke check)
+        # Validates the full Tauri pipeline (frontend embed + release compile +
+        # tauri.conf/capabilities/CSP) without packaging installers or signing.
+        run: npm run tauri build -- --no-bundle

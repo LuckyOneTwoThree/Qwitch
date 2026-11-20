@@ -139,6 +139,16 @@ jobs:
         run: cargo test --all-targets --locked
 
       - name: Build Tauri bundles
+        # macOS 代码签名/公证通过下列 secrets 注入（缺失时自动回落 ad-hoc 未签名构建）：
+        #   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
+        #   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx tauri build --target ${{ matrix.rust_target }}
 
       - name: Stage macOS architecture artifacts

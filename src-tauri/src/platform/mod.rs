@@ -584,10 +584,9 @@ impl NativePlatformHost {
 
         let any_decrypts = !expectation.sample_blobs.is_empty()
             && candidates.iter().any(|(key, _)| {
-                expectation
-                    .sample_blobs
-                    .iter()
-                    .any(|blob| crate::storage::crypto::decrypt_credential(key, blob).is_ok())
+                expectation.sample_blobs.iter().any(|(aad, blob)| {
+                    crate::storage::crypto::decrypt_credential(key, aad, blob).is_ok()
+                })
             });
         let any_fp_match = expectation.fingerprint.as_deref().is_some_and(|fp| {
             candidates
@@ -630,10 +629,9 @@ impl NativePlatformHost {
             .as_deref()
             .map(|fp| crate::storage::crypto::key_fingerprint(key) == fp);
         let sample_ok = (!expectation.sample_blobs.is_empty()).then(|| {
-            expectation
-                .sample_blobs
-                .iter()
-                .any(|blob| crate::storage::crypto::decrypt_credential(key, blob).is_ok())
+            expectation.sample_blobs.iter().any(|(aad, blob)| {
+                crate::storage::crypto::decrypt_credential(key, aad, blob).is_ok()
+            })
         });
         match (fp_ok, sample_ok) {
             // 指纹与样本同时存在时必须两者都匹配，防止旧 key_id 选错钥
@@ -770,7 +768,7 @@ enum KeySource {
 #[derive(Debug, Clone, Default)]
 pub struct KeyExpectation {
     pub fingerprint: Option<String>,
-    pub sample_blobs: Vec<Vec<u8>>,
+    pub sample_blobs: Vec<crate::storage::crypto::AadBlob>,
     pub has_encrypted_data: bool,
 }
 
@@ -1429,11 +1427,12 @@ mod tests {
                 extra: std::collections::HashMap::new(),
             },
         };
-        let blob = crate::storage::crypto::encrypt_credential(&key, &env).expect("encrypt");
+        let aad = crate::storage::crypto::credential_aad("qoder_cn", "acc-sample");
+        let blob = crate::storage::crypto::encrypt_credential(&key, &aad, &env).expect("encrypt");
         let corrupt_blob = vec![1u8; 32];
         let sample_exp = KeyExpectation {
             fingerprint: None,
-            sample_blobs: vec![corrupt_blob, blob.clone()],
+            sample_blobs: vec![(aad.clone(), corrupt_blob), (aad.clone(), blob.clone())],
             has_encrypted_data: true,
         };
         let (k, src) = resolve(
@@ -1452,7 +1451,7 @@ mod tests {
         // 双验证：指纹与样本都指向正确钥 B 时，旧钥 A（钥匙串）落选、B（文件）选中
         let dual_exp = KeyExpectation {
             fingerprint: Some(crate::storage::crypto::key_fingerprint(&key)),
-            sample_blobs: vec![blob],
+            sample_blobs: vec![(aad.clone(), blob.clone())],
             has_encrypted_data: true,
         };
         let (k, src) = resolve(

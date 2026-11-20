@@ -490,7 +490,7 @@ pub async fn download_and_install_update(
 
         let path = std::env::temp_dir().join(format!("qwitch-update-{file_name}"));
         std::fs::write(&path, &bytes).map_err(|e| format!("写入临时安装包失败：{e}"))?;
-        std::process::Command::new(&path)
+        tokio::process::Command::new(&path)
             .spawn()
             .map_err(|e| format!("启动安装程序失败：{e}"))?;
 
@@ -506,25 +506,25 @@ pub async fn download_and_install_update(
 
 /// macOS：用系统默认浏览器打开架构对应的 DMG 或 Release 页面。
 #[tauri::command]
-pub fn open_update_url(url: String) -> Result<(), String> {
+pub async fn open_update_url(url: String) -> Result<(), String> {
     let parsed = validate_official_repo_url(&url)?;
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        tokio::process::Command::new("open")
             .arg(parsed.as_str())
             .spawn()
             .map_err(|e| format!("打开下载页失败：{e}"))?;
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
+        tokio::process::Command::new("explorer")
             .arg(parsed.as_str())
             .spawn()
             .map_err(|e| format!("打开下载页失败：{e}"))?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
+        tokio::process::Command::new("xdg-open")
             .arg(parsed.as_str())
             .spawn()
             .map_err(|e| format!("打开下载页失败：{e}"))?;

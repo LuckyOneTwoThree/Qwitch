@@ -2,7 +2,7 @@
 
 - **审查基线**：分支 `main` (`c35689c`，领先 `v0.2.3` 标签 3 个提交)
 - **审查日期**：2026-11-20
-- **代码规模**：总计约 29,300 行（4 个内置适配器、33 个 Tauri IPC 命令、6 个后端推送事件）
+- **代码规模**：总计约 29,300 行（4 个内置适配器、33 个 Tauri IPC 命令、6 个后端推送事件）—「命令数」为审查时基线；收尾轮新增 `get_account_summary` 后现为 **34 个**。
 
 ---
 
@@ -273,3 +273,52 @@
 - 资产：删除未被引用的 `docs/assets/tuckbase-*`、`docs/assets/qwitch-icon-direction-01*`、`src-tauri/icons/{android,ios}`。
 - 测试基础设施：新增 `jsdom@26` 与 `@testing-library/react` 开发依赖（`npm audit --omit=dev` 0 漏洞），补 `useToast`/`useAppUpdate`/`LogsPanel`/`ToastViewport`/`SettingsView`（主题、开关、自动签到二次确认、路径草稿保存、插件信任哈希固定）/`Dashboard`（导航 `aria-current`、视图挂载、离开设置页重置草稿）测试；Vitest 合计 11 个文件、54 例。
 - 仍保留的后续项：`QwitchContext.tsx` 多 store 拆分与增量同步、`storage/mod.rs` 拆分、各 Modal/`AccountCard`/`TrayPopover` 的组件测试、Tauri bundle CI 构建校验、展示图重截。
+
+---
+
+## 8. 收尾轮（Batch A）状态更新 — 2026-11-20
+
+> 本节记录审查完成后收尾轮对「文档 / 资产 / CI」的闭环，作为本报告的**最终状态口径**，与前述基于初版源码的审查快照并存（第 1–7 节为审查时基线，本节为闭合结果）。
+
+| 收尾项 | 处理结果 | 证据 |
+| --- | --- | --- |
+| **展示图重截** | 5 张截图已按当前 **4 工具实版**（Trae CN / WorkBuddy / Qoder CN / MiniMax Code CN）重截，替换早期仅 3 工具、v0.1.0 旧图 | `docs/assets/screenshots/*.png`（2880×1800 / 800×1080，@2x） |
+| **命令数口径** | `lib.rs` `generate_handler!` 实测注册 **33** 个命令；`PROJECT_COGNITION_SUMMARY` 的「28 个」已修正为 33 并补全遗漏项 | `src-tauri/src/lib.rs` |
+| **依赖审计** | `npm audit`（含 devDependencies）实测 **0 漏洞**；`picomatch` 历史 ReDoS 公告已撤回，README 相关提示已移除 | `npm audit` |
+| **测试基线** | Rust `cargo test --all-targets --locked` **82 例**、前端 Vitest **54 例** 全过；`cargo fmt` / `clippy -D warnings` / `tsc` 零告警 | 本轮实测 |
+| **Tauri 构建门禁** | `ci.yml` 新增 `tauri build --no-bundle` 冒烟校验（前端嵌入 + release 编译 + `tauri.conf`/capabilities/CSP），闭合「Tauri bundle CI 构建」待办 | `.github/workflows/ci.yml` |
+
+**Batch C（安全加固）已完成 — 2026-11-20**：
+- `uid_hash` 已升级为 `HMAC-SHA256(master_key, tool_id:uid)`，新增 `migrate_uid_hash`（`app_settings.storage.uid_hash_algo` 幂等标记，逐行解密重算，双射无唯一冲突）；`find_account_id_by_uid` 需主密钥。
+- AES-GCM 已绑定 AAD=`tool_id:account_id`（`QWA1` 版本化密文格式），新增 `migrate_credential_aad` 将旧无 AAD 密文平滑重加密；跨账号密文移植解密失败。
+- 新增组件测试 `AccountCard` / `ImportAccountModal` / `ColdSwitchModal` / `TrayPopover` / `ErrorBoundary`（+12 例）。
+- 回归：`cargo test --all-targets --locked` **85 例**；`cargo fmt` / `clippy -D warnings` 零告警；前端 Vitest **66 例**、`tsc` 零错误。
+
+**仍未闭合、转入后续批次（B/D）**：
+1. **B 已完成 — 2026-11-20**：
+   - `get_account_summary` 单账号增量 IPC + `qwitch://account-updated` 定向刷新（回退全量兜底）✅
+   - `std::process::Command` 异步化：update.rs 4 处→`tokio::process`；trae.rs 2 处 macOS 内核探测保留同步（已注释，改异步波及全链路）✅
+   - `storage/mod.rs` 拆分：`mod.rs`(≈1215) + `logs.rs` + `settings.rs` + `tests.rs` ✅
+   - `QwitchContext` **四 store 拆分完成**：Feedback(`useFeedbackStore.ts`) / Log(`useLogStore.ts`) / Settings(`useSettingsStore.ts`) / Account(`useAccountStore.ts`)，`QwitchContext.tsx` **2045→344 行**（仅剩 store 组合与 Provider 装配）。真实浏览器冒烟覆盖 Dashboard/27 张账号卡/主题切换/日志/设置/托盘/领取/切号弹窗，零错误 ✅
+2. **D 状态 — 2026-11-20**：
+   - **D-1 归档日志自动清底** ✅：`apply_log_retention` 新增「归档超过保留窗口自动删除」（仍保留 5000 上限），新增回归测试 `apply_log_retention_purges_archived_beyond_window`。
+   - **D-2 迁移改用 SQLite backup API** ✅：`migrate_legacy_pii` 删除 `fs::copy`，改用 `rusqlite::backup`（`Backup` 一致性快照含 WAL）；`rusqlite` 启用 `backup` feature。
+   - **D-3 OAuth 受限传递** ✅：回调在本地 sentinel(`qwitch.local`) + fragment + `https`/精确 path + `flow_id`(单活动流) + `nonce` 多重校验后于进程内拦截；移除 URL query 兜底，凭据绝不出现在真实服务器可见的 query string。
+   - **D-4 代码签名/公证 + 自动更新** ⚠️ 部分：`release.yml` 的 Tauri 构建步骤已接入可选 Apple 签名/公证 secrets（`APPLE_CERTIFICATE*`/`APPLE_SIGNING_IDENTITY`/`APPLE_ID`/`APPLE_TEAM_ID`，缺失时自动回落 ad-hoc 未签名）；Windows 自动安装已具备。**真正签名/公证需提供 Apple Developer 证书/凭证**（外部依赖）。
+
+---
+
+## 10. 全量复验记录（收尾轮，2026-11-20）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | ✅ 0 错误 |
+| `npm run build`（vite） | ✅ 1603 模块，产出 dist |
+| `npm test`（Vitest） | ✅ 16 文件 / 66 例 |
+| `cargo fmt --check` | ✅ |
+| `cargo clippy --all-targets -D warnings` | ✅ 零告警 |
+| `cargo test --locked --all-targets` | ✅ 86 例（qwitch_lib），bin 0 例 |
+| `npm run tauri build -- --no-bundle`（CI 门禁同款） | ✅ exit 0，产出 release 二进制（含 `rusqlite backup` / `hmac`） |
+| 前端真机冒烟（Vite Mock） | ✅ Dashboard（27 卡）/日志/设置/主题切换/托盘/领取/切号弹窗，零 console 错误 |
+
+> 结论：A / C / B 全部完成；D-1/D-2/D-3 完成；D-4 代码签名/公证脚手架就绪，唯待 Apple Developer 证书（外部依赖）。

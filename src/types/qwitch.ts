@@ -189,3 +189,20 @@ export interface ToastState {
 }
 
 export type BatchActionType = "claim" | "refresh";
+
+export interface BatchProgressState {
+  action?: BatchActionType;
+  running: boolean;
+  total: number;
+  completed: number;
+  currentLabel?: string;
+  phase: "checking" | "claiming" | "jitter_wait" | "done";
+  jitterSeconds?: number;
+  summaryText?: string;
+}
+
+export interface SwitchDialogState {
+  account: AccountSummary | null;
+  phase: "confirm" | "closing" | "writing" | "launching" | "done";
+  isClientRunning?: boolean;
+}

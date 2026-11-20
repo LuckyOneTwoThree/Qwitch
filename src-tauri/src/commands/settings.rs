@@ -298,7 +298,10 @@ pub async fn reconcile_active_accounts(
             continue;
         }
         let current_active = state.db.get_active_account_id(&tool_id).ok().flatten();
-        match state.db.find_account_id_by_uid(&tool_id, trimmed) {
+        match state
+            .db
+            .find_account_id_by_uid(&state.master_key, &tool_id, trimmed)
+        {
             Ok(Some((id, _))) => {
                 if current_active.as_deref() != Some(id.as_str())
                     && state.db.set_active_on_client(&tool_id, &id).is_ok()

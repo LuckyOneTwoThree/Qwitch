@@ -239,7 +239,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 **发布前手工清单**：空数据目录首装 · 备份恢复到冲突钥匙串环境 · 慢启动客户端切号 · 托盘 / Dock 行为。
 
-> 开发链依赖中 picomatch 存在上游尚未发布修复版的 ReDoS 公告（仅影响 dev server / 测试运行器，不进生产产物）；生产依赖审计为 0 漏洞。
+> `npm audit`（含 devDependencies）实测 **0 漏洞**；此前 dev 链 `picomatch` 的 ReDoS 公告已由上游撤回/修复，故已移除该历史提示。
 
 ## 文档索引
 
@@ -255,13 +255,14 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 ## 路线图
 
-- [ ] `uid_hash` 升级 HMAC-SHA256、AES-GCM 绑定账号 AAD
-- [ ] 外部插件内容哈希 / 签名固定，内容变更重新确认
-- [ ] OAuth 凭据改受限 IPC 桥传递（脱离 URL Query）
-- [ ] 旧版数据迁移改用 SQLite backup API；进程探测异步化
-- [ ] 归档日志自动清底；Context 按更新频次拆分 + 增量同步
-- [ ] 组件级集成测试与 Tauri bundle CI 构建
-- [ ] 代码签名 / 公证与自动更新
+- [x] `uid_hash` 升级 HMAC-SHA256、AES-GCM 绑定账号 AAD（含旧库平滑迁移）
+- [x] 外部插件内容哈希 / 签名固定，内容变更重新确认
+- [x] OAuth 凭据改受限本地传递（本地 sentinel + fragment + nonce/flow 校验，拒绝从 URL query 读取）
+- [x] 旧版数据迁移改用 SQLite backup API（进程探测异步化：update.rs 已改 tokio，trae macOS 内核探测按判断保留）
+- [x] 归档日志自动清底（归档超保留窗口自动清除 + 5000 上限）
+- [x] Context 按更新频次拆分（Account/Log/Settings/Feedback 四 store）+ 单账号增量同步
+- [x] 组件级测试与 Tauri bundle CI 构建校验
+- [ ] 代码签名 / 公证与自动更新（release.yml 已接入可选 Apple 签名 secrets；**需提供 Apple Developer 证书/凭证**方可真正签名公证；Windows 自动安装已具备）
 
 ## 贡献
 

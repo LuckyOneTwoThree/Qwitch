@@ -76,6 +76,12 @@ pub fn run() {
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             db.verify_or_init_key_fingerprint(&data_dir, &master_key)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            if let Err(e) = db.migrate_uid_hash(&master_key) {
+                eprintln!("Qwitch uid_hash 加密指纹迁移失败（不影响启动）: {e}");
+            }
+            if let Err(e) = db.migrate_credential_aad(&master_key) {
+                eprintln!("Qwitch 凭据 AAD 绑定迁移失败（不影响启动）: {e}");
+            }
             if let Err(e) = db.migrate_legacy_pii(&master_key) {
                 eprintln!("Qwitch 历史 PII 迁移失败（不影响启动）: {e}");
             }
@@ -318,6 +324,7 @@ pub fn run() {
             commands::detect_client_status,
             commands::reconcile_active_accounts,
             commands::list_accounts,
+            commands::get_account_summary,
             commands::import_local_account,
             commands::preview_local_account,
             commands::launch_tool_profile,

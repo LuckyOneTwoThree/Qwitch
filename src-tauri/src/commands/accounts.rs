@@ -22,6 +22,19 @@ pub fn list_accounts(
         .map_err(|e| e.to_string())
 }
 
+/// 单账号增量刷新：供前端在 `qwitch://account-updated` 事件后定向更新单卡，
+/// 避免每次事件都全量 `list_accounts` 拉取重渲染整棵账号树。
+#[tauri::command]
+pub fn get_account_summary(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<AccountSummary, String> {
+    state
+        .db
+        .get_account_summary(&account_id)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn import_local_account(
     app: AppHandle,
@@ -213,7 +226,7 @@ pub async fn preview_local_account(
     drop(_temp_guard);
     let matched = state
         .db
-        .find_account_id_by_uid(&tool_id, &envelope.uid)
+        .find_account_id_by_uid(&state.master_key, &tool_id, &envelope.uid)
         .map_err(|e| e.to_string())?;
     let matches_target = account_id.as_deref().is_some_and(|id| {
         state

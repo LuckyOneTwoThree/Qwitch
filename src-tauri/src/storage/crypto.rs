@@ -1,7 +1,8 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
+use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -13,6 +14,9 @@ use std::sync::atomic::{compiler_fence, Ordering};
 
 const NONCE_LEN: usize = 12;
 
+/// 凭据样本：`(aad, blob)` 二元组。用于启动期主密钥校验时按行 AAD 解密。
+pub type AadBlob = (Vec<u8>, Vec<u8>);
+
 fn zeroize_bytes(buf: &mut [u8]) {
     for b in buf.iter_mut() {
         // SAFETY: b 是有效可写的可变引用字节，使用 volatile 防止编译器优化消除清零
@@ -23,8 +27,21 @@ fn zeroize_bytes(buf: &mut [u8]) {
     compiler_fence(Ordering::SeqCst);
 }
 
+/// 新密文格式魔数前缀：`QWA1` = Qwitch AEAD v1（带 AAD 绑定）。
+/// 旧库密文无此前缀（`[nonce][ciphertext]`），读取时走兼容分支。
+const AAD_MAGIC: &[u8; 4] = b"QWA1";
+
+/// 派生凭据密文的 AAD（附加认证数据）：绑定 `tool_id` 与 `account_id`。
+///
+/// 同一份密文若被移植到其它账号行（跨账号密文替换攻击），AAD 不匹配将导致
+/// AES-GCM 解密认证失败，从而阻断凭据串号读取。
+pub fn credential_aad(tool_id: &str, account_id: &str) -> Vec<u8> {
+    format!("{tool_id}:{account_id}").into_bytes()
+}
+
 pub fn encrypt_credential(
     master_key: &[u8; 32],
+    aad: &[u8],
     envelope: &CredentialEnvelope,
 ) -> Result<Vec<u8>, StorageError> {
     let mut plaintext =
@@ -38,38 +55,70 @@ pub fn encrypt_credential(
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext_res = cipher
-        .encrypt(nonce, plaintext.as_ref())
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext.as_ref(),
+                aad,
+            },
+        )
         .map_err(|e| StorageError::Crypto(format!("Encryption failed: {e}")));
     zeroize_bytes(&mut plaintext);
     let ciphertext = ciphertext_res?;
 
-    let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    let mut out = Vec::with_capacity(AAD_MAGIC.len() + NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(AAD_MAGIC);
     out.extend_from_slice(&nonce_bytes);
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
 
+/// 解密凭据密文。`aad` 必须与加密时一致（新格式 `QWA1`）；旧格式密文忽略
+/// `aad` 走兼容解密，供 `migrate_credential_aad` 平滑升级。
 pub fn decrypt_credential(
     master_key: &[u8; 32],
+    aad: &[u8],
     blob: &[u8],
 ) -> Result<CredentialEnvelope, StorageError> {
-    if blob.len() <= NONCE_LEN {
-        return Err(StorageError::Crypto("Encrypted blob is too short".into()));
-    }
-
-    let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
     let cipher =
         Aes256Gcm::new_from_slice(master_key).map_err(|e| StorageError::Crypto(e.to_string()))?;
-    let nonce = Nonce::from_slice(nonce_bytes);
 
-    let mut plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| StorageError::Crypto(format!("Decryption failed: {e}")))?;
+    let mut plaintext =
+        if blob.len() >= AAD_MAGIC.len() + NONCE_LEN && &blob[..AAD_MAGIC.len()] == AAD_MAGIC {
+            // 新格式：magic + nonce + ciphertext，AAD 参与认证
+            let rest = &blob[AAD_MAGIC.len()..];
+            let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+            let nonce = Nonce::from_slice(nonce_bytes);
+            cipher
+                .decrypt(
+                    nonce,
+                    Payload {
+                        msg: ciphertext,
+                        aad,
+                    },
+                )
+                .map_err(|e| StorageError::Crypto(format!("Decryption failed: {e}")))?
+        } else {
+            // 旧格式：nonce + ciphertext，无 AAD（忽略 aad，兼容历史密文）
+            if blob.len() <= NONCE_LEN {
+                return Err(StorageError::Crypto("Encrypted blob is too short".into()));
+            }
+            let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
+            let nonce = Nonce::from_slice(nonce_bytes);
+            cipher
+                .decrypt(nonce, ciphertext)
+                .map_err(|e| StorageError::Crypto(format!("Decryption failed: {e}")))?
+        };
 
     let parsed =
         serde_json::from_slice(&plaintext).map_err(|e| StorageError::Crypto(e.to_string()));
     zeroize_bytes(&mut plaintext);
     parsed
+}
+
+/// 判断密文是否已是带 AAD 的新格式（供 AAD 迁移跳过已升级行）。
+pub fn is_aad_sealed(blob: &[u8]) -> bool {
+    blob.len() >= AAD_MAGIC.len() && &blob[..AAD_MAGIC.len()] == AAD_MAGIC
 }
 
 pub fn key_fingerprint(master_key: &[u8; 32]) -> String {
@@ -82,6 +131,20 @@ pub fn compute_uid_hash(tool_id: &str, uid: &str) -> String {
     hasher.update(b":");
     hasher.update(uid.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// 以主密钥为盐的 UID 指纹（HMAC-SHA256(tool_id:uid)）。
+///
+/// 用于替代无盐 `compute_uid_hash`：即使本地数据库泄露，攻击者也无法在
+/// 不知道 `master_key` 的情况下离线枚举/彩虹表反查 UID。旧库通过
+/// `QwitchDatabase::migrate_uid_hash` 一次性平滑迁移到该算法。
+pub fn compute_uid_hash_hmac(master_key: &[u8; 32], tool_id: &str, uid: &str) -> String {
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(master_key).expect("HMAC-SHA256 接受任意长度密钥");
+    mac.update(tool_id.as_bytes());
+    mac.update(b":");
+    mac.update(uid.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 pub fn mask_uid(uid: &str) -> String {
@@ -407,14 +470,50 @@ mod tests {
             },
         };
 
-        let mut encrypted = encrypt_credential(&key, &env).expect("encrypt ok");
-        let decrypted = decrypt_credential(&key, &encrypted).expect("decrypt ok");
+        let aad = credential_aad("qoder_cn", "acc-1");
+        let mut encrypted = encrypt_credential(&key, &aad, &env).expect("encrypt ok");
+        let decrypted = decrypt_credential(&key, &aad, &encrypted).expect("decrypt ok");
         assert_eq!(decrypted.uid, env.uid);
         assert_eq!(decrypted.display_email, env.display_email);
 
+        // 错误 AAD（跨账号密文替换）必须解密失败
+        let wrong_aad = credential_aad("qoder_cn", "acc-2");
+        assert!(decrypt_credential(&key, &wrong_aad, &encrypted).is_err());
+
+        // 旧格式（无 QWA1 前缀、无 AAD）仍可兼容解密（忽略传入 aad）
+        let cipher = Aes256Gcm::new_from_slice(&key).expect("cipher");
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce[0] = 7;
+        let legacy_pt = serde_json::to_vec(&env).expect("serde");
+        let legacy_ct = cipher
+            .encrypt(Nonce::from_slice(&nonce), legacy_pt.as_ref())
+            .expect("legacy encrypt");
+        let mut legacy_blob = nonce.to_vec();
+        legacy_blob.extend_from_slice(&legacy_ct);
+        assert!(decrypt_credential(&key, b"", &legacy_blob).is_ok());
+
         let last_idx = encrypted.len() - 1;
         encrypted[last_idx] ^= 0xFF;
-        assert!(decrypt_credential(&key, &encrypted).is_err());
+        assert!(decrypt_credential(&key, &aad, &encrypted).is_err());
+    }
+
+    #[test]
+    fn uid_hash_hmac_is_salted_deterministic_and_distinct() {
+        let k1 = [1u8; 32];
+        let k2 = [2u8; 32];
+        let a1 = compute_uid_hash_hmac(&k1, "trae_cn", "u_1");
+        let a2 = compute_uid_hash_hmac(&k1, "trae_cn", "u_1");
+        let b = compute_uid_hash_hmac(&k2, "trae_cn", "u_1");
+        let legacy = compute_uid_hash("trae_cn", "u_1");
+        // 确定性
+        assert_eq!(a1, a2);
+        // 不同主密钥 → 不同指纹（加盐）
+        assert_ne!(a1, b);
+        // 与旧无盐 SHA-256 不同
+        assert_ne!(a1, legacy);
+        // 64 位十六进制
+        assert_eq!(a1.len(), 64);
+        assert!(a1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

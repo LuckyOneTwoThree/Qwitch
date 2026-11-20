@@ -211,6 +211,9 @@ impl TraeAdapter {
 
     #[cfg(target_os = "macos")]
     fn detect_device_brand() -> Option<String> {
+        // 注：`sysctl`/`sw_vers` 为一次性、毫秒级只读探测，仅在 macOS 本机导入/切号的
+        // 设备指纹采集时调用。位于同步指纹构建链中，改异步将波及 import/apply_session
+        // 全链路，收益不抵风险，故保留同步调用。
         let output = std::process::Command::new("sysctl")
             .args(["-n", "hw.model"])
             .output()

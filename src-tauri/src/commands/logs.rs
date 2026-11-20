@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tauri::{AppHandle, Emitter, State};
 
 use crate::domain::{
@@ -25,9 +27,15 @@ pub fn get_action_logs(
         .map_err(|e| e.to_string())
 }
 
+/// 日志统计：对 `action_logs` 做无 WHERE 的 `SUM(CASE...)` 全表扫描，
+/// 随日志量线性增长。改为异步命令 + `spawn_blocking`，避免占用主线程。
 #[tauri::command]
-pub fn get_action_log_stats(state: State<'_, AppState>) -> Result<ActionLogStats, String> {
-    state.db.get_action_log_stats().map_err(|e| e.to_string())
+pub async fn get_action_log_stats(state: State<'_, AppState>) -> Result<ActionLogStats, String> {
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || db.get_action_log_stats())
+        .await
+        .map_err(|e| format!("日志统计任务失败: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -72,23 +80,33 @@ pub fn delete_action_logs(
     Ok(count)
 }
 
+/// 导出日志：一次读取最多 10000 条 + 序列化 + 写盘，全部在 `spawn_blocking` 中执行，
+/// 避免阻塞主线程（原先为同步命令，导出期间界面会卡顿）。
 #[tauri::command]
-pub fn export_action_logs(
+pub async fn export_action_logs(
     app: AppHandle,
     state: State<'_, AppState>,
     scope: Option<LogScope>,
     archive_after_export: Option<bool>,
 ) -> Result<ExportLogsResult, String> {
     let target_scope = scope.unwrap_or(LogScope::Archived);
-    let logs = state
-        .db
-        .list_action_logs(target_scope, 10_000, 0, None)
+    let db = Arc::clone(&state.db);
+    let host = Arc::clone(&state.host);
+
+    // 读取 + 序列化 + 写盘全部移入阻塞线程池
+    let data_dir = tokio::task::spawn_blocking(move || host.qwitch_data_dir())
+        .await
+        .map_err(|e| format!("获取数据目录失败: {e}"))?
         .map_err(|e| e.to_string())?;
+    let logs =
+        tokio::task::spawn_blocking(move || db.list_action_logs(target_scope, 10_000, 0, None))
+            .await
+            .map_err(|e| format!("读取日志失败: {e}"))?
+            .map_err(|e| e.to_string())?;
     if logs.is_empty() {
         return Err("当前视图没有可导出的操作日志".into());
     }
 
-    let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
     let archive_dir = data_dir.join("archives");
     std::fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
 

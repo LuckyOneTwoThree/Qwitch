@@ -610,6 +610,21 @@ pub async fn refresh_quota_batch(
         .try_lock_owned()
         .map_err(|_| "已有批量任务正在进行，请等待完成后再试".to_string())?;
 
+    // 与领取一致：拿到锁后立即广播启动，避免前端二次点击穿透
+    let _ = app.emit(
+        "qwitch://batch-progress",
+        crate::scheduler::BatchProgressEvent {
+            action: "refresh".into(),
+            running: true,
+            total: account_ids.len(),
+            completed: 0,
+            current_label: None,
+            phase: "checking".into(),
+            jitter_seconds: None,
+            summary_text: Some("正在初始化批量队列…".into()),
+        },
+    );
+
     tokio::spawn(async move {
         let _guard = guard;
         let _ = scheduler
@@ -645,6 +660,27 @@ pub async fn claim_daily_batch(
         .queue_lock()
         .try_lock_owned()
         .map_err(|_| "已有批量任务正在进行，请等待完成后再试".to_string())?;
+
+    let total = account_ids.len();
+    // 拿到锁后立刻广播「已启动」，再 spawn 后台执行。
+    //
+    // 否则存在竞态窗口：后端 `spawn` 后立即返回 `Ok(())`，而首个进度事件要等
+    // 后台任务真正开始才发出。前端在此期间 `batchProgress.running` 仍为 false，
+    // 用户二次点击会穿透双守卫、被 `try_lock_owned` 拒绝，看到「已有批量任务正在进行」
+    // 的红色错误提示。先发事件可让前端立即进入运行态。
+    let _ = app.emit(
+        "qwitch://batch-progress",
+        crate::scheduler::BatchProgressEvent {
+            action: "claim".into(),
+            running: true,
+            total,
+            completed: 0,
+            current_label: None,
+            phase: "checking".into(),
+            jitter_seconds: None,
+            summary_text: Some("正在初始化批量队列…".into()),
+        },
+    );
 
     tokio::spawn(async move {
         let _guard = guard;

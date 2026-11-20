@@ -1,7 +1,7 @@
 # Qwitch 项目认知总结（二次开发基线）
 
 > 基于当前 `main` 分支源码（v0.2.3）逐文件核验形成，作为后续优化与功能迭代的“先读这份”基线。
-> 核验事实：`npm test` 42 例通过；`cargo test --locked --all-targets` 82 例通过；前端 Vite 6.4.6 / React 18 / TS strict；后端 Rust + Tauri v2。
+> 核验事实：`npm test` 54 例通过；`cargo test --locked --all-targets` 82 例通过；前端 Vite 6.4.6 / React 18 / TS strict；后端 Rust + Tauri v2。
 
 ---
 
@@ -139,7 +139,7 @@ npm install
 npm run dev            # 仅前端（浏览器 Mock 预览，无 Tauri）
 npm run tauri dev      # 桌面应用开发（Vite:1420 + Rust）
 npm run build          # tsc + vite build（产出 dist/）
-npm test               # Vitest（42 例）
+npm test               # Vitest（54 例）
 cd src-tauri
 cargo test --all-targets            # 82 例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
@@ -152,11 +152,11 @@ npx tauri build        # 打包安装包
 
 ## 10. 测试与 CI 配置
 
-- **前端**：`selectors.test.ts`（15）、`settingsUtils.test.ts`（6）、`logStateUtils.test.ts`（3）、`toolRegistry.test.ts`（3）、`mockStore.test.ts`（2）、`useToast.test.ts`（4）、`useAppUpdate.test.ts`（4）、`ToastViewport.test.tsx`（3）、`pages/dashboard/LogsView.test.tsx`（2）= 42 例，`vitest run`；组件/Hook 测试用文件级 `// @vitest-environment jsdom` + `@testing-library/react`（jsdom 26，Node ≥ 18）。
+- **前端**：`selectors.test.ts`（15）、`settingsUtils.test.ts`（6）、`logStateUtils.test.ts`（3）、`toolRegistry.test.ts`（3）、`mockStore.test.ts`（2）、`useToast.test.ts`（4）、`useAppUpdate.test.ts`（4）、`ToastViewport.test.tsx`（3）、`pages/dashboard/LogsView.test.tsx`（2）、`pages/dashboard/SettingsView.test.tsx`（7）、`pages/Dashboard.test.tsx`（5）= 54 例，`vitest run`；组件/Hook 测试用文件级 `// @vitest-environment jsdom` + `@testing-library/react`（jsdom 26，Node ≥ 18）。
 - **后端**：模块内 `#[cfg(test)]` 覆盖 storage（增删改/密钥指纹/PII 迁移/快照保留/跨日口径）、crypto（加解密/脱敏）、platform（主密钥决策矩阵/LaunchAgent）、adapter（外部信任/会话回滚/Trae 设备头/WorkBuddy 端点白名单）、commands（OAuth 白名单/UID 校验/切号互斥）、update（选产物/校验/URL 白名单）= 82 例（含 scheduler 5 个行为测试）。
 - **CI（`ci.yml`）**：push/PR 到 `main`，`macos-latest + windows-latest` 矩阵 → `npm ci` → `npm audit --omit=dev` → `npm run build` → `npm test` → `cargo fmt --check` → `cargo clippy -D warnings` → `cargo test --all-targets`。
 - **Release（`release.yml`）**：`v*` tag 触发（先 ubuntu verify）→ 构建 macOS arm64 / macOS x64 / Windows x64 三产物 → 压 SHA256SUMS → `gh release` 发布（预发布带 `-` 则 prerelease）。
-- **文档漂移提示**：测试数量以实测为准（当前 Rust 82 / Vitest 42）；二次开发时以代码为准。
+- **文档漂移提示**：测试数量以实测为准（当前 Rust 82 / Vitest 54）；二次开发时以代码为准。
 
 ---
 
@@ -182,7 +182,7 @@ npx tauri build        # 打包安装包
 3. **`uid_hash` 仍为无盐 `SHA-256(tool_id:uid)`**——建议升级 `HMAC-SHA256(master_key, …)` 并平滑迁移。
 4. **AES-GCM 未绑定 AAD**（未绑定 account/tool 上下文）——建议引入 AAD，防跨账号密文替换。
 5. **异步上下文仍有同步 `std::process::Command`**（如 `trae.rs` 的 `sysctl`/`sw_vers`，platform 探测分支）——建议 `tokio::process` 或 `spawn_blocking`，避免阻塞 Tokio。
-6. **组件级测试仍很薄**：已有 Hook / `LogsPanel` / `ToastViewport` 的 jsdom 测试，但 `Dashboard`、`SettingsView`、各 Modal 尚无，Tauri bundle 未纳入 CI 构建校验。
+6. **组件级测试仍很薄**：已有 Hook / `LogsPanel` / `ToastViewport` 的 jsdom 测试，已覆盖 `Dashboard` 导航、`SettingsView`，但各 Modal、`AccountCard`、`TrayPopover` 尚无，Tauri bundle 未纳入 CI 构建校验。
 7. **文档漂移**：README 测试数量、`docs/*_AUDIT.md` 为历史基线（含大量“已修复”标注），改代码时以源码为准。
 8. 其他路线图项：外部插件内容哈希固定、OAuth 凭据走受限 IPC 桥（脱离 URL）、旧版数据迁移用 SQLite backup API、归档日志自动清底、代码签名/公证与自动更新。
 

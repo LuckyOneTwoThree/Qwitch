@@ -271,4 +271,5 @@
 - 后端：`commands/mod.rs`（原 3,261 行）拆为 `mod.rs` + `accounts/profile/settings/switch/logs/oauth` 6 个子模块；`scheduler/mod.rs` 新增 `SchedulerEventSink` 与 5 个行为测试（幂等/Fail-Closed、工具级熔断、设备日限、凭据轮换与限流熔断、队列互斥）；`adapter/common.rs` 收敛共享 HTTP 客户端与状态映射；`Cargo.toml` 设 `rust-version = "1.88"` 并收窄 `tokio` features（`reqwest` 保持 0.12 以沿用 `ring`，避免 Windows CI 引入 `aws-lc-rs` 构建依赖）；CSP 增加 `form-action 'self'`；CI 增加 `permissions: contents: read`、`bash -n` 脚本检查与 `--locked`；Linux 增加 `xdg-open` 更新入口。
 - 前端：`Dashboard.tsx` 由 2,341 行降至约 1,178 行，日志/设置视图拆至 `pages/dashboard/{LogsView,SettingsView,types}`；抽出 `context/logStateUtils.ts`；日志勾选改用 `Set` 的 O(1) 判定并补 `role="checkbox"`；侧栏 `aria-current="page"`；工具账号计数改用 `Map`；`ToastViewport` 错误用 `alert`、其余用 `status`；`text-[10px]` 全部提升为 `text-[11px]`；`mockStore` 的 MiniMax 与后端对齐。
 - 资产：删除未被引用的 `docs/assets/tuckbase-*`、`docs/assets/qwitch-icon-direction-01*`、`src-tauri/icons/{android,ios}`。
-- 仍保留的后续项：`QwitchContext.tsx` 多 store 拆分与增量同步、`storage/mod.rs` 拆分、组件级（DOM）集成测试、Tauri bundle CI 构建校验、展示图重截。
+- 测试基础设施：新增 `jsdom@26` 与 `@testing-library/react` 开发依赖（`npm audit --omit=dev` 0 漏洞），补 `useToast`/`useAppUpdate`/`LogsPanel`/`ToastViewport` 组件级测试；Vitest 合计 9 个文件、42 例。
+- 仍保留的后续项：`QwitchContext.tsx` 多 store 拆分与增量同步、`storage/mod.rs` 拆分、`Dashboard`/`SettingsView`/Modal 的组件测试、Tauri bundle CI 构建校验、展示图重截。

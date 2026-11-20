@@ -261,10 +261,14 @@
 > - 前端：`npm test -- --run`（2 个测试文件、21 条用例全部通过）、`npx tsc --noEmit` 与 `npm run build` 退出码 `0`。
 > - 后端：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 均零告警通过；`cargo test --all-targets`（`qwitch_lib` 76 条用例全部通过，`qwitch` 二进制 0 条测试）。
 
-### 第三阶段：测试护栏、架构拆分与文档收敛（已完成，Dashboard.tsx 视图拆分顺延）
+### 第三阶段：测试护栏、架构拆分与文档收敛（已完成）
 1. **补齐测试基线**：为 [scheduler/mod.rs](../src-tauri/src/scheduler/mod.rs) 补齐 Mock Adapter 行为测试（串行、抖动、跨设备冷却、熔断、幂等），补全组件集成测试与 Vitest 覆盖率。
 2. **文档与资产对齐**：一次性同步 `README.md`、`CORE_DESIGN.md`、`ADAPTER_SPEC.md`、`ARCHITECTURE.md` 与 `PROJECT_COGNITION_SUMMARY.md`，补全 `mockStore` 中的 MiniMax 并重截 5 张展示图，清理无用旧图标资产。
 3. **架构拆解与依赖收敛**：拆分 `commands/mod.rs`、`QwitchContext.tsx`、`Dashboard.tsx`，升级对齐 `reqwest 0.13` 并收窄 `tokio` features。
 
 
-**第三阶段落地记录**：后端 `commands/` 拆分为 6 个子模块；scheduler 新增 5 个行为测试；依赖/MSRV/CSP/CI 加固；前端新增 logStateUtils、toolRegistry、mockStore 测试、侧栏 `aria-current`、O(1) 工具计数；清理未引用的遗留素材。**未完成**：`Dashboard.tsx` 拆分为 LogsView/SettingsView 顺延至后续迭代。
+**第三阶段落地记录**：
+- 后端：`commands/mod.rs`（原 3,261 行）拆为 `mod.rs` + `accounts/profile/settings/switch/logs/oauth` 6 个子模块；`scheduler/mod.rs` 新增 `SchedulerEventSink` 与 5 个行为测试（幂等/Fail-Closed、工具级熔断、设备日限、凭据轮换与限流熔断、队列互斥）；`adapter/common.rs` 收敛共享 HTTP 客户端与状态映射；`Cargo.toml` 设 `rust-version = "1.88"` 并收窄 `tokio` features（`reqwest` 保持 0.12 以沿用 `ring`，避免 Windows CI 引入 `aws-lc-rs` 构建依赖）；CSP 增加 `form-action 'self'`；CI 增加 `permissions: contents: read`、`bash -n` 脚本检查与 `--locked`；Linux 增加 `xdg-open` 更新入口。
+- 前端：`Dashboard.tsx` 由 2,341 行降至约 1,178 行，日志/设置视图拆至 `pages/dashboard/{LogsView,SettingsView,types}`；抽出 `context/logStateUtils.ts`；日志勾选改用 `Set` 的 O(1) 判定并补 `role="checkbox"`；侧栏 `aria-current="page"`；工具账号计数改用 `Map`；`ToastViewport` 错误用 `alert`、其余用 `status`；`text-[10px]` 全部提升为 `text-[11px]`；`mockStore` 的 MiniMax 与后端对齐。
+- 资产：删除未被引用的 `docs/assets/tuckbase-*`、`docs/assets/qwitch-icon-direction-01*`、`src-tauri/icons/{android,ios}`。
+- 仍保留的后续项：`QwitchContext.tsx` 多 store 拆分与增量同步、`storage/mod.rs` 拆分、组件级（DOM）集成测试、Tauri bundle CI 构建校验、展示图重截。

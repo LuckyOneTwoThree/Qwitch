@@ -208,7 +208,7 @@ Qwitch/
 │  └─ data/                  # 浏览器预览 Mock
 ├─ src-tauri/                # Rust 后端
 │  └─ src/
-│     ├─ commands/           # Tauri IPC 命令
+│     ├─ commands/           # Tauri IPC 命令（accounts/profile/settings/switch/logs/oauth 子模块）
 │     ├─ adapter/            # 内置适配器 + JSON-RPC 外部协议
 │     ├─ scheduler/          # 防风控调度器
 │     ├─ platform/           # 钥匙串 / 进程 / 路径 / 自启

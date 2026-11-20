@@ -1,7 +1,7 @@
 # Qwitch 项目认知总结（二次开发基线）
 
 > 基于当前 `main` 分支源码（v0.2.3）逐文件核验形成，作为后续优化与功能迭代的“先读这份”基线。
-> 核验事实：`npm test` 19 例通过；`cargo test --all-targets` 58 例通过；前端 Vite 6.4.6 / React 18 / TS strict；后端 Rust + Tauri v2。
+> 核验事实：`npm test` 29 例通过；`cargo test --locked --all-targets` 82 例通过；前端 Vite 6.4.6 / React 18 / TS strict；后端 Rust + Tauri v2。
 
 ---
 
@@ -20,7 +20,7 @@
 | --- | --- |
 | 桌面框架 | Tauri v2（`tray-icon`、`macos-private-api`、`single-instance`） |
 | 前端 | React 18、TypeScript（`strict`）、Tailwind CSS 4（`@tailwindcss/vite`）、Vite 6、lucide-react 图标、Vitest 5 |
-| 后端 | Rust 2021、tokio（full）、rusqlite（bundled SQLite）、reqwest（rustls-tls）、keyring v3（apple/windows native）、aes-gcm 0.10、sha2、uuid、chrono、base64 |
+| 后端 | Rust 2021、tokio（rt-multi-thread/macros/sync/time/process/io-util，MSRV 1.88）、rusqlite（bundled SQLite）、reqwest（rustls-tls）、keyring v3（apple/windows native）、aes-gcm 0.10、sha2、uuid、chrono、base64 |
 | 质量门禁 | `tsc` + `vite build`、Vitest、`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`、`npm audit --omit=dev` |
 | 平台 | macOS 10.15+（arm64 / x64 独立包）、Windows 10+（x64 NSIS/MSI） |
 
@@ -35,9 +35,9 @@ Qwitch/
 ├─ src/                    # 前端
 │  ├─ App.tsx              # 双窗口分流（main / tray）+ 浏览器 Mock 预览外壳
 │  ├─ main.tsx             # React 入口（StrictMode + ErrorBoundary）
-│  ├─ pages/Dashboard.tsx  # 主窗口（账号池/日志/设置），~2258 行
+│  ├─ pages/Dashboard.tsx  # 主窗口（账号池/导航/KPI），~1178 行；日志/设置视图拆至 pages/dashboard/{LogsView,SettingsView,types}
 │  ├─ pages/TrayPopover.tsx# 托盘弹层
-│  ├─ context/QwitchContext.tsx  # 全局状态中枢，~1838 行（+ settingsUtils.ts）
+│  ├─ context/QwitchContext.tsx  # 全局状态中枢，~2074 行（+ settingsUtils.ts、logStateUtils.ts）
 │  ├─ domain/              # selectors.ts（统计口径）、toolRegistry.ts（工具品牌/可见工具）
 │  ├─ components/          # AccountCard/ImportAccountModal/ColdSwitchModal/UpdateCard/... + ui/ 基座
 │  ├─ data/mockStore.ts    # 浏览器预览 Mock 数据
@@ -45,11 +45,11 @@ Qwitch/
 ├─ src-tauri/              # 后端
 │  └─ src/
 │     ├─ lib.rs            # Tauri Builder：setup/托盘/窗口事件/命令注册
-│     ├─ commands/mod.rs   # 全部 IPC 命令 + OAuth 注入，~2473 行（重）
+│     ├─ commands/mod.rs   # AppState + 窗口/托盘辅助 + 子模块 glob 再导出；IPC 命令按域拆至 accounts/profile/settings/switch/logs/oauth.rs
 │     ├─ adapter/          # ToolAdapter trait + trae/workbuddy/qoder/minimax + external(JSON-RPC) + common
 │     ├─ scheduler/mod.rs  # AntiRiskScheduler：单队列串行+Jitter+幂等+工具级熔断
-│     ├─ platform/mod.rs   # PlatformHost：路径/进程/钥匙串/自启/数据迁移，~1498 行
-│     ├─ storage/mod.rs    # SQLite + 加密凭据 + 日志 + PII 迁移，~2160 行
+│     ├─ platform/mod.rs   # PlatformHost：路径/进程/钥匙串/自启/数据迁移，~1767 行
+│     ├─ storage/mod.rs    # SQLite + 加密凭据 + 日志 + PII 迁移，~2406 行
 │     ├─ storage/crypto.rs # AES-256-GCM、uid_hash、脱敏、日志清洗
 │     ├─ domain/mod.rs     # 领域模型 + AppSettingsDto + CredentialEnvelope
 │     └─ update.rs         # GitHub Release 更新检查/下载/校验
@@ -91,8 +91,8 @@ Qwitch/
 
 ## 6. 后端核心模块职责
 
-- **`lib.rs`**：启动编排——开库→取凭据样本→选主密钥（`KeyExpectation`：`key_id` 指纹 + 样本密文双验证）→`verify_or_init_key_fingerprint`→PII 迁移→日志保留清理→自启→建适配器→`AppState`→托盘/菜单/窗口事件→注册 28 个命令。关闭主窗口按 `close_to_tray` 收进托盘；托盘 `Focused(false)` 在非切号中隐藏。
-- **`commands/mod.rs`**：全部 IPC + OAuth 注入脚本。含账户增删改查、导入/预览/Token、查额（单/批）、领取批量、切号、日志治理、更新。`resolve_client_executable` 统一 `custom_client_paths` 覆盖。**文件过大（~2473 行）是主要结构债**。
+- **`lib.rs`**：启动编排——开库→取凭据样本→选主密钥（`KeyExpectation`：`key_id` 指纹 + 样本密文双验证）→`verify_or_init_key_fingerprint`→PII 迁移→日志保留清理→自启→建适配器→`AppState`→托盘/菜单/窗口事件→注册 33 个命令。关闭主窗口按 `close_to_tray` 收进托盘；托盘 `Focused(false)` 在非切号中隐藏。
+- **`commands/`**：`mod.rs`（`AppState`、窗口/托盘辅助、`pub use` 再导出）+ 6 个子模块：`accounts.rs`（账户增删改查/查额/领取）、`profile.rs`（导入/预览/Token）、`settings.rs`、`switch.rs`（切号）、`logs.rs`、`oauth.rs`（OAuth + 注入脚本）。含账户增删改查、导入/预览/Token、查额（单/批）、领取批量、切号、日志治理、更新。`resolve_client_executable` 统一 `custom_client_paths` 覆盖。第三阶段已按域拆分（原单文件职责过重的结构债已消除）。
 - **`adapter/mod.rs`**：`ToolAdapter` trait（`import_from_local/parse_manual_token/inspect_quota/claim_daily(precheck)/refresh_credential/apply_session/backup_session/restore_session/daily_claim_device_key`）；`create_all_adapters`（内置 4 个 + 外部信任过滤 + `RESERVED_ADAPTER_IDS` 防冒名）；`backup_files/restore_files` 会话回滚（含 WAL/SHM）。
 - **`adapter/{trae,workbuddy,qoder,minimax}.rs`**：各自本地凭据解析/解密、额度与签到接口、`apply_session` 写回。要点：Trae `iCubeAuthInfo://icube.cloudide`（CN 为 `"tc"` 加密串）+ 设备级每日一次（错误码 9095）；WorkBuddy `workbuddy-desktop.info`（`sym-v1` AES-GCM，需 Electron 运行时解密）+ 端点白名单（`copilot.tencent.com`/`www.workbuddy.cn`）；Qoder `auth.v1.dat`（Chromium v10 + DPAPI/Keychain）+ `campaigns` 活动领取；MiniMax 设备码 OAuth + `credit/signin` 接口 + `refresh_credential`。
 - **`scheduler/mod.rs`**：`AntiRiskScheduler.mutex` 单队列。`run_daily_claim_batch`：逐账号→状态/能力/熔断/设备日限校验→`inspect_quota` 幂等前置（Fail-Closed：仅 `Available` 才领）→`claim_daily`→落库/日志/设备标记→账号间 `rand` Jitter（下限由设置保障）→`qwitch://batch-progress` 阶段事件→汇总 `done`。`run_quota_refresh_batch` 同理。`handle_adapter_failure` 将 401→`expired`、403/429→`risk_paused` 并熔断该工具。
@@ -139,9 +139,9 @@ npm install
 npm run dev            # 仅前端（浏览器 Mock 预览，无 Tauri）
 npm run tauri dev      # 桌面应用开发（Vite:1420 + Rust）
 npm run build          # tsc + vite build（产出 dist/）
-npm test               # Vitest（19 例）
+npm test               # Vitest（29 例）
 cd src-tauri
-cargo test --all-targets            # 58 例
+cargo test --all-targets            # 82 例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 npx tauri build        # 打包安装包
 ```
@@ -152,11 +152,11 @@ npx tauri build        # 打包安装包
 
 ## 10. 测试与 CI 配置
 
-- **前端**：`src/domain/selectors.test.ts`（14）、`src/context/settingsUtils.test.ts`（5）= 19 例，`vitest run`。
-- **后端**：模块内 `#[cfg(test)]` 覆盖 storage（增删改/密钥指纹/PII 迁移/快照保留/跨日口径）、crypto（加解密/脱敏）、platform（主密钥决策矩阵/LaunchAgent）、adapter（外部信任/会话回滚/Trae 设备头/WorkBuddy 端点白名单）、commands（OAuth 白名单/UID 校验/切号互斥）、update（选产物/校验/URL 白名单）= 58 例。
+- **前端**：`selectors.test.ts`（15）、`settingsUtils.test.ts`（6）、`logStateUtils.test.ts`（3）、`toolRegistry.test.ts`（3）、`mockStore.test.ts`（2）= 29 例，`vitest run`。
+- **后端**：模块内 `#[cfg(test)]` 覆盖 storage（增删改/密钥指纹/PII 迁移/快照保留/跨日口径）、crypto（加解密/脱敏）、platform（主密钥决策矩阵/LaunchAgent）、adapter（外部信任/会话回滚/Trae 设备头/WorkBuddy 端点白名单）、commands（OAuth 白名单/UID 校验/切号互斥）、update（选产物/校验/URL 白名单）= 82 例（含 scheduler 5 个行为测试）。
 - **CI（`ci.yml`）**：push/PR 到 `main`，`macos-latest + windows-latest` 矩阵 → `npm ci` → `npm audit --omit=dev` → `npm run build` → `npm test` → `cargo fmt --check` → `cargo clippy -D warnings` → `cargo test --all-targets`。
 - **Release（`release.yml`）**：`v*` tag 触发（先 ubuntu verify）→ 构建 macOS arm64 / macOS x64 / Windows x64 三产物 → 压 SHA256SUMS → `gh release` 发布（预发布带 `-` 则 prerelease）。
-- **文档漂移提示**：README 写“51 Rust 测试”，实测为 **58**；二次开发时以代码/实测为准。
+- **文档漂移提示**：测试数量以实测为准（当前 Rust 82 / Vitest 29）；二次开发时以代码为准。
 
 ---
 
@@ -177,8 +177,8 @@ npx tauri build        # 打包安装包
 **已落地（不必重复做）**：CSP 严格策略、SQLite WAL/busy_timeout、`list_accounts` 单 SQL 消 N+1、`refresh_quota_batch` 入调度器、`delete/update/rename` 广播+审计、主密钥 `key_id`+样本双验证、外部适配器信任门禁、会话备份回滚、切号存活轮询与原子提交、日志归档/保留、`custom_client_paths` 探针穿透。
 
 **仍存在的债（优先级从高到低）**：
-1. **`commands/mod.rs` 约 2473 行**职责过重（账户/设置/日志/切号/OAuth/更新混于一处）——建议按域拆分 `account/oauth/settings/logs/switch`。
-2. **`QwitchContext.tsx` 约 1838 行单体 Context**——每次事件全量 `syncFromBackend`；建议拆 `Account/Log/Settings/Feedback` store + 增量 `get_account_summary(accountId)` + 150ms 去抖合并。
+1. ~~`commands/mod.rs` 职责过重~~ 已在第三阶段拆分；`storage/mod.rs`（约 2406 行）仍偏大。
+2. **`QwitchContext.tsx` 约 2074 行单体 Context**——每次事件全量 `syncFromBackend`；建议拆 `Account/Log/Settings/Feedback` store + 增量 `get_account_summary(accountId)` + 150ms 去抖合并。
 3. **`uid_hash` 仍为无盐 `SHA-256(tool_id:uid)`**——建议升级 `HMAC-SHA256(master_key, …)` 并平滑迁移。
 4. **AES-GCM 未绑定 AAD**（未绑定 account/tool 上下文）——建议引入 AAD，防跨账号密文替换。
 5. **异步上下文仍有同步 `std::process::Command`**（如 `trae.rs` 的 `sysctl`/`sw_vers`，platform 探测分支）——建议 `tokio::process` 或 `spawn_blocking`，避免阻塞 Tokio。

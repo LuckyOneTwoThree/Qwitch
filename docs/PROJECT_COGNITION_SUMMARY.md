@@ -37,7 +37,7 @@ Qwitch/
 │  ├─ main.tsx             # React 入口（StrictMode + ErrorBoundary）
 │  ├─ pages/Dashboard.tsx  # 主窗口（账号池/导航/KPI），~1178 行；日志/设置视图拆至 pages/dashboard/{LogsView,SettingsView,types}
 │  ├─ pages/TrayPopover.tsx# 托盘弹层
-│  ├─ context/QwitchContext.tsx  # 全局状态中枢，~2074 行（+ settingsUtils.ts、logStateUtils.ts）
+│  ├─ context/QwitchContext.tsx  # 全局状态中枢，~1998 行（+ settingsUtils.ts、logStateUtils.ts、useToast.ts、useAppUpdate.ts）
 │  ├─ domain/              # selectors.ts（统计口径）、toolRegistry.ts（工具品牌/可见工具）
 │  ├─ components/          # AccountCard/ImportAccountModal/ColdSwitchModal/UpdateCard/... + ui/ 基座
 │  ├─ data/mockStore.ts    # 浏览器预览 Mock 数据
@@ -178,7 +178,7 @@ npx tauri build        # 打包安装包
 
 **仍存在的债（优先级从高到低）**：
 1. ~~`commands/mod.rs` 职责过重~~ 已在第三阶段拆分；`storage/mod.rs`（约 2406 行）仍偏大。
-2. **`QwitchContext.tsx` 约 2074 行单体 Context**——每次事件全量 `syncFromBackend`；建议拆 `Account/Log/Settings/Feedback` store + 增量 `get_account_summary(accountId)` + 150ms 去抖合并。
+2. **`QwitchContext.tsx` 约 1998 行单体 Context**——每次事件全量 `syncFromBackend`；建议拆 `Account/Log/Settings/Feedback` store + 增量 `get_account_summary(accountId)` + 150ms 去抖合并。
 3. **`uid_hash` 仍为无盐 `SHA-256(tool_id:uid)`**——建议升级 `HMAC-SHA256(master_key, …)` 并平滑迁移。
 4. **AES-GCM 未绑定 AAD**（未绑定 account/tool 上下文）——建议引入 AAD，防跨账号密文替换。
 5. **异步上下文仍有同步 `std::process::Command`**（如 `trae.rs` 的 `sysctl`/`sw_vers`，platform 探测分支）——建议 `tokio::process` 或 `spawn_blocking`，避免阻塞 Tokio。

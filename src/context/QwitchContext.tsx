@@ -22,6 +22,8 @@ import {
   mergeUniqueLogs,
   resolveTheme,
 } from "./logStateUtils";
+import { useToast } from "./useToast";
+import { useAppUpdate } from "./useAppUpdate";
 import type {
   AccountSummary,
   ActionLogCleanupRequest,
@@ -175,6 +177,7 @@ const detectTrayWindow = () =>
 
 export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const isTauriRuntime = detectTauriRuntime();
+  const { updateInfo, updateChecking, updateError, checkAppUpdate } = useAppUpdate(isTauriRuntime);
   const isTrayWindow = detectTrayWindow();
 
   const [isInitializing, setIsInitializing] = useState<boolean>(isTauriRuntime);
@@ -199,7 +202,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     account: null,
     phase: "confirm",
   });
-  const [toast, setToast] = useState<ToastState | null>(null);
+  const { toast, showToast, dismissToast } = useToast();
   const [appSettings, setAppSettings] = useState<AppSettings>(() => normalizeAppSettings());
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const [jitterRangeMs, setJitterRangeMsState] = useState<[number, number]>([1500, 3500]);
@@ -209,13 +212,6 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   }>({ archiveAfterDays: 14, maxActiveCount: 200 });
   const [customClientPaths, setCustomClientPaths] = useState<Record<string, string>>({});
   const [clientStatuses, setClientStatuses] = useState<Record<string, ClientHostStatus>>({});
-  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
-  const [updateChecking, setUpdateChecking] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const updateInfoRef = useRef<AppUpdateInfo | null>(null);
-  updateInfoRef.current = updateInfo;
-  const lastUpdateCheckAtRef = useRef(0);
-  const updateCheckInFlightRef = useRef<Promise<AppUpdateInfo | null> | null>(null);
   const [cstDayKey, setCstDayKey] = useState<string>(() => toCstDayKey(Date.now()));
   const cstDayKeyRef = useRef(cstDayKey);
   cstDayKeyRef.current = cstDayKey;
@@ -247,8 +243,6 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const toastTimerRef = useRef<number | null>(null);
-  const toastSeqRef = useRef(0);
   const logLimitRef = useRef(LOG_PAGE_SIZE);
   const logScopeRef = useRef(logScope);
   logScopeRef.current = logScope;
@@ -324,9 +318,6 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     return () => {
-      if (toastTimerRef.current !== null) {
-        window.clearTimeout(toastTimerRef.current);
-      }
       if (syncDebounceTimerRef.current !== null) {
         window.clearTimeout(syncDebounceTimerRef.current);
       }
@@ -359,27 +350,6 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       }
     };
   }, [batchProgress]);
-
-  const dismissToast = useCallback(() => {
-    if (toastTimerRef.current !== null) {
-      window.clearTimeout(toastTimerRef.current);
-      toastTimerRef.current = null;
-    }
-    setToast(null);
-  }, []);
-
-  const showToast = useCallback((message: string, tone: ToastTone = "info") => {
-    if (toastTimerRef.current !== null) {
-      window.clearTimeout(toastTimerRef.current);
-    }
-    const id = ++toastSeqRef.current;
-    setToast({ id, message, tone });
-    const durationMs = tone === "error" ? 6500 : tone === "warning" ? 4500 : 3400;
-    toastTimerRef.current = window.setTimeout(() => {
-      setToast((prev) => (prev && prev.id === id ? null : prev));
-      toastTimerRef.current = null;
-    }, durationMs);
-  }, []);
 
   const saveAppSettings = useCallback(
     (next: Partial<AppSettings>, silent = false): Promise<boolean> => {
@@ -1859,52 +1829,6 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     }, 700);
     return () => window.clearTimeout(timer);
   }, [isInitializing, isTrayWindow]);
-
-  const checkAppUpdate = useCallback(
-    async (options?: { force?: boolean; silent?: boolean }): Promise<AppUpdateInfo | null> => {
-      if (!isTauriRuntime) return null;
-      const force = Boolean(options?.force);
-      const silent = Boolean(options?.silent);
-      if (
-        !force &&
-        updateInfoRef.current &&
-        Date.now() - lastUpdateCheckAtRef.current < 10 * 60_000
-      ) {
-        return updateInfoRef.current;
-      }
-      if (updateCheckInFlightRef.current) {
-        return updateCheckInFlightRef.current;
-      }
-
-      setUpdateChecking(true);
-      if (!silent) {
-        setUpdateError(null);
-      }
-
-      const promise = invoke<AppUpdateInfo>("check_app_update")
-        .then((info) => {
-          updateInfoRef.current = info;
-          lastUpdateCheckAtRef.current = Date.now();
-          setUpdateInfo(info);
-          setUpdateError(null);
-          return info;
-        })
-        .catch((err) => {
-          if (!silent) {
-            setUpdateError(String(err));
-          }
-          return null;
-        })
-        .finally(() => {
-          updateCheckInFlightRef.current = null;
-          setUpdateChecking(false);
-        });
-
-      updateCheckInFlightRef.current = promise;
-      return promise;
-    },
-    [isTauriRuntime]
-  );
 
   // 启动后静默检查一次 GitHub Releases；失败不打扰用户
   useEffect(() => {

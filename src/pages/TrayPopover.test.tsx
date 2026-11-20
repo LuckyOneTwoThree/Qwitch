@@ -34,6 +34,7 @@ beforeEach(() => {
     updateChecking: false,
     checkAppUpdate: vi.fn().mockResolvedValue(null),
     isTauriRuntime: true,
+    showToast: vi.fn(),
   };
   h.useQwitch.mockReturnValue(ctx);
 });
@@ -92,5 +93,34 @@ describe("TrayPopover", () => {
     render(<TrayPopover onOpenMain={vi.fn()} />);
     fireEvent.click(screen.getByLabelText("检查更新"));
     expect(ctx.checkAppUpdate).toHaveBeenCalledWith({ force: true, silent: false });
+  });
+
+  it("托盘内安装失败时给出 Toast 提示，而非静默吞掉", async () => {
+    const invokeMock = vi.fn().mockRejectedValue(new Error("checksum mismatch"));
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+    ctx.updateInfo = {
+      updateAvailable: true,
+      currentVersion: "0.4.1",
+      latestVersion: "0.5.0",
+      releaseUrl: "https://github.com/x/releases",
+      assetUrl: "https://github.com/x/a.exe",
+      assetName: "Qwitch_0.5.0_x64-setup.exe",
+      checksumsUrl: "https://github.com/x/SHA256SUMS.txt",
+      canAutoInstall: true,
+      releaseNotes: "",
+      strategy: "auto_install",
+      platformLabel: "Windows",
+      hint: "",
+    };
+    render(<TrayPopover onOpenMain={vi.fn()} />);
+    // 关键：失败必须让用户看见，此前是静默 catch，用户只能反复重试
+    const btn = screen.getByRole("button", { name: /立即更新/ });
+    fireEvent.click(btn);
+    await Promise.resolve();
+    expect(ctx.showToast).toHaveBeenCalledWith(
+      expect.stringContaining("更新失败"),
+      "error"
+    );
+    vi.doUnmock("@tauri-apps/api/core");
   });
 });

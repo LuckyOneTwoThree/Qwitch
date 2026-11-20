@@ -307,6 +307,22 @@ export const FLAT_SORT_TIER = {
  *
  * 排序是**稳定**的：同层同工具内不重排，避免每次刷新卡片跳动。
  */
+/**
+ * `isAccountClaimable` 的适配器直传版本（内部使用，避免重复线性查找）。
+ */
+function isAccountClaimableWithAdapter(
+  acc: AccountSummary,
+  adapter: AdapterManifest | undefined
+): boolean {
+  const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : false;
+  return (
+    supportsClaim &&
+    acc.status === "active" &&
+    acc.hasApiToken !== false &&
+    getEffectiveClaimStatus(acc) === "available"
+  );
+}
+
 export function sortAccountsForFlatView(
   accounts: AccountSummary[],
   adapters: AdapterManifest[]
@@ -316,12 +332,25 @@ export function sortAccountsForFlatView(
     toolOrder.set(tool.id, index);
   });
 
+  // 预建 toolId → adapter 索引：isAccountClaimable 内部会按 toolId 查找适配器，
+  // 若直接传入 adapters 数组，每个账号都要线性扫描一次。账号量虽小，但排序
+  // 在每次过滤/刷新时都会执行，索引化后开销从 O(n·m) 降为 O(n)。
+  const adapterById = new Map(adapters.map((a) => [a.id, a]));
+  const claimableCache = new Map<string, boolean>();
+
   const tierOf = (acc: AccountSummary): number => {
     // 已停用是用户主动关闭的，不需要提醒处理，归入 normal
     if (acc.status !== "disabled" && isAccountNeedingAttention(acc)) {
       return FLAT_SORT_TIER.attention;
     }
-    if (isAccountClaimable(acc, adapters)) {
+    // 同一账号的 claimable 判定在本次排序内只算一次
+    let claimable = claimableCache.get(acc.id);
+    if (claimable === undefined) {
+      const adapter = adapterById.get(acc.toolId);
+      claimable = isAccountClaimableWithAdapter(acc, adapter);
+      claimableCache.set(acc.id, claimable);
+    }
+    if (claimable) {
       return FLAT_SORT_TIER.claimable;
     }
     if (acc.isActiveOnClient) {

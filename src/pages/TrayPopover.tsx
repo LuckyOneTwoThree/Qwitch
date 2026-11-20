@@ -48,6 +48,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     updateChecking,
     checkAppUpdate,
     isTauriRuntime,
+    showToast,
   } = useQwitch();
 
   const [toolFilter, setToolFilter] = useState<"all" | ToolId>("all");
@@ -71,15 +72,19 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     if (updateInstalling) return;
     setUpdateInstalling(true);
     try {
+      // 成功后进程会自行退出以完成覆盖安装，无需恢复按钮状态
       await invoke<string>("download_and_install_update", {
         assetUrl: updateInfo.assetUrl,
         assetName: updateInfo.assetName,
         checksumsUrl: updateInfo.checksumsUrl,
       });
-    } catch {
+    } catch (err) {
+      // 此前是静默 catch，用户点击「立即更新」失败后毫无反馈，只能反复重试。
+      // 托盘空间不足以展示细节，因此用 Toast 提示并引导至主窗口设置页查看原因。
       setUpdateInstalling(false);
+      showToast(`更新失败：${String(err)}`, "error");
     }
-  }, [updateInfo, updateInstalling]);
+  }, [updateInfo, updateInstalling, showToast]);
 
   useEffect(() => {
     void refreshClientStatuses();

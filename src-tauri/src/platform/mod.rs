@@ -571,6 +571,21 @@ impl NativePlatformHost {
         let clean = app_name.trim_end_matches(".app");
         let main_bin = format!("/{}/Contents/MacOS/{}", app_name, clean);
 
+        // 快速前置过滤：先用 pgrep 判断「是否存在任何同名进程」。
+        // 绝大多数情况下（客户端未启动）在此直接返回，避免为一次探测付出
+        // `ps -axo` 的全进程遍历开销（实测 ps ≈25ms vs pgrep ≈13ms，
+        // 而该函数在切号弹窗、窗口聚焦等路径上会被反复调用）。
+        let bundle_needle = format!("/{}/Contents/MacOS/", escape_pgrep_regex(app_name));
+        if !Command::new("pgrep")
+            .args(["-f", &bundle_needle])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return false;
+        }
+
         let Ok(output) = Command::new("ps")
             .args(["-axo", "pid=,command="])
             .stdout(Stdio::piped())

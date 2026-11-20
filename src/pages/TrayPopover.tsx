@@ -33,9 +33,12 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     clientStatuses,
     claimDailyBatch,
     requestColdSwitch,
+    switchDialog,
+    cancelColdSwitch,
     refreshAllQuotas,
     refreshClientStatuses,
     batchProgress,
+    cstDayKey,
     theme,
     toggleTheme,
     quitApp,
@@ -52,13 +55,23 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     return () => window.removeEventListener("focus", handleFocus);
   }, [refreshClientStatuses]);
 
+  useEffect(() => {
+    const handleBlur = () => {
+      if (switchDialog.account && switchDialog.phase === "confirm") {
+        cancelColdSwitch();
+      }
+    };
+    window.addEventListener("blur", handleBlur);
+    return () => window.removeEventListener("blur", handleBlur);
+  }, [cancelColdSwitch, switchDialog.account, switchDialog.phase]);
+
   const visibleTools = useMemo(() => getVisibleTools(adapters), [adapters]);
   const isBusy = Boolean(batchProgress?.running);
 
-  const globalStats = useMemo(
-    () => selectScopedStats(accounts, adapters, clientStatuses),
-    [accounts, adapters, clientStatuses]
-  );
+  const globalStats = useMemo(() => {
+    void cstDayKey;
+    return selectScopedStats(accounts, adapters, clientStatuses);
+  }, [accounts, adapters, clientStatuses, cstDayKey]);
 
   const toolGroups = useMemo(() => {
     const knownToolIds = new Set<string>(visibleTools.map((t) => t.id));

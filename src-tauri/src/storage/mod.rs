@@ -805,13 +805,25 @@ impl QwitchDatabase {
     }
 
     /// 清除某工具下所有账号的“本机使用中”标记（当本机当前登录账号不在库中时使用）
-    pub fn clear_active_on_client(&self, tool_id: &str) -> Result<(), StorageError> {
+    pub fn clear_active_on_client(&self, tool_id: &str) -> Result<usize, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        conn.execute(
-            "UPDATE accounts SET is_active_on_client = 0 WHERE tool_id = ?1",
+        let affected = conn.execute(
+            "UPDATE accounts SET is_active_on_client = 0 WHERE tool_id = ?1 AND is_active_on_client != 0",
             params![tool_id],
         )?;
-        Ok(())
+        Ok(affected)
+    }
+
+    /// 查询某工具当前被标记为“本机使用中”的账号 ID
+    pub fn get_active_account_id(&self, tool_id: &str) -> Result<Option<String>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        conn.query_row(
+            "SELECT id FROM accounts WHERE tool_id = ?1 AND is_active_on_client != 0 LIMIT 1",
+            params![tool_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn delete_account(&self, account_id: &str) -> Result<(), StorageError> {
@@ -899,21 +911,46 @@ impl QwitchDatabase {
         scope: LogScope,
         limit: u32,
         offset: u32,
+        before_id: Option<i64>,
     ) -> Result<Vec<ActionLogItem>, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let scope_clause = match scope {
-            LogScope::Active => "WHERE archived_at IS NULL",
-            LogScope::Archived => "WHERE archived_at IS NOT NULL",
-            LogScope::All => "",
+        let mut clauses: Vec<&'static str> = Vec::new();
+        match scope {
+            LogScope::Active => clauses.push("archived_at IS NULL"),
+            LogScope::Archived => clauses.push("archived_at IS NOT NULL"),
+            LogScope::All => {}
+        }
+        if before_id.is_some() {
+            clauses.push("id < ?");
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
         };
-        let sql = format!(
-            "SELECT id, account_id, tool_id, action_type, result_status, error_code, message_sanitized, created_at, archived_at
-             FROM action_logs {scope_clause} ORDER BY id DESC LIMIT ?1 OFFSET ?2"
-        );
+        let clamped_limit = limit.clamp(1, 10_000) as i64;
+        let sql = if before_id.is_some() {
+            format!(
+                "SELECT id, account_id, tool_id, action_type, result_status, error_code, message_sanitized, created_at, archived_at
+                 FROM action_logs {where_sql} ORDER BY id DESC LIMIT ?"
+            )
+        } else {
+            format!(
+                "SELECT id, account_id, tool_id, action_type, result_status, error_code, message_sanitized, created_at, archived_at
+                 FROM action_logs {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+            )
+        };
         let mut stmt = conn.prepare(&sql)?;
 
-        let clamped_limit = limit.clamp(1, 10_000);
-        let rows = stmt.query_map(params![clamped_limit, offset], |row| {
+        let mut query_params: Vec<Value> = Vec::new();
+        if let Some(cursor) = before_id {
+            query_params.push(Value::Integer(cursor));
+            query_params.push(Value::Integer(clamped_limit));
+        } else {
+            query_params.push(Value::Integer(clamped_limit));
+            query_params.push(Value::Integer(offset as i64));
+        }
+        let rows = stmt.query_map(params_from_iter(query_params), |row| {
             let err_opt: Option<String> = row.get(5)?;
             Ok(ActionLogItem {
                 id: row.get(0)?,
@@ -1634,9 +1671,11 @@ mod tests {
             .unwrap();
         assert_eq!(archived_redundant, 2);
 
-        let active = db.list_action_logs(LogScope::Active, 50, 0).unwrap();
+        let active = db.list_action_logs(LogScope::Active, 50, 0, None).unwrap();
         assert_eq!(active.len(), 2);
-        let archived = db.list_action_logs(LogScope::Archived, 50, 0).unwrap();
+        let archived = db
+            .list_action_logs(LogScope::Archived, 50, 0, None)
+            .unwrap();
         assert_eq!(archived.len(), 2);
         assert!(archived.iter().all(|item| item.archived_at.is_some()));
 
@@ -1644,11 +1683,13 @@ mod tests {
         let retained = db.apply_log_retention(0, 1).unwrap();
         assert_eq!(retained, 1);
         assert_eq!(
-            db.list_action_logs(LogScope::Active, 50, 0).unwrap().len(),
+            db.list_action_logs(LogScope::Active, 50, 0, None)
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
-            db.list_action_logs(LogScope::Archived, 50, 0)
+            db.list_action_logs(LogScope::Archived, 50, 0, None)
                 .unwrap()
                 .len(),
             3
@@ -1664,7 +1705,9 @@ mod tests {
             .unwrap();
         assert_eq!(restored, 1);
         assert_eq!(
-            db.list_action_logs(LogScope::Active, 50, 0).unwrap().len(),
+            db.list_action_logs(LogScope::Active, 50, 0, None)
+                .unwrap()
+                .len(),
             2
         );
 
@@ -1676,7 +1719,7 @@ mod tests {
             .unwrap();
         assert_eq!(deleted, 2);
         assert_eq!(
-            db.list_action_logs(LogScope::Archived, 50, 0)
+            db.list_action_logs(LogScope::Archived, 50, 0, None)
                 .unwrap()
                 .len(),
             0
@@ -2069,7 +2112,7 @@ mod tests {
             .expect("delete");
         assert_eq!(deleted, 1, "空请求默认只删除活跃日志，不得清空归档");
         let archived = db
-            .list_action_logs(LogScope::Archived, 100, 0)
+            .list_action_logs(LogScope::Archived, 100, 0, None)
             .expect("list");
         assert_eq!(archived.len(), 1);
 
@@ -2109,7 +2152,9 @@ mod tests {
         let labels: Vec<&str> = accs.iter().map(|a| a.label.as_str()).collect();
         assert!(labels.contains(&"al***@example.com"));
         assert!(labels.contains(&"Alice (al***@example.com)"));
-        let logs = db.list_action_logs(LogScope::All, 100, 0).expect("logs");
+        let logs = db
+            .list_action_logs(LogScope::All, 100, 0, None)
+            .expect("logs");
         assert!(!logs[0].message_sanitized.contains("alice@example.com"));
         assert!(!logs[0].message_sanitized.contains("13812345678"));
         assert!(
@@ -2313,5 +2358,49 @@ mod tests {
             .expect("multi-sample verification must succeed via second healthy row");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn action_logs_before_id_cursor_avoids_drift_on_insert() {
+        let db_path = temp_db_path("log_cursor");
+        let db = QwitchDatabase::open(&db_path).expect("open");
+        for i in 1..=5 {
+            db.append_action_log(
+                None,
+                "trae_cn",
+                "query",
+                "success",
+                None,
+                &format!("条目 {i}"),
+            )
+            .unwrap();
+        }
+        let page1 = db.list_action_logs(LogScope::Active, 2, 0, None).unwrap();
+        assert_eq!(page1.len(), 2);
+        let cursor = page1.last().unwrap().id;
+
+        // 翻页前插入两条新日志；游标分页下第二页不应出现重复或漏项
+        db.append_action_log(None, "trae_cn", "query", "success", None, "新条目 6")
+            .unwrap();
+        db.append_action_log(None, "trae_cn", "query", "success", None, "新条目 7")
+            .unwrap();
+
+        let page2 = db
+            .list_action_logs(LogScope::Active, 2, 0, Some(cursor))
+            .unwrap();
+        let page3 = db
+            .list_action_logs(LogScope::Active, 2, 0, Some(page2.last().unwrap().id))
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page3.len(), 1);
+        let seen_ids: Vec<i64> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .map(|l| l.id)
+            .collect();
+        assert!(seen_ids.windows(2).all(|w| w[0] > w[1]));
+
+        let _ = std::fs::remove_file(&db_path);
     }
 }

@@ -10,8 +10,6 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
-import type { AppUpdateInfo } from "../types/qwitch";
-import packageJson from "../../package.json";
 
 function formatSize(bytes?: number): string | null {
   if (!bytes || bytes <= 0) return null;
@@ -25,11 +23,15 @@ function formatTime(iso?: string): string | null {
 }
 
 export function UpdateCard() {
-  const { isTauriRuntime, showToast } = useQwitch();
-  const [checking, setChecking] = useState(false);
+  const {
+    isTauriRuntime,
+    showToast,
+    updateInfo: info,
+    updateChecking: checking,
+    updateError: error,
+    checkAppUpdate,
+  } = useQwitch();
   const [installing, setInstalling] = useState(false);
-  const [info, setInfo] = useState<AppUpdateInfo | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const runCheck = useCallback(
     async (manual: boolean) => {
@@ -39,26 +41,17 @@ export function UpdateCard() {
         }
         return;
       }
-      setChecking(true);
-      setError(null);
-      try {
-        const result = await invoke<AppUpdateInfo>("check_app_update");
-        setInfo(result);
-        if (manual) {
-          showToast(
-            result.updateAvailable
-              ? `发现新版本 v${result.latestVersion}`
-              : `已是最新版本 v${result.currentVersion}`,
-            result.updateAvailable ? "info" : "success"
-          );
-        }
-      } catch (err) {
-        setError(String(err));
-      } finally {
-        setChecking(false);
+      const result = await checkAppUpdate({ force: manual, silent: false });
+      if (manual && result) {
+        showToast(
+          result.updateAvailable
+            ? `发现新版本 v${result.latestVersion}`
+            : `已是最新版本 v${result.currentVersion}`,
+          result.updateAvailable ? "info" : "success"
+        );
       }
     },
-    [isTauriRuntime, showToast]
+    [checkAppUpdate, isTauriRuntime, showToast]
   );
 
   useEffect(() => {
@@ -79,13 +72,13 @@ export function UpdateCard() {
   );
 
   const installOnWindows = useCallback(async () => {
-    if (!info?.assetUrl || !info.assetName || installing) return;
+    if (!info?.assetUrl || !info.assetName || !info.checksumsUrl || installing) return;
     setInstalling(true);
     try {
       const message = await invoke<string>("download_and_install_update", {
         assetUrl: info.assetUrl,
         assetName: info.assetName,
-        checksumsUrl: info.checksumsUrl ?? null,
+        checksumsUrl: info.checksumsUrl,
       });
       showToast(message, "success");
     } catch (err) {
@@ -94,7 +87,7 @@ export function UpdateCard() {
     }
   }, [info, installing, showToast]);
 
-  const currentVersion = info?.currentVersion ?? packageJson.version;
+  const currentVersion = info?.currentVersion ?? __APP_VERSION__;
   const publishedAt = formatTime(info?.publishedAt);
   const assetSize = formatSize(info?.assetSize);
   const notes = info?.releaseNotes?.trim();
@@ -175,19 +168,25 @@ export function UpdateCard() {
 
           <div className="flex flex-wrap items-center gap-2">
             {info.strategy === "windows_installer" ? (
-              <button
-                type="button"
-                disabled={installing || !info.assetUrl}
-                onClick={() => void installOnWindows()}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
-              >
-                {installing ? (
-                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
-                ) : (
-                  <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                )}
-                {installing ? "正在下载安装包..." : `下载并安装 v${info.latestVersion}`}
-              </button>
+              info.assetUrl && info.checksumsUrl ? (
+                <button
+                  type="button"
+                  disabled={installing}
+                  onClick={() => void installOnWindows()}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                >
+                  {installing ? (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                  {installing ? "正在下载安装包..." : `下载并安装 v${info.latestVersion}`}
+                </button>
+              ) : (
+                <span className="inline-flex items-center rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-800 dark:text-amber-300">
+                  未提供 SHA-256 校验清单，自动安装已禁用，请点击「查看 Release」手动下载并校验
+                </span>
+              )
             ) : (
               <button
                 type="button"

@@ -84,7 +84,6 @@ export interface ClientHostStatus {
 
 export interface LocalAccountPreview {
   toolId: ToolId;
-  uid: string;
   uidMasked: string;
   displayName?: string;
   isFallbackUid: boolean;

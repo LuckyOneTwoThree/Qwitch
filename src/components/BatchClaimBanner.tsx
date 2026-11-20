@@ -19,7 +19,11 @@ export function BatchClaimBanner({ compact = false }: { compact?: boolean }) {
   } else if (batchProgress.phase === "claiming") {
     statusLine = `正在领取每日额度：${batchProgress.currentLabel ?? ""}...`;
   } else if (batchProgress.phase === "jitter_wait") {
-    statusLine = `防风控错峰等待 ${batchProgress.jitterSeconds ?? 2}s...`;
+    const secs =
+      typeof batchProgress.jitterSeconds === "number"
+        ? batchProgress.jitterSeconds.toFixed(1)
+        : "2.0";
+    statusLine = batchProgress.summaryText?.trim() || `防风控错峰等待 ${secs}s...`;
   } else {
     statusLine =
       batchProgress.summaryText ?? (isRefresh ? "批量查额已完成" : "领取队列已完成");

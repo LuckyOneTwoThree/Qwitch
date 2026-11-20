@@ -4,19 +4,19 @@ use sha2::{Digest, Sha256};
 use crate::adapter::AdapterError;
 use crate::domain::UnifiedErrorCode;
 
-/// 从 JSON 字段安全提取 UID 字符串（兼容字符串与整型数字，拒绝空串/布尔/对象）
+/// 从 JSON 字段安全提取 UID 字符串（兼容正整型数字与非空非哨兵字符串，拒绝 `0` / `-1` / 布尔 / 对象）
 pub fn json_uid_to_string(v: &Value) -> Option<String> {
     if let Some(s) = v.as_str() {
         let t = s.trim();
-        if !t.is_empty() {
+        if !t.is_empty() && !matches!(t, "0" | "-1") {
             return Some(t.to_string());
         }
         return None;
     }
     if let Some(n) = v.as_i64() {
-        return Some(n.to_string());
+        return (n > 0).then(|| n.to_string());
     }
-    v.as_u64().map(|n| n.to_string())
+    v.as_u64().and_then(|n| (n > 0).then(|| n.to_string()))
 }
 
 /// 生成稳定且不泄露原文前缀的兜底 UID（SHA-256 前 12 个十六进制字符）
@@ -44,6 +44,7 @@ fn collect_idempotent_candidates(val: &Value, out: &mut Vec<String>) {
     const MESSAGE_KEYS: &[&str] = &[
         "message",
         "msg",
+        "status_msg",
         "error_msg",
         "errorMessage",
         "errMsg",
@@ -66,14 +67,15 @@ fn collect_idempotent_candidates(val: &Value, out: &mut Vec<String>) {
             }
         }
     }
-    if let Some(data) = obj.get("data").filter(|v| v.is_object()) {
-        collect_idempotent_candidates(data, out);
+    for nested_key in ["data", "base_resp"] {
+        if let Some(nested) = obj.get(nested_key).filter(|v| v.is_object()) {
+            collect_idempotent_candidates(nested, out);
+        }
     }
 }
 
-fn contains_claim_negation_or_failure(text: &str) -> bool {
+fn contains_claim_negation(text: &str) -> bool {
     const CN_NEGATIONS: &[&str] = &[
-        "失败",
         "未签",
         "未领",
         "尚未",
@@ -94,12 +96,18 @@ fn contains_claim_negation_or_failure(text: &str) -> bool {
         "have not checked",
         "never checked",
         "never claimed",
-        "failed",
-        "failure",
     ];
     let lower = text.to_ascii_lowercase();
     CN_NEGATIONS.iter().any(|pat| text.contains(pat))
         || EN_NEGATIONS.iter().any(|pat| lower.contains(pat))
+}
+
+fn contains_clause_failure(clause: &str) -> bool {
+    let lower = clause.to_ascii_lowercase();
+    clause.contains("失败")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("expired")
 }
 
 fn contains_explicit_claimed_phrase(text: &str) -> bool {
@@ -134,7 +142,8 @@ fn contains_explicit_claimed_phrase(text: &str) -> bool {
         || EN_POSITIVES.iter().any(|pat| lower.contains(pat))
 }
 
-/// 严格匹配"今日已签/已领"幂等文案，排除 "not checked in" / "not already claimed" / "已签到失败" 等否定或失败消息
+/// 严格匹配"今日已签/已领"幂等文案，排除 "not checked in" / "not already claimed" / "已签到失败" 等否定或失败消息，
+/// 同时兼容 `"签到失败：今日已签到"` 这类前置提示与 MiniMax `base_resp.status_msg`。
 pub fn is_idempotent_claimed_phrase(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -153,15 +162,17 @@ pub fn is_idempotent_claimed_phrase(text: &str) -> bool {
         extracted.iter().map(String::as_str).collect()
     };
 
-    if candidates
-        .iter()
-        .any(|msg| contains_claim_negation_or_failure(msg))
-    {
+    if candidates.iter().any(|msg| contains_claim_negation(msg)) {
         return false;
     }
-    candidates
-        .iter()
-        .any(|msg| contains_explicit_claimed_phrase(msg))
+    candidates.iter().any(|msg| {
+        msg.split(['：', ':', '，', ',', '；', ';', '\n'])
+            .map(str::trim)
+            .filter(|clause| !clause.is_empty())
+            .any(|clause| {
+                !contains_clause_failure(clause) && contains_explicit_claimed_phrase(clause)
+            })
+    })
 }
 
 /// HTTP 200 内的业务码统一映射：401/403/429 必须落到可熔断的错误码，
@@ -226,6 +237,10 @@ mod tests {
         );
         assert!(json_uid_to_string(&serde_json::json!("   ")).is_none());
         assert!(json_uid_to_string(&serde_json::json!(true)).is_none());
+        assert!(json_uid_to_string(&serde_json::json!(0)).is_none());
+        assert!(json_uid_to_string(&serde_json::json!(-1)).is_none());
+        assert!(json_uid_to_string(&serde_json::json!("0")).is_none());
+        assert!(json_uid_to_string(&serde_json::json!("-1")).is_none());
 
         let h1 = hash_fallback_uid("wb_manual", b"eyJhbGciOiJIUzI1NiJ9.aaa");
         let h2 = hash_fallback_uid("wb_manual", b"eyJhbGciOiJIUzI1NiJ9.bbb");
@@ -257,6 +272,10 @@ mod tests {
         assert!(!is_idempotent_claimed_phrase("Not already claimed"));
         assert!(!is_idempotent_claimed_phrase("已签到失败"));
         assert!(!is_idempotent_claimed_phrase("尚未领取"));
+        assert!(is_idempotent_claimed_phrase("签到失败：今日已签到"));
+        assert!(is_idempotent_claimed_phrase(
+            r#"{"base_resp":{"status_code":1001,"status_msg":"今日已签到"}}"#
+        ));
         assert!(!is_idempotent_claimed_phrase(
             r#"{"message":"claim failed"}"#
         ));

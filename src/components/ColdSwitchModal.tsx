@@ -92,8 +92,9 @@ export function ColdSwitchModal() {
             </button>
             <button
               type="button"
+              disabled={isProcessing}
               onClick={() => void confirmColdSwitch()}
-              className="shrink-0 whitespace-nowrap rounded-lg bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              className="shrink-0 whitespace-nowrap rounded-lg bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
             >
               {switchDialog.isClientRunning !== false ? "确认关闭并切换" : "确认写入并启动"}
             </button>
@@ -101,7 +102,7 @@ export function ColdSwitchModal() {
         </>
       ) : (
         <div className="mt-5 space-y-3 rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/70">
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             {SWITCH_STEPS.map((st, idx) => {
               const skipped = st.key === "closing" && switchDialog.isClientRunning === false;
               const done = !skipped && (currentRank > idx || switchDialog.phase === "done");

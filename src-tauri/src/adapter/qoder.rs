@@ -112,9 +112,20 @@ impl QoderAdapter {
              $u=[System.Security.Cryptography.ProtectedData]::Unprotect($b,$null,'CurrentUser'); \
              [Convert]::ToBase64String($u)"
         );
-        let mut cmd = tokio::process::Command::new("powershell");
+        let ps_bin = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .map(|r| {
+                r.join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe")
+            })
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| PathBuf::from("powershell"));
+        let mut cmd = tokio::process::Command::new(ps_bin);
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_script]);
         cmd.creation_flags(0x0800_0000);
+        cmd.kill_on_drop(true);
         let out = tokio::time::timeout(Duration::from_secs(10), cmd.output())
             .await
             .ok()?
@@ -163,10 +174,15 @@ impl QoderAdapter {
     fn read_local_machine_id_fallback() -> Option<String> {
         let host = crate::platform::NativePlatformHost;
         let config_dir = host.client_config_dir("qoder_cn").ok()?;
-        std::fs::read_to_string(config_dir.join("machineid"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        for name in [MACHINE_ID_FILE, "machineid"] {
+            if let Ok(raw) = std::fs::read_to_string(config_dir.join(name)) {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
     }
 
     fn merge_post_claim_quota(
@@ -393,9 +409,10 @@ impl QoderAdapter {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .ok()?;
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(2000));
         for query in [
-            "SELECT account_id FROM plugin_inventory_meta WHERE account_id IS NOT NULL AND account_id != '' LIMIT 1",
-            "SELECT account_id FROM agent_profiles WHERE account_id IS NOT NULL AND account_id != '' LIMIT 1",
+            "SELECT account_id FROM plugin_inventory_meta WHERE account_id IS NOT NULL AND account_id != '' ORDER BY rowid DESC LIMIT 1",
+            "SELECT account_id FROM agent_profiles WHERE account_id IS NOT NULL AND account_id != '' ORDER BY rowid DESC LIMIT 1",
         ] {
             if let Ok(uid) = conn.query_row(query, [], |row| row.get::<_, String>(0)) {
                 let trimmed = uid.trim();
@@ -487,7 +504,7 @@ impl QoderAdapter {
             .header(USER_AGENT, "qoder/0.5.14")
             .send()
             .await
-            .map_err(|e| format!("轮询 Qoder 登录态失败: {e}"))?;
+            .map_err(|e| format!("轮询 Qoder 登录态失败: {}", e.without_url()))?;
 
         if resp.status().as_u16() == 404 {
             return Ok(None);
@@ -649,6 +666,30 @@ impl Default for QoderAdapter {
 impl ToolAdapter for QoderAdapter {
     fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
+        let config_dir = host.client_config_dir("qoder_cn").ok()?;
+        if !config_dir.join(AUTH_DAT_FILE).is_file() {
+            return None;
+        }
+        if let Some(dot_dir) = Self::qoder_dot_dir() {
+            if let Ok(status_bytes) = std::fs::read(dot_dir.join(".qoder-app-status.json")) {
+                if let Ok(status_json) = serde_json::from_slice::<Value>(&status_bytes) {
+                    if let Some(avatar_uid) = status_json
+                        .get("avatar_url")
+                        .and_then(|v| v.as_str())
+                        .and_then(Self::extract_uid_from_avatar_url)
+                    {
+                        if !CredentialEnvelope::is_fallback_uid(&avatar_uid) {
+                            return Some(avatar_uid);
+                        }
+                    }
+                }
+            }
+        }
+        Self::read_uid_from_main_sqlite(&config_dir)
+            .filter(|uid| !CredentialEnvelope::is_fallback_uid(uid))
     }
 
     async fn import_from_local(
@@ -890,8 +931,16 @@ impl ToolAdapter for QoderAdapter {
         let mut claimed_any = false;
         let mut saw_already_claimed = false;
         let mut skipped_invalid_cid = false;
+        let mut skipped_missing_cid = false;
+        let mut partial_failure_note: Option<String> = None;
         for (idx, campaign) in claimable.into_iter().enumerate() {
-            let Some(cid) = campaign.get("campaignId").and_then(|v| v.as_str()) else {
+            let Some(cid) = campaign
+                .get("campaignId")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                skipped_missing_cid = true;
                 continue;
             };
             if !crate::adapter::common::is_valid_path_segment(cid) {
@@ -902,16 +951,20 @@ impl ToolAdapter for QoderAdapter {
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
             let url = format!("{DEFAULT_BASE_URL}/sash/api/v1/me/campaigns/{cid}/claim");
-            let resp = self
-                .http
-                .post(&url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(|e| AdapterError::Unified {
-                    code: UnifiedErrorCode::NetworkError,
-                    message: format!("领取 Qoder CN Credits 失败: {e}"),
-                })?;
+            let resp = match self.http.post(&url).headers(headers.clone()).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        message: format!("领取 Qoder CN Credits 失败: {e}"),
+                    };
+                    if claimed_any || saw_already_claimed {
+                        partial_failure_note = Some("后续活动请求失败，已保留已领取进度".into());
+                        break;
+                    }
+                    return Err(err);
+                }
+            };
 
             let status = resp.status();
             if !status.is_success() {
@@ -922,13 +975,32 @@ impl ToolAdapter for QoderAdapter {
                         continue;
                     }
                 }
-                return Err(Self::map_http_status(status, "领取 Qoder CN Credits"));
+                let err = Self::map_http_status(status, "领取 Qoder CN Credits");
+                if claimed_any || saw_already_claimed {
+                    partial_failure_note = Some(format!(
+                        "后续活动返回异常（HTTP {}），已保留已领取进度",
+                        status.as_u16()
+                    ));
+                    break;
+                }
+                return Err(err);
             }
 
-            let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::NetworkError,
-                message: format!("解析 Qoder CN 领取响应失败: {e}"),
-            })?;
+            let body: Value = match resp.json().await {
+                Ok(b) => b,
+                Err(e) => {
+                    let err = AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        message: format!("解析 Qoder CN 领取响应失败: {e}"),
+                    };
+                    if claimed_any || saw_already_claimed {
+                        partial_failure_note =
+                            Some("后续活动响应解析失败，已保留已领取进度".into());
+                        break;
+                    }
+                    return Err(err);
+                }
+            };
             let data = body.get("data").filter(|v| v.is_object()).unwrap_or(&body);
             let status_str = data
                 .get("status")
@@ -941,6 +1013,11 @@ impl ToolAdapter for QoderAdapter {
                 if let Some(err) =
                     crate::adapter::common::map_business_code(c, "领取 Qoder CN Credits")
                 {
+                    if claimed_any || saw_already_claimed {
+                        partial_failure_note =
+                            Some(format!("后续活动返回业务码 {c}，已保留已领取进度"));
+                        break;
+                    }
                     return Err(err);
                 }
             }
@@ -953,6 +1030,9 @@ impl ToolAdapter for QoderAdapter {
                 {
                     total_gained += amt;
                 }
+            } else if claimed_any || saw_already_claimed {
+                partial_failure_note = Some("后续活动缺少确认状态，已保留已领取进度".into());
+                break;
             } else {
                 return Err(AdapterError::Unified {
                     code: UnifiedErrorCode::NetworkError,
@@ -961,10 +1041,14 @@ impl ToolAdapter for QoderAdapter {
             }
         }
 
-        if skipped_invalid_cid && !claimed_any && !saw_already_claimed {
+        if (skipped_invalid_cid || skipped_missing_cid) && !claimed_any && !saw_already_claimed {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: "Qoder CN 活动 ID 包含非法字符，无法完成领取".into(),
+                message: if skipped_missing_cid {
+                    "Qoder CN 活动缺少有效 campaignId，无法完成领取".into()
+                } else {
+                    "Qoder CN 活动 ID 包含非法字符，无法完成领取".into()
+                },
             });
         }
 
@@ -976,15 +1060,20 @@ impl ToolAdapter for QoderAdapter {
             precheck,
             confirmed_claimed,
         );
+        let base_summary = if total_gained > 0.0 {
+            format!("成功领取 {} Credits", total_gained as i64)
+        } else if claimed_any {
+            "每日 Credits 领取已完成".into()
+        } else {
+            "本周期已领取".into()
+        };
+        let reward_summary = match partial_failure_note {
+            Some(note) => format!("{base_summary}（{note}）"),
+            None => base_summary,
+        };
         Ok(ClaimResult {
             claimed: claimed_any,
-            reward_summary: if total_gained > 0.0 {
-                format!("成功领取 {} Credits", total_gained as i64)
-            } else if claimed_any {
-                "每日 Credits 领取已完成".into()
-            } else {
-                "本周期已领取".into()
-            },
+            reward_summary,
             updated_quota: refreshed,
         })
     }
@@ -1024,37 +1113,17 @@ impl ToolAdapter for QoderAdapter {
         })?;
 
         let target = config_dir.join(AUTH_DAT_FILE);
-        let tmp = config_dir.join(".auth.v1.dat.tmp");
-        if let Err(e) = std::fs::write(&tmp, &dat_bytes) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("写入临时 auth.v1.dat 失败: {e}"),
-            });
-        }
-        if let Err(e) = std::fs::rename(&tmp, &target) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("替换 Qoder CN 会话文件失败: {e}"),
-            });
-        }
+        crate::adapter::write_private_file_atomic(&target, &dat_bytes)?;
 
         if let Some(status_b64) = files.get(APP_STATUS_SNAPSHOT_KEY) {
             if let (Ok(status_bytes), Some(dot_dir)) =
                 (BASE64.decode(status_b64), Self::qoder_dot_dir())
             {
-                let _ = std::fs::create_dir_all(&dot_dir);
                 let status_target = dot_dir.join(".qoder-app-status.json");
-                let status_tmp = dot_dir.join(".qoder-app-status.json.tmp");
-                if std::fs::write(&status_tmp, status_bytes).is_ok() {
-                    if std::fs::rename(&status_tmp, &status_target).is_err() {
-                        let _ = std::fs::remove_file(&status_tmp);
-                    }
-                } else {
-                    let _ = std::fs::remove_file(&status_tmp);
-                }
+                let _ = crate::adapter::write_private_file_atomic(&status_target, &status_bytes);
             }
+        } else if let Some(dot_dir) = Self::qoder_dot_dir() {
+            let _ = std::fs::remove_file(dot_dir.join(".qoder-app-status.json"));
         }
 
         Ok(())

@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import type { AccountSummary } from "../types/qwitch";
+import type { AccountSummary, AuthMethod } from "../types/qwitch";
 import { AccountStatusBadge, ClaimStatusBadge } from "./StatusBadge";
 import { ToolBrandIcon } from "./ToolBrandIcon";
 import { getToolBrandMeta } from "../domain/toolRegistry";
@@ -41,7 +41,7 @@ export const AccountCard = React.memo(function AccountCard({
   onOpenBindModal,
 }: {
   account: AccountSummary;
-  onOpenBindModal?: (account: AccountSummary) => void;
+  onOpenBindModal?: (account: AccountSummary, preferredMethod?: AuthMethod) => void;
 }) {
   const {
     refreshAccountQuota,
@@ -62,6 +62,9 @@ export const AccountCard = React.memo(function AccountCard({
   const [refreshing, setRefreshing] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [associating, setAssociating] = useState(false);
+  const [oauthLaunching, setOauthLaunching] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [togglingStatus, setTogglingStatus] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelDraft, setLabelDraft] = useState(account.label);
@@ -106,12 +109,20 @@ export const AccountCard = React.memo(function AccountCard({
     }
   };
 
-  const handleDirectOAuth = () => {
+  const handleDirectOAuth = async () => {
+    if (oauthLaunching) return;
     if (!supportsWebviewOAuth && onOpenBindModal) {
       onOpenBindModal(account);
       return;
     }
-    void importAccount(account.toolId, "", "webview_oauth", undefined, account.id).catch(() => {});
+    setOauthLaunching(true);
+    try {
+      await importAccount(account.toolId, "", "webview_oauth", undefined, account.id);
+    } catch {
+      // 错误提示由 context 统一展示
+    } finally {
+      setOauthLaunching(false);
+    }
   };
 
   const handleAssociateLocal = async () => {
@@ -165,9 +176,15 @@ export const AccountCard = React.memo(function AccountCard({
   };
 
   const handleSaveRename = async () => {
+    if (renaming) return;
     const trimmed = labelDraft.trim();
     if (trimmed && trimmed !== account.label) {
-      await renameAccount(account.id, trimmed);
+      setRenaming(true);
+      try {
+        await renameAccount(account.id, trimmed);
+      } finally {
+        setRenaming(false);
+      }
     }
     setEditingLabel(false);
   };
@@ -228,9 +245,10 @@ export const AccountCard = React.memo(function AccountCard({
                     />
                     <button
                       type="button"
+                      disabled={renaming}
                       onClick={() => void handleSaveRename()}
                       aria-label="保存账号备注"
-                      className="rounded-md bg-zinc-900 p-1 text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
+                      className="rounded-md bg-zinc-900 p-1 text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
                     >
                       <Check className="h-3 w-3" aria-hidden="true" />
                     </button>
@@ -297,18 +315,30 @@ export const AccountCard = React.memo(function AccountCard({
 
           <div className="mt-3 flex flex-1 flex-col justify-center space-y-2">
             {missingApiToken ? (
-              <div className="flex items-center justify-between gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs">
                 <span className="leading-snug text-amber-900 dark:text-amber-200">
                   已绑定切号快照 · 授权后开启查额与签到
                 </span>
-                <button
-                  type="button"
-                  onClick={handleDirectOAuth}
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-amber-700 dark:bg-amber-500 dark:text-zinc-950 dark:hover:bg-amber-400"
-                >
-                  <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
-                  在线授权
-                </button>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={oauthLaunching}
+                    onClick={() => void handleDirectOAuth()}
+                    className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-amber-700 disabled:opacity-50 dark:bg-amber-500 dark:text-zinc-950 dark:hover:bg-amber-400"
+                  >
+                    <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    {oauthLaunching ? "授权中..." : "在线授权"}
+                  </button>
+                  {onOpenBindModal && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenBindModal(account, "token_paste")}
+                      className="inline-flex shrink-0 whitespace-nowrap items-center rounded-lg border border-amber-500/35 bg-white/80 px-2 py-1 text-[11px] font-medium text-amber-900 transition hover:bg-white dark:bg-zinc-900/70 dark:text-amber-200 dark:hover:bg-zinc-800"
+                    >
+                      粘贴凭据
+                    </button>
+                  )}
+                </div>
               </div>
             ) : primaryBucket ? (
               <>
@@ -417,8 +447,11 @@ export const AccountCard = React.memo(function AccountCard({
               </>
             ) : (
               <div className="rounded-xl border border-dashed border-zinc-200 px-3 py-3 text-center text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-                {account.latestQuota?.claimStatus === "unsupported"
-                  ? "本周期暂无可用签到福利活动"
+                {account.latestQuota
+                  ? account.latestQuota.claimStatus === "unsupported" &&
+                    adapter?.capabilities.supportsDailyClaim
+                    ? "本周期暂无可用签到福利活动"
+                    : "已同步额度，当前套餐无细分额度桶"
                   : "暂无额度快照，点击下方「查额」获取最新数据"}
               </div>
             )}
@@ -470,12 +503,22 @@ export const AccountCard = React.memo(function AccountCard({
               <>
                 <button
                   type="button"
-                  onClick={handleDirectOAuth}
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-500/25 dark:text-amber-300"
+                  disabled={oauthLaunching}
+                  onClick={() => void handleDirectOAuth()}
+                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-500/25 disabled:opacity-50 dark:text-amber-300"
                 >
                   <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
-                  重新授权
+                  {oauthLaunching ? "授权中..." : "重新授权"}
                 </button>
+                {onOpenBindModal && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenBindModal(account, "token_paste")}
+                    className="inline-flex shrink-0 whitespace-nowrap items-center rounded-lg border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  >
+                    粘贴凭据
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={recovering || isBatchRunning}
@@ -541,10 +584,19 @@ export const AccountCard = React.memo(function AccountCard({
 
             <button
               type="button"
-              onClick={() => void toggleAccountDisabled(account.id)}
+              disabled={togglingStatus}
+              onClick={async () => {
+                if (togglingStatus) return;
+                setTogglingStatus(true);
+                try {
+                  await toggleAccountDisabled(account.id);
+                } finally {
+                  setTogglingStatus(false);
+                }
+              }}
               title={isDisabled ? "恢复启用" : "停用账号（跳过批量队列）"}
               aria-label={isDisabled ? `恢复启用 ${account.label}` : `停用 ${account.label}`}
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
             >
               {isDisabled ? (
                 <PlayCircle className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />

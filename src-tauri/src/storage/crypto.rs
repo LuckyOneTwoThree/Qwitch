@@ -119,15 +119,19 @@ pub fn mask_phone(phone: &str) -> String {
 }
 
 pub fn mask_email(email: &str) -> String {
-    if email.contains("***") {
-        return email.to_string();
-    }
     match email.split_once('@') {
         Some((local, domain)) => {
-            let visible: String = local.chars().take(2).collect();
+            if local.ends_with("***") && local.chars().count() <= 5 {
+                return email.to_string();
+            }
+            let stripped = local.trim_start_matches('*');
+            let visible: String = stripped.chars().take(2).collect();
             format!("{visible}***@{domain}")
         }
         None => {
+            if email.contains("***") {
+                return email.to_string();
+            }
             // 无 @ 的"邮箱"字段实际可能是手机号
             if email.chars().all(|c| c.is_ascii_digit()) && email.len() >= 7 {
                 mask_phone(email)
@@ -136,6 +140,141 @@ pub fn mask_email(email: &str) -> String {
             }
         }
     }
+}
+
+fn redact_kv_secrets(input: &str) -> String {
+    const SECRET_KEYS: &[&str] = &[
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "code_verifier",
+        "client_secret",
+        "authorization",
+        "password",
+        "verifier",
+        "secret",
+        "cookie",
+        "token",
+        "state",
+    ];
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let at_boundary = i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
+        let rest_bytes = &bytes[i..];
+        let matched_key = if at_boundary {
+            SECRET_KEYS.iter().find(|&&key| {
+                let kb = key.as_bytes();
+                if rest_bytes.len() <= kb.len() || !rest_bytes[..kb.len()].eq_ignore_ascii_case(kb)
+                {
+                    return false;
+                }
+                let mut j = kb.len();
+                if j < rest_bytes.len() && matches!(rest_bytes[j], b'"' | b'\'') {
+                    j += 1;
+                }
+                while j < rest_bytes.len() && rest_bytes[j] == b' ' {
+                    j += 1;
+                }
+                j < rest_bytes.len() && matches!(rest_bytes[j], b'=' | b':')
+            })
+        } else {
+            None
+        };
+
+        if let Some(&key) = matched_key {
+            let mut j = i + key.len();
+            if j < bytes.len() && matches!(bytes[j], b'"' | b'\'') {
+                j += 1;
+            }
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            // 包含 `=` 或 `:`
+            j += 1;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            let quote = if j < bytes.len() && matches!(bytes[j], b'"' | b'\'') {
+                let q = bytes[j];
+                j += 1;
+                Some(q)
+            } else {
+                None
+            };
+            out.push_str(&input[i..j]);
+            let val_start = j;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if let Some(q) = quote {
+                    if b == q {
+                        break;
+                    }
+                } else if b.is_ascii_whitespace()
+                    || matches!(b, b'&' | b',' | b';' | b')' | b']' | b'}' | b'"' | b'\'')
+                {
+                    break;
+                }
+                j += 1;
+            }
+            if j > val_start {
+                let val = &input[val_start..j];
+                if val.starts_with("[REDACTED") || val == "[JWT_REDACTED]" {
+                    out.push_str(val);
+                } else if quote.is_none()
+                    && key.eq_ignore_ascii_case("authorization")
+                    && (val.eq_ignore_ascii_case("bearer")
+                        || val.eq_ignore_ascii_case("cloud-ide-jwt")
+                        || val.eq_ignore_ascii_case("basic")
+                        || val.eq_ignore_ascii_case("token"))
+                {
+                    let mut cred_start = j;
+                    while cred_start < bytes.len() && matches!(bytes[cred_start], b' ' | b'\t') {
+                        cred_start += 1;
+                    }
+                    let mut k = cred_start;
+                    while k < bytes.len() {
+                        let b = bytes[k];
+                        if b.is_ascii_whitespace()
+                            || matches!(b, b'&' | b',' | b';' | b')' | b']' | b'}' | b'"' | b'\'')
+                        {
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if k > cred_start {
+                        out.push_str(val);
+                        out.push_str(&input[j..cred_start]);
+                        let cred = &input[cred_start..k];
+                        if cred.starts_with("[REDACTED") || cred == "[JWT_REDACTED]" {
+                            out.push_str(cred);
+                        } else {
+                            out.push_str("[REDACTED]");
+                        }
+                        i = k;
+                        continue;
+                    }
+                    out.push_str(val);
+                } else {
+                    out.push_str("[REDACTED]");
+                }
+                i = j;
+                continue;
+            }
+            i = val_start;
+            continue;
+        }
+
+        if let Some(ch) = input[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
 }
 
 fn redact_auth_schemes(input: &str) -> String {
@@ -213,7 +352,7 @@ fn extract_cn_mobile_digits(token: &str) -> Option<String> {
 /// 审计日志兜底脱敏：扫描消息中的邮箱/手机号/JWT/认证头片段并打码，
 /// 防止用户自定义备注或上游回显报错把 PII/凭据带入日志与导出归档
 pub fn sanitize_log_message(message: &str) -> String {
-    let pre_redacted = redact_auth_schemes(message);
+    let pre_redacted = redact_kv_secrets(&redact_auth_schemes(message));
     let mut out = String::with_capacity(pre_redacted.len());
     let mut token = String::new();
     let flush = |token: &mut String, out: &mut String| {
@@ -346,5 +485,26 @@ mod tests {
         let redacted_big = sanitize_log_message(&big);
         assert!(!redacted_big.contains("top_secret_999"));
         assert!(redacted_big.contains("BeArEr [REDACTED] tail"));
+
+        // 假脱敏前缀邮箱（含 *** 但未真实打码）及 URL/JSON key=value 密钥脱敏
+        let masked_fake = sanitize_log_message("账号 ***alice@example.com*** 异常");
+        assert!(!masked_fake.contains("alice"));
+        assert!(masked_fake.contains("al***@example.com"));
+
+        let url_and_json = sanitize_log_message(
+            r#"GET https://example.com/cb?state=st_abc_1&token=tok_xyz_9 {"refresh_token":"rt_secret_77","code_verifier":"cv_999"}"#,
+        );
+        assert!(!url_and_json.contains("st_abc_1"));
+        assert!(!url_and_json.contains("tok_xyz_9"));
+        assert!(!url_and_json.contains("rt_secret_77"));
+        assert!(!url_and_json.contains("cv_999"));
+        assert!(url_and_json.contains("state=[REDACTED]"));
+        assert!(url_and_json.contains("token=[REDACTED]"));
+        assert!(url_and_json.contains(r#""refresh_token":"[REDACTED]""#));
+        assert!(url_and_json.contains(r#""code_verifier":"[REDACTED]""#));
+
+        let basic_auth = sanitize_log_message("header Authorization: Basic dXNlcjpwYXNz ok");
+        assert!(!basic_auth.contains("dXNlcjpwYXNz"));
+        assert!(basic_auth.contains("Authorization: Basic [REDACTED] ok"));
     }
 }

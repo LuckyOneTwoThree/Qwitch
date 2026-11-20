@@ -76,41 +76,129 @@ pub fn backup_files(paths: &[std::path::PathBuf]) -> Result<SessionBackup, Adapt
     Ok(SessionBackup { files })
 }
 
+/// 原子写入私密会话/凭据文件：Unix 下直接以 `0600` 创建临时文件再写盘，消除 `0644 -> 0600` 竞态窗口。
+pub fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("创建会话目录失败 {}: {e}", parent.display()),
+        })?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("session");
+    let tmp_name = format!(".{file_name}.qwitch-tmp-{}", uuid::Uuid::new_v4());
+    let tmp = match path.parent() {
+        Some(parent) => parent.join(&tmp_name),
+        None => std::path::PathBuf::from(&tmp_name),
+    };
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&tmp).map_err(|e| AdapterError::Unified {
+        code: UnifiedErrorCode::InternalError,
+        message: format!("创建临时会话文件失败 {}: {e}", path.display()),
+    })?;
+
+    if let Err(e) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("写入临时会话文件失败 {}: {e}", path.display()),
+        });
+    }
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("替换会话文件失败 {}: {e}", path.display()),
+        });
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_base(path: &Path) -> Option<std::path::PathBuf> {
+    let raw = path.as_os_str().to_string_lossy();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        if let Some(base) = raw.strip_suffix(suffix) {
+            return Some(std::path::PathBuf::from(base));
+        }
+    }
+    None
+}
+
 pub fn restore_files(backup: &SessionBackup) -> Result<(), AdapterError> {
     let mut errors = Vec::new();
+    let mut failed_bases: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+
+    let mut primary = Vec::new();
+    let mut sidecars = Vec::new();
     for (path, content) in &backup.files {
+        if let Some(base) = sqlite_sidecar_base(path) {
+            sidecars.push((path, content, base));
+        } else {
+            primary.push((path, content));
+        }
+    }
+
+    for (path, content) in primary {
         match content {
             Some(bytes) => {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let file_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("session");
-                let tmp = match path.parent() {
-                    Some(parent) => parent.join(format!(".{file_name}.qwitch-restore-tmp")),
-                    None => path.with_extension("qwitch-restore-tmp"),
-                };
-                if let Err(e) = std::fs::write(&tmp, bytes) {
-                    let _ = std::fs::remove_file(&tmp);
-                    errors.push(format!("恢复会话文件失败 {}: {e}", path.display()));
-                    continue;
-                }
-                if let Err(e) = std::fs::rename(&tmp, path) {
-                    let _ = std::fs::remove_file(&tmp);
-                    errors.push(format!("恢复会话文件失败 {}: {e}", path.display()));
+                if let Err(AdapterError::Unified { message, .. }) =
+                    write_private_file_atomic(path, bytes)
+                {
+                    failed_bases.insert(path.clone());
+                    errors.push(format!("恢复会话文件失败 {}: {message}", path.display()));
                 }
             }
             None => {
                 if let Err(e) = std::fs::remove_file(path) {
                     if e.kind() != std::io::ErrorKind::NotFound {
+                        failed_bases.insert(path.clone());
                         errors.push(format!("清理新增会话文件失败 {}: {e}", path.display()));
                     }
                 }
             }
         }
     }
+
+    for (path, content, base) in sidecars {
+        if failed_bases.contains(&base) {
+            errors.push(format!(
+                "主库恢复失败，已保留附属日志 {} 以防数据库损坏",
+                path.display()
+            ));
+            continue;
+        }
+        match content {
+            Some(bytes) => {
+                if let Err(AdapterError::Unified { message, .. }) =
+                    write_private_file_atomic(path, bytes)
+                {
+                    errors.push(format!("恢复附属日志失败 {}: {message}", path.display()));
+                }
+            }
+            None => {
+                if let Err(e) = std::fs::remove_file(path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        errors.push(format!("清理新增附属日志失败 {}: {e}", path.display()));
+                    }
+                }
+            }
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -124,6 +212,12 @@ pub fn restore_files(backup: &SessionBackup) -> Result<(), AdapterError> {
 #[async_trait]
 pub trait ToolAdapter: Send + Sync {
     fn manifest(&self) -> &AdapterManifest;
+
+    /// 纯本地只读探测当前客户端登录账号的真实 UID（严禁联网或拉起外部解密子进程）。
+    fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
+        let _ = host;
+        None
+    }
 
     /// Stable opaque key for a device-scoped daily claim quota, if applicable.
     /// Implementations must not expose the raw device identifier here.
@@ -404,8 +498,38 @@ mod tests {
         restore_files(&backup).expect("restore wal + db");
         assert_eq!(std::fs::read(&db).unwrap(), b"orig-db");
         assert_eq!(std::fs::read(&wal).unwrap(), b"orig-wal");
-        assert!(!root.join(".state.vscdb.qwitch-restore-tmp").exists());
-        assert!(!root.join(".state.vscdb-wal.qwitch-restore-tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_preserves_wal_sidecar_when_main_db_restore_fails() {
+        let root =
+            std::env::temp_dir().join(format!("qwitch_restore_wal_guard_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = root.join("state.vscdb");
+        let wal = root.join("state.vscdb-wal");
+        std::fs::write(&db, b"orig-db").unwrap();
+        // 原来没有 wal 文件（backup 中对应 None）
+        let backup = backup_files(&[db.clone(), wal.clone()]).expect("backup");
+
+        // 模拟切号后产生新 wal，且主库路径无法覆盖（被替换为非空目录）
+        std::fs::remove_file(&db).unwrap();
+        std::fs::create_dir_all(db.join("blocking_sub")).unwrap();
+        std::fs::write(&wal, b"active-wal-data").unwrap();
+
+        assert!(restore_files(&backup).is_err());
+        assert!(
+            wal.exists(),
+            "主库恢复失败时绝不能删除其 -wal，否则会破坏 SQLite 数据库"
+        );
+        assert_eq!(std::fs::read(&wal).unwrap(), b"active-wal-data");
 
         let _ = std::fs::remove_dir_all(&root);
     }

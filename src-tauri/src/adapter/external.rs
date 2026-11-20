@@ -292,7 +292,8 @@ impl ExternalAdapter {
             if trimmed.is_empty() {
                 String::new()
             } else {
-                let clipped: String = trimmed.chars().take(200).collect();
+                let sanitized = crate::storage::crypto::sanitize_log_message(trimmed);
+                let clipped: String = sanitized.chars().take(200).collect();
                 format!("（stderr: {clipped}）")
             }
         };

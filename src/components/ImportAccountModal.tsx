@@ -67,6 +67,8 @@ export function ImportAccountModal({  open,
 
     if (!open) {
       lastTargetIdRef.current = undefined;
+      setLabel("");
+      setRawInput("");
       setInspectResult(null);
       setInspectError(null);
       setInspecting(false);
@@ -91,7 +93,9 @@ export function ImportAccountModal({  open,
     if (targetAccount) {
       setToolId(targetAccount.toolId);
       const methods = getSupportedMethods(targetAccount.toolId);
-      if (targetAccount.hasApiToken === false && methods.includes("webview_oauth")) {
+      if (defaultMethod && methods.includes(defaultMethod)) {
+        setMethod(defaultMethod);
+      } else if (targetAccount.hasApiToken === false && methods.includes("webview_oauth")) {
         setMethod("webview_oauth");
       } else if (targetAccount.hasLocalSnapshot === false && methods.includes("local_import")) {
         setMethod("local_import");
@@ -549,6 +553,10 @@ export function ImportAccountModal({  open,
               <textarea
                 id="qwitch-import-raw"
                 rows={4}
+                spellCheck={false}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
                 placeholder="粘贴 Bearer Token / JWT 或完整 JSON 会话片段（本地加密落盘，绝不外传）..."
                 value={rawInput}
                 onChange={(e) => setRawInput(e.target.value)}

@@ -41,6 +41,11 @@ echo "隔离 storage:     $PROFILE_STORAGE"
 echo "  device_id = ${PROF_DEV:-<未找到>}"
 echo "------------------------------------------------------------"
 
+if [ -z "$MAIN_DEV" ]; then
+  echo "结论: ❌ FAIL —— 主目录未找到有效 device_id（请确认在已登录 Trae CN 的 macOS 宿主上运行）。" >&2
+  exit 1
+fi
+
 if [ -z "$PROF_DEV" ]; then
   echo "结论: ⏳ 待定 —— 隔离 profile 还没有 storage.json 设备键。"
   echo "      请先在隔离实例里【登录一次】目标账号，再重新运行本脚本。"

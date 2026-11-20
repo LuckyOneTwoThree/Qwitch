@@ -499,14 +499,15 @@ impl MiniMaxAdapter {
             .get("interval")
             .and_then(int_field)
             .filter(|s| *s > 0)
-            .unwrap_or(3);
+            .unwrap_or(3)
+            .clamp(1, 60);
 
         Ok(MiniMaxDeviceAuth {
             login_url,
             device_code,
             user_code,
             code_verifier,
-            interval_ms: (interval as u64) * 1000,
+            interval_ms: (interval as u64).saturating_mul(1000),
             expires_at_ms: Utc::now()
                 .timestamp_millis()
                 .saturating_add(expires_in.saturating_mul(1000)),
@@ -550,7 +551,7 @@ impl MiniMaxAdapter {
             .await
             .map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: format!("轮询 MiniMax 设备授权失败: {e}"),
+                message: format!("轮询 MiniMax 设备授权失败: {}", e.without_url()),
             })?;
 
         let http_status = resp.status();
@@ -881,37 +882,7 @@ impl MiniMaxAdapter {
     }
 
     fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("创建 MiniMax 配置目录失败 {}: {e}", parent.display()),
-            })?;
-        }
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("minimax-session");
-        let tmp = path.with_file_name(format!(".{file_name}.qwitch-tmp"));
-        if let Err(e) = std::fs::write(&tmp, bytes) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("写入 MiniMax 临时文件失败 {}: {e}", tmp.display()),
-            });
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("替换 MiniMax 会话文件失败 {}: {e}", path.display()),
-            });
-        }
-        Ok(())
+        crate::adapter::write_private_file_atomic(path, bytes)
     }
 
     fn decode_snapshot_file(
@@ -1005,6 +976,31 @@ impl ToolAdapter for MiniMaxAdapter {
         &self.manifest
     }
 
+    fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
+        let (auth_path, _) = Self::auth_file_paths()?;
+        let auth_bytes = std::fs::read(&auth_path).ok()?;
+        let auth_json: Value = serde_json::from_slice(&auth_bytes).ok()?;
+        let record = Self::pick_auth_record(&auth_json)?;
+        let _tokens = Self::tokens_from_record(record)?;
+        let config_path = Self::app_config_path(host)?;
+        let config_bytes = std::fs::read(&config_path).ok()?;
+        let config: Value = serde_json::from_slice(&config_bytes).ok()?;
+        let shared = config.get("sharedUser")?;
+        let uid = shared
+            .get("realUserID")
+            .and_then(crate::adapter::common::json_uid_to_string)
+            .or_else(|| {
+                shared
+                    .get("userID")
+                    .and_then(crate::adapter::common::json_uid_to_string)
+            })?;
+        if CredentialEnvelope::is_fallback_uid(&uid) {
+            None
+        } else {
+            Some(uid)
+        }
+    }
+
     async fn import_from_local(
         &self,
         host: &dyn PlatformHost,
@@ -1046,14 +1042,14 @@ impl ToolAdapter for MiniMaxAdapter {
             files.insert(AUTH_STATE_JSON.to_string(), BASE64.encode(state_bytes));
         }
 
-        let mut uid: Option<String> = None;
+        let mut uid_from_config: Option<String> = None;
         let mut display_name: Option<String> = None;
         if let Some(config_path) = Self::app_config_path(host) {
             if let Ok(config_bytes) = std::fs::read(&config_path) {
                 files.insert(APP_CONFIG_JSON.to_string(), BASE64.encode(&config_bytes));
                 if let Ok(config) = serde_json::from_slice::<Value>(&config_bytes) {
                     if let Some(shared) = config.get("sharedUser") {
-                        uid = shared
+                        uid_from_config = shared
                             .get("realUserID")
                             .and_then(crate::adapter::common::json_uid_to_string)
                             .or_else(|| {
@@ -1070,20 +1066,29 @@ impl ToolAdapter for MiniMaxAdapter {
             }
         }
 
-        let uid = uid.filter(|s| !s.is_empty()).unwrap_or_else(|| {
-            crate::adapter::common::hash_fallback_uid("minimax_cn", tokens.access_token.as_bytes())
-        });
-
-        // 用服务端 profile 的 user_name 作为权威昵称（本地配置 sharedUser.userName 可能
-        // 不是昵称、或是子账号名/已过时）。注意不覆盖 uid，保持账号去重稳定。
+        // 用服务端 profile 的 user_name 作为权威昵称；若本机 config 未提供真实 userID，
+        // 也优先采用服务端 profile 的 realUserID，确保与 OAuth 导入稳定去重同一账号。
+        let mut uid_from_profile: Option<String> = None;
         let mut display_email: Option<String> = None;
-        if let Ok((_p_uid, p_name, p_email)) = Self::fetch_user_profile(&tokens.access_token).await
-        {
+        if let Ok((p_uid, p_name, p_email)) = Self::fetch_user_profile(&tokens.access_token).await {
+            if !p_uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(&p_uid) {
+                uid_from_profile = Some(p_uid);
+            }
             if let Some(n) = p_name.filter(|s| !s.trim().is_empty()) {
                 display_name = Some(n);
             }
             display_email = p_email.filter(|s| !s.trim().is_empty());
         }
+
+        let uid = uid_from_config
+            .filter(|s| !s.is_empty())
+            .or(uid_from_profile)
+            .unwrap_or_else(|| {
+                crate::adapter::common::hash_fallback_uid(
+                    "minimax_cn",
+                    tokens.access_token.as_bytes(),
+                )
+            });
 
         files.insert(
             SNAPSHOT_TOKEN_FILE.to_string(),
@@ -1308,7 +1313,11 @@ impl ToolAdapter for MiniMaxAdapter {
         };
 
         let auth_bytes = Self::decode_snapshot_file(files, AUTH_JSON)?;
-        let state_bytes = Self::decode_snapshot_file(files, AUTH_STATE_JSON)?;
+        let state_bytes_opt = if files.contains_key(AUTH_STATE_JSON) {
+            Some(Self::decode_snapshot_file(files, AUTH_STATE_JSON)?)
+        } else {
+            None
+        };
         let Some((auth_path, state_path)) = Self::auth_file_paths() else {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
@@ -1317,7 +1326,16 @@ impl ToolAdapter for MiniMaxAdapter {
         };
 
         Self::write_atomic(&auth_path, &auth_bytes)?;
-        Self::write_atomic(&state_path, &state_bytes)?;
+        if let Some(state_bytes) = state_bytes_opt {
+            Self::write_atomic(&state_path, &state_bytes)?;
+        } else if let Err(e) = std::fs::remove_file(&state_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("清理旧 MiniMax auth-state.json 失败: {e}"),
+                });
+            }
+        }
 
         if let Some(config_b64) = files.get(APP_CONFIG_JSON) {
             let config_bytes = BASE64
@@ -1372,10 +1390,13 @@ impl ToolAdapter for MiniMaxAdapter {
         }
 
         let Some(refresh_token) = tokens.refresh_token.filter(|s| !s.is_empty()) else {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::AuthExpired,
-                message: "MiniMax 登录态已过期且缺少刷新令牌，请重新导入本机登录态".into(),
-            });
+            if now_ms >= expires_at_ms {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::AuthExpired,
+                    message: "MiniMax 登录态已过期且缺少刷新令牌，请重新导入本机登录态".into(),
+                });
+            }
+            return Ok(None);
         };
 
         let resp = self
@@ -1391,7 +1412,7 @@ impl ToolAdapter for MiniMaxAdapter {
             .await
             .map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: format!("刷新 MiniMax 登录态失败: {e}"),
+                message: format!("刷新 MiniMax 登录态失败: {}", e.without_url()),
             })?;
 
         let status = resp.status();

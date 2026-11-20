@@ -11,7 +11,7 @@
 #
 # 用法：
 #   # 1) 导出当前用户已登录的 Trae CN（常用于在“第二台机器/VM”上执行后再拷走）
-#   ./export_trae_profile.sh --current --dest /tmp/trae-profile-B
+#   ./export_trae_profile.sh --current --dest ~/qwitch-profiles/trae-B
 #
 #   # 2) 从指定 Trae CN 数据根导出（例如从第二台机器 scp 过来的原始目录）
 #   ./export_trae_profile.sh --src "/path/to/Trae CN" --dest ~/qwitch-profiles/trae-B
@@ -20,6 +20,7 @@
 #       导出目录再拷到主机，导入 Qwitch，即可获得“与主机不同”的设备身份。
 # =============================================================================
 set -uo pipefail
+umask 077
 
 SRC=""; DEST=""; CURRENT=0
 while [ $# -gt 0 ]; do
@@ -47,9 +48,19 @@ echo "== 导出 =="
 echo "源: $SRC"
 echo "目标: $DEST"
 mkdir -p "$DEST/User/globalStorage" "$DEST/aha"
+chmod 700 "$DEST" "$DEST/User" "$DEST/User/globalStorage" "$DEST/aha" 2>/dev/null || true
 cp -f "$SRC_STORAGE" "$DEST/User/globalStorage/storage.json"
-[ -f "$SRC/User/globalStorage/state.vscdb" ] && cp -f "$SRC/User/globalStorage/state.vscdb" "$DEST/User/globalStorage/state.vscdb" || true
-[ -f "$SRC/aha/TinyStorage" ] && cp -f "$SRC/aha/TinyStorage" "$DEST/aha/TinyStorage" || true
+chmod 600 "$DEST/User/globalStorage/storage.json" 2>/dev/null || true
+for f in state.vscdb state.vscdb-wal state.vscdb-shm; do
+  if [ -f "$SRC/User/globalStorage/$f" ]; then
+    cp -f "$SRC/User/globalStorage/$f" "$DEST/User/globalStorage/$f"
+    chmod 600 "$DEST/User/globalStorage/$f" 2>/dev/null || true
+  fi
+done
+if [ -f "$SRC/aha/TinyStorage" ]; then
+  cp -f "$SRC/aha/TinyStorage" "$DEST/aha/TinyStorage"
+  chmod 600 "$DEST/aha/TinyStorage" 2>/dev/null || true
+fi
 
 extract_dev() { grep -o 'iCubeAuthInfo://icube-dc:[^"]*' "$1" 2>/dev/null | head -1 | sed 's#.*icube-dc:##'; }
 DEST_DEV="$(extract_dev "$DEST/User/globalStorage/storage.json")"
@@ -65,10 +76,12 @@ echo
 if [ -z "$DEST_DEV" ]; then
   echo "⚠️ 导出目录未发现 device_id（该 profile 可能尚未完成登录）" >&2
   exit 1
-elif [ -n "$MAIN_DEV" ] && [ "$DEST_DEV" = "$MAIN_DEV" ]; then
+elif [ "$CURRENT" != "1" ] && [ -n "$MAIN_DEV" ] && [ "$DEST_DEV" = "$MAIN_DEV" ]; then
   echo "⚠️ 导出设备与主机相同 —— 这仍是同一台设备，不能用于多账号签到。"
   echo "   请在【第二台机器/VM/第二个 macOS 用户】里登录目标账号后再导出。"
   exit 1
+elif [ "$CURRENT" = "1" ]; then
+  echo "✅ 本机导出完成：请将 $DEST 拷贝到另一台主机再导入 Qwitch（仅作跨机迁移）。"
 else
   echo "✅ 导出成功，且设备与主机不同（可用于多设备签到）。"
   echo "   Qwitch 导入时把「设备 profile 目录」填为：$DEST"

@@ -57,7 +57,6 @@ import type {
   ToolId,
 } from "../types/qwitch";
 import { invoke } from "@tauri-apps/api/core";
-import packageJson from "../../package.json";
 
 type NavSection = "all" | "logs" | "settings" | ToolId;
 type AllViewMode = "grouped" | "flat";
@@ -168,11 +167,13 @@ export function Dashboard() {
     customClientPaths,
     clientStatuses,
     saveAppSettings,
+    resetSettingsDrafts,
     refreshClientStatuses,
     archiveLogs,
     unarchiveLogs,
     deleteLogs,
     exportLogs,
+    cstDayKey,
     theme,
     toggleTheme,
     quitApp,
@@ -181,6 +182,7 @@ export function Dashboard() {
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const [nav, setNav] = useState<NavSection>("all");
+  const prevNavRef = useRef<NavSection>(nav);
   const [importOpen, setImportOpen] = useState(false);
   const [importDefaultMethod, setImportDefaultMethod] = useState<AuthMethod | undefined>(undefined);
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
@@ -203,6 +205,17 @@ export function Dashboard() {
   }, [isTauriRuntime]);
 
   useEffect(() => {
+    const prev = prevNavRef.current;
+    prevNavRef.current = nav;
+    if (prev === "settings" && nav !== "settings") {
+      resetSettingsDrafts();
+      setPathDraftsDirty(false);
+      setPathDrafts(customClientPaths);
+      setTrustedDraft(externalPlugins.filter((p) => p.trusted).map((p) => p.id));
+    }
+  }, [customClientPaths, externalPlugins, nav, resetSettingsDrafts]);
+
+  useEffect(() => {
     if (nav !== "settings" || !isTauriRuntime) return;
     void reloadExternalPlugins();
   }, [nav, isTauriRuntime, reloadExternalPlugins]);
@@ -214,17 +227,11 @@ export function Dashboard() {
   const [logSearch, setLogSearch] = useState("");
   const [selectedLogIds, setSelectedLogIds] = useState<number[]>([]);
 
-  useEffect(() => {
-    setSelectedLogIds((prev) => {
-      const valid = prev.filter((id) => logs.some((l) => l.id === id));
-      return valid.length === prev.length ? prev : valid;
-    });
-  }, [logs]);
   const [confirmLogAction, setConfirmLogAction] = useState<{
     label: string;
     detail: string;
     danger?: boolean;
-    run: () => Promise<void>;
+    run: () => Promise<boolean | void>;
   } | null>(null);
 
   const visibleTools = useMemo(() => getVisibleTools(adapters), [adapters]);
@@ -257,12 +264,13 @@ export function Dashboard() {
     [accounts, activeToolFilter, nav]
   );
 
-  const scopedStats = useMemo(
-    () => selectScopedStats(scopeAccounts, adapters, clientStatuses, activeToolFilter),
-    [scopeAccounts, adapters, clientStatuses, activeToolFilter]
-  );
+  const scopedStats = useMemo(() => {
+    void cstDayKey;
+    return selectScopedStats(scopeAccounts, adapters, clientStatuses, activeToolFilter);
+  }, [scopeAccounts, adapters, clientStatuses, activeToolFilter, cstDayKey]);
 
   const filteredAccounts = useMemo(() => {
+    void cstDayKey;
     const q = searchQuery.trim().toLowerCase();
     return scopeAccounts.filter((acc) => {
       if (statusFilter === "active_client" && !acc.isActiveOnClient) return false;
@@ -284,7 +292,7 @@ export function Dashboard() {
         .toLowerCase();
       return haystack.includes(q);
     });
-  }, [scopeAccounts, searchQuery, statusFilter, adapters]);
+  }, [scopeAccounts, searchQuery, statusFilter, adapters, cstDayKey]);
 
   const groupedModules = useMemo(() => {
     const isFiltering = Boolean(searchQuery.trim()) || statusFilter !== "all";
@@ -336,6 +344,25 @@ export function Dashboard() {
     });
   }, [logs, logActionFilter, logResultFilter, logSearch, adapters]);
 
+  useEffect(() => {
+    const validIds = new Set(filteredLogs.map((l) => l.id));
+    setSelectedLogIds((prev) => {
+      const valid = prev.filter((id) => validIds.has(id));
+      return valid.length === prev.length ? prev : valid;
+    });
+  }, [filteredLogs]);
+
+  const autoStartDescription = useMemo(() => {
+    const ua = typeof navigator !== "undefined" ? navigator.userAgent.toLowerCase() : "";
+    if (ua.includes("windows")) {
+      return "登录系统时自动启动 Qwitch（Windows 写入当前用户启动项，启动后静默驻留）。";
+    }
+    if (ua.includes("linux")) {
+      return "登录系统时自动启动 Qwitch（Linux 写入 ~/.config/autostart，启动后静默驻留）。";
+    }
+    return "登录系统时自动启动 Qwitch（macOS 写入 ~/Library/LaunchAgents，启动后静默驻留）。";
+  }, []);
+
   const groupedLogs = useMemo(() => {
     const groups: Array<{ day: string; items: ActionLogItem[] }> = [];
     for (const log of filteredLogs) {
@@ -374,6 +401,16 @@ export function Dashboard() {
     setImportPresetTool(toolId ?? activeToolFilter);
     setImportOpen(true);
   };
+
+  const openBindModal = useCallback(
+    (account: AccountSummary, preferredMethod?: AuthMethod) => {
+      setImportOpen(false);
+      setImportDefaultMethod(preferredMethod);
+      setImportPresetTool(account.toolId);
+      setBindTargetAccount(account);
+    },
+    []
+  );
 
   const activeToolMeta = activeToolFilter
     ? getToolBrandMeta(activeToolFilter, adapters)
@@ -554,7 +591,7 @@ export function Dashboard() {
                 Local-First 加密库
               </span>
               <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                v{packageJson.version}
+                v{__APP_VERSION__}
               </span>
             </div>
             <p className="mt-1 leading-snug">
@@ -699,8 +736,8 @@ export function Dashboard() {
                     </span>
                   </div>
                   {!activeToolFilter && (
-                    <div className="hidden shrink-0 items-center gap-1 xl:flex">
-                      {visibleTools.slice(0, 3).map((t) => (
+                    <div className="hidden flex-wrap items-center justify-end gap-1 xl:flex">
+                      {visibleTools.map((t) => (
                         <span
                           key={t.id}
                           title={`${t.name}: ${accounts.filter((a) => a.toolId === t.id).length}`}
@@ -1083,9 +1120,7 @@ export function Dashboard() {
                         setConfirmLogAction({
                           label: "归档当前全部活跃日志？",
                           detail: `将把 ${logStats.activeCount} 条活跃日志全部转入「已归档」，可在归档区查看、导出或恢复。`,
-                          run: async () => {
-                            await archiveLogs({ scope: "active" });
-                          },
+                          run: async () => (await archiveLogs({ scope: "active" })) !== null,
                         })
                       }
                       className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
@@ -1112,9 +1147,7 @@ export function Dashboard() {
                           label: "确认清空全部活跃日志？",
                           detail: `将永久删除 ${logStats.activeCount} 条活跃日志，不可恢复；若需留存请先点击「全部归档」或「导出」。`,
                           danger: true,
-                          run: async () => {
-                            await deleteLogs({ scope: "active" });
-                          },
+                          run: async () => (await deleteLogs({ scope: "active" })) !== null,
                         })
                       }
                       className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
@@ -1158,9 +1191,7 @@ export function Dashboard() {
                           label: "确认彻底清空已归档日志？",
                           detail: `将永久删除 ${logStats.archivedCount} 条已归档历史记录，建议先点击「导出归档 JSON」保存备份。`,
                           danger: true,
-                          run: async () => {
-                            await deleteLogs({ scope: "archived" });
-                          },
+                          run: async () => (await deleteLogs({ scope: "archived" })) !== null,
                         })
                       }
                       className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
@@ -1222,8 +1253,10 @@ export function Dashboard() {
                             type="button"
                             onClick={async () => {
                               const ids = [...selectedLogIds];
-                              setSelectedLogIds([]);
-                              await archiveLogs({ scope: "active", ids });
+                              const count = await archiveLogs({ scope: "active", ids });
+                              if (count !== null) {
+                                setSelectedLogIds([]);
+                              }
                             }}
                             className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
                           >
@@ -1235,8 +1268,10 @@ export function Dashboard() {
                             type="button"
                             onClick={async () => {
                               const ids = [...selectedLogIds];
-                              setSelectedLogIds([]);
-                              await unarchiveLogs({ scope: "archived", ids });
+                              const count = await unarchiveLogs({ scope: "archived", ids });
+                              if (count !== null) {
+                                setSelectedLogIds([]);
+                              }
                             }}
                             className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
                           >
@@ -1254,8 +1289,7 @@ export function Dashboard() {
                               danger: true,
                               run: async () => {
                                 const ids = [...selectedLogIds];
-                                setSelectedLogIds([]);
-                                await deleteLogs({ scope: logScope, ids });
+                                return (await deleteLogs({ scope: logScope, ids })) !== null;
                               },
                             })
                           }
@@ -1470,7 +1504,7 @@ export function Dashboard() {
 
                       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
                         {group.accounts.map((acc) => (
-                          <AccountCard key={acc.id} account={acc} onOpenBindModal={setBindTargetAccount} />
+                          <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                         ))}
 
                         {group.accounts.length === 1 && !isFiltered && (
@@ -1497,7 +1531,7 @@ export function Dashboard() {
               ) : (
                 <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2 2xl:grid-cols-3">
                   {filteredAccounts.map((acc) => (
-                    <AccountCard key={acc.id} account={acc} onOpenBindModal={setBindTargetAccount} />
+                    <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                   ))}
                 </div>
               )}
@@ -1760,7 +1794,7 @@ export function Dashboard() {
                   <SettingToggleRow
                     id="qwitch-launch-at-login"
                     label="开机自动启动"
-                    description="登录系统时自动启动 Qwitch（macOS 写入 ~/Library/LaunchAgents，启动后静默驻留）。"
+                    description={autoStartDescription}
                     checked={Boolean(appSettings.launchAtLogin)}
                     onChange={(next) => void saveAppSettings({ launchAtLogin: next })}
                   />
@@ -1897,11 +1931,14 @@ export function Dashboard() {
                     <input
                       id="qwitch-jitter-min"
                       type="number"
-                      min={500}
+                      min={0}
+                      max={60000}
                       value={jitterRangeMs[0]}
                       onChange={(e) => {
                         const parsed = Number(e.target.value);
-                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+                        const next = Number.isFinite(parsed)
+                          ? Math.min(60000, Math.max(0, Math.floor(parsed)))
+                          : 0;
                         setJitterRangeMs([next, jitterRangeMs[1]]);
                       }}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"
@@ -1917,11 +1954,14 @@ export function Dashboard() {
                     <input
                       id="qwitch-jitter-max"
                       type="number"
-                      min={500}
+                      min={0}
+                      max={60000}
                       value={jitterRangeMs[1]}
                       onChange={(e) => {
                         const parsed = Number(e.target.value);
-                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+                        const next = Number.isFinite(parsed)
+                          ? Math.min(60000, Math.max(0, Math.floor(parsed)))
+                          : 0;
                         setJitterRangeMs([jitterRangeMs[0], next]);
                       }}
                       className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs dark:border-zinc-700 dark:bg-zinc-800"
@@ -1940,8 +1980,14 @@ export function Dashboard() {
                     type="button"
                     onClick={() =>
                       void saveAppSettings({
-                        logArchiveAfterDays: Math.max(0, Math.floor(logRetention.archiveAfterDays)),
-                        logMaxActiveCount: Math.max(0, Math.floor(logRetention.maxActiveCount)),
+                        logArchiveAfterDays: Math.min(
+                          3650,
+                          Math.max(0, Math.floor(logRetention.archiveAfterDays))
+                        ),
+                        logMaxActiveCount: Math.min(
+                          100000,
+                          Math.max(0, Math.floor(logRetention.maxActiveCount))
+                        ),
                       })
                     }
                     className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
@@ -1965,10 +2011,13 @@ export function Dashboard() {
                       id="qwitch-log-days"
                       type="number"
                       min={0}
+                      max={3650}
                       value={logRetention.archiveAfterDays}
                       onChange={(e) => {
                         const parsed = Number(e.target.value);
-                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+                        const next = Number.isFinite(parsed)
+                          ? Math.min(3650, Math.max(0, Math.floor(parsed)))
+                          : 0;
                         setLogRetention({
                           ...logRetention,
                           archiveAfterDays: next,
@@ -1988,10 +2037,13 @@ export function Dashboard() {
                       id="qwitch-log-max"
                       type="number"
                       min={0}
+                      max={100000}
                       value={logRetention.maxActiveCount}
                       onChange={(e) => {
                         const parsed = Number(e.target.value);
-                        const next = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+                        const next = Number.isFinite(parsed)
+                          ? Math.min(100000, Math.max(0, Math.floor(parsed)))
+                          : 0;
                         setLogRetention({
                           ...logRetention,
                           maxActiveCount: next,
@@ -2268,8 +2320,10 @@ export function Dashboard() {
           const action = confirmLogAction;
           setConfirmLogAction(null);
           if (action) {
-            await action.run();
-            setSelectedLogIds([]);
+            const res = await action.run();
+            if (res !== false) {
+              setSelectedLogIds([]);
+            }
           }
         }}
       />

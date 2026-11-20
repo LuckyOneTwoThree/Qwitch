@@ -333,18 +333,8 @@ pub struct AppState {
     pub scheduler: Arc<AntiRiskScheduler>,
     pub oauth_flow_seq: Arc<AtomicU64>,
     pub switching_in_progress: Arc<AtomicBool>,
-}
-
-fn read_device_id_from_storage(storage_path: &std::path::Path) -> Option<String> {
-    let raw = std::fs::read(storage_path).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-    value
-        .as_object()?
-        .keys()
-        .find_map(|key| key.strip_prefix("iCubeAuthInfo://icube-dc:"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    pub last_reconcile_ms: Arc<AtomicU64>,
+    pub tray_blur_suppress_until_ms: Arc<AtomicU64>,
 }
 
 fn mask_device_id(id: &str) -> String {
@@ -384,16 +374,16 @@ pub async fn inspect_profile_dir(
         let (root, _temp_guard) = resolve_profile_root_input(&input)?;
         let storage = root.join("User").join("globalStorage").join("storage.json");
         let has_storage = storage.is_file();
+        let config_dir = root.join("User").join("globalStorage");
         let device_id = if has_storage {
-            read_device_id_from_storage(&storage)
+            crate::adapter::trae::TraeAdapter::read_device_id_from_config_dir(&config_dir)
         } else {
             None
         };
         let local_id = host
             .client_config_dir(&tool_id)
             .ok()
-            .map(|d| d.join("storage.json"))
-            .and_then(|p| read_device_id_from_storage(&p));
+            .and_then(|d| crate::adapter::trae::TraeAdapter::read_device_id_from_config_dir(&d));
         let same_as_local = match (&device_id, &local_id) {
             (Some(a), Some(b)) => Some(a == b),
             _ => None,
@@ -666,6 +656,7 @@ pub fn save_app_settings(
         .db
         .set_setting(SETTINGS_KEY, &json)
         .map_err(|e| e.to_string())?;
+    crate::platform::sync_custom_client_paths(&settings.custom_client_paths);
     let _ = state.db.apply_log_retention(
         settings.log_archive_after_days,
         settings.log_max_active_count,
@@ -701,44 +692,76 @@ pub fn detect_client_status(
     })
 }
 
-/// 校正“本机使用中”标记：读取各工具本机客户端当前真实登录账号，
-/// 与本库账号比对后更新 is_active_on_client（读不到真实 uid 的工具跳过，绝不误清）。
+/// 校正“本机使用中”标记：纯本地只读探测各工具客户端当前真实登录账号，
+/// 与本库账号比对后更新 is_active_on_client（读不到真实 uid 的工具跳过，绝不误清；禁止联网或拉起外部解密进程）。
 #[tauri::command]
 pub async fn reconcile_active_accounts(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let adapters: Vec<(String, Arc<dyn ToolAdapter>)> = state
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev_ms = state.last_reconcile_ms.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(prev_ms) < 3_000 {
+        return Ok(());
+    }
+    if state
+        .last_reconcile_ms
+        .compare_exchange(prev_ms, now_ms, Ordering::SeqCst, Ordering::Relaxed)
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    let host = Arc::clone(&state.host);
+    let candidates: Vec<(String, Arc<dyn ToolAdapter>)> = state
         .adapters
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .filter(|(_, adapter)| {
+            adapter
+                .manifest()
+                .capabilities
+                .auth_methods
+                .contains(&AuthMethod::LocalImport)
+        })
+        .map(|(k, v)| (k.clone(), Arc::clone(v)))
         .collect();
-    for (tool_id, adapter) in adapters {
-        if !adapter
-            .manifest()
-            .capabilities
-            .auth_methods
-            .contains(&AuthMethod::LocalImport)
-        {
+
+    let detected: Vec<(String, String)> = tokio::task::spawn_blocking(move || {
+        candidates
+            .into_iter()
+            .filter_map(|(tool_id, adapter)| {
+                adapter
+                    .detect_local_active_uid(host.as_ref())
+                    .map(|uid| (tool_id, uid))
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("探测本机活跃账号失败: {e}"))?;
+
+    for (tool_id, uid) in detected {
+        let trimmed = uid.trim();
+        if trimmed.is_empty() || crate::domain::CredentialEnvelope::is_fallback_uid(trimmed) {
             continue;
         }
-        let env = match adapter.import_from_local(state.host.as_ref()).await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let uid = env.uid.trim();
-        if uid.is_empty() || crate::domain::CredentialEnvelope::is_fallback_uid(uid) {
-            // 未能可靠解密出真实 uid：跳过，避免把正确的标记误清
-            continue;
-        }
-        match state.db.find_account_id_by_uid(&tool_id, uid) {
+        let current_active = state.db.get_active_account_id(&tool_id).ok().flatten();
+        match state.db.find_account_id_by_uid(&tool_id, trimmed) {
             Ok(Some((id, _))) => {
-                let _ = state.db.set_active_on_client(&tool_id, &id);
-                let _ = app.emit("qwitch://account-updated", &id);
+                if current_active.as_deref() != Some(id.as_str())
+                    && state.db.set_active_on_client(&tool_id, &id).is_ok()
+                {
+                    let _ = app.emit("qwitch://account-updated", &id);
+                }
             }
             Ok(None) => {
-                // 本机当前账号不在库中 → 清掉该工具下所有“使用中”标记
-                let _ = state.db.clear_active_on_client(&tool_id);
+                if let Ok(cleared) = state.db.clear_active_on_client(&tool_id) {
+                    if cleared > 0 {
+                        let _ = app.emit("qwitch://account-updated", &tool_id);
+                    }
+                }
             }
             Err(_) => {}
         }
@@ -1029,7 +1052,6 @@ pub async fn import_local_account(
 #[serde(rename_all = "camelCase")]
 pub struct LocalAccountPreview {
     pub tool_id: String,
-    pub uid: String,
     pub uid_masked: String,
     pub display_name: Option<String>,
     pub is_fallback_uid: bool,
@@ -1097,7 +1119,6 @@ pub async fn preview_local_account(
         matched_account_id: matched.as_ref().map(|(id, _)| id.clone()),
         matched_account_label: matched.map(|(_, label)| label),
         tool_id: envelope.tool_id,
-        uid: envelope.uid,
         display_name: envelope.display_name,
     })
 }
@@ -1353,26 +1374,19 @@ pub async fn refresh_account_quota(
 
 struct SwitchFlagGuard {
     flag: Arc<AtomicBool>,
-    armed: bool,
 }
 
 impl SwitchFlagGuard {
     fn try_acquire(flag: Arc<AtomicBool>) -> Result<Self, String> {
         flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| "切号进行中，请等待当前切换完成后再试".to_string())?;
-        Ok(Self { flag, armed: true })
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
+        Ok(Self { flag })
     }
 }
 
 impl Drop for SwitchFlagGuard {
     fn drop(&mut self) {
-        if self.armed {
-            self.flag.store(false, Ordering::SeqCst);
-        }
+        self.flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1416,7 +1430,12 @@ pub async fn switch_desktop_account(
     account_id: String,
     force_kill: bool,
 ) -> Result<(), String> {
-    let mut switch_guard = SwitchFlagGuard::try_acquire(Arc::clone(&state.switching_in_progress))?;
+    let _switch_guard = SwitchFlagGuard::try_acquire(Arc::clone(&state.switching_in_progress))?;
+    let _queue_guard = state
+        .scheduler
+        .queue_lock()
+        .try_lock_owned()
+        .map_err(|_| "已有批量查额或签到任务正在进行，请等待完成后再试".to_string())?;
 
     let (summary, cred) = state
         .db
@@ -1662,12 +1681,16 @@ pub async fn switch_desktop_account(
     let _ = app.emit("qwitch://account-updated", &summary.id);
     let _ = app.emit("qwitch://logs-updated", ());
 
-    switch_guard.disarm();
-    let flag_clone = Arc::clone(&state.switching_in_progress);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    state
+        .tray_blur_suppress_until_ms
+        .store(now_ms.saturating_add(1800), Ordering::SeqCst);
     let app_for_tray = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
-        flag_clone.store(false, Ordering::SeqCst);
         if let Some(tray) = app_for_tray.get_webview_window("tray") {
             if tray.is_visible().unwrap_or(false) && !tray.is_focused().unwrap_or(false) {
                 let _ = tray.hide();
@@ -1879,13 +1902,15 @@ pub fn get_action_logs(
     scope: Option<LogScope>,
     limit: Option<u32>,
     offset: Option<u32>,
+    before_id: Option<i64>,
 ) -> Result<Vec<ActionLogItem>, String> {
     state
         .db
         .list_action_logs(
             scope.unwrap_or(LogScope::Active),
-            limit.unwrap_or(100).clamp(1, 500),
+            limit.unwrap_or(100).clamp(1, 2_000),
             offset.unwrap_or(0),
+            before_id,
         )
         .map_err(|e| e.to_string())
 }
@@ -1947,7 +1972,7 @@ pub fn export_action_logs(
     let target_scope = scope.unwrap_or(LogScope::Archived);
     let logs = state
         .db
-        .list_action_logs(target_scope, 10_000, 0)
+        .list_action_logs(target_scope, 10_000, 0, None)
         .map_err(|e| e.to_string())?;
     if logs.is_empty() {
         return Err("当前视图没有可导出的操作日志".into());
@@ -2889,6 +2914,8 @@ pub async fn start_webview_oauth(
         }
         OAuthMode::MiniMaxDevicePoll { auth } => {
             tauri::async_runtime::spawn(async move {
+                let mut consecutive_errors: u32 = 0;
+                let mut poll_interval_ms = auth.poll_interval_ms().clamp(1_000, 30_000);
                 loop {
                     if flow_seq.load(Ordering::SeqCst) != flow_id
                         || app_handle.get_webview_window(&win_label).is_none()
@@ -2910,16 +2937,15 @@ pub async fn start_webview_oauth(
                     match MiniMaxAdapter::poll_device_authorization(&auth, host_arc.as_ref()).await
                     {
                         Ok(crate::adapter::minimax::DeviceAuthPoll::Pending) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                auth.poll_interval_ms(),
-                            ))
-                            .await;
+                            consecutive_errors = 0;
+                            tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms))
+                                .await;
                         }
                         Ok(crate::adapter::minimax::DeviceAuthPoll::SlowDown) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                auth.poll_interval_ms() + 5_000,
-                            ))
-                            .await;
+                            consecutive_errors = 0;
+                            poll_interval_ms = (poll_interval_ms.saturating_add(5_000)).min(30_000);
+                            tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms))
+                                .await;
                         }
                         Ok(crate::adapter::minimax::DeviceAuthPoll::Ready(envelope)) => {
                             persist_oauth_envelope(
@@ -2941,6 +2967,23 @@ pub async fn start_webview_oauth(
                             break;
                         }
                         Err(err) => {
+                            let is_transient = matches!(
+                                err,
+                                AdapterError::Unified {
+                                    code: UnifiedErrorCode::NetworkError,
+                                    ..
+                                }
+                            );
+                            if is_transient {
+                                consecutive_errors += 1;
+                                if consecutive_errors < 5 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                        poll_interval_ms,
+                                    ))
+                                    .await;
+                                    continue;
+                                }
+                            }
                             if flow_seq.load(Ordering::SeqCst) == flow_id {
                                 let _ = app_handle.emit("qwitch://oauth-error", format!("{err}"));
                                 if let Some(win) = app_handle.get_webview_window(&win_label) {

@@ -108,24 +108,33 @@ interface QwitchContextValue {
   archiveLogs: (
     request: ActionLogCleanupRequest,
     feedbackLabel?: string | ((count: number) => string)
-  ) => Promise<number>;
+  ) => Promise<number | null>;
   unarchiveLogs: (
     request: ActionLogCleanupRequest,
     feedbackLabel?: string | ((count: number) => string)
-  ) => Promise<number>;
+  ) => Promise<number | null>;
   deleteLogs: (
     request: ActionLogCleanupRequest,
     feedbackLabel?: string | ((count: number) => string)
-  ) => Promise<number>;
+  ) => Promise<number | null>;
   exportLogs: (scope?: LogScope, archiveAfterExport?: boolean) => Promise<void>;
   dismissBatchProgress: () => void;
   quitApp: () => Promise<void>;
   cstDayKey: string;
+  updateInfo: AppUpdateInfo | null;
+  updateChecking: boolean;
+  updateError: string | null;
+  checkAppUpdate: (options?: {
+    force?: boolean;
+    silent?: boolean;
+  }) => Promise<AppUpdateInfo | null>;
+  resetSettingsDrafts: () => void;
 }
 
 const QwitchContext = createContext<QwitchContextValue | null>(null);
 
 const LOG_PAGE_SIZE = 200;
+const LOG_MAX_LIMIT = 2000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -233,6 +242,13 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   }>({ archiveAfterDays: 14, maxActiveCount: 200 });
   const [customClientPaths, setCustomClientPaths] = useState<Record<string, string>>({});
   const [clientStatuses, setClientStatuses] = useState<Record<string, ClientHostStatus>>({});
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const updateInfoRef = useRef<AppUpdateInfo | null>(null);
+  updateInfoRef.current = updateInfo;
+  const lastUpdateCheckAtRef = useRef(0);
+  const updateCheckInFlightRef = useRef<Promise<AppUpdateInfo | null> | null>(null);
   const [cstDayKey, setCstDayKey] = useState<string>(() => toCstDayKey(Date.now()));
   const cstDayKeyRef = useRef(cstDayKey);
   cstDayKeyRef.current = cstDayKey;
@@ -253,11 +269,24 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const resetSettingsDrafts = useCallback(() => {
+    jitterDirtyRef.current = false;
+    logRetentionDirtyRef.current = false;
+    const persisted = appSettingsRef.current;
+    setJitterRangeMsState([persisted.jitterMinMs, persisted.jitterMaxMs]);
+    setLogRetentionState({
+      archiveAfterDays: persisted.logArchiveAfterDays ?? 14,
+      maxActiveCount: persisted.logMaxActiveCount ?? 200,
+    });
+  }, []);
+
   const toastTimerRef = useRef<number | null>(null);
   const toastSeqRef = useRef(0);
   const logLimitRef = useRef(LOG_PAGE_SIZE);
   const logScopeRef = useRef(logScope);
   logScopeRef.current = logScope;
+  const logRequestSeqRef = useRef(0);
+  const loadingMoreLogsRef = useRef(false);
   const didMountLogsRef = useRef(false);
   const syncDebounceTimerRef = useRef<number | null>(null);
   const appSettingsRef = useRef(appSettings);
@@ -270,6 +299,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   adaptersRef.current = adapters;
   const batchRunningRef = useRef(Boolean(batchProgress?.running));
   batchRunningRef.current = Boolean(batchProgress?.running);
+  const batchLaunchLockRef = useRef(false);
+  const coldSwitchDetectSeqRef = useRef(0);
+  const coldSwitchSubmittingRef = useRef(false);
+  const coldSwitchDoneTimerRef = useRef<number | null>(null);
   const pendingAutoClaimRef = useRef(false);
   const startupAutoRunDoneRef = useRef(false);
   const updateCheckDoneRef = useRef(false);
@@ -332,6 +365,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       }
       if (batchDismissTimerRef.current !== null) {
         window.clearTimeout(batchDismissTimerRef.current);
+      }
+      if (coldSwitchDoneTimerRef.current !== null) {
+        window.clearTimeout(coldSwitchDoneTimerRef.current);
       }
     };
   }, []);
@@ -502,8 +538,13 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
               ? "/Applications/Trae CN.app"
               : tid === "workbuddy"
                 ? "/Applications/WorkBuddy.app"
-                : "/Applications/Qoder.app",
-          configDir: `~/Library/Application Support/${tid}`,
+                : tid === "minimax_code_cn"
+                  ? "/Applications/MiniMax.app"
+                  : "/Applications/Qoder.app",
+          configDir:
+            tid === "minimax_code_cn"
+              ? "~/.minimax"
+              : `~/Library/Application Support/${tid}`,
           isRunning: tid === "trae_cn",
         } satisfies ClientHostStatus,
       ]);
@@ -528,16 +569,22 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const refreshLogs = useCallback(
     async (targetScope?: "active" | "archived") => {
       if (!isTauriRuntime) return;
+      const seq = ++logRequestSeqRef.current;
       const scope = targetScope ?? logScopeRef.current;
+      const limit = Math.min(LOG_MAX_LIMIT, logLimitRef.current);
       try {
         const [logList, stats] = await Promise.all([
           invoke<ActionLogItem[]>("get_action_logs", {
             scope,
-            limit: logLimitRef.current,
+            limit,
             offset: 0,
+            beforeId: null,
           }),
           invoke<ActionLogStats>("get_action_log_stats"),
         ]);
+        if (seq !== logRequestSeqRef.current || scope !== logScopeRef.current) {
+          return;
+        }
         setLogsState(logList);
         setBackendLogStats(stats);
       } catch (err) {
@@ -548,16 +595,30 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   );
 
   const loadMoreLogs = useCallback(async () => {
-    if (!isTauriRuntime) return;
+    if (!isTauriRuntime || loadingMoreLogsRef.current) return;
+    loadingMoreLogsRef.current = true;
+    const seq = logRequestSeqRef.current;
     const scope = logScopeRef.current;
+    const currentLogs = logsRef.current;
+    const cursorId = currentLogs.length > 0 ? currentLogs[currentLogs.length - 1].id : null;
     try {
       const more = await invoke<ActionLogItem[]>("get_action_logs", {
         scope,
         limit: LOG_PAGE_SIZE,
-        offset: logsState.length,
+        offset: 0,
+        beforeId: cursorId,
       });
-      if (more.length === 0) return;
-      logLimitRef.current = logsState.length + more.length;
+      if (
+        more.length === 0 ||
+        seq !== logRequestSeqRef.current ||
+        scope !== logScopeRef.current
+      ) {
+        return;
+      }
+      logLimitRef.current = Math.min(
+        LOG_MAX_LIMIT,
+        logsRef.current.length + more.length
+      );
       setLogsState((prev) => {
         const seen = new Set(prev.map((item) => item.id));
         const merged = [...prev];
@@ -570,27 +631,35 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       });
     } catch (err) {
       showToast(`加载更多日志失败：${String(err)}`, "error");
+    } finally {
+      loadingMoreLogsRef.current = false;
     }
-  }, [isTauriRuntime, logsState.length, showToast]);
+  }, [isTauriRuntime, showToast]);
 
   const syncFromBackend = useCallback(async () => {
     if (!isTauriRuntime) return;
+    const seq = logRequestSeqRef.current;
+    const scope = logScopeRef.current;
+    const limit = Math.min(LOG_MAX_LIMIT, logLimitRef.current);
     try {
       const [adList, accList, logList, stats, settings] = await Promise.all([
         invoke<AdapterManifest[]>("list_adapters"),
         invoke<AccountSummary[]>("list_accounts", { toolId: null }),
         invoke<ActionLogItem[]>("get_action_logs", {
-          scope: logScopeRef.current,
-          limit: logLimitRef.current,
+          scope,
+          limit,
           offset: 0,
+          beforeId: null,
         }),
         invoke<ActionLogStats>("get_action_log_stats"),
         invoke<AppSettings>("get_app_settings"),
       ]);
       setAdapters(adList);
       setAccounts(accList);
-      setLogsState(logList);
-      setBackendLogStats(stats);
+      if (seq === logRequestSeqRef.current && scope === logScopeRef.current) {
+        setLogsState(logList);
+        setBackendLogStats(stats);
+      }
       // 设置只在首次加载时应用；后续后台同步不得覆盖用户未保存的草稿
       // （远端真实变更经 settings-updated 事件单独下发）
       if (!settingsLoadedRef.current) {
@@ -610,6 +679,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       didMountLogsRef.current = true;
       return;
     }
+    logRequestSeqRef.current += 1;
     logLimitRef.current = LOG_PAGE_SIZE;
     void refreshLogs(logScope);
   }, [isTauriRuntime, logScope, refreshLogs]);
@@ -617,7 +687,9 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!isTauriRuntime) return;
     void (async () => {
-      await reconcileActiveAccounts();
+      if (!isTrayWindow) {
+        await reconcileActiveAccounts();
+      }
       await syncFromBackend();
     })();
 
@@ -717,17 +789,17 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   // 回到 Qwitch 窗口时自动复核“本机当前账号”（限频，避免频繁重读客户端文件）
   useEffect(() => {
-    if (!isTauriRuntime) return;
+    if (!isTauriRuntime || isTrayWindow) return;
     let last = 0;
     const onFocus = () => {
       const now = Date.now();
-      if (now - last < 4000) return;
+      if (now - last < 10_000) return;
       last = now;
       void reconcileActiveAccounts().then(() => syncFromBackend());
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [isTauriRuntime, reconcileActiveAccounts, syncFromBackend]);
+  }, [isTauriRuntime, isTrayWindow, reconcileActiveAccounts, syncFromBackend]);
 
   const appendLog = useCallback(
     (entry: Omit<ActionLogItem, "id" | "createdAt">) => {
@@ -783,7 +855,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   const refreshAllQuotas = useCallback(
     async (toolId?: ToolId): Promise<boolean> => {
-      if (batchProgress?.running) {
+      if (batchProgress?.running || batchLaunchLockRef.current) {
         showToast("当前已有批量任务正在执行，请稍候", "warning");
         return false;
       }
@@ -801,91 +873,108 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (isTauriRuntime) {
+        batchLaunchLockRef.current = true;
+        setBatchProgress({
+          action: "refresh",
+          running: true,
+          total: candidates.length,
+          completed: 0,
+          currentLabel: candidates[0].label,
+          phase: "checking",
+        });
         try {
           await invoke("refresh_quota_batch", {
             accountIds: candidates.map((c) => c.id),
           });
           return true;
         } catch (err) {
+          setBatchProgress(null);
           showToast(`启动批量查额失败：${String(err)}`, "error");
           return false;
+        } finally {
+          batchLaunchLockRef.current = false;
         }
       }
 
-      setBatchProgress({
-        action: "refresh",
-        running: true,
-        total: candidates.length,
-        completed: 0,
-        currentLabel: candidates[0].label,
-        phase: "checking",
-      });
-
-      for (let i = 0; i < candidates.length; i++) {
-        const acc = candidates[i];
+      batchLaunchLockRef.current = true;
+      try {
         setBatchProgress({
           action: "refresh",
           running: true,
           total: candidates.length,
-          completed: i,
-          currentLabel: acc.label,
+          completed: 0,
+          currentLabel: candidates[0].label,
           phase: "checking",
         });
-        await sleep(320);
-        const now = new Date().toISOString();
-        setAccounts((prev) =>
-          prev.map((item) =>
-            item.id === acc.id && item.latestQuota
-              ? { ...item, updatedAt: now, latestQuota: { ...item.latestQuota, fetchedAt: now } }
-              : item
-          )
-        );
-        appendLog({
-          accountId: acc.id,
-          toolId: acc.toolId,
-          actionType: "query",
-          resultStatus: "success",
-          messageSanitized: `已刷新 ${acc.label} (${acc.uidMasked}) 的最新额度`,
-        });
 
-        if (i < candidates.length - 1) {
+        for (let i = 0; i < candidates.length; i++) {
+          const acc = candidates[i];
           setBatchProgress({
             action: "refresh",
             running: true,
             total: candidates.length,
-            completed: i + 1,
-            phase: "jitter_wait",
-            jitterSeconds: 0.4,
+            completed: i,
+            currentLabel: acc.label,
+            phase: "checking",
           });
-          await sleep(350);
-        }
-      }
+          await sleep(320);
+          const now = new Date().toISOString();
+          setAccounts((prev) =>
+            prev.map((item) =>
+              item.id === acc.id && item.latestQuota
+                ? { ...item, updatedAt: now, latestQuota: { ...item.latestQuota, fetchedAt: now } }
+                : item
+            )
+          );
+          appendLog({
+            accountId: acc.id,
+            toolId: acc.toolId,
+            actionType: "query",
+            resultStatus: "success",
+            messageSanitized: `已刷新 ${acc.label} (${acc.uidMasked}) 的最新额度`,
+          });
 
-      const summaryText = `额度刷新完成：成功 ${candidates.length} 个，跳过 0 个，异常 0 个`;
-      setBatchProgress({
-        action: "refresh",
-        running: false,
-        total: candidates.length,
-        completed: candidates.length,
-        phase: "done",
-        summaryText,
-      });
-      if (!isTrayWindow && pendingAutoClaimRef.current) {
-        pendingAutoClaimRef.current = false;
-        if (appSettingsRef.current.autoClaimDaily) {
-          window.setTimeout(() => {
-            void triggerAutoClaimAvailableRef.current();
-          }, 250);
+          if (i < candidates.length - 1) {
+            setBatchProgress({
+              action: "refresh",
+              running: true,
+              total: candidates.length,
+              completed: i + 1,
+              phase: "jitter_wait",
+              jitterSeconds: 0.4,
+            });
+            await sleep(350);
+          }
         }
+
+        const summaryText = `额度刷新完成：成功 ${candidates.length} 个，跳过 0 个，异常 0 个`;
+        setBatchProgress({
+          action: "refresh",
+          running: false,
+          total: candidates.length,
+          completed: candidates.length,
+          phase: "done",
+          summaryText,
+        });
+        if (!isTrayWindow && pendingAutoClaimRef.current) {
+          pendingAutoClaimRef.current = false;
+          if (appSettingsRef.current.autoClaimDaily) {
+            window.setTimeout(() => {
+              void triggerAutoClaimAvailableRef.current();
+            }, 250);
+          }
+        }
+        return true;
+      } finally {
+        batchLaunchLockRef.current = false;
       }
-      return true;
     },
     [accounts, adapters, appendLog, batchProgress?.running, isTauriRuntime, isTrayWindow, showToast]
   );
 
   const claimDailyBatch = useCallback(
     async (targetIds?: string[], toolId?: ToolId, includeUnknown?: boolean) => {
-      if (batchProgress?.running) {
+      if (batchProgress?.running || batchLaunchLockRef.current) {
         showToast("当前已有批量任务正在执行，请稍候", "warning");
         return;
       }
@@ -939,18 +1028,32 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (isTauriRuntime) {
+        batchLaunchLockRef.current = true;
+        setBatchProgress({
+          action: "claim",
+          running: true,
+          total: candidates.length,
+          completed: 0,
+          currentLabel: candidates[0].label,
+          phase: "checking",
+        });
         try {
           await invoke("claim_daily_batch", {
             accountIds: candidates.map((c) => c.id),
           });
         } catch (err) {
+          setBatchProgress(null);
           showToast(`启动领取队列失败：${String(err)}`, "error");
+        } finally {
+          batchLaunchLockRef.current = false;
         }
         return;
       }
 
       let claimedCount = 0;
       let skippedCount = 0;
+      batchLaunchLockRef.current = true;
+      try {
 
       setBatchProgress({
         action: "claim",
@@ -1054,16 +1157,26 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         phase: "done",
         summaryText,
       });
+      } finally {
+        batchLaunchLockRef.current = false;
+      }
     },
     [accounts, adapters, appendLog, batchProgress?.running, isTauriRuntime, jitterRangeMs, showToast]
   );
 
   const requestColdSwitch = useCallback(
     (account: AccountSummary) => {
+      if (coldSwitchDoneTimerRef.current !== null) {
+        window.clearTimeout(coldSwitchDoneTimerRef.current);
+        coldSwitchDoneTimerRef.current = null;
+      }
+      coldSwitchSubmittingRef.current = false;
+      const seq = ++coldSwitchDetectSeqRef.current;
       setSwitchDialog({ account, phase: "confirm", isClientRunning: true });
       if (isTauriRuntime) {
         void invoke<ClientHostStatus>("detect_client_status", { toolId: account.toolId })
           .then((status) => {
+            if (coldSwitchDetectSeqRef.current !== seq) return;
             setSwitchDialog((prev) =>
               prev.account && prev.account.id === account.id
                 ? { ...prev, isClientRunning: status.isRunning }
@@ -1077,12 +1190,19 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
   );
 
   const cancelColdSwitch = useCallback(() => {
+    if (coldSwitchSubmittingRef.current) return;
+    coldSwitchDetectSeqRef.current += 1;
+    if (coldSwitchDoneTimerRef.current !== null) {
+      window.clearTimeout(coldSwitchDoneTimerRef.current);
+      coldSwitchDoneTimerRef.current = null;
+    }
     setSwitchDialog({ account: null, phase: "confirm" });
   }, []);
 
   const confirmColdSwitch = useCallback(async () => {
     const target = switchDialog.account;
-    if (!target) return;
+    if (!target || coldSwitchSubmittingRef.current) return;
+    coldSwitchSubmittingRef.current = true;
 
     if (isTauriRuntime) {
       setSwitchDialog({
@@ -1098,11 +1218,17 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         await syncFromBackend();
         void refreshClientStatuses([target.toolId]);
         setSwitchDialog({ account: target, phase: "done" });
-        setTimeout(() => {
+        if (coldSwitchDoneTimerRef.current !== null) {
+          window.clearTimeout(coldSwitchDoneTimerRef.current);
+        }
+        coldSwitchDoneTimerRef.current = window.setTimeout(() => {
+          coldSwitchDoneTimerRef.current = null;
+          coldSwitchSubmittingRef.current = false;
           setSwitchDialog({ account: null, phase: "confirm" });
           showToast(`本机客户端已切换至 ${target.label}`, "success");
         }, 650);
       } catch (err) {
+        coldSwitchSubmittingRef.current = false;
         void refreshClientStatuses([target.toolId]);
         setSwitchDialog({ account: null, phase: "confirm" });
         showToast(`切换失败：${String(err)}`, "error");
@@ -1110,32 +1236,43 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    setSwitchDialog({ account: target, phase: "closing" });
-    await sleep(600);
-    setSwitchDialog({ account: target, phase: "writing" });
-    await sleep(550);
-    setSwitchDialog({ account: target, phase: "launching" });
-    await sleep(600);
+    try {
+      setSwitchDialog({ account: target, phase: "closing" });
+      await sleep(600);
+      setSwitchDialog({ account: target, phase: "writing" });
+      await sleep(550);
+      setSwitchDialog({ account: target, phase: "launching" });
+      await sleep(600);
 
-    setAccounts((prev) =>
-      prev.map((acc) =>
-        acc.toolId === target.toolId
-          ? { ...acc, isActiveOnClient: acc.id === target.id }
-          : acc
-      )
-    );
-    appendLog({
-      accountId: target.id,
-      toolId: target.toolId,
-      actionType: "switch",
-      resultStatus: "success",
-      messageSanitized: `已将本机客户端切换至 ${target.label} (${target.uidMasked}) 并重新拉起`,
-    });
-    setSwitchDialog({ account: target, phase: "done" });
-    setTimeout(() => {
+      setAccounts((prev) =>
+        prev.map((acc) =>
+          acc.toolId === target.toolId
+            ? { ...acc, isActiveOnClient: acc.id === target.id }
+            : acc
+        )
+      );
+      appendLog({
+        accountId: target.id,
+        toolId: target.toolId,
+        actionType: "switch",
+        resultStatus: "success",
+        messageSanitized: `已将本机客户端切换至 ${target.label} (${target.uidMasked}) 并重新拉起`,
+      });
+      setSwitchDialog({ account: target, phase: "done" });
+      if (coldSwitchDoneTimerRef.current !== null) {
+        window.clearTimeout(coldSwitchDoneTimerRef.current);
+      }
+      coldSwitchDoneTimerRef.current = window.setTimeout(() => {
+        coldSwitchDoneTimerRef.current = null;
+        coldSwitchSubmittingRef.current = false;
+        setSwitchDialog({ account: null, phase: "confirm" });
+        showToast(`本机客户端已切换至 ${target.label}`, "success");
+      }, 650);
+    } catch (err) {
+      coldSwitchSubmittingRef.current = false;
       setSwitchDialog({ account: null, phase: "confirm" });
-      showToast(`本机客户端已切换至 ${target.label}`, "success");
-    }, 650);
+      showToast(`切换失败：${String(err)}`, "error");
+    }
   }, [
     appendLog,
     isTauriRuntime,
@@ -1263,13 +1400,17 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         hasLocalSnapshot: method === "local_import" || toolId !== "qoder_cn",
         hasApiToken: method !== "local_import" || toolId !== "qoder_cn",
         latestQuota: {
-          planName: "Free",
+          planName: toolId === "minimax_code_cn" ? "Coding Plan" : "Free",
           claimStatus: supportsClaim ? "available" : "unsupported",
           fetchedAt: now,
           buckets: [
             {
               key: "default",
-              label: supportsClaim ? "可用额度" : "快速请求额度",
+              label: supportsClaim
+                ? "可用额度"
+                : toolId === "minimax_code_cn"
+                  ? "本周期 Coding 请求"
+                  : "快速请求额度",
               used: 0,
               total: 500,
               remaining: 500,
@@ -1521,7 +1662,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
           return count;
         } catch (err) {
           showToast(`归档日志失败：${String(err)}`, "error");
-          return 0;
+          return null;
         }
       }
 
@@ -1564,7 +1705,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
           return count;
         } catch (err) {
           showToast(`恢复日志失败：${String(err)}`, "error");
-          return 0;
+          return null;
         }
       }
 
@@ -1605,7 +1746,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
           return count;
         } catch (err) {
           showToast(`删除日志失败：${String(err)}`, "error");
-          return 0;
+          return null;
         }
       }
 
@@ -1769,26 +1910,69 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearTimeout(timer);
   }, [isInitializing, isTrayWindow]);
 
+  const checkAppUpdate = useCallback(
+    async (options?: { force?: boolean; silent?: boolean }): Promise<AppUpdateInfo | null> => {
+      if (!isTauriRuntime) return null;
+      const force = Boolean(options?.force);
+      const silent = Boolean(options?.silent);
+      if (
+        !force &&
+        updateInfoRef.current &&
+        Date.now() - lastUpdateCheckAtRef.current < 10 * 60_000
+      ) {
+        return updateInfoRef.current;
+      }
+      if (updateCheckInFlightRef.current) {
+        return updateCheckInFlightRef.current;
+      }
+
+      setUpdateChecking(true);
+      if (!silent) {
+        setUpdateError(null);
+      }
+
+      const promise = invoke<AppUpdateInfo>("check_app_update")
+        .then((info) => {
+          updateInfoRef.current = info;
+          lastUpdateCheckAtRef.current = Date.now();
+          setUpdateInfo(info);
+          setUpdateError(null);
+          return info;
+        })
+        .catch((err) => {
+          if (!silent) {
+            setUpdateError(String(err));
+          }
+          return null;
+        })
+        .finally(() => {
+          updateCheckInFlightRef.current = null;
+          setUpdateChecking(false);
+        });
+
+      updateCheckInFlightRef.current = promise;
+      return promise;
+    },
+    [isTauriRuntime]
+  );
+
   // 启动后静默检查一次 GitHub Releases；失败不打扰用户
   useEffect(() => {
     if (!isTauriRuntime || isTrayWindow || isInitializing || updateCheckDoneRef.current) return;
-    updateCheckDoneRef.current = true;
     const timer = window.setTimeout(() => {
-      void invoke<AppUpdateInfo>("check_app_update")
-        .then((info) => {
-          if (info.updateAvailable) {
-            showToast(
-              `发现新版本 v${info.latestVersion}，可在「设置 → 软件更新」查看`,
-              "info"
-            );
-          }
-        })
-        .catch(() => {
-          // 网络不可用或 GitHub 限流时静默跳过
-        });
+      if (updateCheckDoneRef.current) return;
+      updateCheckDoneRef.current = true;
+      void checkAppUpdate({ silent: true }).then((info) => {
+        if (info?.updateAvailable) {
+          showToast(
+            `发现新版本 v${info.latestVersion}，可在「设置 → 软件更新」查看`,
+            "info"
+          );
+        }
+      });
     }, 4000);
     return () => window.clearTimeout(timer);
-  }, [isInitializing, isTauriRuntime, isTrayWindow, showToast]);
+  }, [checkAppUpdate, isInitializing, isTauriRuntime, isTrayWindow, showToast]);
 
   useEffect(() => {
     if (isTrayWindow || isInitializing) return;
@@ -1866,6 +2050,11 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       dismissBatchProgress,
       quitApp,
       cstDayKey,
+      updateInfo,
+      updateChecking,
+      updateError,
+      checkAppUpdate,
+      resetSettingsDrafts,
     }),
     [
       isTauriRuntime,
@@ -1917,6 +2106,11 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       dismissBatchProgress,
       quitApp,
       cstDayKey,
+      updateInfo,
+      updateChecking,
+      updateError,
+      checkAppUpdate,
+      resetSettingsDrafts,
     ]
   );
 

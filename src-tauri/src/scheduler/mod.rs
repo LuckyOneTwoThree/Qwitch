@@ -89,6 +89,20 @@ impl AntiRiskScheduler {
             return Ok(());
         }
 
+        let _ = app.emit(
+            "qwitch://batch-progress",
+            BatchProgressEvent {
+                action: "claim".into(),
+                running: true,
+                total,
+                completed: 0,
+                current_label: None,
+                phase: "checking".into(),
+                jitter_seconds: None,
+                summary_text: Some("正在初始化批量队列…".into()),
+            },
+        );
+
         let mut claimed_count: usize = 0;
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
@@ -171,7 +185,21 @@ impl AntiRiskScheduler {
             // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），避免过期后整批 401
             let cred = match adapter.refresh_credential(&cred).await {
                 Ok(Some(updated)) => {
-                    let _ = db.bind_account_credential(master_key, &summary.id, None, &updated);
+                    if let Err(e) =
+                        db.bind_account_credential(master_key, &summary.id, None, &updated)
+                    {
+                        let _ = db.append_action_log(
+                            Some(&summary.id),
+                            &summary.tool_id,
+                            "claim",
+                            "failed",
+                            Some(&UnifiedErrorCode::InternalError),
+                            &format!(
+                                "{} 刷新后的凭据落盘失败（后续操作仍将继续）：{e}",
+                                summary.label
+                            ),
+                        );
+                    }
                     updated
                 }
                 Ok(None) => cred,
@@ -502,6 +530,20 @@ impl AntiRiskScheduler {
             return Ok(());
         }
 
+        let _ = app.emit(
+            "qwitch://batch-progress",
+            BatchProgressEvent {
+                action: "refresh".into(),
+                running: true,
+                total,
+                completed: 0,
+                current_label: None,
+                phase: "checking".into(),
+                jitter_seconds: None,
+                summary_text: Some("正在初始化批量队列…".into()),
+            },
+        );
+
         let mut refreshed_count: usize = 0;
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
@@ -564,7 +606,21 @@ impl AntiRiskScheduler {
             // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken）
             let cred = match adapter.refresh_credential(&cred).await {
                 Ok(Some(updated)) => {
-                    let _ = db.bind_account_credential(master_key, &summary.id, None, &updated);
+                    if let Err(e) =
+                        db.bind_account_credential(master_key, &summary.id, None, &updated)
+                    {
+                        let _ = db.append_action_log(
+                            Some(&summary.id),
+                            &summary.tool_id,
+                            "query",
+                            "failed",
+                            Some(&UnifiedErrorCode::InternalError),
+                            &format!(
+                                "{} 刷新后的凭据落盘失败（后续操作仍将继续）：{e}",
+                                summary.label
+                            ),
+                        );
+                    }
                     updated
                 }
                 Ok(None) => cred,

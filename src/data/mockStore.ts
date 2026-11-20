@@ -60,6 +60,19 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
       supportsMultiInstance: false,
     },
   },
+  {
+    id: "minimax_code_cn",
+    name: "MiniMax",
+    version: "0.1.0",
+    isBuiltin: true,
+    capabilities: {
+      authMethods: ["local_import", "webview_oauth", "token_paste"],
+      supportsQuotaQuery: true,
+      supportsDailyClaim: false,
+      supportsClientSwitch: true,
+      supportsMultiInstance: false,
+    },
+  },
 ];
 
 export const INITIAL_ACCOUNTS: AccountSummary[] = [
@@ -271,9 +284,46 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     lastClaimedAt: cstTimestamp(0, 7, 30),
     updatedAt: cstTimestamp(0, 7, 30),
   },
+  {
+    id: "acc-minimax-1",
+    toolId: "minimax_code_cn",
+    label: "MiniMax · Coding 主号",
+    uidMasked: "mm_91c4****7e",
+    emailMasked: "co***@minimaxi.com",
+    status: "active",
+    isActiveOnClient: true,
+    hasLocalSnapshot: true,
+    hasApiToken: true,
+    latestQuota: {
+      planName: "Coding Plan",
+      claimStatus: "unsupported",
+      fetchedAt: cstTimestamp(0, 10, 5),
+      buckets: [
+        {
+          key: "coding_requests",
+          label: "本周期 Coding 请求",
+          used: 145,
+          total: 1000,
+          remaining: 855,
+          unit: "次",
+          resetAt: nextMonthResetCst(),
+        },
+      ],
+    },
+    updatedAt: cstTimestamp(0, 10, 5),
+  },
 ];
 
 export const INITIAL_LOGS: ActionLogItem[] = [
+  {
+    id: 0,
+    accountId: "acc-minimax-1",
+    toolId: "minimax_code_cn",
+    actionType: "query",
+    resultStatus: "success",
+    messageSanitized: "MiniMax · Coding 主号 (mm_91c4****7e) 已刷新本周期 Coding 配额",
+    createdAt: cstTimestamp(0, 10, 5),
+  },
   {
     id: 1,
     accountId: "acc-wb-2",

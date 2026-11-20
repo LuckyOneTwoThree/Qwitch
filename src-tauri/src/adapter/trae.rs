@@ -249,11 +249,16 @@ impl TraeAdapter {
         None
     }
 
+    /// 从指定 `User/globalStorage` 目录解析设备 ID：优先解密 `aha/TinyStorage`，回退读取 `storage.json`。
+    pub(crate) fn read_device_id_from_config_dir(config_dir: &Path) -> Option<String> {
+        Self::device_id_from_aha(config_dir)
+            .or_else(|| Self::device_id_from_storage(&config_dir.join(STORAGE_JSON)))
+    }
+
     fn resolve_device_headers(&self) -> Option<TraeDeviceHeaders> {
         let host = self.host.as_ref()?;
         let config_dir = host.client_config_dir(self.tool_id()).ok()?;
-        let device_id = Self::device_id_from_aha(&config_dir)
-            .or_else(|| Self::device_id_from_storage(&config_dir.join(STORAGE_JSON)))?;
+        let device_id = Self::read_device_id_from_config_dir(&config_dir)?;
         Some(TraeDeviceHeaders {
             device_id,
             device_brand: Self::detect_device_brand(),
@@ -472,10 +477,13 @@ impl TraeAdapter {
             }
         }
 
-        if auth_entries.is_empty() {
+        let has_login_entry = auth_entries
+            .keys()
+            .any(|k| !k.starts_with(DEVICE_CRED_PREFIX) && k.as_str() != USERTAG_KEY);
+        if auth_entries.is_empty() || !has_login_entry {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::ClientNotFound,
-                message: "Trae storage.json 中未找到 iCubeAuthInfo 登录态，请先在客户端登录".into(),
+                message: "Trae 客户端当前未登录（未找到有效账号凭证，请先在客户端登录）".into(),
             });
         }
 
@@ -555,6 +563,7 @@ impl TraeAdapter {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .ok()?;
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(2000));
         let mut stmt = conn
             .prepare("SELECT key, value FROM ItemTable WHERE key LIKE 'iCubeAuthInfo://%'")
             .ok()?;
@@ -1143,6 +1152,21 @@ impl TraeAdapter {
 impl ToolAdapter for TraeAdapter {
     fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
+        let config_dir = host.client_config_dir(self.tool_id()).ok()?;
+        let raw = std::fs::read(config_dir.join(STORAGE_JSON)).ok()?;
+        let storage_val: Value = serde_json::from_slice(&raw).ok()?;
+        let auth_entries = Self::parse_auth_entries_from_storage(&storage_val).ok()?;
+        let (uid, _, _, _) =
+            Self::extract_identity_from_auth_entries(self.tool_id(), &auth_entries);
+        let trimmed = uid.trim();
+        if trimmed.is_empty() || CredentialEnvelope::is_fallback_uid(trimmed) {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 
     fn daily_claim_device_key(&self) -> Option<String> {
@@ -1797,21 +1821,7 @@ impl ToolAdapter for TraeAdapter {
                 message: e.to_string(),
             })?;
 
-        let tmp_path = config_dir.join(".storage.json.tmp");
-        if let Err(e) = std::fs::write(&tmp_path, serialized) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("写入临时 storage.json 失败: {e}"),
-            });
-        }
-        if let Err(e) = std::fs::rename(&tmp_path, &storage_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("替换 Trae storage.json 失败: {e}"),
-            });
-        }
+        crate::adapter::write_private_file_atomic(&storage_path, &serialized)?;
 
         // 以最终 storage.json 中的账号态为准覆盖 vscdb，同时保留快照里的历史非设备条目
         let mut vscdb_entries = snapshot_vscdb.unwrap_or_default();
@@ -2317,5 +2327,20 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_auth_entries_rejects_logged_out_device_only_storage() {
+        let logged_out = serde_json::json!({
+            "iCubeAuthInfo://icube-dc:93900972767536": "local-dc",
+            "iCubeAuthInfo://usertag": "local-usertag"
+        });
+        assert!(matches!(
+            TraeAdapter::parse_auth_entries_from_storage(&logged_out),
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::ClientNotFound,
+                ..
+            })
+        ));
     }
 }

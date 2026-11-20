@@ -57,29 +57,43 @@ mask_token() { local t="$1"; local n=${#t}; if [ "$n" -le 12 ]; then printf '***
 do_request() {
   local path="$1" token="$2" device_id="$3"; shift 3
   local extra=("$@")
+  local cfg_file="$PROBE_DIR/.curlcfg.$$"
+  umask 077
+  {
+    printf 'header = "Accept: application/json"\n'
+    printf 'header = "Content-Type: application/json"\n'
+    printf 'header = "Authorization: Cloud-IDE-JWT %s"\n' "$token"
+    printf 'header = "X-User-Region: CN"\n'
+    printf 'header = "x-device-type: %s"\n' "$DEVICE_TYPE"
+    printf 'header = "x-app-version: %s"\n' "$APPVER"
+    if [ -n "$DEVICE_BRAND" ]; then
+      printf 'header = "x-device-brand: %s"\n' "$DEVICE_BRAND"
+    fi
+    if [ -n "$OS_VERSION" ]; then
+      printf 'header = "x-os-version: %s"\n' "$OS_VERSION"
+    fi
+    # device_id 为空 => 故意不带该头，验证 9004
+    if [ -n "$device_id" ]; then
+      printf 'header = "x-device-id: %s"\n' "$device_id"
+    fi
+  } > "$cfg_file"
+
   local args=(
     -s -m 20 -o "$PROBE_DIR/.resp.$$" -w '%{http_code}'
     -X POST "$API$path"
-    -H "Accept: application/json"
-    -H "Content-Type: application/json"
-    -H "Authorization: Cloud-IDE-JWT $token"
-    -H "X-User-Region: CN"
-    -H "x-device-type: $DEVICE_TYPE"
-    -H "x-app-version: $APPVER"
+    -K "$cfg_file"
+    -d '{"req_source":1}'
   )
-  [ -n "$DEVICE_BRAND" ] && args+=(-H "x-device-brand: $DEVICE_BRAND")
-  [ -n "$OS_VERSION" ] && args+=(-H "x-os-version: $OS_VERSION")
-  # device_id 为空 => 故意不带该头，验证 9004
-  if [ -n "$device_id" ]; then args+=(-H "x-device-id: $device_id"); fi
-  args+=(-d '{"req_source":1}')
   if [ "${#extra[@]}" -gt 0 ]; then args+=("${extra[@]}"); fi
 
   if [ "${DRY_RUN:-0}" = "1" ]; then
+    rm -f "$cfg_file"
     # 打印将发送的命令（device 明示，token 脱敏）
-    echo "+ curl ${args[*]//$token/$(mask_token "$token")}" >&2
+    echo "+ curl -X POST $API$path (x-device-id=${device_id:-<none>}, token=$(mask_token "$token"))" >&2
     RESP_CODE="dry"; RESP_CODE_BIZ="dry"; RESP_JSON='{"dry_run":true}'; return 0
   fi
   RESP_CODE="$(curl "${args[@]}")" || RESP_CODE="000"
+  rm -f "$cfg_file"
   RESP_JSON="$(cat "$PROBE_DIR/.resp.$$" 2>/dev/null || echo '')"
   rm -f "$PROBE_DIR/.resp.$$"
   RESP_CODE_BIZ="$(printf '%s' "$RESP_JSON" | jq -r '.code // empty' 2>/dev/null || echo '')"
@@ -132,13 +146,13 @@ cmd_claim() {
     i=$((i+1))
     echo "---- [$i] $label  device=${devid:-<缺省>} ----"
     probe_one "claim:$label/dev" "$claim_path" "$token" "$devid"
+    case "$RESP_CODE" in 403|429) echo "!! 命中 $RESP_CODE，按防风控立即中止整批" >&2; break;; esac
     # 跨设备验证：同一 token 换 alt（若有）再打一次，预期命中 9095 或风控
     if [ -n "$alt" ] && [ "$alt" != "$devid" ]; then
       sleep 2
       probe_one "claim:$label/alt" "$claim_path" "$token" "$alt"
+      case "$RESP_CODE" in 403|429) echo "!! 命中 $RESP_CODE，按防风控立即中止整批" >&2; break;; esac
     fi
-    # 风控中止
-    case "$RESP_CODE" in 403|429) echo "!! 命中 $RESP_CODE，按防风控立即中止整批" >&2; break;; esac
     if [ "$RESP_CODE_BIZ" = "9095" ]; then echo "   (9095: 该设备今日已签 —— 若这是第二个账号，说明设备日限生效)"; fi
     # 串行抖动 1.5~3.5s（与产品一致）
     local jit=$((1500 + RANDOM % 2000))

@@ -239,10 +239,12 @@ impl WorkBuddyAdapter {
             || parsed.password().is_some()
             || parsed.query().is_some()
             || parsed.fragment().is_some()
+            || parsed.port().is_some_and(|p| p != 443)
+            || !matches!(parsed.path(), "" | "/")
         {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "WorkBuddy 端点必须为无查询参数的 HTTPS 地址".into(),
+                message: "WorkBuddy 端点必须为无路径与查询参数的标准 HTTPS 地址".into(),
             });
         }
         let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
@@ -250,7 +252,7 @@ impl WorkBuddyAdapter {
             || host == "www.workbuddy.cn"
             || host == "workbuddy.cn"
             || host.ends_with(".workbuddy.cn")
-            || host.ends_with(".tencent.com");
+            || host.ends_with(".copilot.tencent.com");
         if !allowed {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
@@ -469,7 +471,7 @@ impl WorkBuddyAdapter {
             .body("{}")
             .send()
             .await
-            .map_err(|e| format!("请求 WorkBuddy 授权状态失败: {e}"))?;
+            .map_err(|e| format!("请求 WorkBuddy 授权状态失败: {}", e.without_url()))?;
 
         if !resp.status().is_success() {
             return Err(format!(
@@ -519,9 +521,16 @@ impl WorkBuddyAdapter {
             .header("X-No-Department-Info", "true")
             .send()
             .await
-            .map_err(|e| format!("轮询 WorkBuddy Token 失败: {e}"))?;
+            .map_err(|e| format!("轮询 WorkBuddy Token 失败: {}", e.without_url()))?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if !status.is_success() {
+            if matches!(status.as_u16(), 401 | 403 | 429) || status.is_server_error() {
+                return Err(format!(
+                    "轮询 WorkBuddy Token 异常：HTTP {}",
+                    status.as_u16()
+                ));
+            }
             return Ok(None);
         }
 
@@ -1029,6 +1038,20 @@ fn dig_data(val: &Value) -> &Value {
 impl ToolAdapter for WorkBuddyAdapter {
     fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
+        let auth_dir = host.client_config_dir("workbuddy").ok()?;
+        let bytes = std::fs::read(auth_dir.join(AUTH_FILENAME)).ok()?;
+        let sess = Self::parse_session_json(&bytes).ok()?;
+        let uid = sess
+            .pointer("/account/uid")
+            .and_then(crate::adapter::common::json_uid_to_string)?;
+        if CredentialEnvelope::is_fallback_uid(&uid) {
+            None
+        } else {
+            Some(uid)
+        }
     }
 
     async fn import_from_local(
@@ -1654,6 +1677,14 @@ impl ToolAdapter for WorkBuddyAdapter {
                 if let Some(name) = cred.display_name.as_ref().filter(|s| !s.trim().is_empty()) {
                     account_map.insert("nickName".to_string(), Value::String(name.clone()));
                 }
+                let enterprise_id = extra
+                    .get("enterprise_id")
+                    .or_else(|| extra.get("enterpriseId"))
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty());
+                if let Some(eid) = enterprise_id {
+                    account_map.insert("enterpriseId".to_string(), Value::String(eid.to_string()));
+                }
                 let account_val = Value::Object(account_map);
 
                 let mut auth_map = serde_json::Map::new();
@@ -1662,6 +1693,16 @@ impl ToolAdapter for WorkBuddyAdapter {
                     Value::String(access_token.clone()),
                 );
                 auth_map.insert("endpoint".to_string(), Value::String(endpoint));
+                if let Some(eid) = enterprise_id {
+                    auth_map.insert("enterpriseId".to_string(), Value::String(eid.to_string()));
+                }
+                if let Some(domain) = extra
+                    .get("domain")
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    auth_map.insert("domain".to_string(), Value::String(domain.to_string()));
+                }
                 if let Some(rt) = refresh_token.as_ref().filter(|s| !s.trim().is_empty()) {
                     auth_map.insert("refreshToken".to_string(), Value::String(rt.clone()));
                 }
@@ -1686,15 +1727,7 @@ impl ToolAdapter for WorkBuddyAdapter {
             }
         };
 
-        let tmp = auth_dir.join(".workbuddy-desktop.info.tmp");
-        std::fs::write(&tmp, &bytes).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("写入临时凭据失败: {e}"),
-        })?;
-        std::fs::rename(&tmp, &target).map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("替换 WorkBuddy 会话文件失败: {e}"),
-        })?;
+        crate::adapter::write_private_file_atomic(&target, &bytes)?;
 
         Ok(())
     }
@@ -1729,6 +1762,9 @@ mod tests {
         );
         assert!(WorkBuddyAdapter::validate_endpoint("http://copilot.tencent.com").is_err());
         assert!(WorkBuddyAdapter::validate_endpoint("https://evil.example.com").is_err());
+        assert!(WorkBuddyAdapter::validate_endpoint("https://evil.tencent.com").is_err());
+        assert!(WorkBuddyAdapter::validate_endpoint("https://copilot.tencent.com:8443").is_err());
+        assert!(WorkBuddyAdapter::validate_endpoint("https://copilot.tencent.com/extra").is_err());
         assert!(WorkBuddyAdapter::validate_endpoint("https://copilot.tencent.com?x=1").is_err());
     }
 

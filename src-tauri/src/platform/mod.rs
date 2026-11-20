@@ -217,10 +217,39 @@ impl PlatformHost for ScopedPlatformHost {
     }
 }
 
+static CUSTOM_PATHS_CACHE: std::sync::OnceLock<
+    std::sync::RwLock<Option<std::collections::HashMap<String, String>>>,
+> = std::sync::OnceLock::new();
+
+static LEGACY_MIGRATED: std::sync::Once = std::sync::Once::new();
+
+fn custom_paths_cache(
+) -> &'static std::sync::RwLock<Option<std::collections::HashMap<String, String>>> {
+    CUSTOM_PATHS_CACHE.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// 同步内存中的自定义客户端路径缓存，避免每次进程检测都重新打开 SQLite 连接。
+pub fn sync_custom_client_paths(paths: &std::collections::HashMap<String, String>) {
+    if let Ok(mut guard) = custom_paths_cache().write() {
+        *guard = Some(paths.clone());
+    }
+}
+
 pub struct NativePlatformHost;
 
 impl NativePlatformHost {
     fn read_custom_client_path(&self, tool_id: &str) -> Option<PathBuf> {
+        if let Ok(guard) = custom_paths_cache().read() {
+            if let Some(map) = guard.as_ref() {
+                let raw = map
+                    .get(tool_id)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())?;
+                let path = PathBuf::from(raw);
+                return path.exists().then_some(path);
+            }
+        }
+
         let db_path = self.qwitch_data_dir().ok()?.join("qwitch.db");
         if !db_path.is_file() {
             return None;
@@ -507,6 +536,30 @@ impl NativePlatformHost {
         )
     }
 
+    fn parse_hex_master_key(hex_str: &str) -> Option<[u8; 32]> {
+        let bytes = hex::decode(hex_str.trim()).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Some(key)
+    }
+
+    fn should_probe_legacy_keyring(
+        keyring_hex: Option<&str>,
+        persistent: bool,
+        expectation: &KeyExpectation,
+    ) -> bool {
+        if !persistent {
+            return false;
+        }
+        match keyring_hex.and_then(Self::parse_hex_master_key) {
+            Some(key) => !Self::key_matches_expectation(&key, expectation),
+            None => true,
+        }
+    }
+
     fn resolve_master_key_logic(
         keyring_hex: Option<&str>,
         legacy_hex: Option<&str>,
@@ -514,28 +567,18 @@ impl NativePlatformHost {
         keyring_persistent: bool,
         expectation: &KeyExpectation,
     ) -> Result<([u8; 32], KeySource), HostError> {
-        let read_hex_key = |hex_str: &str| -> Option<[u8; 32]> {
-            let bytes = hex::decode(hex_str.trim()).ok()?;
-            if bytes.len() != 32 {
-                return None;
-            }
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            Some(key)
-        };
-
         // 收集全部候选（仅当钥匙串真正跨进程持久化时才信任其中的密钥），
         // 逐个用指纹/密文样本验证后选中匹配者；验证通过前不做任何删除/迁移
         let mut candidates: Vec<([u8; 32], KeySource)> = Vec::new();
         if keyring_persistent {
-            if let Some(key) = keyring_hex.and_then(read_hex_key) {
+            if let Some(key) = keyring_hex.and_then(Self::parse_hex_master_key) {
                 candidates.push((key, KeySource::Keyring));
             }
         }
-        if let Some(key) = legacy_hex.and_then(read_hex_key) {
+        if let Some(key) = legacy_hex.and_then(Self::parse_hex_master_key) {
             candidates.push((key, KeySource::LegacyKeyring));
         }
-        if let Some(key) = file_hex.and_then(read_hex_key) {
+        if let Some(key) = file_hex.and_then(Self::parse_hex_master_key) {
             candidates.push((key, KeySource::File));
         }
 
@@ -651,14 +694,15 @@ impl NativePlatformHost {
             None
         };
         let keyring_hex = entry.as_ref().and_then(|kr| kr.get_password().ok());
-        // 仅当当前钥匙串条目缺失时才探测历史条目，避免每次启动多一次钥匙串访问/授权弹窗
-        let legacy_hex = if persistent && keyring_hex.is_none() {
-            Entry::new(LEGACY_KEYRING_SERVICE, KEYRING_MASTER_USER)
-                .ok()
-                .and_then(|kr| kr.get_password().ok())
-        } else {
-            None
-        };
+        // 当前钥匙串条目缺失、格式非法或无法通过指纹/样本验证时，探测历史条目（避免正确钥正常启动时多一次钥匙串访问）
+        let legacy_hex =
+            if Self::should_probe_legacy_keyring(keyring_hex.as_deref(), persistent, expectation) {
+                Entry::new(LEGACY_KEYRING_SERVICE, KEYRING_MASTER_USER)
+                    .ok()
+                    .and_then(|kr| kr.get_password().ok())
+            } else {
+                None
+            };
         let file_hex = std::fs::read_to_string(&key_file).ok();
 
         let (key, source) = Self::resolve_master_key_logic(
@@ -740,13 +784,17 @@ impl KeyExpectation {
 impl PlatformHost for NativePlatformHost {
     fn qwitch_data_dir(&self) -> Result<PathBuf, HostError> {
         let (dir, legacy_dir) = Self::resolve_data_dirs()?;
-        std::fs::create_dir_all(&dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        if !dir.exists() {
+            std::fs::create_dir_all(&dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
         }
-        Self::migrate_legacy_data_dir(&legacy_dir, &dir);
+        LEGACY_MIGRATED.call_once(|| {
+            Self::migrate_legacy_data_dir(&legacy_dir, &dir);
+        });
         Ok(dir)
     }
 
@@ -992,6 +1040,8 @@ impl PlatformHost for NativePlatformHost {
                 "无法关闭正在运行的 {tool_id} 客户端，请手动退出后重试"
             )));
         }
+        #[cfg(target_os = "macos")]
+        cleanup_bundle_leftovers(&primary_names, 2500).await;
 
         Ok(())
     }
@@ -1007,6 +1057,9 @@ impl PlatformHost for NativePlatformHost {
                 let mut cmd = Command::new("open");
                 cmd.env_remove("ELECTRON_RUN_AS_NODE");
                 cmd.env_remove("NODE_OPTIONS");
+                if !args.is_empty() {
+                    cmd.arg("-n");
+                }
                 cmd.arg("-a").arg(executable);
                 if !args.is_empty() {
                     cmd.arg("--args").args(args);
@@ -1673,6 +1726,39 @@ mod tests {
             "不匹配时不得删除任何候选密钥文件"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // --- 场景 8：新钥匙串存有错钥，但历史 Quiver 钥匙串存有正确钥 → 触发回退并选出历史钥 ---
+        let legacy_hex = hex::encode(correct_key);
+        let stale_hex = hex::encode(stale_key);
+        assert!(
+            !NativePlatformHost::should_probe_legacy_keyring(Some(&legacy_hex), true, &expectation),
+            "已匹配当前钥匙串条目时不应额外探测历史条目"
+        );
+        assert!(
+            NativePlatformHost::should_probe_legacy_keyring(Some(&stale_hex), true, &expectation),
+            "当前钥匙串条目不匹配时必须允许探测历史条目"
+        );
+        fake_store().lock().unwrap().clear();
+        let dir = temp_data_dir("legacy_fallback");
+        fake_store().lock().unwrap().insert(
+            format!("{KEYRING_SERVICE}:{KEYRING_MASTER_USER}"),
+            stale_hex.clone(),
+        );
+        fake_store().lock().unwrap().insert(
+            format!("{LEGACY_KEYRING_SERVICE}:{KEYRING_MASTER_USER}"),
+            legacy_hex.clone(),
+        );
+        std::fs::write(dir.join("qwitch.db"), b"placeholder").unwrap();
+        std::fs::write(
+            dir.join("key_id"),
+            crate::storage::crypto::key_fingerprint(&correct_key),
+        )
+        .unwrap();
+        let recovered =
+            NativePlatformHost::get_or_create_master_key_with_expectation(&dir, true, &expectation)
+                .expect("legacy keyring fallback should recover correct key");
+        assert_eq!(recovered, correct_key);
         let _ = std::fs::remove_dir_all(&dir);
 
         // 恢复 mock，避免影响后续可能使用 keyring 的测试

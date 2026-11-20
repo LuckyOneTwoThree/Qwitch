@@ -80,6 +80,7 @@ pub fn run() {
                 eprintln!("Qwitch 历史 PII 迁移失败（不影响启动）: {e}");
             }
             let startup_settings = commands::load_app_settings(&db);
+            platform::sync_custom_client_paths(&startup_settings.custom_client_paths);
             let _ = db.apply_log_retention(
                 startup_settings.log_archive_after_days,
                 startup_settings.log_max_active_count,
@@ -108,6 +109,8 @@ pub fn run() {
                 scheduler: Arc::new(AntiRiskScheduler::new()),
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
                 switching_in_progress: Arc::new(AtomicBool::new(false)),
+                last_reconcile_ms: Arc::new(AtomicU64::new(0)),
+                tray_blur_suppress_until_ms: Arc::new(AtomicU64::new(0)),
             };
             app.manage(state);
 
@@ -287,12 +290,19 @@ pub fn run() {
                 }
             }
             ("tray", WindowEvent::Focused(false)) => {
-                let switching = window
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let suppress_blur = window
                     .app_handle()
                     .try_state::<AppState>()
-                    .map(|s| s.switching_in_progress.load(Ordering::SeqCst))
+                    .map(|s| {
+                        s.switching_in_progress.load(Ordering::SeqCst)
+                            || now_ms < s.tray_blur_suppress_until_ms.load(Ordering::SeqCst)
+                    })
                     .unwrap_or(false);
-                if !switching {
+                if !suppress_blur {
                     let _ = window.hide();
                 }
             }
@@ -352,12 +362,17 @@ pub fn run() {
         }),
         Err(e) => {
             // GUI 下 panic 用户看不到原因：用原生错误弹窗展示恢复指引
+            #[cfg(target_os = "macos")]
+            let hint = format!(
+                "{e}\n\n若你在覆盖升级 Qwitch.app 后看到过 macOS 钥匙串授权弹窗（例如 dev.qwitch.app），请重新打开 Qwitch 并点击「始终允许」；若误点了拒绝，也可在系统「钥匙串访问」中授权 Qwitch 或恢复 master.key 备份。数据目录中的密钥文件与数据库均已被保留。"
+            );
+            #[cfg(not(target_os = "macos"))]
+            let hint = format!(
+                "{e}\n\n若为密钥相关错误，请恢复正确的系统钥匙串条目或 master.key 备份后重试；数据目录中的密钥文件与数据库均已被保留。"
+            );
             rfd::MessageDialog::new()
                 .set_title("Qwitch 启动失败")
-                .set_description(format!(
-                    "{e}\n\n若为密钥相关错误，请恢复正确的系统钥匙串条目或 master.key 备份后重试；\
-                     数据目录中的密钥文件与数据库均已被保留。"
-                ))
+                .set_description(hint)
                 .set_level(rfd::MessageLevel::Error)
                 .show();
             std::process::exit(1);

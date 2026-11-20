@@ -1,7 +1,7 @@
-import { useEffect, useId, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import { Layers } from "lucide-react";
-import { useQwitch } from "../context/QwitchContext";
 import { getToolBrandMeta as resolveToolBrandMeta } from "../domain/toolRegistry";
+import type { AdapterManifest } from "../types/qwitch";
 
 export { getToolBrandMeta, TOOL_BRAND_META, type ToolBrandMeta } from "../domain/toolRegistry";
 
@@ -12,18 +12,19 @@ const SIZE_CLASSES: Record<"xs" | "sm" | "md" | "lg", string> = {
   lg: "h-11 w-11 rounded-2xl",
 };
 
-export function ToolBrandIcon({
+export const ToolBrandIcon = React.memo(function ToolBrandIcon({
   toolId,
+  adapters,
   size = "md",
   className = "",
   decorative = true,
 }: {
   toolId: string;
+  adapters?: AdapterManifest[];
   size?: "xs" | "sm" | "md" | "lg";
   className?: string;
   decorative?: boolean;
 }) {
-  const { adapters } = useQwitch();
   const meta = resolveToolBrandMeta(toolId, adapters);
   const sizeClass = SIZE_CLASSES[size];
   const [iconFailed, setIconFailed] = useState(false);
@@ -61,7 +62,7 @@ export function ToolBrandIcon({
       />
     </div>
   );
-}
+});
 
 export function QwitchLogo({ size = "md" }: { size?: "sm" | "md" }) {
   // React useId 默认包含冒号（:r0:），作为 SVG url(#id) 引用时部分 WebKit 版本会解析失败

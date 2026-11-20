@@ -457,6 +457,42 @@ impl ToolAdapter for ExternalAdapter {
     }
 }
 
+/// 判断命令串是否「看起来是插件目录内的文件路径」而非裸命令名。
+///
+/// 裸命令名（`python3` / `node` / `ruby`）由 `PATH` 解析，按协议保留；
+/// 但带脚本扩展名的（`adapter.py` / `run.js`）显然指向目录内文件，
+/// 必须按路径校验，否则不存在的脚本名会被误当作 PATH 命令放行。
+fn looks_like_adapter_file(command: &str) -> bool {
+    const SCRIPT_EXTS: &[&str] = &[
+        "py", "js", "mjs", "cjs", "ts", "sh", "bash", "zsh", "rb", "pl", "php", "lua", "jar",
+        "exe", "bat", "cmd", "ps1",
+    ];
+    if command.contains('/') || command.contains('\\') || command.starts_with('.') {
+        return true;
+    }
+    match command.rsplit_once('.') {
+        Some((_, ext)) => SCRIPT_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => false,
+    }
+}
+
+/// 校验 manifest 声明的入口命令。
+///
+/// 安全目标：入口命令指向的**实际执行体**必须受 `adapter_content_hash` 约束，
+/// 否则「内容哈希固定」只保证清单目录未被改动，却拦不住把执行体指向目录外的
+/// 任意二进制（如 `/bin/sh`），使信任门禁形同虚设。
+///
+/// 规则：
+/// * 控制字符、父目录穿越 → 拒绝。
+/// * **绝对路径** → 仅当规范化后仍位于 `adapter_dir` 内才允许（历史实现无条件放行，
+///   可指向任意系统二进制，已收紧）。
+/// * **文件形态的相对路径**（含分隔符、以 `.` 开头、或带脚本扩展名）→ 必须存在，
+///   且规范化后仍位于 `adapter_dir` 内（历史实现「文件不存在也放行」为 fail-open，
+///   已改为 fail-closed）。
+/// * **裸命令名**（如 `python3`）→ 保留，这是 `docs/CORE_DESIGN.md` 3.1 公开的
+///   插件协议（`entry.command` 可为解释器名）。残余风险：解析依赖继承的 `PATH`，
+///   若用户 `PATH` 中存在同名恶意程序仍可能被选中；信任外部插件时应确认其入口
+///   为自带脚本，或改用插件目录内的相对路径。
 fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
@@ -469,20 +505,28 @@ fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
     {
         return false;
     }
-    if cmd_path.is_absolute() {
-        return true;
-    }
-    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.') {
+
+    // 执行体必须落在插件目录内且是普通文件
+    let within_adapter_dir = |candidate: &Path| -> bool {
         let Ok(canon_dir) = std::fs::canonicalize(adapter_dir) else {
             return false;
         };
-        let joined = adapter_dir.join(cmd_path);
-        if joined.exists() {
-            return std::fs::canonicalize(&joined)
-                .is_ok_and(|canon_cmd| canon_cmd.starts_with(&canon_dir));
-        }
-        return true;
+        let Ok(canon_cmd) = std::fs::canonicalize(candidate) else {
+            return false;
+        };
+        canon_cmd.starts_with(&canon_dir) && canon_cmd.is_file()
+    };
+
+    if cmd_path.is_absolute() {
+        return within_adapter_dir(cmd_path);
     }
+
+    if looks_like_adapter_file(trimmed) {
+        // 不存在即拒绝（fail-closed），不再放行
+        return within_adapter_dir(&adapter_dir.join(cmd_path));
+    }
+
+    // 裸命令名：按文档协议保留（解释器由 PATH 解析）
     true
 }
 
@@ -824,6 +868,55 @@ mod tests {
         std::fs::write(valid_dir.join("run.py"), b"print('v2')").unwrap();
         let hash2 = adapter_content_hash(&valid_dir).expect("hash2");
         assert_ne!(hash1, hash2);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn entry_command_rejects_absolute_outside_paths_and_missing_relative_paths() {
+        let root = std::env::temp_dir().join(format!("qwitch_entry_cmd_{}", Uuid::new_v4()));
+        let dir = root.join("adapters").join("plugin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run.py"), b"print(1)").unwrap();
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin").join("helper"), b"#!/bin/sh\n").unwrap();
+
+        // 绝对路径指向插件目录之外：必须拒绝（历史实现无条件放行）
+        assert!(!is_valid_entry_command(&dir, "/bin/sh"));
+        assert!(!is_valid_entry_command(&dir, "/bin/echo"));
+        assert!(!is_valid_entry_command(&dir, "/etc/passwd"));
+
+        // 绝对路径位于插件目录内：允许
+        let inside_abs = dir.join("run.py");
+        assert!(is_valid_entry_command(&dir, &inside_abs.to_string_lossy()));
+
+        // 相对路径存在且在目录内：允许
+        assert!(is_valid_entry_command(&dir, "run.py"));
+        assert!(is_valid_entry_command(&dir, "./run.py"));
+        assert!(is_valid_entry_command(&dir, "bin/helper"));
+
+        // 相对路径不存在：拒绝（历史实现 fail-open 放行）
+        assert!(!is_valid_entry_command(&dir, "missing.py"));
+        assert!(!is_valid_entry_command(&dir, "./missing.py"));
+        assert!(!is_valid_entry_command(&dir, "bin/missing"));
+
+        // 父目录穿越：拒绝
+        assert!(!is_valid_entry_command(&dir, "../escape.py"));
+        assert!(!is_valid_entry_command(&dir, "bin/../../escape.py"));
+
+        // 带脚本扩展名但不存在：同样拒绝（不得被当作 PATH 命令放行）
+        assert!(!is_valid_entry_command(&dir, "missing.sh"));
+        assert!(!is_valid_entry_command(&dir, "adapter.py"));
+
+        // 裸命令名（无扩展名）按协议视为解释器，由 PATH 解析
+        assert!(is_valid_entry_command(&dir, "python3"));
+        assert!(is_valid_entry_command(&dir, "node"));
+
+        // 空串与控制字符：拒绝
+        assert!(!is_valid_entry_command(&dir, ""));
+        assert!(!is_valid_entry_command(&dir, "   "));
+        assert!(!is_valid_entry_command(&dir, "run.py\0"));
+        assert!(!is_valid_entry_command(&dir, "run\n.py"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

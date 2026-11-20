@@ -323,6 +323,71 @@ async fn fetch_release_via_api(client: &reqwest::Client) -> Result<AppUpdateInfo
     )
 }
 
+/// 校验「即将安装的更新」确实是从当前版本升级，而非降级/跨版本替换。
+///
+/// 背景：`download_and_install_update` 的 `asset_url` / `checksums_url` 由前端传入，
+/// 而 `validate_official_repo_url` 只校验「属于本仓库」，因此任意历史 tag 的安装包
+/// 都能通过 URL 校验，且其 SHA256SUMS.txt 同样能通过校验和验证 —— 即存在降级安装
+/// （downgrade）面。此函数在真正执行安装前重新拉取 latest release 并要求：
+///   1. 目标资产名与 latest release 中该平台的资产名逐字一致；
+///   2. 目标资产 URL 与 latest release 中该资产的下载地址逐字一致；
+///   3. checksums URL（若提供）与 latest release 的 SHA256SUMS.txt 地址一致；
+///   4. latest 版本严格大于当前版本（禁止降级与同版本重装）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn validate_update_target(
+    latest: &AppUpdateInfo,
+    current_version: &str,
+    asset_name: &str,
+    asset_url: &str,
+    checksums_url: Option<&str>,
+) -> Result<(), String> {
+    let current = Version::parse(current_version).map_err(|e| format!("当前版本号无效：{e}"))?;
+    let latest_ver =
+        Version::parse(&latest.latest_version).map_err(|e| format!("最新版本号无效：{e}"))?;
+
+    if latest_ver <= current {
+        return Err(format!(
+            "已中止：目标版本 {} 不高于当前版本 {}（禁止降级或同版本重装）",
+            latest.latest_version, current_version
+        ));
+    }
+
+    let expected_name = latest.asset_name.as_deref().ok_or_else(|| {
+        format!(
+            "最新版本 {} 没有适用于本平台的安装包",
+            latest.latest_version
+        )
+    })?;
+    if expected_name != asset_name {
+        return Err(format!(
+            "已中止：目标安装包 {asset_name} 与最新版本资产 {expected_name} 不一致"
+        ));
+    }
+
+    let expected_url = latest
+        .asset_url
+        .as_deref()
+        .ok_or_else(|| "最新版本缺少安装包下载地址".to_string())?;
+    if expected_url != asset_url {
+        return Err("已中止：目标下载地址与最新版本资产地址不一致".into());
+    }
+
+    match (latest.checksums_url.as_deref(), checksums_url) {
+        (Some(expected), Some(given)) if expected != given => {
+            return Err("已中止：校验和文件地址与最新版本不一致".into());
+        }
+        (Some(_), None) => {
+            return Err("已中止：最新版本提供校验和文件，但请求未提供".into());
+        }
+        (None, Some(_)) => {
+            return Err("已中止：最新版本未提供校验和文件，但请求声明了该文件".into());
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 /// GitHub API 有匿名限流（共享出口 IP 很容易 403）。
 /// 备用方案走 releases/latest 的 302 跳转获取版本号，再按发布命名规则拼接资产地址。
 async fn fetch_release_via_redirect(client: &reqwest::Client) -> Result<AppUpdateInfo, String> {
@@ -461,6 +526,25 @@ pub async fn download_and_install_update(
 
         let client = build_download_client(300)?;
         let url = validate_official_repo_url(&asset_url)?;
+
+        // 安装前重新确认「目标确实是当前最新版本」：阻断降级安装与跨版本替换。
+        // 复用与 check_app_update 相同的取最新版本逻辑（API 优先，限流时降级跳转）。
+        let latest = match fetch_release_via_api(&client).await {
+            Ok(info) => info,
+            Err(api_err) => fetch_release_via_redirect(&client)
+                .await
+                .map_err(|redirect_err| {
+                    format!("无法确认最新版本，已中止自动安装：{api_err}；{redirect_err}")
+                })?,
+        };
+        validate_update_target(
+            &latest,
+            env!("CARGO_PKG_VERSION"),
+            &file_name,
+            &asset_url,
+            Some(&checksums_url),
+        )?;
+
         let response = client
             .get(url)
             .send()
@@ -607,6 +691,82 @@ zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz  Qwitch_0.2.1_b
         assert!(parse_checksum(&text, "Qwitch_0.2.1_short.dmg").is_none());
         assert!(parse_checksum(&text, "Qwitch_0.2.1_badhex.dmg").is_none());
         assert!(parse_checksum(&text, "Qwitch_0.2.0_x64.dmg").is_none());
+    }
+
+    fn sample_latest(version: &str) -> AppUpdateInfo {
+        AppUpdateInfo {
+            update_available: true,
+            current_version: "0.3.0".to_string(),
+            latest_version: version.to_string(),
+            release_url: "https://github.com/LuckyOneTwoThree/Qwitch/releases".to_string(),
+            release_notes: String::new(),
+            published_at: None,
+            asset_name: Some("Qwitch_0.4.0_x64-setup.exe".to_string()),
+            asset_url: Some(
+                "https://github.com/LuckyOneTwoThree/Qwitch/releases/download/v0.4.0/Qwitch_0.4.0_x64-setup.exe"
+                    .to_string(),
+            ),
+            asset_size: Some(1024),
+            checksums_url: Some(
+                "https://github.com/LuckyOneTwoThree/Qwitch/releases/download/v0.4.0/SHA256SUMS.txt"
+                    .to_string(),
+            ),
+            strategy: "auto_install".to_string(),
+            platform_label: "Windows".to_string(),
+            can_auto_install: true,
+            hint: String::new(),
+        }
+    }
+
+    #[test]
+    fn update_target_rejects_downgrade_and_same_version() {
+        let latest = sample_latest("0.4.0");
+        let name = "Qwitch_0.4.0_x64-setup.exe";
+        let url = latest.asset_url.as_deref().unwrap();
+        let ck = latest.checksums_url.as_deref();
+
+        // 正常升级：通过
+        assert!(validate_update_target(&latest, "0.3.0", name, url, ck).is_ok());
+
+        // 降级：拒绝（这是 anti-rollback 的核心目标）
+        assert!(validate_update_target(&latest, "0.5.0", name, url, ck).is_err());
+
+        // 同版本重装：拒绝
+        assert!(validate_update_target(&latest, "0.4.0", name, url, ck).is_err());
+    }
+
+    #[test]
+    fn update_target_rejects_asset_and_checksum_mismatch() {
+        let latest = sample_latest("0.4.0");
+        let name = "Qwitch_0.4.0_x64-setup.exe";
+        let url = latest.asset_url.as_deref().unwrap();
+        let ck = latest.checksums_url.as_deref();
+
+        // 资产名不一致（例如指向旧版本安装包）
+        assert!(
+            validate_update_target(&latest, "0.3.0", "Qwitch_0.1.0_x64-setup.exe", url, ck)
+                .is_err()
+        );
+        // 下载地址不一致
+        assert!(validate_update_target(
+            &latest,
+            "0.3.0",
+            name,
+            "https://github.com/LuckyOneTwoThree/Qwitch/releases/download/v0.1.0/Qwitch_0.4.0_x64-setup.exe",
+            ck
+        )
+        .is_err());
+        // 校验和地址不一致
+        assert!(validate_update_target(
+            &latest,
+            "0.3.0",
+            name,
+            url,
+            Some("https://github.com/LuckyOneTwoThree/Qwitch/releases/download/v0.1.0/SHA256SUMS.txt")
+        )
+        .is_err());
+        // 请求未提供校验和
+        assert!(validate_update_target(&latest, "0.3.0", name, url, None).is_err());
     }
 
     #[test]

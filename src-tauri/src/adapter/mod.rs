@@ -291,9 +291,12 @@ pub fn create_all_adapters(
     let mut map: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
     // 优先注册国内版内置适配器（Trae 国际版无每日积分签到，暂不纳入）
     let builtins: Vec<Arc<dyn ToolAdapter>> = vec![
-        Arc::new(trae::TraeAdapter::with_host(true, host)),
-        Arc::new(workbuddy::WorkBuddyAdapter::new()),
-        Arc::new(qoder::QoderAdapter::new()),
+        Arc::new(trae::TraeAdapter::with_host(true, Arc::clone(&host))),
+        // WorkBuddy / Qoder 同样注入宿主：其内部读取客户端配置（解密运行时路径、
+        // machine-id）必须走同一 PlatformHost，否则多实例 profile 隔离场景会
+        // 读到真实本机配置而非目标 profile。
+        Arc::new(workbuddy::WorkBuddyAdapter::with_host(Arc::clone(&host))),
+        Arc::new(qoder::QoderAdapter::with_host(Arc::clone(&host))),
         Arc::new(minimax::MiniMaxAdapter::new()),
     ];
     for adapter in builtins {
@@ -353,13 +356,16 @@ mod tests {
     fn write_manifest(root: &Path, id: &str) {
         let dir = root.join("adapters").join(id);
         std::fs::create_dir_all(&dir).unwrap();
+        // 入口必须是插件目录内的实际文件：绝对路径（如 /bin/echo）指向目录外，
+        // 不受 adapter_content_hash 约束，现已被 is_valid_entry_command 拒绝。
+        std::fs::write(dir.join("run.sh"), b"#!/bin/sh\nexit 0\n").unwrap();
         std::fs::write(
             dir.join("manifest.json"),
             serde_json::json!({
                 "id": id,
                 "name": format!("Plugin {id}"),
                 "version": "0.0.1",
-                "entry": { "command": "/bin/echo" },
+                "entry": { "command": "./run.sh" },
                 "capabilities": {}
             })
             .to_string(),

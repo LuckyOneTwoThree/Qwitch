@@ -357,3 +357,101 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod http_mapping_integration_tests {
+    use super::{map_business_code, map_http_status};
+    use crate::domain::UnifiedErrorCode;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// `map_http_status` 是 20 个调用点的错误码唯一来源，此前零测试。
+    /// 这里用 wiremock 起真实 HTTP 服务，验证状态码 → 统一错误码的映射矩阵。
+    #[tokio::test]
+    async fn http_status_matrix_maps_to_unified_error_codes() {
+        let server = MockServer::start().await;
+        let client = super::shared_http_client();
+
+        let cases: &[(u16, UnifiedErrorCode)] = &[
+            (401, UnifiedErrorCode::AuthExpired),
+            (403, UnifiedErrorCode::RiskTriggered),
+            (429, UnifiedErrorCode::RateLimited),
+            (500, UnifiedErrorCode::NetworkError),
+            (502, UnifiedErrorCode::NetworkError),
+            (503, UnifiedErrorCode::NetworkError),
+        ];
+
+        for (status, expected) in cases {
+            Mock::given(method("GET"))
+                .and(path(format!("/status/{status}")))
+                .respond_with(ResponseTemplate::new(*status))
+                .mount(&server)
+                .await;
+
+            let resp = client
+                .get(format!("{}/status/{status}", server.uri()))
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(resp.status().as_u16(), *status);
+
+            let err = map_http_status(resp.status(), "测试上下文");
+            match err {
+                crate::adapter::AdapterError::Unified { code, .. } => {
+                    assert_eq!(code, *expected, "HTTP {status} 应映射为 {expected:?}");
+                }
+            }
+        }
+    }
+
+    /// 200 但业务码表示失败：必须落到可熔断的错误码，不得退化为 NetworkError。
+    #[tokio::test]
+    async fn business_code_matrix_keeps_circuit_breaker_semantics() {
+        assert_eq!(
+            map_business_code(401, "ctx").map(|e| match e {
+                crate::adapter::AdapterError::Unified { code, .. } => code,
+            }),
+            Some(UnifiedErrorCode::AuthExpired)
+        );
+        assert_eq!(
+            map_business_code(403, "ctx").map(|e| match e {
+                crate::adapter::AdapterError::Unified { code, .. } => code,
+            }),
+            Some(UnifiedErrorCode::RiskTriggered)
+        );
+        assert_eq!(
+            map_business_code(429, "ctx").map(|e| match e {
+                crate::adapter::AdapterError::Unified { code, .. } => code,
+            }),
+            Some(UnifiedErrorCode::RateLimited)
+        );
+        // 未知业务码不映射（交由调用方处理）
+        assert!(map_business_code(0, "ctx").is_none());
+    }
+
+    /// 非 JSON 响应体不应被当作成功：验证错误路径不会 panic 且能区分内容类型。
+    #[tokio::test]
+    async fn non_json_success_body_is_not_silently_accepted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/html"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("<html>WAF blocked</html>")
+                    .insert_header("content-type", "text/html"),
+            )
+            .mount(&server)
+            .await;
+
+        let resp = super::shared_http_client()
+            .get(format!("{}/html", server.uri()))
+            .send()
+            .await
+            .expect("request");
+        assert!(resp.status().is_success());
+
+        // 解析 JSON 必须失败，调用方据此判定为异常而非「已签到」
+        let parsed = resp.json::<serde_json::Value>().await;
+        assert!(parsed.is_err(), "HTML 响应不得被解析为 JSON 成功体");
+    }
+}

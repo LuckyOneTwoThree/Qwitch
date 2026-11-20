@@ -59,6 +59,14 @@ impl SchedulerEventSink for AppHandle {
     }
 }
 
+/// 同一工具连续出现网络/服务端错误（5xx、超时、连接失败）达到该次数后，
+/// 本批次熔断该工具剩余账号。
+///
+/// 动机：`map_http_status` 把 5xx 映射为 `NetworkError`，而熔断只对
+/// `RiskTriggered | RateLimited` 生效，因此平台 500 会让调度器逐个账号继续打，
+/// 既无退避也放大了失败面。连续阈值能在「偶发抖动」与「平台整体不可用」之间区分。
+const CONSECUTIVE_NETWORK_ERROR_BREAKER: u32 = 3;
+
 pub struct AntiRiskScheduler {
     queue_lock: Arc<Mutex<()>>,
 }
@@ -152,6 +160,8 @@ impl AntiRiskScheduler {
         let mut last_device_scope: Option<String> = None;
         // 工具级熔断：同一工具出现风控/限流后，中止该工具剩余账号
         let mut risk_broken_tools: HashMap<String, ()> = HashMap::new();
+        // 连续网络/服务端错误计数（5xx、超时、连接失败），达阈值才熔断
+        let mut consecutive_network_errors: HashMap<String, u32> = HashMap::new();
         // 设备级每日额度：收到成功回包或 9095 后，阻止本机对同设备继续发领取请求。
         let mut device_limit_reached: HashMap<String, ()> = HashMap::new();
 
@@ -254,12 +264,12 @@ impl AntiRiskScheduler {
                         "claim",
                         err,
                     );
-                    if matches!(
+                    update_tool_breaker(
                         code,
-                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
-                    ) {
-                        risk_broken_tools.insert(summary.tool_id.clone(), ());
-                    }
+                        &summary.tool_id,
+                        &mut risk_broken_tools,
+                        &mut consecutive_network_errors,
+                    );
                     sink.emit_account_updated(&summary.id);
                     continue;
                 }
@@ -334,6 +344,8 @@ impl AntiRiskScheduler {
             // 1. 幂等前置校验：先查状态再决定是否领取（Fail-Closed）
             let quota = match adapter.inspect_quota(&cred).await {
                 Ok(q) => {
+                    // 请求成功即打断该工具的连续失败链
+                    reset_tool_breaker_counter(&summary.tool_id, &mut consecutive_network_errors);
                     let _ = db.save_quota_snapshot(&summary.id, &q);
                     q
                 }
@@ -347,12 +359,12 @@ impl AntiRiskScheduler {
                         "claim",
                         err,
                     );
-                    if matches!(
+                    update_tool_breaker(
                         code,
-                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
-                    ) {
-                        risk_broken_tools.insert(summary.tool_id.clone(), ());
-                    }
+                        &summary.tool_id,
+                        &mut risk_broken_tools,
+                        &mut consecutive_network_errors,
+                    );
                     sink.emit_account_updated(&summary.id);
                     continue;
                 }
@@ -407,6 +419,10 @@ impl AntiRiskScheduler {
                     // 2. 执行手动领取（复用前置快照，避免适配器重复查状态）
                     match adapter.claim_daily(&cred, Some(&quota)).await {
                         Ok(res) => {
+                            reset_tool_breaker_counter(
+                                &summary.tool_id,
+                                &mut consecutive_network_errors,
+                            );
                             let is_confirmed_claimed = res
                                 .updated_quota
                                 .as_ref()
@@ -489,12 +505,12 @@ impl AntiRiskScheduler {
                                 "claim",
                                 err,
                             );
-                            if matches!(
+                            update_tool_breaker(
                                 code,
-                                UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
-                            ) {
-                                risk_broken_tools.insert(summary.tool_id.clone(), ());
-                            }
+                                &summary.tool_id,
+                                &mut risk_broken_tools,
+                                &mut consecutive_network_errors,
+                            );
                         }
                     }
                 }
@@ -599,6 +615,7 @@ impl AntiRiskScheduler {
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
         let mut risk_broken_tools: HashMap<String, ()> = HashMap::new();
+        let mut consecutive_network_errors: HashMap<String, u32> = HashMap::new();
 
         for (idx, account_id) in account_ids.iter().enumerate() {
             let (summary, cred) = match db.get_account_credential(master_key, account_id) {
@@ -685,12 +702,12 @@ impl AntiRiskScheduler {
                         "query",
                         err,
                     );
-                    if matches!(
+                    update_tool_breaker(
                         code,
-                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
-                    ) {
-                        risk_broken_tools.insert(summary.tool_id.clone(), ());
-                    }
+                        &summary.tool_id,
+                        &mut risk_broken_tools,
+                        &mut consecutive_network_errors,
+                    );
                     sink.emit_account_updated(&summary.id);
                     continue;
                 }
@@ -709,6 +726,7 @@ impl AntiRiskScheduler {
 
             match adapter.inspect_quota(&cred).await {
                 Ok(snapshot) => {
+                    reset_tool_breaker_counter(&summary.tool_id, &mut consecutive_network_errors);
                     refreshed_count += 1;
                     let _ = db.save_quota_snapshot(&summary.id, &snapshot);
                     let _ = db.append_action_log(
@@ -733,12 +751,12 @@ impl AntiRiskScheduler {
                         "query",
                         err,
                     );
-                    if matches!(
+                    update_tool_breaker(
                         code,
-                        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
-                    ) {
-                        risk_broken_tools.insert(summary.tool_id.clone(), ());
-                    }
+                        &summary.tool_id,
+                        &mut risk_broken_tools,
+                        &mut consecutive_network_errors,
+                    );
                 }
             }
 
@@ -795,6 +813,54 @@ impl AntiRiskScheduler {
 impl Default for AntiRiskScheduler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 根据失败错误码决定是否熔断该工具，并维护「连续网络错误」计数。
+///
+/// * `RiskTriggered` / `RateLimited` → 立即熔断（平台明确拒绝）。
+/// * `NetworkError` → 连续计数，达到阈值才熔断（区分抖动与整体不可用）。
+/// * 其他错误码（含 `AuthExpired`）→ 只清计数，不熔断同工具后续账号。
+///
+/// 返回 `true` 表示该工具已熔断。
+fn update_tool_breaker(
+    code: UnifiedErrorCode,
+    tool_id: &str,
+    broken_tools: &mut HashMap<String, ()>,
+    consecutive_network_errors: &mut HashMap<String, u32>,
+) -> bool {
+    if matches!(
+        code,
+        UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+    ) {
+        broken_tools.insert(tool_id.to_string(), ());
+        consecutive_network_errors.remove(tool_id);
+        return true;
+    }
+    if code == UnifiedErrorCode::NetworkError {
+        let counter = consecutive_network_errors
+            .entry(tool_id.to_string())
+            .or_insert(0);
+        *counter += 1;
+        if *counter >= CONSECUTIVE_NETWORK_ERROR_BREAKER {
+            broken_tools.insert(tool_id.to_string(), ());
+            consecutive_network_errors.remove(tool_id);
+            return true;
+        }
+        return false;
+    }
+    // 成功路径之外的「非网络类失败」会打断连续性
+    consecutive_network_errors.remove(tool_id);
+    false
+}
+
+/// 请求成功后重置该工具的连续网络错误计数。
+fn reset_tool_breaker_counter(
+    tool_id: &str,
+    consecutive_network_errors: &mut HashMap<String, u32>,
+) {
+    if consecutive_network_errors.contains_key(tool_id) {
+        consecutive_network_errors.remove(tool_id);
     }
 }
 
@@ -1397,6 +1463,84 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn consecutive_network_errors_break_only_after_threshold_and_reset_on_success() {
+        let mut broken: HashMap<String, ()> = HashMap::new();
+        let mut counters: HashMap<String, u32> = HashMap::new();
+
+        for i in 0..CONSECUTIVE_NETWORK_ERROR_BREAKER - 1 {
+            let tripped = update_tool_breaker(
+                UnifiedErrorCode::NetworkError,
+                "tool_a",
+                &mut broken,
+                &mut counters,
+            );
+            assert!(!tripped, "第 {i} 次网络错误不应熔断");
+            assert!(!broken.contains_key("tool_a"));
+        }
+
+        reset_tool_breaker_counter("tool_a", &mut counters);
+        assert!(!counters.contains_key("tool_a"));
+
+        for _ in 0..CONSECUTIVE_NETWORK_ERROR_BREAKER {
+            update_tool_breaker(
+                UnifiedErrorCode::NetworkError,
+                "tool_a",
+                &mut broken,
+                &mut counters,
+            );
+        }
+        assert!(
+            broken.contains_key("tool_a"),
+            "连续 {} 次网络错误应熔断该工具",
+            CONSECUTIVE_NETWORK_ERROR_BREAKER
+        );
+    }
+
+    #[test]
+    fn risk_and_rate_limit_break_immediately_while_auth_expired_does_not() {
+        let mut broken: HashMap<String, ()> = HashMap::new();
+        let mut counters: HashMap<String, u32> = HashMap::new();
+
+        assert!(update_tool_breaker(
+            UnifiedErrorCode::RiskTriggered,
+            "tool_r",
+            &mut broken,
+            &mut counters
+        ));
+        assert!(broken.contains_key("tool_r"));
+
+        let mut broken2: HashMap<String, ()> = HashMap::new();
+        let mut counters2: HashMap<String, u32> = HashMap::new();
+        assert!(!update_tool_breaker(
+            UnifiedErrorCode::AuthExpired,
+            "tool_x",
+            &mut broken2,
+            &mut counters2
+        ));
+        assert!(!broken2.contains_key("tool_x"));
+    }
+
+    #[test]
+    fn breaker_is_isolated_per_tool() {
+        let mut broken: HashMap<String, ()> = HashMap::new();
+        let mut counters: HashMap<String, u32> = HashMap::new();
+
+        for _ in 0..CONSECUTIVE_NETWORK_ERROR_BREAKER {
+            update_tool_breaker(
+                UnifiedErrorCode::NetworkError,
+                "tool_a",
+                &mut broken,
+                &mut counters,
+            );
+        }
+        assert!(broken.contains_key("tool_a"));
+        assert!(
+            !broken.contains_key("tool_b"),
+            "熔断必须按工具隔离，不得影响其他工具"
+        );
     }
 
     #[tokio::test]

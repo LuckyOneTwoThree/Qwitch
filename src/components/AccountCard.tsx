@@ -192,12 +192,12 @@ export const AccountCard = React.memo(function AccountCard({
   return (
     <>
       <div
-        className={`group flex h-full flex-col justify-between rounded-2xl border bg-white p-3.5 transition-all dark:bg-zinc-900/90 ${
+        className={`group surface-card surface-interactive flex h-full flex-col justify-between p-3.5 ${
           account.isActiveOnClient
-            ? "border-emerald-500/45 shadow-xs ring-1 ring-emerald-500/15 dark:border-emerald-400/35 dark:ring-emerald-400/15"
+            ? "border-emerald-500/45 ring-1 ring-emerald-500/15 dark:border-emerald-400/35 dark:ring-emerald-400/15"
             : isDisabled
-              ? "border-zinc-200/80 bg-zinc-50/70 opacity-85 dark:border-zinc-800 dark:bg-zinc-900/50"
-              : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+              ? "bg-zinc-50/70 opacity-85 dark:bg-zinc-900/50"
+              : ""
         }`}
       >
         <div className="flex flex-1 flex-col">
@@ -206,18 +206,18 @@ export const AccountCard = React.memo(function AccountCard({
               <ToolBrandIcon toolId={account.toolId} size="md" className="mt-0.5" decorative />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="shrink-0 whitespace-nowrap text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                  <span className="shrink-0 whitespace-nowrap text-xs font-medium tracking-wide text-zinc-500 dark:text-zinc-400">
                     {toolMeta.name}
                   </span>
                   {account.latestQuota?.planName && (
                     <span
-                      className={`shrink-0 whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${toolMeta.badgeClass}`}
+                      className={`badge shrink-0 whitespace-nowrap ${toolMeta.badgeClass}`}
                     >
                       {account.latestQuota.planName}
                     </span>
                   )}
                   {account.isActiveOnClient && (
-                    <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-full bg-emerald-500/12 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">
+                    <span className="badge shrink-0 whitespace-nowrap border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-800 dark:text-emerald-300">
                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                       本机使用中
                     </span>
@@ -248,7 +248,7 @@ export const AccountCard = React.memo(function AccountCard({
                       disabled={renaming}
                       onClick={() => void handleSaveRename()}
                       aria-label="保存账号备注"
-                      className="rounded-md bg-zinc-900 p-1 text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+                      className="btn btn-icon btn-primary rounded-md disabled:opacity-50"
                     >
                       <Check className="h-3 w-3" aria-hidden="true" />
                     </button>
@@ -259,7 +259,7 @@ export const AccountCard = React.memo(function AccountCard({
                         setEditingLabel(false);
                       }}
                       aria-label="取消重命名"
-                      className="rounded-md border border-zinc-200 p-1 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300"
+                      className="btn btn-icon btn-secondary rounded-md"
                     >
                       <X className="h-3 w-3" aria-hidden="true" />
                     </button>
@@ -277,7 +277,7 @@ export const AccountCard = React.memo(function AccountCard({
                       }}
                       title="修改账号备注"
                       aria-label={`修改 ${account.label} 备注`}
-                      className="shrink-0 rounded p-0.5 text-zinc-500 opacity-0 transition hover:bg-zinc-100 hover:text-zinc-800 group-hover:opacity-100 focus-visible:opacity-100 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                      className="shrink-0 rounded p-0.5 text-zinc-400 opacity-0 transition hover:bg-zinc-100 hover:text-zinc-800 group-hover:opacity-100 focus-visible:opacity-100 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                     >
                       <Pencil className="h-3 w-3" aria-hidden="true" />
                     </button>
@@ -315,7 +315,7 @@ export const AccountCard = React.memo(function AccountCard({
 
           <div className="mt-3 flex flex-1 flex-col justify-center space-y-2">
             {missingApiToken ? (
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs">
                 <span className="leading-snug text-amber-900 dark:text-amber-200">
                   已绑定切号快照 · 授权后开启查额与签到
                 </span>
@@ -324,7 +324,7 @@ export const AccountCard = React.memo(function AccountCard({
                     type="button"
                     disabled={oauthLaunching}
                     onClick={() => void handleDirectOAuth()}
-                    className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-amber-700 disabled:opacity-50 dark:bg-amber-500 dark:text-zinc-950 dark:hover:bg-amber-400"
+                    className="btn btn-sm gap-1 whitespace-nowrap bg-amber-600 text-white transition hover:bg-amber-700 disabled:opacity-50 dark:bg-amber-500 dark:text-zinc-950 dark:hover:bg-amber-400"
                   >
                     <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
                     {oauthLaunching ? "授权中..." : "在线授权"}
@@ -333,7 +333,7 @@ export const AccountCard = React.memo(function AccountCard({
                     <button
                       type="button"
                       onClick={() => onOpenBindModal(account, "token_paste")}
-                      className="inline-flex shrink-0 whitespace-nowrap items-center rounded-lg border border-amber-500/35 bg-white/80 px-2 py-1 text-[11px] font-medium text-amber-900 transition hover:bg-white dark:bg-zinc-900/70 dark:text-amber-200 dark:hover:bg-zinc-800"
+                      className="btn btn-sm shrink-0 gap-1 whitespace-nowrap border border-amber-500/35 bg-white/80 text-[11px] font-medium text-amber-900 transition hover:bg-white dark:bg-zinc-900/70 dark:text-amber-200 dark:hover:bg-zinc-800"
                     >
                       粘贴凭据
                     </button>
@@ -361,14 +361,14 @@ export const AccountCard = React.memo(function AccountCard({
                             )
                           : 0;
                     const barColor = isQoderClaimed
-                      ? "bg-emerald-600 dark:bg-emerald-400"
+                      ? "bg-emerald-500"
                       : isQoderPendingVerify
                         ? "bg-zinc-400 dark:bg-zinc-500"
                         : pct <= 15
                           ? "bg-rose-500"
                           : pct <= 35
                             ? "bg-amber-500"
-                            : "bg-zinc-900 dark:bg-zinc-100";
+                            : "meter-fill";
                     const pctBadge = isQoderClaimed
                       ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
                       : isQoderPendingVerify
@@ -419,7 +419,7 @@ export const AccountCard = React.memo(function AccountCard({
                           aria-valuenow={pct}
                           aria-valuemin={0}
                           aria-valuemax={100}
-                          className="h-2 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800"
+                          className="meter"
                         >
                           <div
                             className={`h-full rounded-full transition-all duration-300 ${barColor}`}
@@ -434,7 +434,7 @@ export const AccountCard = React.memo(function AccountCard({
                 {secondaryBuckets.map((bucket) => (
                   <div
                     key={bucket.key}
-                    className="flex items-center justify-between gap-2 rounded-xl bg-zinc-50 px-3 py-1.5 text-[11px] dark:bg-zinc-800/60"
+                    className="flex items-center justify-between gap-2 rounded-lg bg-zinc-50/80 px-3 py-1.5 text-xs dark:bg-zinc-800/50"
                   >
                     <span className="truncate text-zinc-600 dark:text-zinc-400">
                       {bucket.label}
@@ -446,7 +446,7 @@ export const AccountCard = React.memo(function AccountCard({
                 ))}
               </>
             ) : (
-              <div className="rounded-xl border border-dashed border-zinc-200 px-3 py-3 text-center text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+              <div className="rounded-lg border border-dashed border-zinc-200 px-3 py-3 text-center text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
                 {account.latestQuota
                   ? account.latestQuota.claimStatus === "unsupported" &&
                     adapter?.capabilities.supportsDailyClaim
@@ -457,7 +457,7 @@ export const AccountCard = React.memo(function AccountCard({
             )}
           </div>
 
-          <div className="mt-2.5 flex items-center justify-between gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <div className="mt-2.5 flex items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-400">
             <div className="flex flex-wrap items-center gap-2">
               {needsRecovery ? (
                 <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 text-amber-700 dark:text-amber-300">
@@ -497,7 +497,7 @@ export const AccountCard = React.memo(function AccountCard({
           </div>
         </div>
 
-        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 pt-2.5 dark:border-zinc-800">
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200/70 pt-2.5 dark:border-zinc-800/70">
           <div className="flex flex-wrap items-center gap-1.5">
             {needsRecovery ? (
               <>
@@ -505,7 +505,7 @@ export const AccountCard = React.memo(function AccountCard({
                   type="button"
                   disabled={oauthLaunching}
                   onClick={() => void handleDirectOAuth()}
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-500/25 disabled:opacity-50 dark:text-amber-300"
+                  className="btn btn-sm gap-1 whitespace-nowrap border border-amber-500/25 bg-amber-500/15 text-amber-800 transition hover:bg-amber-500/25 disabled:opacity-50 dark:text-amber-300"
                 >
                   <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
                   {oauthLaunching ? "授权中..." : "重新授权"}
@@ -523,7 +523,7 @@ export const AccountCard = React.memo(function AccountCard({
                   type="button"
                   disabled={recovering || isBatchRunning}
                   onClick={() => void handleRecover()}
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <RotateCcw
                     className={`h-3 w-3 shrink-0 ${recovering ? "animate-spin" : ""}`}
@@ -545,7 +545,7 @@ export const AccountCard = React.memo(function AccountCard({
                         ? "批量任务进行中，查额已排队禁用"
                         : "刷新额度"
                   }
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <RefreshCw
                     className={`h-3 w-3 shrink-0 ${refreshing ? "animate-spin" : ""}`}
@@ -596,7 +596,7 @@ export const AccountCard = React.memo(function AccountCard({
               }}
               title={isDisabled ? "恢复启用" : "停用账号（跳过批量队列）"}
               aria-label={isDisabled ? `恢复启用 ${account.label}` : `停用 ${account.label}`}
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+              className="btn btn-icon btn-secondary shrink-0 disabled:opacity-50"
             >
               {isDisabled ? (
                 <PlayCircle className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
@@ -610,7 +610,7 @@ export const AccountCard = React.memo(function AccountCard({
               onClick={() => setConfirmDeleteOpen(true)}
               title="删除账号"
               aria-label={`删除账号 ${account.label}`}
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2 py-1 text-xs font-medium text-zinc-500 transition hover:border-rose-300 hover:text-rose-600 dark:border-zinc-700 dark:text-zinc-400 dark:hover:border-rose-800 dark:hover:text-rose-400"
+              className="btn btn-icon btn-secondary shrink-0 border-zinc-200 text-zinc-400 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600 dark:border-zinc-700 dark:text-zinc-500 dark:hover:border-rose-800 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
             >
               <Trash2 className="h-3 w-3 shrink-0" aria-hidden="true" />
             </button>
@@ -622,7 +622,7 @@ export const AccountCard = React.memo(function AccountCard({
               disabled={associating}
               onClick={() => void handleAssociateLocal()}
               title={`读取本机 ${toolMeta.name} 当前登录的会话并合并到该账号；需要客户端已登录「${account.label}」`}
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:opacity-50"
             >
               <Link2 className="h-3 w-3 shrink-0" aria-hidden="true" />
               {associating ? "关联中..." : "关联本机"}
@@ -633,10 +633,10 @@ export const AccountCard = React.memo(function AccountCard({
               disabled={account.isActiveOnClient || !canSwitch}
               title={!canSwitch ? "该适配器声明不支持切号" : undefined}
               onClick={() => requestColdSwitch(account)}
-              className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+              className={`btn btn-sm gap-1 whitespace-nowrap ${
                 account.isActiveOnClient
-                  ? "cursor-default bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
-                  : "bg-zinc-900 text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                  ? "btn-secondary cursor-default"
+                  : "btn-primary"
               }`}
             >
               <ArrowLeftRight className="h-3 w-3 shrink-0" aria-hidden="true" />

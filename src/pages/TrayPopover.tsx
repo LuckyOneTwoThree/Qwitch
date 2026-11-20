@@ -141,7 +141,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       return (
         <div
           role="status"
-          className="inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/12 px-3 py-2 text-xs font-medium text-emerald-800 dark:text-emerald-300"
+          className="badge min-w-0 flex-1 justify-center gap-1.5 border-emerald-500/30 bg-emerald-500/12 px-3 py-2 text-xs font-medium text-emerald-800 dark:text-emerald-300"
         >
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           <span className="truncate">
@@ -158,7 +158,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
         <button
           type="button"
           onClick={() => void claimDailyBatch()}
-          className="inline-flex min-w-0 flex-1 shrink-0 whitespace-nowrap items-center justify-center gap-1.5 rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white shadow-xs transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          className="btn btn-md btn-primary min-w-0 flex-1 shrink-0 gap-1.5 whitespace-nowrap"
         >
           <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           一键领取全部待领 ({globalStats.claimableCount})
@@ -171,7 +171,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
         <button
           type="button"
           onClick={() => void claimDailyBatch(undefined, undefined, true)}
-          className="inline-flex min-w-0 flex-1 shrink-0 whitespace-nowrap items-center justify-center gap-1.5 rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white shadow-xs transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          className="btn btn-md btn-primary min-w-0 flex-1 shrink-0 gap-1.5 whitespace-nowrap"
         >
           <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           核实并一键领取 ({globalStats.unknownClaimCount})
@@ -183,7 +183,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       <button
         type="button"
         disabled
-        className="inline-flex min-w-0 flex-1 shrink-0 whitespace-nowrap items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-100 px-3 py-2 text-xs font-medium text-zinc-500 dark:border-zinc-800 dark:bg-zinc-800/80 dark:text-zinc-400"
+        className="btn btn-md min-w-0 flex-1 shrink-0 gap-1.5 whitespace-nowrap border border-zinc-200 bg-zinc-100 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-800/80 dark:text-zinc-400"
       >
         {globalStats.unclaimedAuthMissingCount > 0
           ? `${globalStats.unclaimedAuthMissingCount} 个账号待主面板授权`
@@ -193,7 +193,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
   };
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden rounded-[18px] border border-black/[0.08] bg-zinc-50/95 text-zinc-900 shadow-[0_14px_36px_-6px_rgba(0,0,0,0.22),0_4px_12px_-2px_rgba(0,0,0,0.10)] backdrop-blur-xl dark:border-white/[0.12] dark:bg-zinc-950/95 dark:text-zinc-100">
+    <div className="flex h-full w-full flex-col overflow-hidden rounded-[18px] border border-black/[0.08] bg-zinc-50/95 text-zinc-900 shadow-float backdrop-blur-xl dark:border-white/[0.12] dark:bg-zinc-950/95 dark:text-zinc-100">
       {/* 顶部栏 */}
       <header className="shrink-0 border-b border-zinc-200/80 bg-white/90 px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
         <div className="flex items-center justify-between gap-2">
@@ -216,7 +216,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
               disabled={isBusy || accounts.length === 0}
               title="刷新全部额度"
               aria-label="刷新全部额度"
-              className="rounded-lg border border-zinc-200 bg-white p-1.5 text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+              className="btn btn-icon btn-secondary disabled:opacity-45"
             >
               <RefreshCw
                 className={`h-3.5 w-3.5 ${
@@ -243,7 +243,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
             <button
               type="button"
               onClick={onOpenMain}
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2 py-1 text-[11px] font-medium text-zinc-700 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+              className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
             >
               主面板
               <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -256,18 +256,14 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           <div
             role="tablist"
             aria-label="快捷工具筛选"
-            className="mt-2 flex items-center gap-1 overflow-x-auto pb-0.5"
+            className="mask-fade-r scrollbar-none mt-2 flex items-center gap-1 overflow-x-auto pr-6 pb-0.5"
           >
             <button
               type="button"
               role="tab"
               aria-selected={resolvedToolFilter === "all"}
               onClick={() => setToolFilter("all")}
-              className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium transition ${
-                resolvedToolFilter === "all"
-                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                  : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/80 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
-              }`}
+              className={`chip ${resolvedToolFilter === "all" ? "chip-active" : ""}`}
             >
               全部
               <span className="tabular-nums opacity-80">{accounts.length}</span>
@@ -281,11 +277,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                   role="tab"
                   aria-selected={selected}
                   onClick={() => setToolFilter(g.id)}
-                  className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium transition ${
-                    selected
-                      ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                      : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/80 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
-                  }`}
+                  className={`chip ${selected ? "chip-active" : ""}`}
                 >
                   <ToolBrandIcon toolId={g.id} size="xs" decorative />
                   <span>{g.name}</span>
@@ -342,7 +334,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                       <span className="truncate text-[11px] font-semibold text-zinc-800 dark:text-zinc-200">
                         {group.name}
                       </span>
-                      <span className="rounded-full bg-zinc-200/80 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                      <span className="badge badge-neutral tabular-nums">
                         {group.accounts.length}
                       </span>
                     </div>
@@ -395,12 +387,12 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                       return (
                         <div
                           key={acc.id}
-                          className={`rounded-xl border bg-white p-2.5 transition dark:bg-zinc-900 ${
+                          className={`surface-card surface-interactive p-2.5 ${
                             acc.isActiveOnClient
-                              ? "border-emerald-500/45 shadow-xs ring-1 ring-emerald-500/15 dark:border-emerald-400/35"
+                              ? "border-emerald-500/45 ring-1 ring-emerald-500/15 dark:border-emerald-400/35"
                               : isDisabled
-                                ? "border-zinc-200/80 opacity-75 dark:border-zinc-800"
-                                : "border-zinc-200/90 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                                ? "opacity-75"
+                                : ""
                           }`}
                         >
                           <div className="flex items-center justify-between gap-2">
@@ -415,7 +407,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                 {acc.label}
                               </span>
                               {acc.latestQuota?.planName && (
-                                <span className="shrink-0 rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                                <span className="badge badge-neutral shrink-0 border-zinc-200 dark:border-zinc-700">
                                   {acc.latestQuota.planName}
                                 </span>
                               )}
@@ -465,17 +457,17 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                   aria-valuenow={pct}
                                   aria-valuemin={0}
                                   aria-valuemax={100}
-                                  className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800"
+                                  className="meter mt-1"
                                 >
                                   <div
                                     className={`h-full rounded-full transition-all duration-300 ${
                                       isQoderClaimed
-                                        ? "bg-emerald-600 dark:bg-emerald-400"
+                                        ? "bg-emerald-500"
                                         : pct <= 15
                                           ? "bg-rose-500"
                                           : pct <= 35
                                             ? "bg-amber-500"
-                                            : "bg-zinc-900 dark:bg-zinc-100"
+                                            : "meter-fill"
                                     }`}
                                     style={{ width: `${pct}%` }}
                                   />
@@ -489,7 +481,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                           ) : null}
 
                           {/* 底部操作行 */}
-                          <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-100 pt-1.5 dark:border-zinc-800/80">
+                          <div className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-200/70 pt-1.5 dark:border-zinc-800/70">
                             <span className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                               {acc.uidMasked}
                             </span>
@@ -500,7 +492,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                   type="button"
                                   disabled={isBusy}
                                   onClick={() => void claimDailyBatch([acc.id])}
-                                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/12 px-2 py-0.5 text-[11px] font-medium text-sky-800 transition hover:bg-sky-500/20 disabled:opacity-45 dark:text-sky-300"
+                                  className="btn btn-xs shrink-0 gap-1 whitespace-nowrap border border-sky-500/30 bg-sky-500/12 text-sky-800 transition hover:bg-sky-500/20 disabled:opacity-45 dark:text-sky-300"
                                 >
                                   <Sparkles className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                                   领取
@@ -508,12 +500,12 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                               )}
 
                               {acc.isActiveOnClient ? (
-                                <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md bg-emerald-500/12 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:text-emerald-300">
+                                <span className="badge shrink-0 whitespace-nowrap border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300">
                                   <CheckCircle2 className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                                   使用中
                                 </span>
                               ) : missingLocal ? (
-                                <span className="shrink-0 whitespace-nowrap rounded-md bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                                <span className="badge badge-neutral shrink-0 whitespace-nowrap">
                                   未关联本机
                                 </span>
                               ) : (
@@ -525,7 +517,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                   }
                                   title="切换本机客户端账号"
                                   onClick={() => requestColdSwitch(acc)}
-                                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-md bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                                  className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
                                 >
                                   <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                                   切换
@@ -568,7 +560,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           onClick={() => void quitApp()}
           title="退出 Qwitch"
           aria-label="退出 Qwitch"
-          className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-xl border border-zinc-200 bg-white px-2.5 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+          className="btn btn-md btn-secondary shrink-0 gap-1 whitespace-nowrap"
         >
           <Power className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           退出

@@ -48,15 +48,13 @@ export function LogsToolbar({
     <div className="shrink-0 space-y-2.5 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
       <BatchClaimBanner />
 
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="surface-card flex flex-wrap items-center justify-between gap-3 p-3">
         <div className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/60">
           <button
             type="button"
             onClick={() => setLogScope("active")}
-            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-              logScope === "active"
-                ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            className={`chip gap-1.5 text-xs ${
+              logScope === "active" ? "chip-active" : ""
             }`}
           >
             <ScrollText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -74,10 +72,8 @@ export function LogsToolbar({
           <button
             type="button"
             onClick={() => setLogScope("archived")}
-            className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-              logScope === "archived"
-                ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            className={`chip gap-1.5 text-xs ${
+              logScope === "archived" ? "chip-active" : ""
             }`}
           >
             <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -108,7 +104,7 @@ export function LogsToolbar({
                   )
                 }
                 title="将日常“额度查询成功”和“幂等跳过”归档，仅保留签到成功、切号、导入及所有异常"
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
               >
                 <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 清理冗余
@@ -128,7 +124,7 @@ export function LogsToolbar({
                     "已将 7 天前活跃日志移入归档"
                   )
                 }
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
               >
                 <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 归档 7 天前
@@ -144,7 +140,7 @@ export function LogsToolbar({
                     run: async () => (await archiveLogs({ scope: "active" })) !== null,
                   })
                 }
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
               >
                 <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 全部归档
@@ -154,7 +150,7 @@ export function LogsToolbar({
                 type="button"
                 disabled={logStats.activeCount === 0}
                 onClick={() => void exportLogs("active", false)}
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
               >
                 <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 导出
@@ -171,7 +167,7 @@ export function LogsToolbar({
                     run: async () => (await deleteLogs({ scope: "active" })) !== null,
                   })
                 }
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
+                className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
               >
                 <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 清空活跃
@@ -183,7 +179,7 @@ export function LogsToolbar({
                 type="button"
                 disabled={logStats.archivedCount === 0}
                 onClick={() => void exportLogs("archived", false)}
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-45 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
               >
                 <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 导出归档 JSON
@@ -198,7 +194,7 @@ export function LogsToolbar({
                     (count) => `已恢复 ${count} 条归档日志`
                   )
                 }
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
               >
                 <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 全部恢复
@@ -215,7 +211,7 @@ export function LogsToolbar({
                     run: async () => (await deleteLogs({ scope: "archived" })) !== null,
                   })
                 }
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
+                className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
               >
                 <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 彻底清空归档
@@ -225,7 +221,7 @@ export function LogsToolbar({
         </div>
       </div>
 
-      <div className="flex flex-col gap-2.5 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="surface-card flex flex-col gap-2.5 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="relative min-w-[220px] flex-1">
             <Search
@@ -244,7 +240,7 @@ export function LogsToolbar({
               <button
                 type="button"
                 onClick={() => setLogSearch("")}
-                className="absolute top-1/2 right-2.5 -translate-y-1/2 text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                className="btn btn-xs btn-ghost absolute top-1/2 right-2.5 -translate-y-1/2 p-0 hover:text-zinc-800 dark:hover:text-zinc-200"
                 aria-label="清除搜索"
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
@@ -257,7 +253,7 @@ export function LogsToolbar({
               <button
                 type="button"
                 onClick={toggleSelectAllVisibleLogs}
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                className="btn btn-sm btn-secondary shrink-0 gap-1.5 whitespace-nowrap"
               >
                 {allVisibleLogsSelected ? (
                   <CheckSquare className="h-3.5 w-3.5 text-zinc-900 dark:text-zinc-100" aria-hidden="true" />
@@ -279,7 +275,7 @@ export function LogsToolbar({
                           setSelectedLogIds([]);
                         }
                       }}
-                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
+                      className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
                     >
                       <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       归档已选 ({selectedLogIds.length})
@@ -294,7 +290,7 @@ export function LogsToolbar({
                           setSelectedLogIds([]);
                         }
                       }}
-                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900"
+                      className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
                     >
                       <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       恢复已选 ({selectedLogIds.length})
@@ -314,7 +310,7 @@ export function LogsToolbar({
                         },
                       })
                     }
-                    className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300"
+                    className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
                   >
                     <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     删除已选 ({selectedLogIds.length})
@@ -327,7 +323,7 @@ export function LogsToolbar({
 
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <span className="mr-1 text-xs text-zinc-500 dark:text-zinc-400">
               动作：
             </span>
             {(
@@ -343,10 +339,8 @@ export function LogsToolbar({
                 key={item.id}
                 type="button"
                 onClick={() => setLogActionFilter(item.id)}
-                className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition ${
-                  logActionFilter === item.id
-                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                    : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300"
+                className={`chip text-xs ${
+                  logActionFilter === item.id ? "chip-active" : ""
                 }`}
               >
                 {item.label}
@@ -355,7 +349,7 @@ export function LogsToolbar({
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <span className="mr-1 text-xs text-zinc-500 dark:text-zinc-400">
               结果：
             </span>
             {(
@@ -370,10 +364,8 @@ export function LogsToolbar({
                 key={item.id}
                 type="button"
                 onClick={() => setLogResultFilter(item.id)}
-                className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium transition ${
-                  logResultFilter === item.id
-                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                    : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300"
+                className={`chip text-xs ${
+                  logResultFilter === item.id ? "chip-active" : ""
                 }`}
               >
                 {item.label}
@@ -408,7 +400,7 @@ export function LogsPanel({
   const selectedLogIdSet = useMemo(() => new Set(selectedLogIds), [selectedLogIds]);
   return (
       <div className="space-y-3">
-        <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="surface-card overflow-hidden">
           {filteredLogs.length === 0 ? (
             <div className="px-6 py-12 text-center">
               <div className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
@@ -416,7 +408,7 @@ export function LogsPanel({
                   ? "归档区暂无历史日志"
                   : "当前筛选条件下暂无操作记录"}
               </div>
-              <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                 {logScope === "archived"
                   ? "当日常冗余或超期日志被归档后，可在此查看、导出或恢复。"
                   : "若需查看历史已归档日志，请切换到上方「已归档」标签页。"}
@@ -426,7 +418,7 @@ export function LogsPanel({
             <div>
               {groupedLogs.map((group) => (
                 <div key={group.day}>
-                  <div className="flex items-center justify-between border-y border-zinc-100 bg-zinc-50/80 px-4 py-1.5 text-[11px] font-medium text-zinc-600 first:border-t-0 dark:border-zinc-800 dark:bg-zinc-950/40 dark:text-zinc-400">
+                  <div className="flex items-center justify-between border-y border-zinc-100 bg-zinc-50/80 px-4 py-1.5 text-xs font-medium text-zinc-600 first:border-t-0 dark:border-zinc-800 dark:bg-zinc-950/40 dark:text-zinc-400">
                     <span>{group.day}</span>
                     <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
                       {group.items.length} 条
@@ -470,16 +462,16 @@ export function LogsPanel({
                             </button>
                             <ToolBrandIcon toolId={log.toolId} size="sm" decorative />
                             <span
-                              className={`shrink-0 whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] font-medium ${actionMeta.style}`}
+                              className={`badge shrink-0 ${actionMeta.style}`}
                             >
                               {actionMeta.label}
                             </span>
                             <span
-                              className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                              className={`badge shrink-0 ${
                                 log.resultStatus === "success"
                                   ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
                                   : log.resultStatus === "skipped"
-                                    ? "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                                    ? "badge-neutral"
                                     : "bg-rose-500/12 text-rose-800 dark:text-rose-300"
                               }`}
                             >
@@ -496,10 +488,10 @@ export function LogsPanel({
                             </span>
                             {log.errorCode && (
                               <span
-                                className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] ${
+                                className={`badge shrink-0 font-mono ${
                                   log.resultStatus === "failed"
                                     ? "bg-rose-500/12 text-rose-700 dark:text-rose-300"
-                                    : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                                    : "badge-neutral"
                                 }`}
                               >
                                 {log.errorCode}
@@ -533,7 +525,7 @@ export function LogsPanel({
                                   onClick={() =>
                                     void archiveLogs({ scope: "active", ids: [log.id] })
                                   }
-                                  className="rounded-md p-1 text-zinc-500 transition hover:bg-zinc-200/70 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                                  className="btn btn-xs btn-ghost shrink-0 p-1 hover:bg-zinc-200/70 hover:text-zinc-800 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                                 >
                                   <Archive className="h-3.5 w-3.5" aria-hidden="true" />
                                 </button>
@@ -545,7 +537,7 @@ export function LogsPanel({
                                   onClick={() =>
                                     void unarchiveLogs({ scope: "archived", ids: [log.id] })
                                   }
-                                  className="rounded-md p-1 text-zinc-500 transition hover:bg-zinc-200/70 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                                  className="btn btn-xs btn-ghost shrink-0 p-1 hover:bg-zinc-200/70 hover:text-zinc-800 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                                 >
                                   <ArchiveRestore className="h-3.5 w-3.5" aria-hidden="true" />
                                 </button>
@@ -564,7 +556,7 @@ export function LogsPanel({
                                     },
                                   })
                                 }
-                                className="rounded-md p-1 text-zinc-500 transition hover:bg-rose-500/10 hover:text-rose-600 dark:text-zinc-400 dark:hover:text-rose-400"
+                                className="btn btn-xs btn-ghost shrink-0 p-1 hover:bg-rose-500/10 hover:text-rose-600 dark:hover:text-rose-400"
                               >
                                 <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                               </button>
@@ -589,7 +581,7 @@ export function LogsPanel({
                   await loadMoreLogs();
                   setLoadingMoreLogs(false);
                 }}
-                className="rounded-lg border border-zinc-200 bg-white px-3.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                className="btn btn-md btn-secondary whitespace-normal"
               >
                 {loadingMoreLogs
                   ? "加载中..."

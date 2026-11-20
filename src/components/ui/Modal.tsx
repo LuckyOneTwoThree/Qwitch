@@ -94,7 +94,7 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-xs"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4 backdrop-blur-sm dark:bg-black/65"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && !disableClose) {
           onCloseRef.current();
@@ -107,7 +107,7 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={labelledBy}
         tabIndex={-1}
-        className={`w-full ${maxWidthClass} rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl outline-none dark:border-zinc-800 dark:bg-zinc-900`}
+        className={`w-full ${maxWidthClass} animate-pop rounded-2xl border border-zinc-200 bg-white p-5 shadow-float outline-none dark:border-zinc-800 dark:bg-zinc-900`}
       >
         {children}
       </div>

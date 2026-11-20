@@ -2,6 +2,8 @@
 
 > **完成度状态（2026-11-18）**：Sprint 1（止血与安全红线）与 Sprint 2（口径收口/切号可靠性/调度闭环）已随 commit `7d45cd2`、`43de677` 及后续修复批次落地；Sprint 3 大部分落地（设计令牌/无障碍/toolRegistry/退出按钮/外部适配器信任门禁/CSP 基础加固），`uid_hash` HMAC 升级仍为待评估项；Sprint 4 部分落地（WAL/单 SQL/快照清理/CI 测试门禁/Vitest 基线），Context 四拆与 `get_account_summary` 增量同步仍待排期。详见各批次 commit 说明。
 
+> **FE-3.1 视觉体系落地（2026-11-20）**：Sprint 3 的 **FE-3.1**（`index.css` `@theme` 设计令牌 + Button / Card / Badge / Progress / Modal / ConfirmDialog / Toast 抽取 + `focus-visible`）已在本轮完整落地：新增 `brand-*` 品牌色阶（与 Logo 同源）、4 档圆角/阴影/字体/动效令牌与 12 个共享组件基元；主按钮写法由 5 种收敛为 `.btn-primary`（`bg-zinc-900` 硬编码 98 处全部消除）；并一并修复 [前端体验审计报告](./FRONTEND_UX_AUDIT.md) 中「统计卡在 860–934px 破版」的**布局根因**——将 KPI/账号网格的断点基准由视口断点改为**容器查询**（`@container`），使最小窗口宽度下标签不再截断。详见 [UI 视觉质感优化报告](./UI_VISUAL_REFINEMENT.md)。本次为纯视觉层重构，`tsc --noEmit`、132 个 Vitest 用例与生产构建全部通过，未改动任何核心功能、数据口径与可访问性语义。
+
 > 本路线图拉通 [前端体验与交互审计报告](../docs/FRONTEND_UX_AUDIT.md) 与 [代码安全与架构审查报告](../docs/BACKEND_ARCH_REVIEW.md)，将前端与后端的协同改造编排为 **4 个可独立交付的 Sprint**，优先消除数据丢失与安全红线风险，再推进体验闭环、设计系统与底层架构演进。
 
 ---

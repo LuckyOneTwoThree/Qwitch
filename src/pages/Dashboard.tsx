@@ -350,7 +350,7 @@ export function Dashboard() {
 
   return (
     <div className="flex h-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <aside className="flex h-full w-54 shrink-0 flex-col justify-between border-r border-zinc-200 bg-white/85 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/65">
+      <aside className="flex h-full w-56 shrink-0 flex-col justify-between border-r border-zinc-200 bg-white/85 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/65">
         <div className="overflow-y-auto pr-0.5">
           <div className="mb-5 flex items-center gap-2.5 px-1.5">
             <QwitchLogo size="md" />
@@ -372,20 +372,16 @@ export function Dashboard() {
                   type="button"
                   onClick={() => setNav("all")}
                   aria-current={nav === "all" ? "page" : undefined}
-                  className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
-                    nav === "all"
-                      ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                      : "text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                  }`}
+                  className={`nav-item ${nav === "all" ? "nav-item-active" : ""}`}
                 >
-                  <span className="flex items-center gap-2">
-                    <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    全部账号
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Layers className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">全部账号</span>
                   </span>
                   <span
-                    className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
                       nav === "all"
-                        ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                        ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
                         : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                     }`}
                   >
@@ -403,11 +399,7 @@ export function Dashboard() {
                       type="button"
                       onClick={() => setNav(tool.id)}
                       aria-current={active ? "page" : undefined}
-                      className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
-                        active
-                          ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                          : "text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                      }`}
+                      className={`nav-item ${active ? "nav-item-active" : ""}`}
                     >
                       <span className="flex min-w-0 items-center gap-2">
                         <ToolBrandIcon toolId={tool.id} size="xs" decorative />
@@ -420,9 +412,9 @@ export function Dashboard() {
                         )}
                       </span>
                       <span
-                        className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                        className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
                           active
-                            ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                            ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
                             : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                         }`}
                       >
@@ -443,20 +435,16 @@ export function Dashboard() {
                   type="button"
                   onClick={() => setNav("logs")}
                   aria-current={nav === "logs" ? "page" : undefined}
-                  className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
-                    nav === "logs"
-                      ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                      : "text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                  }`}
+                  className={`nav-item ${nav === "logs" ? "nav-item-active" : ""}`}
                 >
-                  <span className="flex items-center gap-2">
-                    <ScrollText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    操作日志
+                  <span className="flex min-w-0 items-center gap-2">
+                    <ScrollText className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">操作日志</span>
                   </span>
                   <span
-                    className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
                       nav === "logs"
-                        ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                        ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
                         : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                     }`}
                   >
@@ -468,15 +456,11 @@ export function Dashboard() {
                   type="button"
                   onClick={() => setNav("settings")}
                   aria-current={nav === "settings" ? "page" : undefined}
-                  className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
-                    nav === "settings"
-                      ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
-                      : "text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                  }`}
+                  className={`nav-item ${nav === "settings" ? "nav-item-active" : ""}`}
                 >
-                  <span className="flex items-center gap-2">
-                    <Settings className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    设置与环境
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Settings className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">设置与环境</span>
                   </span>
                 </button>
               </nav>
@@ -485,17 +469,19 @@ export function Dashboard() {
         </div>
 
         <div className="space-y-2">
-          <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-2.5 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+          <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/80 p-2.5 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-400">
             <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
-                <Lock className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+              <span className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-100">
+                <span className="flex h-4 w-4 items-center justify-center rounded-[5px] bg-emerald-500/12 text-emerald-600 dark:text-emerald-400">
+                  <Lock className="h-2.5 w-2.5" aria-hidden="true" />
+                </span>
                 Local-First 加密库
               </span>
               <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
                 v{__APP_VERSION__}
               </span>
             </div>
-            <p className="mt-1 leading-snug">
+            <p className="mt-1.5 leading-snug">
               凭据经系统钥匙串与 AES-256-GCM 加密落盘；
               {appSettings.closeToTray !== false
                 ? "关闭主窗将隐藏窗口并仅留菜单栏常驻。"
@@ -506,7 +492,7 @@ export function Dashboard() {
           <button
             type="button"
             onClick={() => void quitApp()}
-            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            className="btn btn-sm btn-secondary w-full gap-1.5"
           >
             <Power className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             退出 Qwitch
@@ -514,13 +500,13 @@ export function Dashboard() {
         </div>
       </aside>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/90 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/80">
+      <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 py-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
           <div className="flex min-w-0 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
               <h1 className="truncate text-sm font-semibold tracking-tight">{headerTitle}</h1>
-              <p className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+              <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
                 {headerSubtitle}
               </p>
             </div>
@@ -534,7 +520,7 @@ export function Dashboard() {
                     type="button"
                     onClick={() => void refreshAllQuotas(activeToolFilter)}
                     disabled={isBatchBusy}
-                    className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
                   >
                     <RefreshCw
                       className={`h-3.5 w-3.5 shrink-0 ${
@@ -563,7 +549,7 @@ export function Dashboard() {
                         type="button"
                         onClick={() => void claimDailyBatch(undefined, activeToolFilter)}
                         disabled={isBatchBusy}
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                        className="btn btn-sm btn-primary gap-1.5 whitespace-nowrap"
                       >
                         <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         {activeToolMeta
@@ -575,7 +561,7 @@ export function Dashboard() {
                         type="button"
                         onClick={() => void claimDailyBatch(undefined, activeToolFilter, true)}
                         disabled={isBatchBusy}
-                        className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                        className="btn btn-sm btn-primary gap-1.5 whitespace-nowrap"
                       >
                         <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         {activeToolMeta
@@ -589,7 +575,7 @@ export function Dashboard() {
                 <button
                   type="button"
                   onClick={() => openImportModal()}
-                  className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
                 >
                   <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   导入账号
@@ -602,7 +588,7 @@ export function Dashboard() {
               onClick={toggleTheme}
               title="切换深色/浅色主题"
               aria-label="切换深色或浅色主题"
-              className="shrink-0 rounded-lg border border-zinc-200 bg-white p-1.5 text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              className="btn btn-icon btn-secondary shrink-0"
             >
               {theme === "dark" ? (
                 <Sun className="h-3.5 w-3.5" aria-hidden="true" />
@@ -619,49 +605,35 @@ export function Dashboard() {
 
             <section
               aria-label="当前作用域核心指标"
-              className="grid grid-cols-2 gap-2.5 sm:grid-cols-4"
+              className="grid grid-cols-1 gap-2.5 @sm:grid-cols-2 @3xl:grid-cols-4"
             >
               <button
                 type="button"
                 onClick={() => setStatusFilter("all")}
                 aria-pressed={statusFilter === "all"}
-                className="flex min-w-0 flex-col justify-between rounded-xl border border-zinc-200 bg-white px-3 py-2 text-left transition hover:border-zinc-300 dark:border-zinc-800 dark:bg-zinc-900/90 dark:hover:border-zinc-700"
+                className={`surface-card surface-interactive flex min-w-0 flex-col justify-between gap-2.5 px-3.5 py-3 text-left ${
+                  statusFilter === "all" ? "border-brand-500/60 ring-1 ring-brand-500/20" : ""
+                }`}
               >
                 <div className="flex w-full items-center justify-between gap-1.5">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-                      <Layers className="h-3 w-3" aria-hidden="true" />
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-500/12 text-brand-700 dark:text-brand-400">
+                      <Layers className="h-3.5 w-3.5" aria-hidden="true" />
                     </span>
-                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
                       {activeToolMeta ? `${activeToolMeta.name} 账号` : "纳管账号"}
                     </span>
                   </div>
-                  {!activeToolFilter && (
-                    <div className="hidden flex-wrap items-center justify-end gap-1 xl:flex">
-                      {visibleTools.map((t) => (
-                        <span
-                          key={t.id}
-                          title={`${t.name}: ${(accountCountByTool.get(t.id) ?? 0)}`}
-                          className="inline-flex items-center gap-0.5 rounded bg-zinc-100 px-1 py-0.5 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                        >
-                          <ToolBrandIcon toolId={t.id} size="xs" decorative />
-                          <span className="tabular-nums">
-                            {(accountCountByTool.get(t.id) ?? 0)}
-                          </span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
                 </div>
 
-                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                <div className="flex w-full items-baseline justify-between gap-1.5">
                   <div className="flex items-baseline gap-1">
-                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                    <span className="text-2xl leading-none font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-100">
                       {scopedStats.total}
                     </span>
-                    <span className="text-[11px] text-zinc-600 dark:text-zinc-400">个</span>
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">个</span>
                   </div>
-                  <span className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                     {statusFilter === "all" ? "当前总览" : "点击看全部"}
                   </span>
                 </div>
@@ -673,26 +645,26 @@ export function Dashboard() {
                   setStatusFilter((prev) => (prev === "active_client" ? "all" : "active_client"))
                 }
                 aria-pressed={statusFilter === "active_client"}
-                className={`flex min-w-0 flex-col justify-between rounded-xl border bg-white px-3 py-2 text-left transition dark:bg-zinc-900/90 ${
+                className={`surface-card surface-interactive flex min-w-0 flex-col justify-between gap-2.5 px-3.5 py-3 text-left ${
                   statusFilter === "active_client"
-                    ? "border-emerald-500/60 ring-1 ring-emerald-500/20 dark:border-emerald-400/50"
-                    : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                    ? "border-emerald-500/60 ring-1 ring-emerald-500/20"
+                    : ""
                 }`}
               >
                 <div className="flex w-full items-center justify-between gap-1.5">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-400">
-                      <MonitorCheck className="h-3 w-3" aria-hidden="true" />
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/12 text-emerald-700 dark:text-emerald-400">
+                      <MonitorCheck className="h-3.5 w-3.5" aria-hidden="true" />
                     </span>
-                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
                       本机挂载
                     </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium ${
+                    className={`badge shrink-0 whitespace-nowrap ${
                       scopedStats.runningClientsCount > 0
-                        ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                        : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                        ? "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
+                        : "badge-neutral"
                     }`}
                   >
                     {scopedStats.runningClientsCount > 0
@@ -703,16 +675,16 @@ export function Dashboard() {
                   </span>
                 </div>
 
-                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                <div className="flex w-full items-baseline justify-between gap-1.5">
                   <div className="flex items-baseline">
-                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                    <span className="text-2xl leading-none font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-100">
                       {scopedStats.activeClientsCount}
                     </span>
-                    <span className="ml-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                    <span className="ml-1 text-xs text-zinc-500 dark:text-zinc-400">
                       /{scopedStats.scopeToolCapacity}
                     </span>
                   </div>
-                  <span className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                     {statusFilter === "active_client" ? "已筛选" : "使用中"}
                   </span>
                 </div>
@@ -724,44 +696,44 @@ export function Dashboard() {
                   setStatusFilter((prev) => (prev === "claimable" ? "all" : "claimable"))
                 }
                 aria-pressed={statusFilter === "claimable"}
-                className={`flex min-w-0 flex-col justify-between rounded-xl border bg-white px-3 py-2 text-left transition dark:bg-zinc-900/90 ${
+                className={`surface-card surface-interactive flex min-w-0 flex-col justify-between gap-2.5 px-3.5 py-3 text-left ${
                   statusFilter === "claimable"
-                    ? "border-sky-500/60 ring-1 ring-sky-500/20 dark:border-sky-400/50"
-                    : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                    ? "border-sky-500/60 ring-1 ring-sky-500/20"
+                    : ""
                 }`}
               >
                 <div className="flex w-full items-center justify-between gap-1.5">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-sky-500/12 text-sky-700 dark:text-sky-400">
-                      <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-sky-500/12 text-sky-700 dark:text-sky-400">
+                      <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
                     </span>
-                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
                       今日签到
                     </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium ${
+                    className={`badge shrink-0 whitespace-nowrap ${
                       scopedStats.claimableCount > 0
-                        ? "bg-sky-500/12 text-sky-800 dark:text-sky-300"
+                        ? "border-sky-500/25 bg-sky-500/12 text-sky-800 dark:text-sky-300"
                         : scopedStats.unclaimedAuthMissingCount > 0
-                          ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
+                          ? "border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300"
                           : scopedStats.allClaimed
-                            ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                            : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                            ? "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
+                            : "badge-neutral"
                     }`}
                   >
                     {scopedStats.claimBadgeText}
                   </span>
                 </div>
 
-                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                <div className="flex w-full items-baseline justify-between gap-1.5">
                   <div className="flex items-baseline gap-1">
-                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                    <span className="text-2xl leading-none font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-100">
                       {scopedStats.claimedCount}
                     </span>
-                    <span className="text-[11px] text-zinc-600 dark:text-zinc-400">已签</span>
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">已签</span>
                   </div>
-                  <span className="truncate text-[11px] tabular-nums text-zinc-600 dark:text-zinc-400">
+                  <span className="truncate text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
                     {scopedStats.eligibleClaimTotal > 0
                       ? `共 ${scopedStats.eligibleClaimTotal} 可签`
                       : "仅查额/切号"}
@@ -775,32 +747,32 @@ export function Dashboard() {
                   setStatusFilter((prev) => (prev === "attention" ? "all" : "attention"))
                 }
                 aria-pressed={statusFilter === "attention"}
-                className={`flex min-w-0 flex-col justify-between rounded-xl border bg-white px-3 py-2 text-left transition dark:bg-zinc-900/90 ${
+                className={`surface-card surface-interactive flex min-w-0 flex-col justify-between gap-2.5 px-3.5 py-3 text-left ${
                   statusFilter === "attention"
-                    ? "border-amber-500/60 ring-1 ring-amber-500/20 dark:border-amber-400/50"
-                    : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                    ? "border-amber-500/60 ring-1 ring-amber-500/20"
+                    : ""
                 }`}
               >
                 <div className="flex w-full items-center justify-between gap-1.5">
-                  <div className="flex min-w-0 items-center gap-1.5">
+                  <div className="flex min-w-0 items-center gap-2">
                     <span
-                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${
+                      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
                         scopedStats.attentionCount > 0
                           ? "bg-amber-500/12 text-amber-700 dark:text-amber-400"
                           : "bg-emerald-500/12 text-emerald-700 dark:text-emerald-400"
                       }`}
                     >
-                      <Activity className="h-3 w-3" aria-hidden="true" />
+                      <Activity className="h-3.5 w-3.5" aria-hidden="true" />
                     </span>
-                    <span className="truncate text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
                       凭据健康
                     </span>
                   </div>
                   <span
-                    className={`shrink-0 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[11px] font-medium ${
+                    className={`badge shrink-0 whitespace-nowrap ${
                       scopedStats.attentionCount > 0
-                        ? "bg-amber-500/12 text-amber-800 dark:text-amber-300"
-                        : "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
+                        ? "border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300"
+                        : "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
                     }`}
                   >
                     {scopedStats.attentionCount > 0
@@ -811,25 +783,46 @@ export function Dashboard() {
                   </span>
                 </div>
 
-                <div className="mt-1.5 flex w-full items-baseline justify-between gap-1.5">
+                <div className="flex w-full items-baseline justify-between gap-1.5">
                   <div className="flex items-baseline gap-1">
-                    <span className="text-lg leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
+                    <span className="text-2xl leading-none font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-100">
                       {scopedStats.healthyCount}
                     </span>
-                    <span className="text-[11px] text-zinc-600 dark:text-zinc-400">正常</span>
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">正常</span>
                   </div>
-                  <span className="truncate text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                     {scopedStats.attentionCount > 0 ? "点击筛选" : "状态完好"}
                   </span>
                 </div>
               </button>
             </section>
 
+            {!activeToolFilter && scopeAccounts.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-0.5">
+                <span className="text-[11px] font-medium tracking-wide text-zinc-500 dark:text-zinc-400">
+                  工具分布
+                </span>
+                {visibleTools.map((t) => (
+                  <span
+                    key={t.id}
+                    title={`${t.name}: ${(accountCountByTool.get(t.id) ?? 0)}`}
+                    className="badge badge-neutral gap-1"
+                  >
+                    <ToolBrandIcon toolId={t.id} size="xs" decorative />
+                    <span>{t.name}</span>
+                    <span className="font-semibold tabular-nums">
+                      {(accountCountByTool.get(t.id) ?? 0)}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+
             {scopeAccounts.length > 0 && (
-              <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-zinc-200 bg-white px-3.5 py-2 dark:border-zinc-800 dark:bg-zinc-900/90">
+              <div className="surface-card flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5">
                 <div className="relative min-w-[190px] flex-1 max-w-xs">
                   <Search
-                    className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
+                    className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500"
                     aria-hidden="true"
                   />
                   <input
@@ -838,14 +831,14 @@ export function Dashboard() {
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="搜索昵称、UID、手机号或套餐..."
                     aria-label="搜索账号"
-                    className="w-full rounded-lg border border-zinc-200 bg-zinc-50 py-1 pr-7 pl-8 text-xs text-zinc-900 transition focus:border-zinc-400 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-100 dark:focus:bg-zinc-800"
+                    className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 py-1.5 pr-7 pl-8 text-xs text-zinc-900 transition focus:border-brand-400 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-brand-500 dark:focus:bg-zinc-800"
                   />
                   {searchQuery && (
                     <button
                       type="button"
                       onClick={() => setSearchQuery("")}
                       aria-label="清空搜索"
-                      className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                      className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-200/70 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                     >
                       <X className="h-3 w-3" aria-hidden="true" />
                     </button>
@@ -869,11 +862,7 @@ export function Dashboard() {
                           key={f.id}
                           type="button"
                           onClick={() => setStatusFilter(f.id)}
-                          className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium transition ${
-                            active
-                              ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                              : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700/70"
-                          }`}
+                          className={`chip ${active ? "chip-active" : ""}`}
                         >
                           <span>{f.label}</span>
                           <span
@@ -894,10 +883,10 @@ export function Dashboard() {
                         type="button"
                         onClick={() => setViewMode("grouped")}
                         title="按平台模块化分类展示"
-                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
                           viewMode === "grouped"
-                            ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                            : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                            ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100"
+                            : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                         }`}
                       >
                         <LayoutList className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -907,10 +896,10 @@ export function Dashboard() {
                         type="button"
                         onClick={() => setViewMode("flat")}
                         title="紧凑平铺展示"
-                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
                           viewMode === "flat"
-                            ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                            : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+                            ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100"
+                            : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                         }`}
                       >
                         <LayoutGrid className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -954,30 +943,30 @@ export function Dashboard() {
               {isInitializing && scopeAccounts.length === 0 ? (
                 <div
                   aria-label="正在加载本地账号库"
-                  className="grid grid-cols-1 gap-3.5 md:grid-cols-2 2xl:grid-cols-3"
+                  className="grid grid-cols-1 gap-3.5 @lg:grid-cols-2 @5xl:grid-cols-3"
                 >
                   {[0, 1, 2].map((idx) => (
                     <div
                       key={idx}
-                      className="h-44 animate-pulse rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
+                      className="surface-card h-44 p-4"
                     >
                       <div className="flex items-center gap-3">
-                        <div className="h-9 w-9 rounded-xl bg-zinc-200 dark:bg-zinc-800" />
+                        <div className="skeleton h-9 w-9 rounded-xl" />
                         <div className="flex-1 space-y-2">
-                          <div className="h-3 w-24 rounded bg-zinc-200 dark:bg-zinc-800" />
-                          <div className="h-4 w-36 rounded bg-zinc-200 dark:bg-zinc-800" />
+                          <div className="skeleton h-3 w-24 rounded" />
+                          <div className="skeleton h-4 w-36 rounded" />
                         </div>
                       </div>
-                      <div className="mt-6 h-2 w-full rounded-full bg-zinc-100 dark:bg-zinc-800" />
+                      <div className="skeleton mt-6 h-2 w-full rounded-full" />
                       <div className="mt-6 flex justify-between">
-                        <div className="h-6 w-24 rounded-lg bg-zinc-100 dark:bg-zinc-800" />
-                        <div className="h-6 w-20 rounded-lg bg-zinc-200 dark:bg-zinc-800" />
+                        <div className="skeleton h-6 w-24 rounded-lg" />
+                        <div className="skeleton h-6 w-20 rounded-lg" />
                       </div>
                     </div>
                   ))}
                 </div>
               ) : scopeAccounts.length === 0 ? (
-                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white/75 px-6 py-14 text-center dark:border-zinc-800 dark:bg-zinc-900/40">
+                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-300/80 bg-white/60 px-6 py-14 text-center dark:border-zinc-700/70 dark:bg-zinc-900/30">
                   {activeToolFilter ? (
                     <ToolBrandIcon toolId={activeToolFilter} size="lg" decorative />
                   ) : (
@@ -999,7 +988,7 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={() => openImportModal("local_import")}
-                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-xl bg-zinc-900 px-4 py-2 text-xs font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                      className="btn btn-md btn-primary gap-1.5"
                     >
                       <HardDriveDownload className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       本机一键导入
@@ -1007,7 +996,7 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={() => openImportModal("webview_oauth")}
-                      className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                      className="btn btn-md btn-secondary gap-1.5"
                     >
                       <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       内置授权登录
@@ -1015,7 +1004,7 @@ export function Dashboard() {
                   </div>
                 </div>
               ) : filteredAccounts.length === 0 ? (
-                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-white/60 px-6 py-12 text-center dark:border-zinc-800 dark:bg-zinc-900/30">
+                <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-300/80 bg-white/45 px-6 py-12 text-center dark:border-zinc-700/70 dark:bg-zinc-900/25">
                   <Search className="h-6 w-6 text-zinc-400 dark:text-zinc-600" aria-hidden="true" />
                   <h2 className="mt-3 text-sm font-medium text-zinc-800 dark:text-zinc-200">
                     当前筛选条件下暂无匹配账号
@@ -1029,7 +1018,7 @@ export function Dashboard() {
                       setSearchQuery("");
                       setStatusFilter("all");
                     }}
-                    className="mt-4 rounded-lg border border-zinc-200 bg-white px-3.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    className="btn btn-sm btn-secondary mt-4"
                   >
                     清除筛选条件
                   </button>
@@ -1039,7 +1028,7 @@ export function Dashboard() {
                   {groupedModules.map((group) => (
                     <section
                       key={group.id}
-                      className="rounded-2xl border border-zinc-200/80 bg-zinc-100/45 p-3.5 dark:border-zinc-800/90 dark:bg-zinc-900/40"
+                      className="rounded-2xl bg-zinc-100/55 p-3.5 dark:bg-zinc-900/35"
                     >
                       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-0.5">
                         <div className="flex flex-wrap items-center gap-2">
@@ -1072,14 +1061,14 @@ export function Dashboard() {
                         <button
                           type="button"
                           onClick={() => openImportModal("webview_oauth", group.id)}
-                          className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                          className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
                         >
                           <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
                           添加账号
                         </button>
                       </div>
 
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+                      <div className="grid grid-cols-1 gap-3 @lg:grid-cols-2 @5xl:grid-cols-3">
                         {group.accounts.map((acc) => (
                           <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                         ))}
@@ -1106,7 +1095,7 @@ export function Dashboard() {
                   ))}
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-3.5 md:grid-cols-2 2xl:grid-cols-3">
+                <div className="grid grid-cols-1 gap-3.5 @lg:grid-cols-2 @5xl:grid-cols-3">
                   {filteredAccounts.map((acc) => (
                     <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                   ))}

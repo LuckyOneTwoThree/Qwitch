@@ -37,7 +37,7 @@ export function BatchClaimBanner({ compact = false }: { compact?: boolean }) {
       <div
         role="status"
         aria-live="polite"
-        className={`flex items-center justify-between gap-2 rounded-xl border transition-all ${
+        className={`flex items-center justify-between gap-2 rounded-lg border transition-all ${
           compact ? "px-2.5 py-1.5" : "px-3 py-1.5"
         } ${
           hasFailure
@@ -81,7 +81,7 @@ export function BatchClaimBanner({ compact = false }: { compact?: boolean }) {
     <div
       role="status"
       aria-live="polite"
-      className={`rounded-xl border border-sky-500/20 bg-sky-500/[0.06] dark:border-sky-400/20 dark:bg-sky-500/10 ${
+      className={`rounded-lg border border-sky-500/20 bg-sky-500/[0.06] dark:border-sky-400/20 dark:bg-sky-500/10 ${
         compact ? "px-2.5 py-2" : "px-3 py-2"
       }`}
     >
@@ -99,7 +99,7 @@ export function BatchClaimBanner({ compact = false }: { compact?: boolean }) {
           </span>
         </div>
 
-        <span className="shrink-0 rounded-md bg-sky-500/12 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-sky-800 dark:text-sky-300">
+        <span className="badge shrink-0 border-sky-500/25 bg-sky-500/12 tabular-nums text-sky-800 dark:text-sky-300">
           {pct}%
         </span>
       </div>

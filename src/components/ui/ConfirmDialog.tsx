@@ -49,7 +49,7 @@ export function ConfirmDialog({
           type="button"
           onClick={onCancel}
           aria-label="关闭确认弹窗"
-          className="shrink-0 rounded-lg p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          className="btn btn-sm btn-ghost shrink-0 p-1"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -59,17 +59,15 @@ export function ConfirmDialog({
         <button
           type="button"
           onClick={onCancel}
-          className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 px-3.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="btn btn-md btn-secondary shrink-0 whitespace-nowrap"
         >
           {cancelLabel}
         </button>
         <button
           type="button"
           onClick={() => void onConfirm()}
-          className={`shrink-0 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-medium text-white transition ${
-            danger
-              ? "bg-rose-600 hover:bg-rose-700 dark:bg-rose-500 dark:hover:bg-rose-600"
-              : "bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+          className={`btn btn-md shrink-0 whitespace-nowrap ${
+            danger ? "btn-danger" : "btn-primary"
           }`}
         >
           {confirmLabel}

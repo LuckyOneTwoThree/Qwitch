@@ -37,19 +37,19 @@ function PrototypeShell() {
   return (
     <div className="relative flex h-screen flex-col overflow-hidden">
       {!isTauriRuntime && (
-        <div className="z-40 flex shrink-0 items-center justify-between border-b border-zinc-200 bg-zinc-100/90 px-4 py-1.5 text-xs backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/90">
-          <span className="font-medium text-zinc-600 dark:text-zinc-400">
+        <div className="z-40 flex shrink-0 items-center justify-between border-b border-zinc-200 bg-zinc-100/80 px-4 py-1.5 text-xs backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/80">
+          <span className="font-medium text-zinc-500 dark:text-zinc-400">
             Qwitch 交互原型预览（Mock 数据模式）
           </span>
           <div className="flex items-center gap-2">
-            <div className="inline-flex rounded-lg bg-zinc-200/80 p-0.5 dark:bg-zinc-800">
+            <div className="inline-flex rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-800">
               <button
                 type="button"
                 onClick={() => setPreviewMode("dashboard")}
                 className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
                   previewMode === "dashboard"
-                    ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100"
-                    : "text-zinc-600 dark:text-zinc-400"
+                    ? "bg-white text-zinc-900 shadow-card dark:bg-zinc-700 dark:text-zinc-100"
+                    : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                 }`}
               >
                 <Monitor className="h-3 w-3" aria-hidden="true" />
@@ -60,8 +60,8 @@ function PrototypeShell() {
                 onClick={() => setPreviewMode("tray")}
                 className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
                   previewMode === "tray"
-                    ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-700 dark:text-zinc-100"
-                    : "text-zinc-600 dark:text-zinc-400"
+                    ? "bg-white text-zinc-900 shadow-card dark:bg-zinc-700 dark:text-zinc-100"
+                    : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                 }`}
               >
                 <PanelTop className="h-3 w-3" aria-hidden="true" />
@@ -73,7 +73,7 @@ function PrototypeShell() {
               onClick={toggleTheme}
               title="切换深色/浅色主题"
               aria-label="切换深色或浅色主题"
-              className="rounded-lg border border-zinc-200 bg-white p-1.5 text-zinc-600 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              className="btn btn-icon btn-secondary"
             >
               {theme === "dark" ? (
                 <Sun className="h-3.5 w-3.5" aria-hidden="true" />
@@ -90,7 +90,7 @@ function PrototypeShell() {
           <Dashboard />
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-zinc-200/60 p-8 dark:bg-zinc-950">
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-zinc-100 p-8 dark:bg-zinc-950">
           <div className="relative h-[500px] w-[384px] p-2 pt-1 pb-2.5">
             <TrayPopover onOpenMain={() => setPreviewMode("dashboard")} />
           </div>

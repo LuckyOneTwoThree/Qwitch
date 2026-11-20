@@ -24,7 +24,7 @@ function SettingToggleRow({
     <div className="flex items-start justify-between gap-3 rounded-xl border border-zinc-100 bg-zinc-50/70 px-3 py-2.5 dark:border-zinc-800 dark:bg-zinc-800/40">
       <label htmlFor={id} className="min-w-0 flex-1 cursor-pointer">
         <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{label}</div>
-        <p className="mt-0.5 text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">
+        <p className="mt-0.5 text-xs leading-snug text-zinc-600 dark:text-zinc-400">
           {description}
         </p>
       </label>
@@ -36,7 +36,7 @@ function SettingToggleRow({
         onClick={() => onChange(!checked)}
         className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
           checked
-            ? "bg-zinc-900 dark:bg-zinc-100"
+            ? "bg-brand-700 dark:bg-brand-400"
             : "bg-zinc-300 dark:bg-zinc-700"
         }`}
       >
@@ -90,15 +90,13 @@ export function SettingsView({
   } = useQwitch();
   return (
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="surface-card p-5">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <AppWindow className="h-4 w-4 text-sky-500" aria-hidden="true" />
               桌面常驻与启动偏好
             </div>
-            <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-              即时生效
-            </span>
+            <span className="badge badge-neutral">即时生效</span>
           </div>
           <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
             控制关闭主窗口时的常驻行为及系统登录自动启动策略。
@@ -111,7 +109,7 @@ export function SettingsView({
                   <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
                     外观主题
                   </div>
-                  <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
                     支持始终浅色、深色或随系统外观自动切换。
                   </p>
                 </div>
@@ -128,10 +126,8 @@ export function SettingsView({
                         type="button"
                         aria-pressed={selected}
                         onClick={() => void saveAppSettings({ theme: opt.value }, true)}
-                        className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition ${
-                          selected
-                            ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                            : "border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        className={`btn btn-xs ${
+                          selected ? "btn-primary" : "btn-secondary"
                         }`}
                       >
                         {opt.label}
@@ -165,15 +161,13 @@ export function SettingsView({
           </div>
         </div>
 
-        <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="surface-card p-5">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Timer className="h-4 w-4 text-indigo-500" aria-hidden="true" />
               自动化巡检与每日签到策略
             </div>
-            <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-              即时生效
-            </span>
+            <span className="badge badge-neutral">即时生效</span>
           </div>
           <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
             主窗口可见时按单队列防风控节奏静默核实额度、同步跨天签到状态；隐藏到托盘后将暂停周期性刷新。
@@ -215,7 +209,7 @@ export function SettingsView({
                   <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">
                     后台定时刷新间隔
                   </div>
-                  <p className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
                     主窗口保持可见期间周期性检查额度与次日新签到活动（隐藏到托盘后自动暂停）。
                   </p>
                 </div>
@@ -238,10 +232,8 @@ export function SettingsView({
                             autoRefreshIntervalMinutes: opt.value,
                           })
                         }
-                        className={`rounded-lg px-2 py-1 text-[11px] font-medium transition ${
-                          selected
-                            ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                            : "bg-white text-zinc-700 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                        className={`chip ${
+                          selected ? "chip-active" : ""
                         }`}
                       >
                         {opt.label}
@@ -254,7 +246,7 @@ export function SettingsView({
           </div>
         </div>
 
-        <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="surface-card p-5">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <ShieldCheck className="h-4 w-4 text-emerald-500" aria-hidden="true" />
@@ -268,7 +260,7 @@ export function SettingsView({
                   jitterMaxMs: jitterRangeMs[1],
                 })
               }
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap"
             >
               <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
               保存配置
@@ -327,7 +319,7 @@ export function SettingsView({
           </div>
         </div>
 
-        <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="surface-card p-5">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Archive className="h-4 w-4 text-amber-500" aria-hidden="true" />
@@ -347,7 +339,7 @@ export function SettingsView({
                   ),
                 })
               }
-              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap"
             >
               <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
               保存并执行
@@ -412,7 +404,7 @@ export function SettingsView({
           </div>
         </div>
 
-        <div className="rounded-2xl border border-zinc-200 bg-white p-5 lg:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="surface-card p-5 lg:col-span-2">
           <div className="flex items-center gap-2 text-sm font-semibold">
             <Puzzle className="h-4 w-4 text-sky-500" aria-hidden="true" />
             已注册适配器（内置 + 外部扩展）
@@ -429,12 +421,12 @@ export function SettingsView({
                     <div className="truncate font-semibold text-zinc-900 dark:text-zinc-100">
                       {ad.name}
                     </div>
-                    <div className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">
                       {getToolBrandMeta(ad.id, adapters).tagline}
                     </div>
                   </div>
                 </div>
-                <span className="shrink-0 whitespace-nowrap rounded-md bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                <span className="badge badge-neutral shrink-0">
                   v{ad.version} · {ad.capabilities.supportsDailyClaim ? "查额与签到" : "仅查额与切号"}
                 </span>
               </div>
@@ -443,7 +435,7 @@ export function SettingsView({
         </div>
 
         {isTauriRuntime && (
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5 lg:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="surface-card p-5 lg:col-span-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div className="flex items-center gap-2 text-sm font-semibold">
@@ -476,7 +468,7 @@ export function SettingsView({
                     showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
                   }
                 }}
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
               >
                 <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
                 保存信任设置
@@ -503,12 +495,12 @@ export function SettingsView({
                           </span>
                         </div>
                         {plugin.reserved && (
-                          <div className="mt-0.5 text-[11px] text-rose-600 dark:text-rose-400">
+                          <div className="mt-0.5 text-xs text-rose-600 dark:text-rose-400">
                             该 ID 为内置/历史保留，已被禁止加载
                           </div>
                         )}
                         {!plugin.reserved && plugin.hashMismatch && (
-                          <div className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">
+                          <div className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">
                             插件目录内容已变更或尚未固定校验哈希，当前已被阻止加载；确认安全后请重新点击「保存信任设置」
                           </div>
                         )}
@@ -542,7 +534,7 @@ export function SettingsView({
           </div>
         )}
 
-        <div className="rounded-2xl border border-zinc-200 bg-white p-5 lg:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="surface-card p-5 lg:col-span-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <div className="flex items-center gap-2 text-sm font-semibold">
@@ -557,7 +549,7 @@ export function SettingsView({
               <button
                 type="button"
                 onClick={() => void refreshClientStatuses()}
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
               >
                 <RefreshCw className="h-3 w-3 shrink-0" aria-hidden="true" />
                 重新探测
@@ -571,7 +563,7 @@ export function SettingsView({
                     await refreshClientStatuses();
                   }
                 }}
-                className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
               >
                 <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
                 保存路径覆盖
@@ -600,10 +592,10 @@ export function SettingsView({
                         </span>
                       </div>
                       <span
-                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+                        className={`badge gap-1.5 ${
                           status?.isRunning
                             ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                            : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                            : "badge-neutral"
                         }`}
                       >
                         {status?.isRunning && (
@@ -613,7 +605,7 @@ export function SettingsView({
                       </span>
                     </div>
 
-                    <div className="mt-2.5 grid grid-cols-1 gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400 md:grid-cols-2">
+                    <div className="mt-2.5 grid grid-cols-1 gap-1.5 text-xs text-zinc-600 dark:text-zinc-400 md:grid-cols-2">
                       <div className="truncate">
                         <span className="text-zinc-500 dark:text-zinc-400">探测应用：</span>
                         <span className="font-mono text-zinc-800 dark:text-zinc-200">

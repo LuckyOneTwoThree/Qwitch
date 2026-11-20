@@ -1,11 +1,15 @@
 import type { AccountStatus, ClaimStatus } from "../types/qwitch";
 
+/**
+ * 状态徽标统一使用 `.badge` 基元 + 语义色调，
+ * 保证「正常 / 过期 / 风控 / 停用」四种状态在圆角、内边距、字重上完全一致。
+ */
 export function AccountStatusBadge({ status }: { status: AccountStatus }) {
   const styles: Record<AccountStatus, string> = {
-    active: "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300 border-emerald-500/25",
-    expired: "bg-amber-500/12 text-amber-800 dark:text-amber-300 border-amber-500/25",
-    risk_paused: "bg-rose-500/12 text-rose-800 dark:text-rose-300 border-rose-500/25",
-    disabled: "bg-zinc-500/12 text-zinc-700 dark:text-zinc-300 border-zinc-500/25",
+    active: "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300",
+    expired: "border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300",
+    risk_paused: "border-rose-500/25 bg-rose-500/12 text-rose-800 dark:text-rose-300",
+    disabled: "border-zinc-500/25 bg-zinc-500/12 text-zinc-700 dark:text-zinc-300",
   };
 
   const labels: Record<AccountStatus, string> = {
@@ -16,9 +20,19 @@ export function AccountStatusBadge({ status }: { status: AccountStatus }) {
   };
 
   return (
-    <span
-      className={`inline-flex shrink-0 whitespace-nowrap items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${styles[status]}`}
-    >
+    <span className={`badge ${styles[status]}`}>
+      <span
+        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+          status === "active"
+            ? "bg-emerald-500"
+            : status === "expired"
+              ? "bg-amber-500"
+              : status === "risk_paused"
+                ? "bg-rose-500"
+                : "bg-zinc-400"
+        }`}
+        aria-hidden="true"
+      />
       {labels[status]}
     </span>
   );
@@ -29,7 +43,7 @@ export function ClaimStatusBadge({ status }: { status: ClaimStatus }) {
 
   if (status === "unknown") {
     return (
-      <span className="inline-flex shrink-0 whitespace-nowrap items-center rounded-full border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+      <span className="badge badge-neutral border-zinc-300 dark:border-zinc-700">
         状态待核实
       </span>
     );
@@ -37,15 +51,11 @@ export function ClaimStatusBadge({ status }: { status: ClaimStatus }) {
 
   if (status === "available") {
     return (
-      <span className="inline-flex shrink-0 whitespace-nowrap items-center rounded-full border border-sky-500/25 bg-sky-500/12 px-2 py-0.5 text-[11px] font-medium text-sky-800 dark:text-sky-300">
+      <span className="badge border-sky-500/25 bg-sky-500/12 text-sky-800 dark:text-sky-300">
         今日待领
       </span>
     );
   }
 
-  return (
-    <span className="inline-flex shrink-0 whitespace-nowrap items-center rounded-full border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-      今日已领
-    </span>
-  );
+  return <span className="badge badge-neutral border-zinc-300 dark:border-zinc-700">今日已领</span>;
 }

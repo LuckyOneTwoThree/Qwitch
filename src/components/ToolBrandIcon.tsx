@@ -5,9 +5,13 @@ import type { AdapterManifest } from "../types/qwitch";
 
 export { getToolBrandMeta, TOOL_BRAND_META, type ToolBrandMeta } from "../domain/toolRegistry";
 
+/**
+ * 尺寸刻度对齐 4px 栅格：16 / 24 / 36 / 44 px。
+ * 圆角随尺寸递增，避免小尺寸出现过尖的 4px 圆角（这是「廉价感」的常见来源）。
+ */
 const SIZE_CLASSES: Record<"xs" | "sm" | "md" | "lg", string> = {
-  xs: "h-4 w-4 rounded-[4px]",
-  sm: "h-6 w-6 rounded-md",
+  xs: "h-4 w-4 rounded-[6px]",
+  sm: "h-6 w-6 rounded-lg",
   md: "h-9 w-9 rounded-xl",
   lg: "h-11 w-11 rounded-2xl",
 };
@@ -38,7 +42,7 @@ export const ToolBrandIcon = React.memo(function ToolBrandIcon({
     return (
       <div
         aria-hidden={decorative || undefined}
-        className={`inline-flex shrink-0 items-center justify-center bg-zinc-100 text-zinc-600 ring-1 ring-black/8 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-white/10 ${sizeClass} ${className}`}
+        className={`inline-flex shrink-0 items-center justify-center bg-zinc-100 text-zinc-500 ring-1 ring-black/6 dark:bg-zinc-800/80 dark:text-zinc-400 dark:ring-white/10 ${sizeClass} ${className}`}
       >
         <Layers
           className={size === "xs" ? "h-2.5 w-2.5" : size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4"}
@@ -51,7 +55,7 @@ export const ToolBrandIcon = React.memo(function ToolBrandIcon({
   return (
     <div
       aria-hidden={decorative || undefined}
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden bg-white shadow-2xs ring-1 ring-black/8 dark:bg-zinc-900 dark:ring-white/12 ${sizeClass} ${className}`}
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden bg-white shadow-xs ring-1 ring-black/8 dark:bg-zinc-900 dark:ring-white/12 ${sizeClass} ${className}`}
     >
       <img
         src={iconSrc}

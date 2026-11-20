@@ -93,7 +93,7 @@ export function UpdateCard() {
   const notes = info?.releaseNotes?.trim();
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-5 lg:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
+    <div className="surface-card p-5 lg:col-span-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -118,7 +118,7 @@ export function UpdateCard() {
           type="button"
           disabled={checking || installing}
           onClick={() => void runCheck(true)}
-          className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="btn btn-sm btn-secondary shrink-0 gap-1"
         >
           {checking ? (
             <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
@@ -148,9 +148,7 @@ export function UpdateCard() {
       {info?.updateAvailable && (
         <div className="mt-4 space-y-3">
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-            <span className="rounded-full bg-zinc-100 px-2 py-0.5 dark:bg-zinc-800">
-              {info.platformLabel}
-            </span>
+            <span className="badge badge-neutral">{info.platformLabel}</span>
             {info.assetName && (
               <span className="truncate font-mono" title={info.assetName}>
                 {info.assetName}
@@ -161,7 +159,7 @@ export function UpdateCard() {
           </div>
 
           {notes && (
-            <div className="max-h-40 overflow-auto whitespace-pre-wrap rounded-xl bg-zinc-50 p-3 text-[11px] leading-relaxed text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300">
+            <div className="max-h-40 overflow-auto whitespace-pre-wrap rounded-xl bg-zinc-50 p-3 text-xs leading-relaxed text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300">
               {notes}
             </div>
           )}
@@ -173,7 +171,7 @@ export function UpdateCard() {
                   type="button"
                   disabled={installing}
                   onClick={() => void installOnWindows()}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                  className="btn btn-md btn-primary shrink-0 gap-1.5"
                 >
                   {installing ? (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
@@ -183,7 +181,7 @@ export function UpdateCard() {
                   {installing ? "正在下载安装包..." : `下载并安装 v${info.latestVersion}`}
                 </button>
               ) : (
-                <span className="inline-flex items-center rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-800 dark:text-amber-300">
+                <span className="inline-flex items-center rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-800 dark:text-amber-300">
                   未提供 SHA-256 校验清单，自动安装已禁用，请点击「查看 Release」手动下载并校验
                 </span>
               )
@@ -192,7 +190,7 @@ export function UpdateCard() {
                 type="button"
                 disabled={!info.assetUrl}
                 onClick={() => void openUrl(info.assetUrl)}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+                className="btn btn-md btn-primary shrink-0 gap-1.5"
               >
                 <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 下载 {info.platformLabel} 安装包
@@ -201,19 +199,19 @@ export function UpdateCard() {
             <button
               type="button"
               onClick={() => void openUrl(info.releaseUrl)}
-              className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="btn btn-sm btn-secondary shrink-0 gap-1"
             >
               <ArrowUpRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               查看 Release
             </button>
           </div>
 
-          <p className="rounded-xl bg-amber-500/5 p-3 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-300">
+          <p className="rounded-xl bg-amber-500/5 p-3 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
             {info.hint}
           </p>
 
           {info.strategy === "macos_dmg" && (
-            <ol className="list-decimal space-y-1 pl-5 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+            <ol className="list-decimal space-y-1 pl-5 text-xs leading-relaxed text-zinc-600 dark:text-zinc-400">
               <li>下载与芯片架构匹配的 DMG（Apple Silicon 选 aarch64，Intel 选 x64）。</li>
               <li>退出 Qwitch，打开 DMG，将 Qwitch 拖入「应用程序」并覆盖旧版本。</li>
               <li>

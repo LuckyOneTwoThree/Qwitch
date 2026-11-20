@@ -60,7 +60,7 @@ export function ColdSwitchModal() {
             type="button"
             onClick={cancelColdSwitch}
             aria-label="关闭切换确认窗口"
-            className="shrink-0 rounded-lg p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            className="btn btn-sm btn-ghost shrink-0 p-1"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -86,7 +86,7 @@ export function ColdSwitchModal() {
             <button
               type="button"
               onClick={cancelColdSwitch}
-              className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 px-3.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="btn btn-md btn-secondary shrink-0 whitespace-nowrap"
             >
               取消
             </button>
@@ -94,7 +94,7 @@ export function ColdSwitchModal() {
               type="button"
               disabled={isProcessing}
               onClick={() => void confirmColdSwitch()}
-              className="shrink-0 whitespace-nowrap rounded-lg bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              className="btn btn-md btn-primary shrink-0 whitespace-nowrap disabled:opacity-50"
             >
               {switchDialog.isClientRunning !== false ? "确认关闭并切换" : "确认写入并启动"}
             </button>
@@ -110,7 +110,7 @@ export function ColdSwitchModal() {
               return (
                 <div
                   key={st.key}
-                  className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[11px] font-medium ${
+                  className={`badge gap-1.5 ${
                     done
                       ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                       : active

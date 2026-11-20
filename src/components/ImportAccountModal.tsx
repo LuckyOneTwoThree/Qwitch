@@ -296,7 +296,7 @@ export function ImportAccountModal({  open,
             disabled={submitting}
             onClick={onClose}
             aria-label="关闭导入弹窗"
-            className="shrink-0 rounded-lg p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            className="btn btn-sm btn-ghost shrink-0 p-1 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -326,7 +326,7 @@ export function ImportAccountModal({  open,
                       targetAccount && !active
                         ? "cursor-not-allowed border-zinc-100 bg-zinc-50 text-zinc-400 dark:border-zinc-800/60 dark:bg-zinc-900/40 dark:text-zinc-500"
                         : active
-                          ? "border-zinc-900 bg-zinc-900 text-white shadow-xs dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+                          ? "border-brand-700 bg-brand-700 text-white shadow-xs dark:border-brand-300 dark:bg-brand-300 dark:text-zinc-900"
                           : "border-zinc-200 text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800/60"
                     }`}
                   >
@@ -336,7 +336,7 @@ export function ImportAccountModal({  open,
                         {tool.name}
                       </div>
                       <div
-                        className={`truncate text-[11px] ${
+                        className={`truncate text-xs ${
                           active
                             ? "text-white/80 dark:text-zinc-700"
                             : "text-zinc-500 dark:text-zinc-400"
@@ -389,7 +389,7 @@ export function ImportAccountModal({  open,
                       !supported
                         ? "cursor-not-allowed border-zinc-100 bg-zinc-50 text-zinc-400 dark:border-zinc-800/60 dark:bg-zinc-900/40 dark:text-zinc-500"
                         : active
-                          ? "border-zinc-900 bg-zinc-900/5 text-zinc-900 ring-1 ring-zinc-900/10 dark:border-zinc-200 dark:bg-zinc-100/10 dark:text-zinc-100 dark:ring-zinc-100/10"
+                          ? "border-brand-700 bg-brand-50 text-brand-900 ring-1 ring-brand-700/10 dark:border-brand-300 dark:bg-brand-500/10 dark:text-brand-100 dark:ring-brand-300/10"
                           : "border-zinc-200 text-zinc-700 hover:border-zinc-300 dark:border-zinc-700 dark:text-zinc-200"
                     }`}
                   >
@@ -397,7 +397,7 @@ export function ImportAccountModal({  open,
                       <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       <span>{item.label}</span>
                     </div>
-                    <span className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
+                    <span className="text-xs leading-snug text-zinc-500 dark:text-zinc-400">
                       {item.desc}
                     </span>
                   </button>
@@ -415,9 +415,9 @@ export function ImportAccountModal({  open,
                 <button
                   type="button"
                   onClick={() => setProfileMode("default")}
-                  className={`rounded-lg border px-2.5 py-2 text-left text-[11px] transition ${
+                  className={`rounded-lg border px-2.5 py-2 text-left text-xs transition ${
                     profileMode === "default"
-                      ? "border-zinc-900 bg-zinc-900/5 text-zinc-900 ring-1 ring-zinc-900/10 dark:border-zinc-200 dark:bg-zinc-100/10 dark:text-zinc-100"
+                      ? "border-brand-700 bg-brand-50 text-brand-900 ring-1 ring-brand-700/10 dark:border-brand-300 dark:bg-brand-500/10 dark:text-brand-100 dark:ring-brand-300/10"
                       : "border-zinc-200 text-zinc-600 hover:border-zinc-300 dark:border-zinc-700 dark:text-zinc-300"
                   }`}
                 >
@@ -439,9 +439,9 @@ export function ImportAccountModal({  open,
                       }
                     }
                   }}
-                  className={`rounded-lg border px-2.5 py-2 text-left text-[11px] transition ${
+                  className={`rounded-lg border px-2.5 py-2 text-left text-xs transition ${
                     profileMode === "device"
-                      ? "border-zinc-900 bg-zinc-900/5 text-zinc-900 ring-1 ring-zinc-900/10 dark:border-zinc-200 dark:bg-zinc-100/10 dark:text-zinc-100"
+                      ? "border-brand-700 bg-brand-50 text-brand-900 ring-1 ring-brand-700/10 dark:border-brand-300 dark:bg-brand-500/10 dark:text-brand-100 dark:ring-brand-300/10"
                       : "border-zinc-200 text-zinc-600 hover:border-zinc-300 dark:border-zinc-700 dark:text-zinc-300"
                   }`}
                 >
@@ -454,11 +454,11 @@ export function ImportAccountModal({  open,
               {profileMode === "device" && (
                 <div className="mt-2 space-y-3">
                   <div className="rounded-lg bg-zinc-50 p-2.5 dark:bg-zinc-800/40">
-                    <div className="mb-1.5 text-[11px] font-medium text-zinc-700 dark:text-zinc-200">
+                    <div className="mb-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-200">
                       第 1 步 · 在装有 Trae CN 的那台设备上导出
                     </div>
                     <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">那台设备系统</span>
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400">那台设备系统</span>
                       <div className="inline-flex rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-700/70">
                         {(["mac", "win"] as DevicePlatform[]).map((p) => (
                           <button key={p} type="button" onClick={() => setDevicePlatform(p)}
@@ -468,18 +468,18 @@ export function ImportAccountModal({  open,
                         ))}
                       </div>
                       <button type="button" onClick={() => void handleCopyExport()}
-                        className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900">
+                        className="btn btn-xs btn-primary gap-1">
                         <Copy className="h-3 w-3" aria-hidden="true" /> 复制导出命令
                       </button>
                     </div>
                     <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-zinc-200 bg-white p-2 text-[11px] leading-snug text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">{exportCommand(devicePlatform)}</pre>
-                    <p className="mt-1 text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
+                    <p className="mt-1 text-xs leading-snug text-zinc-500 dark:text-zinc-400">
                       先完全退出那台设备的 Trae CN，把上面的命令粘贴到 {devicePlatform === "win" ? "PowerShell" : "终端"} 执行；会在桌面生成 TraeCN-profile.zip，把它拷到本机。
                     </p>
                   </div>
 
                   <div>
-                    <div className="mb-1.5 text-[11px] font-medium text-zinc-700 dark:text-zinc-200">
+                    <div className="mb-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-200">
                       第 2 步 · 把 zip（或整个文件夹）选进来
                     </div>
                     <input
@@ -492,16 +492,16 @@ export function ImportAccountModal({  open,
                     />
                     <div className="mt-1.5 flex flex-wrap gap-2">
                       <button type="button" onClick={() => void handlePickFile()}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900">
+                        className="btn btn-sm btn-primary gap-1.5">
                         <FileArchive className="h-3.5 w-3.5" aria-hidden="true" /> 选择导出包(.zip)
                       </button>
                       <button type="button" onClick={() => void handlePickFolder()}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800">
+                        className="btn btn-sm btn-secondary gap-1.5">
                         <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" /> 选择文件夹
                       </button>
                     </div>
                     {profileDir.trim() && (
-                      <p className="mt-1.5 text-[11px] leading-snug">
+                      <p className="mt-1.5 text-xs leading-snug">
                         {inspecting ? (
                           <span className="text-zinc-500 dark:text-zinc-400">校验中…</span>
                         ) : inspectError ? (
@@ -583,14 +583,14 @@ export function ImportAccountModal({  open,
             type="button"
             disabled={submitting}
             onClick={onClose}
-            className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 px-3.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            className="btn btn-md btn-secondary shrink-0 whitespace-nowrap"
           >
             取消
           </button>
           <button
             type="submit"
             disabled={submitting || (isDeviceProfile && inspecting)}
-            className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+            className="btn btn-md btn-primary shrink-0 gap-1.5 whitespace-nowrap"
           >
             {submitting && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />}
             {method === "webview_oauth"

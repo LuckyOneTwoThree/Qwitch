@@ -251,10 +251,14 @@ jobs:
 
           - **macOS Apple Silicon (`*aarch64.dmg`)**：适用于 M1/M2/M3/M4 等 Apple Silicon Mac，原生 arm64，无需 Rosetta 2。
           - **macOS Intel (`*x64.dmg`)**：适用于 Intel 芯片 Mac，原生 x86_64。
-          - 两个 macOS 包均为独立架构，下载体积比 Universal 通用包更小；请按芯片类型选择。首次打开若提示“已损坏”或无法验证开发者（暂未配置 Apple 公证签名），拖入 `/Applications` 后执行：
-            ```bash
-            xattr -cr /Applications/Qwitch.app
-            ```
+          - 两个 macOS 包均为独立架构，下载体积比 Universal 通用包更小；请按芯片类型选择。
+          - **macOS 首次打开被拦截**（当前为 ad-hoc 签名，无 Apple Developer 证书、未公证）：先把 `Qwitch.app` 拖入 `/Applications`，再按提示类型处理——
+            - 提示「**无法验证开发者**」：打开「系统设置 → 隐私与安全性」，在底部点击「仍要打开」，然后重新双击应用。
+            - 提示「**已损坏**」：系统不会提供「仍要打开」按钮，需清除隔离属性：
+              ```bash
+              xattr -dr com.apple.quarantine /Applications/Qwitch.app
+              ```
+              若仍无效，改用 `xattr -cr /Applications/Qwitch.app` 清除全部扩展属性。
           - **Windows (`*x64-setup.exe` / `*x64*.msi`)**：适用于 Windows x64 桌面端安装。
           - **完整性校验**：下载后可对照 `SHA256SUMS.txt` 校验安装包哈希值。
           EOF

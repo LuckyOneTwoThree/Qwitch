@@ -63,7 +63,7 @@
 
 - 启动后静默检查 GitHub Releases，设置页「软件更新」可手动检查并查看版本、发布说明与安装包大小。
 - **Windows**：下载官方 NSIS 安装包，SHA256 校验通过后拉起安装程序，Qwitch 自动退出以完成覆盖升级。
-- **macOS**：按芯片架构下载对应 DMG，提供覆盖安装与 Gatekeeper 放行指引；当前安装包未签名/公证，暂不做应用内自替换。
+- **macOS**：按芯片架构下载对应 DMG，提供覆盖安装与 Gatekeeper 放行指引；当前安装包为 ad-hoc 签名（无证书、未公证），暂不做应用内自替换。
 - 更新检查只访问 GitHub Releases，不上传任何本机数据。
 
 ### 📊 额度与签到
@@ -115,7 +115,7 @@
 | macOS 10.15+ | Intel | `Qwitch_*_x64.dmg` |
 | Windows 10+ | x64 | `Qwitch_*_x64-setup.exe` / `.msi` |
 
-> **未签名提示**：当前版本未做代码签名 / 公证。macOS 首次打开若被 Gatekeeper 拦截，请在「系统设置 → 隐私与安全性」中选择「仍要打开」；Windows SmartScreen 提示时选择「更多信息 → 仍要运行」。
+> **macOS 签名提示**：当前版本为 ad-hoc 签名（无 Apple Developer 证书、未公证）。首次打开被 Gatekeeper 拦截时，请按提示类型处理：「无法验证开发者」→ 系统设置中选「仍要打开」；「已损坏」→ 执行 `xattr -dr com.apple.quarantine /Applications/Qwitch.app`。详见 [FAQ](#faq)。Windows SmartScreen 提示时选择「更多信息 → 仍要运行」。
 
 ### 从源码构建
 
@@ -294,7 +294,29 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 <details>
 <summary><b>macOS 提示「已损坏」或「无法验证开发者」？</b></summary>
 
-当前版本未签名。请在「系统设置 → 隐私与安全性」底部选择「仍要打开」，或对应用执行 `xattr -dr com.apple.quarantine /Applications/Qwitch.app`。
+当前版本使用 **ad-hoc 签名**（无 Apple Developer 证书、未公证），因此 Gatekeeper 会拦截。两种提示的成因与解法不同，请对号入座。
+
+**先做这一步**：把 `Qwitch.app` 拖进 `/Applications`（不要留在 `~/Downloads` 或挂载的 DMG 里操作）。
+
+**情况 A：提示「无法验证开发者，无法打开」**
+
+这是签名有效但无证书信任，系统已提供放行入口：
+
+1. 打开「系统设置 → 隐私与安全性」
+2. 滚动到底部，在「安全性」区域点击 **「仍要打开」**
+3. 再次双击应用，弹窗中确认「打开」
+
+**情况 B：提示「已损坏，应移到废纸篓」**
+
+这是下载隔离属性（quarantine）导致的校验失败，系统**不会**提供「仍要打开」按钮，需手动清除隔离属性：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Qwitch.app
+```
+
+执行后重新双击即可打开。
+
+> 说明：`-dr com.apple.quarantine` 只删除隔离属性（`-d` 删除指定属性，`-r` 递归）。若上述命令无效，可改用 `xattr -cr /Applications/Qwitch.app` 清除全部扩展属性。
 </details>
 
 <details>

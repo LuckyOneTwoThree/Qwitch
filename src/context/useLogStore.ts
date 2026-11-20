@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { INITIAL_LOGS } from "../data/mockStore";
+import { getMockLogs } from "../data/mockStoreLoader";
 import { computeMockLogStats, matchesLogCleanup, mergeUniqueLogs } from "./logStateUtils";
 import type {
   ActionLogCleanupRequest,
@@ -27,7 +27,7 @@ interface UseLogStoreArgs {
  */
 export function useLogStore({ isTauriRuntime, showToast }: UseLogStoreArgs) {
   const [logsState, setLogsState] = useState<ActionLogItem[]>(
-    isTauriRuntime ? [] : INITIAL_LOGS
+    isTauriRuntime ? [] : getMockLogs()
   );
   const [logScope, setLogScope] = useState<"active" | "archived">("active");
   const [backendLogStats, setBackendLogStats] = useState<ActionLogStats>({

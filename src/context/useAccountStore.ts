@@ -1,7 +1,19 @@
+/**
+ * 关于下方若干 `eslint-disable react-hooks/exhaustive-deps` 的说明：
+ *
+ * 被省略的依赖全部是**引用恒定**的值，纳入依赖数组不会改变行为，只会增加噪音：
+ * - `appSettingsRef` / `pendingAutoClaimRef` / `pendingAccountIdsRef` 等：`useRef`
+ *   返回的对象在整个组件生命周期内引用不变；
+ * - `setBatchProgress` / `setSwitchDialog`：`useState` 的 setter，React 保证引用稳定。
+ *
+ * 这些依赖刻意不写入数组，是为了让 effect 只在**真正需要重新订阅**的条件
+ * （如 `isTauriRuntime`、`syncFromBackend` 等回调身份）变化时重跑，避免因
+ * ref/setter 被误当作变化源而频繁重建事件监听。
+ */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { INITIAL_ACCOUNTS, MOCK_ADAPTERS } from "../data/mockStore";
+import { getMockAccounts, getMockAdapters } from "../data/mockStoreLoader";
 import { getEffectiveClaimStatus, selectClaimCandidates, toCstDayKey } from "../domain/selectors";
 import type {
   AccountSummary,
@@ -74,17 +86,20 @@ export function useAccountStore({
   pendingAutoClaimRef,
 }: UseAccountStoreDeps) {
   const [isInitializing, setIsInitializing] = useState<boolean>(isTauriRuntime);
-  const [adapters, setAdapters] = useState<AdapterManifest[]>(
-    isTauriRuntime ? [] : MOCK_ADAPTERS
+  // 经 loader 取值：生产构建下 getMock* 恒返回空集合，不会出现假账号
+  const [adapters, setAdapters] = useState<AdapterManifest[]>(() =>
+    isTauriRuntime ? [] : getMockAdapters()
   );
-  const [accounts, setAccounts] = useState<AccountSummary[]>(
-    isTauriRuntime ? [] : INITIAL_ACCOUNTS
+  const [accounts, setAccounts] = useState<AccountSummary[]>(() =>
+    isTauriRuntime ? [] : getMockAccounts()
   );
   const [clientStatuses, setClientStatuses] = useState<Record<string, ClientHostStatus>>({});
   const [cstDayKey, setCstDayKey] = useState<string>(() => toCstDayKey(Date.now()));
   const cstDayKeyRef = useRef(cstDayKey);
   cstDayKeyRef.current = cstDayKey;
 
+  // 账号/适配器全量同步的请求序号：用于丢弃「先发出但后返回」的过期响应
+  const accountSyncSeqRef = useRef(0);
   const didMountLogsRef = useRef(false);
   const syncDebounceTimerRef = useRef<number | null>(null);
   const accountSyncTimerRef = useRef<number | null>(null);
@@ -196,6 +211,8 @@ export function useAccountStore({
   const syncFromBackend = useCallback(async () => {
     if (!isTauriRuntime) return;
     const { seq, scope, limit } = requestSnapshot();
+    accountSyncSeqRef.current += 1;
+    const accountSeq = accountSyncSeqRef.current;
     try {
       const [adList, accList, logList, stats, settings] = await Promise.all([
         invoke<AdapterManifest[]>("list_adapters"),
@@ -209,6 +226,11 @@ export function useAccountStore({
         invoke<ActionLogStats>("get_action_log_stats"),
         invoke<AppSettings>("get_app_settings"),
       ]);
+      // 账号/适配器同样需要序号守卫：并发调用（如事件去抖与手动刷新重叠）时，
+      // 先发出但后返回的旧响应会覆盖新状态，表现为「已删除的账号又回来」。
+      if (accountSeq !== accountSyncSeqRef.current) {
+        return;
+      }
       setAdapters(adList);
       setAccounts(accList);
       commitSnapshot(logList, stats, seq, scope);
@@ -372,6 +394,7 @@ export function useAccountStore({
         window.clearTimeout(accountSyncTimerRef.current);
         accountSyncTimerRef.current = null;
       }
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
       pendingAccountIdsRef.current.clear();
       if (logsDebounceTimerRef.current !== null) {
         window.clearTimeout(logsDebounceTimerRef.current);
@@ -381,6 +404,7 @@ export function useAccountStore({
         unlisten();
       }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
   }, [applyIncomingSettings, isTrayWindow, isTauriRuntime, reconcileActiveAccounts, refreshAccountSummaries, refreshLogs, showToast, syncFromBackend]);
 
   // 回到 Qwitch 窗口时自动复核“本机当前账号”（限频，避免频繁重读客户端文件）
@@ -551,6 +575,7 @@ export function useAccountStore({
         batchLaunchLockRef.current = false;
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
     [accounts, adapters, appendLog, batchProgress?.running, isTauriRuntime, isTrayWindow, showToast]
   );
 
@@ -743,6 +768,7 @@ export function useAccountStore({
         batchLaunchLockRef.current = false;
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
     [accounts, adapters, appendLog, batchProgress?.running, isTauriRuntime, jitterRangeMs, showToast]
   );
 
@@ -768,6 +794,7 @@ export function useAccountStore({
           .catch(() => {});
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
     [isTauriRuntime]
   );
 
@@ -779,6 +806,7 @@ export function useAccountStore({
       coldSwitchDoneTimerRef.current = null;
     }
     setSwitchDialog({ account: null, phase: "confirm" });
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
   }, []);
 
   const confirmColdSwitch = useCallback(async () => {
@@ -855,6 +883,7 @@ export function useAccountStore({
       setSwitchDialog({ account: null, phase: "confirm" });
       showToast(`切换失败：${String(err)}`, "error");
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
   }, [
     appendLog,
     isTauriRuntime,
@@ -1279,6 +1308,7 @@ export function useAccountStore({
       }
     }, 700);
     return () => window.clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
   }, [isInitializing, isTrayWindow]);
 
   // 启动后静默检查一次 GitHub Releases；失败不打扰用户
@@ -1321,6 +1351,7 @@ export function useAccountStore({
       });
     }, mins * 60_000);
     return () => window.clearInterval(intervalId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 省略的均为 useRef/useState setter，引用恒定（见文件头说明）
   }, [appSettings.autoRefreshIntervalMinutes, isInitializing, isTrayWindow]);
 
 

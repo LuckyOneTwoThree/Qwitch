@@ -170,8 +170,32 @@ export function useSettingsStore({
 
           if (isTauriRuntime) {
             try {
+              // 外部插件信任必须经后端原生对话框确认：
+              // 对「本次新增信任」的插件逐个索取一次性票据，随保存一并提交。
+              // 未取得票据（用户取消 / 对话框失败）则中止保存，避免出现
+              // 「UI 显示已启用但后端未授权」或「前端绕过确认自我批准」两种不一致。
+              const trustedAdapterTickets: Record<string, string> = {};
+              const newlyTrusted = (payload.trustedAdapters ?? []).filter(
+                (id) => !(previous.trustedAdapters ?? []).includes(id)
+              );
+              for (const id of newlyTrusted) {
+                try {
+                  trustedAdapterTickets[id] = await invoke<string>(
+                    "request_plugin_trust",
+                    { adapterId: id }
+                  );
+                } catch (err) {
+                  showToast(
+                    `插件 ${id} 未获得信任确认：${String(err)}`,
+                    "warning"
+                  );
+                  return false;
+                }
+              }
+
               const saved = await invoke<AppSettings>("save_app_settings", {
                 settings: payload,
+                trustedAdapterTickets,
               });
               if (touchesJitter) jitterDirtyRef.current = false;
               if (touchesRetention) logRetentionDirtyRef.current = false;

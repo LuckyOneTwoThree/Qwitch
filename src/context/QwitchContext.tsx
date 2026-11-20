@@ -283,6 +283,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       accounts,
       logs,
       logScope,
+      setLogScope,
       logStats,
       hasMoreLogs,
       loadMoreLogs,

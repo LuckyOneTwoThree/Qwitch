@@ -235,7 +235,6 @@
     background-color: #fff;
     border: 1px solid var(--color-zinc-200);
     color: var(--color-zinc-700);
-    box-shadow: var(--shadow-card);
   }
   .btn-secondary:hover:not(:disabled) {
     background-color: var(--color-zinc-50);
@@ -337,12 +336,10 @@
     border-radius: var(--radius-card);
     border: 1px solid var(--color-zinc-200);
     background-color: #fff;
-    box-shadow: var(--shadow-card);
   }
   .dark .surface-card {
     border-color: var(--color-zinc-800);
-    background-color: var(--color-zinc-900);
-    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.24);
+    background-color: color-mix(in oklab, var(--color-zinc-900) 92%, white);
   }
 
   /* 可交互卡片：hover 时抬升，替代「只有描边」的扁平感 */

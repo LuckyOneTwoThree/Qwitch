@@ -241,7 +241,7 @@ export const AccountCard = React.memo(function AccountCard({
                       aria-label="保存账号备注"
                       className="btn btn-icon btn-primary rounded-md disabled:opacity-50"
                     >
-                      <Check className="h-3 w-3" aria-hidden="true" />
+                      <Check className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -252,7 +252,7 @@ export const AccountCard = React.memo(function AccountCard({
                       aria-label="取消重命名"
                       className="btn btn-icon btn-secondary rounded-md"
                     >
-                      <X className="h-3 w-3" aria-hidden="true" />
+                      <X className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
                   </div>
                 ) : (
@@ -270,7 +270,7 @@ export const AccountCard = React.memo(function AccountCard({
                       aria-label={`修改 ${account.label} 备注`}
                       className="shrink-0 rounded p-0.5 text-zinc-400 opacity-0 transition hover:bg-zinc-100 hover:text-zinc-800 group-hover:opacity-100 focus-visible:opacity-100 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                     >
-                      <Pencil className="h-3 w-3" aria-hidden="true" />
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
                   </div>
                 )}
@@ -315,7 +315,7 @@ export const AccountCard = React.memo(function AccountCard({
                     onClick={() => void handleDirectOAuth()}
                     className="btn btn-sm gap-1 whitespace-nowrap bg-amber-600 text-white transition hover:bg-amber-700 disabled:opacity-50 dark:bg-amber-500 dark:text-zinc-950 dark:hover:bg-amber-400"
                   >
-                    <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     {oauthLaunching ? "授权中..." : "在线授权"}
                   </button>
                   {onOpenBindModal && (
@@ -462,12 +462,12 @@ export const AccountCard = React.memo(function AccountCard({
             <div className="flex flex-wrap items-center gap-2">
               {needsRecovery ? (
                 <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 text-amber-700 dark:text-amber-300">
-                  <AlertCircle className="h-3 w-3" aria-hidden="true" />
+                  <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
                   {account.status === "expired" ? "在线凭据已过期" : "风控暂停，需恢复"}
                 </span>
               ) : isDisabled ? (
                 <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 text-zinc-600 dark:text-zinc-400">
-                  <PauseCircle className="h-3 w-3" aria-hidden="true" />
+                  <PauseCircle className="h-3.5 w-3.5" aria-hidden="true" />
                   已停用（跳过批量任务）
                 </span>
               ) : (
@@ -475,7 +475,7 @@ export const AccountCard = React.memo(function AccountCard({
                   className="inline-flex shrink-0 items-center gap-1 text-zinc-500 dark:text-zinc-400"
                   title="该账号当前已具备的能力"
                 >
-                  <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                  <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
                   {(() => {
                     const caps = [
                       !missingLocalSnapshot && canSwitch ? "切号" : null,
@@ -488,7 +488,7 @@ export const AccountCard = React.memo(function AccountCard({
               )}
             </div>
             <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 tabular-nums">
-              <Clock className="h-3 w-3" aria-hidden="true" />
+              <Clock className="h-3.5 w-3.5" aria-hidden="true" />
               {formatSyncTime(account.latestQuota?.fetchedAt ?? account.updatedAt)}
             </span>
           </div>
@@ -504,7 +504,7 @@ export const AccountCard = React.memo(function AccountCard({
                   onClick={() => void handleDirectOAuth()}
                   className="btn btn-sm gap-1 whitespace-nowrap border border-amber-500/25 bg-amber-500/15 text-amber-800 transition hover:bg-amber-500/25 disabled:opacity-50 dark:text-amber-300"
                 >
-                  <Globe className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   {oauthLaunching ? "授权中..." : "重新授权"}
                 </button>
                 {onOpenBindModal && (
@@ -523,7 +523,7 @@ export const AccountCard = React.memo(function AccountCard({
                   className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <RotateCcw
-                    className={`h-3 w-3 shrink-0 ${recovering ? "animate-spin" : ""}`}
+                    className={`h-3.5 w-3.5 shrink-0 ${recovering ? "animate-spin" : ""}`}
                     aria-hidden="true"
                   />
                   {recovering ? "恢复中..." : "重试"}
@@ -545,7 +545,7 @@ export const AccountCard = React.memo(function AccountCard({
                   className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <RefreshCw
-                    className={`h-3 w-3 shrink-0 ${refreshing ? "animate-spin" : ""}`}
+                    className={`h-3.5 w-3.5 shrink-0 ${refreshing ? "animate-spin" : ""}`}
                     aria-hidden="true"
                   />
                   查额
@@ -565,7 +565,7 @@ export const AccountCard = React.memo(function AccountCard({
                       onClick={() => void claimDailyBatch([account.id])}
                       className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap"
                     >
-                      <Sparkles className="h-3 w-3 shrink-0" aria-hidden="true" />
+                      <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       领取
                     </button>
                   )}
@@ -589,9 +589,9 @@ export const AccountCard = React.memo(function AccountCard({
               className="btn btn-icon btn-secondary shrink-0 disabled:opacity-50"
             >
               {isDisabled ? (
-                <PlayCircle className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                <PlayCircle className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
               ) : (
-                <PauseCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <PauseCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               )}
             </button>
 
@@ -602,7 +602,7 @@ export const AccountCard = React.memo(function AccountCard({
               aria-label={`删除账号 ${account.label}`}
               className="btn btn-icon btn-secondary shrink-0 border-zinc-200 text-zinc-400 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-600 dark:border-zinc-700 dark:text-zinc-500 dark:hover:border-rose-800 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
             >
-              <Trash2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+              <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             </button>
           </div>
 
@@ -614,7 +614,7 @@ export const AccountCard = React.memo(function AccountCard({
               title={`读取本机 ${toolMeta.name} 当前登录的会话并合并到该账号；需要客户端已登录「${account.label}」`}
               className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:opacity-50"
             >
-              <Link2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+              <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               {associating ? "关联中..." : "关联本机"}
             </button>
           ) : (
@@ -631,7 +631,7 @@ export const AccountCard = React.memo(function AccountCard({
                 onClick={() => requestColdSwitch(account)}
                 className="btn btn-sm btn-brand-soft gap-1 whitespace-nowrap"
               >
-                <ArrowLeftRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <ArrowLeftRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 切至桌面端
               </button>
             )

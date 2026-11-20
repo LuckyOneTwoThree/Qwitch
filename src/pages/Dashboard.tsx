@@ -505,7 +505,7 @@ export function Dashboard() {
           <div className="flex min-w-0 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-semibold tracking-tight">{headerTitle}</h1>
+              <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>
               <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
                 {headerSubtitle}
               </p>
@@ -797,27 +797,6 @@ export function Dashboard() {
               </button>
             </section>
 
-            {!activeToolFilter && scopeAccounts.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 px-0.5">
-                <span className="text-[11px] font-medium tracking-wide text-zinc-500 dark:text-zinc-400">
-                  工具分布
-                </span>
-                {visibleTools.map((t) => (
-                  <span
-                    key={t.id}
-                    title={`${t.name}: ${(accountCountByTool.get(t.id) ?? 0)}`}
-                    className="badge badge-neutral gap-1"
-                  >
-                    <ToolBrandIcon toolId={t.id} size="xs" decorative />
-                    <span>{t.name}</span>
-                    <span className="font-semibold tabular-nums">
-                      {(accountCountByTool.get(t.id) ?? 0)}
-                    </span>
-                  </span>
-                ))}
-              </div>
-            )}
-
             {scopeAccounts.length > 0 && (
               <div className="surface-card flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5">
                 <div className="relative min-w-[190px] flex-1 max-w-xs">
@@ -1033,7 +1012,7 @@ export function Dashboard() {
                       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-0.5">
                         <div className="flex flex-wrap items-center gap-2">
                           <ToolBrandIcon toolId={group.id} size="sm" decorative />
-                          <h2 className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                             {group.name}
                           </h2>
                           <span className="rounded-full bg-zinc-200/80 px-2 py-0.5 text-[11px] font-medium tabular-nums text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">

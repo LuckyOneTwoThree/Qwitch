@@ -235,6 +235,11 @@ export function Dashboard() {
   } | null>(null);
 
   const visibleTools = useMemo(() => getVisibleTools(adapters), [adapters]);
+  const accountCountByTool = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const acc of accounts) m.set(acc.toolId, (m.get(acc.toolId) ?? 0) + 1);
+    return m;
+  }, [accounts]);
 
   const activeToolFilter: ToolId | undefined =
     nav !== "all" && nav !== "logs" && nav !== "settings" ? nav : undefined;
@@ -474,6 +479,7 @@ export function Dashboard() {
                 <button
                   type="button"
                   onClick={() => setNav("all")}
+                  aria-current={nav === "all" ? "page" : undefined}
                   className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
                     nav === "all"
                       ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
@@ -497,13 +503,14 @@ export function Dashboard() {
 
                 {visibleTools.map((tool) => {
                   const active = nav === tool.id;
-                  const count = accounts.filter((a) => a.toolId === tool.id).length;
+                  const count = (accountCountByTool.get(tool.id) ?? 0);
                   const isRunning = clientStatuses[tool.id]?.isRunning;
                   return (
                     <button
                       key={tool.id}
                       type="button"
                       onClick={() => setNav(tool.id)}
+                      aria-current={active ? "page" : undefined}
                       className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
                         active
                           ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
@@ -543,6 +550,7 @@ export function Dashboard() {
                 <button
                   type="button"
                   onClick={() => setNav("logs")}
+                  aria-current={nav === "logs" ? "page" : undefined}
                   className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
                     nav === "logs"
                       ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
@@ -567,6 +575,7 @@ export function Dashboard() {
                 <button
                   type="button"
                   onClick={() => setNav("settings")}
+                  aria-current={nav === "settings" ? "page" : undefined}
                   className={`flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-xs font-medium transition ${
                     nav === "settings"
                       ? "bg-zinc-900 text-white shadow-2xs dark:bg-zinc-100 dark:text-zinc-900"
@@ -740,12 +749,12 @@ export function Dashboard() {
                       {visibleTools.map((t) => (
                         <span
                           key={t.id}
-                          title={`${t.name}: ${accounts.filter((a) => a.toolId === t.id).length}`}
+                          title={`${t.name}: ${(accountCountByTool.get(t.id) ?? 0)}`}
                           className="inline-flex items-center gap-0.5 rounded bg-zinc-100 px-1 py-0.5 text-[11px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                         >
                           <ToolBrandIcon toolId={t.id} size="xs" decorative />
                           <span className="tabular-nums">
-                            {accounts.filter((a) => a.toolId === t.id).length}
+                            {(accountCountByTool.get(t.id) ?? 0)}
                           </span>
                         </span>
                       ))}

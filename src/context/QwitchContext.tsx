@@ -16,6 +16,12 @@ import {
   normalizeAppSettings,
   sanitizeAppSettingsPatch,
 } from "./settingsUtils";
+import {
+  computeMockLogStats,
+  matchesLogCleanup,
+  mergeUniqueLogs,
+  resolveTheme,
+} from "./logStateUtils";
 import type {
   AccountSummary,
   ActionLogCleanupRequest,
@@ -163,48 +169,9 @@ const syncThemeStorage = (nextTheme: "light" | "dark" | "system") => {
   }
 };
 
-const resolveTheme = (t: "light" | "dark" | "system"): "light" | "dark" => {
-  if (t === "system") {
-    return typeof window !== "undefined" &&
-      window.matchMedia?.("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
-  }
-  return t;
-};
-
 const detectTrayWindow = () =>
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("view") === "tray";
-
-const isRedundantLog = (log: ActionLogItem) =>
-  log.resultStatus === "skipped" ||
-  (log.actionType === "query" && log.resultStatus === "success");
-
-const matchesLogCleanup = (
-  log: ActionLogItem,
-  req: ActionLogCleanupRequest,
-  defaultScope: LogScope
-) => {
-  const scope = req.scope ?? defaultScope;
-  if (scope === "active" && log.archivedAt) return false;
-  if (scope === "archived" && !log.archivedAt) return false;
-  if (req.ids) {
-    if (!req.ids.includes(log.id)) return false;
-  }
-  if (req.olderThanDays && req.olderThanDays > 0) {
-    const cutoff = Date.now() - req.olderThanDays * 86_400_000;
-    if (new Date(log.createdAt).getTime() >= cutoff) return false;
-  }
-  if (req.actionType && req.actionType !== "all" && log.actionType !== req.actionType) {
-    return false;
-  }
-  if (req.resultStatus && req.resultStatus !== "all" && log.resultStatus !== req.resultStatus) {
-    return false;
-  }
-  if (req.redundantOnly && !isRedundantLog(log)) return false;
-  return true;
-};
 
 export function QwitchProvider({ children }: { children: React.ReactNode }) {
   const isTauriRuntime = detectTauriRuntime();
@@ -619,16 +586,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         LOG_MAX_LIMIT,
         logsRef.current.length + more.length
       );
-      setLogsState((prev) => {
-        const seen = new Set(prev.map((item) => item.id));
-        const merged = [...prev];
-        for (const item of more) {
-          if (!seen.has(item.id)) {
-            merged.push(item);
-          }
-        }
-        return merged;
-      });
+      setLogsState((prev) => mergeUniqueLogs(prev, more));
     } catch (err) {
       showToast(`加载更多日志失败：${String(err)}`, "error");
     } finally {
@@ -1389,7 +1347,10 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       const randHex = Math.random().toString(16).slice(2, 6);
       const id = `acc-${toolId}-${Date.now()}`;
       const supportsClaim =
-        toolId === "trae_cn" || toolId === "workbuddy" || toolId === "qoder_cn";
+        toolId === "trae_cn" ||
+        toolId === "workbuddy" ||
+        toolId === "qoder_cn" ||
+        toolId === "minimax_code_cn";
       const newAcc: AccountSummary = {
         id,
         toolId,
@@ -1400,17 +1361,13 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
         hasLocalSnapshot: method === "local_import" || toolId !== "qoder_cn",
         hasApiToken: method !== "local_import" || toolId !== "qoder_cn",
         latestQuota: {
-          planName: toolId === "minimax_code_cn" ? "Coding Plan" : "Free",
+          planName: "Free",
           claimStatus: supportsClaim ? "available" : "unsupported",
           fetchedAt: now,
           buckets: [
             {
               key: "default",
-              label: supportsClaim
-                ? "可用额度"
-                : toolId === "minimax_code_cn"
-                  ? "本周期 Coding 请求"
-                  : "快速请求额度",
+              label: supportsClaim ? "可用额度" : "快速请求额度",
               used: 0,
               total: 500,
               remaining: 500,
@@ -1625,14 +1582,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
 
   const logStats = useMemo<ActionLogStats>(() => {
     if (isTauriRuntime) return backendLogStats;
-    const active = logsState.filter((item) => !item.archivedAt);
-    const archived = logsState.filter((item) => Boolean(item.archivedAt));
-    return {
-      activeCount: active.length,
-      archivedCount: archived.length,
-      failedActiveCount: active.filter((item) => item.resultStatus === "failed").length,
-      noiseActiveCount: active.filter(isRedundantLog).length,
-    };
+    return computeMockLogStats(logsState);
   }, [backendLogStats, isTauriRuntime, logsState]);
 
   const hasMoreLogs = useMemo(() => {

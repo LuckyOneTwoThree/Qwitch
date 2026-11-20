@@ -422,7 +422,7 @@ export function ImportAccountModal({  open,
                   }`}
                 >
                   本机默认
-                  <span className="mt-0.5 block text-[10px] text-zinc-500 dark:text-zinc-400">
+                  <span className="mt-0.5 block text-[11px] text-zinc-500 dark:text-zinc-400">
                     直接用本机 device_id
                   </span>
                 </button>
@@ -446,7 +446,7 @@ export function ImportAccountModal({  open,
                   }`}
                 >
                   隔离设备 profile
-                  <span className="mt-0.5 block text-[10px] text-zinc-500 dark:text-zinc-400">
+                  <span className="mt-0.5 block text-[11px] text-zinc-500 dark:text-zinc-400">
                     每个账号独立设备身份
                   </span>
                 </button>
@@ -472,8 +472,8 @@ export function ImportAccountModal({  open,
                         <Copy className="h-3 w-3" aria-hidden="true" /> 复制导出命令
                       </button>
                     </div>
-                    <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-zinc-200 bg-white p-2 text-[10px] leading-snug text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">{exportCommand(devicePlatform)}</pre>
-                    <p className="mt-1 text-[10px] leading-snug text-zinc-500 dark:text-zinc-400">
+                    <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md border border-zinc-200 bg-white p-2 text-[11px] leading-snug text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">{exportCommand(devicePlatform)}</pre>
+                    <p className="mt-1 text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
                       先完全退出那台设备的 Trae CN，把上面的命令粘贴到 {devicePlatform === "win" ? "PowerShell" : "终端"} 执行；会在桌面生成 TraeCN-profile.zip，把它拷到本机。
                     </p>
                   </div>

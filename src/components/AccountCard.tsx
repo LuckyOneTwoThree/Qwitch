@@ -290,7 +290,7 @@ export const AccountCard = React.memo(function AccountCard({
                 </p>
                 {account.deviceIdMasked && (
                   <p
-                    className={`mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] ${
+                    className={`mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[11px] ${
                       account.deviceType === "win"
                         ? "bg-sky-500/10 text-sky-700 dark:text-sky-300"
                         : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"

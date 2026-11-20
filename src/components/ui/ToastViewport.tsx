@@ -44,7 +44,7 @@ export function ToastViewport({ compact = false }: { compact?: boolean }) {
 
   return (
     <div
-      role="status"
+      role={toast.tone === "error" ? "alert" : "status"}
       aria-live={toast.tone === "error" ? "assertive" : "polite"}
       className={`fixed z-50 flex max-w-sm items-center gap-2 rounded-xl border px-3.5 py-2.5 text-xs font-medium shadow-xl ${
         compact ? "right-3 bottom-3 left-3" : "right-5 bottom-5"

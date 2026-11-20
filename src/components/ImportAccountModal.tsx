@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Copy, FileArchive, FolderOpen, Globe, HardDriveDownload, KeyRound, Loader2, X } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { getVisibleTools } from "../domain/toolRegistry";
@@ -48,16 +48,20 @@ export function ImportAccountModal({  open,
   const wasOpenRef = useRef(false);
   const lastTargetIdRef = useRef<string | undefined>(undefined);
 
-  const getSupportedMethods = (tid: ToolId): AuthMethod[] => {
-    const adapter = adapters.find((a) => a.id === tid);
-    const declared = adapter?.capabilities.authMethods ?? ["local_import", "webview_oauth"];
-    const set = new Set<AuthMethod>(declared);
-    // 所有内置适配器均实现 parse_manual_token，默认开放手动 Token/JSON 粘贴补充通道
-    if (adapter?.isBuiltin ?? true) {
-      set.add("token_paste");
-    }
-    return Array.from(set);
-  };
+  // 用 useCallback 固定引用：否则每次渲染都是新函数，作为 effect 依赖会引发无限循环
+  const getSupportedMethods = useCallback(
+    (tid: ToolId): AuthMethod[] => {
+      const adapter = adapters.find((a) => a.id === tid);
+      const declared = adapter?.capabilities.authMethods ?? ["local_import", "webview_oauth"];
+      const set = new Set<AuthMethod>(declared);
+      // 所有内置适配器均实现 parse_manual_token，默认开放手动 Token/JSON 粘贴补充通道
+      if (adapter?.isBuiltin ?? true) {
+        set.add("token_paste");
+      }
+      return Array.from(set);
+    },
+    [adapters]
+  );
 
   // 仅在弹窗打开瞬间或切换 targetAccount 时初始化表单，避免后台 syncFromBackend 更新 adapters 引用重置用户输入
   useEffect(() => {
@@ -119,7 +123,7 @@ export function ImportAccountModal({  open,
     } else {
       setMethod(methods[0] ?? "webview_oauth");
     }
-  }, [open, targetAccount, defaultToolId, defaultMethod, visibleTools]);
+  }, [open, targetAccount, defaultToolId, defaultMethod, visibleTools, getSupportedMethods]);
 
   // 若后台适配器列表更新导致当前选中方式不再受支持，仅校正导入方式，不清空用户输入的别名或 Token
   useEffect(() => {
@@ -128,7 +132,7 @@ export function ImportAccountModal({  open,
     if (methods.length > 0 && !methods.includes(method)) {
       setMethod(methods[0]);
     }
-  }, [open, toolId, method, adapters]);
+  }, [open, toolId, method, getSupportedMethods]);
 
   const supportedMethods = getSupportedMethods(toolId);
   // 目前仅 Trae CN 支持“隔离设备 profile”多开签到；后续可依 adapter 能力位扩展

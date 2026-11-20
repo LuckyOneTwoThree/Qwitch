@@ -6,6 +6,7 @@ import {
   isSameCstDay,
   selectClaimCandidates,
   selectScopedStats,
+  sortAccountsForFlatView,
 } from "./selectors";
 
 const NOW_ISO = new Date().toISOString();
@@ -203,5 +204,124 @@ describe("selectClaimCandidates", () => {
     ];
     const candidates = selectClaimCandidates(accounts, adapters, { toolId: "qoder_cn" });
     expect(candidates.map((c) => c.id)).toEqual(["b"]);
+  });
+});
+describe("sortAccountsForFlatView", () => {
+  const adapters = [
+    makeAdapter("trae_cn"),
+    makeAdapter("workbuddy"),
+    makeAdapter("qoder_cn"),
+    makeAdapter("minimax_code_cn"),
+  ];
+
+  it("按「待处理 → 可领取 → 挂载中 → 其余」分层", () => {
+    const normal = makeAcc({
+      id: "n",
+      toolId: "trae_cn",
+      label: "正常",
+      latestQuota: { claimStatus: "claimed", fetchedAt: NOW_ISO, buckets: [] },
+    });
+    const active = makeAcc({
+      id: "a",
+      toolId: "trae_cn",
+      label: "挂载中",
+      isActiveOnClient: true,
+      latestQuota: { claimStatus: "claimed", fetchedAt: NOW_ISO, buckets: [] },
+    });
+    const claimable = makeAcc({
+      id: "c",
+      toolId: "trae_cn",
+      label: "可领取",
+      latestQuota: { claimStatus: "available", fetchedAt: NOW_ISO, buckets: [] },
+    });
+    const attention = makeAcc({
+      id: "x",
+      toolId: "trae_cn",
+      label: "已过期",
+      status: "expired",
+    });
+
+    const sorted = sortAccountsForFlatView(
+      [normal, active, claimable, attention],
+      adapters
+    );
+
+    expect(sorted.map((a) => a.id)).toEqual(["x", "c", "a", "n"]);
+  });
+
+  it("层内按工具顺序排列，与分组视图的 BUILTIN_TOOL_ORDER 一致", () => {
+    // 全部为 normal 层，验证工具顺序为 trae → workbuddy → qoder → minimax
+    const accounts = [
+      makeAcc({ id: "mm", toolId: "minimax_code_cn", label: "MiniMax" }),
+      makeAcc({ id: "qd", toolId: "qoder_cn", label: "Qoder" }),
+      makeAcc({ id: "tr", toolId: "trae_cn", label: "Trae" }),
+      makeAcc({ id: "wb", toolId: "workbuddy", label: "WorkBuddy" }),
+    ];
+
+    const sorted = sortAccountsForFlatView(accounts, adapters);
+
+    expect(sorted.map((a) => a.toolId)).toEqual([
+      "trae_cn",
+      "workbuddy",
+      "qoder_cn",
+      "minimax_code_cn",
+    ]);
+  });
+
+  it("同层同工具内保持传入顺序（稳定排序，避免刷新时卡片跳动）", () => {
+    const first = makeAcc({ id: "1", toolId: "trae_cn", label: "先导入" });
+    const second = makeAcc({ id: "2", toolId: "trae_cn", label: "后导入" });
+    const third = makeAcc({ id: "3", toolId: "trae_cn", label: "最后" });
+
+    const sorted = sortAccountsForFlatView([first, second, third], adapters);
+    expect(sorted.map((a) => a.id)).toEqual(["1", "2", "3"]);
+
+    // 顺序颠倒输入，仍按传入顺序输出（不按 label 重排）
+    const sorted2 = sortAccountsForFlatView([third, first, second], adapters);
+    expect(sorted2.map((a) => a.id)).toEqual(["3", "1", "2"]);
+  });
+
+  it("已停用账号不进入「待处理」层（用户主动关闭，无需提醒）", () => {
+    const disabled = makeAcc({
+      id: "d",
+      toolId: "trae_cn",
+      label: "已停用",
+      status: "disabled",
+    });
+    const attention = makeAcc({
+      id: "x",
+      toolId: "trae_cn",
+      label: "风控",
+      status: "risk_paused",
+    });
+
+    const sorted = sortAccountsForFlatView([disabled, attention], adapters);
+    // 风控排最前；停用归入 normal 层
+    expect(sorted.map((a) => a.id)).toEqual(["x", "d"]);
+  });
+
+  it("未完成授权（hasApiToken=false）归入待处理层", () => {
+    const noToken = makeAcc({
+      id: "nt",
+      toolId: "trae_cn",
+      label: "待授权",
+      hasApiToken: false,
+    });
+    const normal = makeAcc({ id: "n", toolId: "trae_cn", label: "正常" });
+
+    const sorted = sortAccountsForFlatView([normal, noToken], adapters);
+    expect(sorted.map((a) => a.id)).toEqual(["nt", "n"]);
+  });
+
+  it("未知工具（外部插件未加载）排在已知工具之后但不丢失", () => {
+    const unknown = makeAcc({ id: "u", toolId: "ext_plugin" as never, label: "外部" });
+    const known = makeAcc({ id: "k", toolId: "trae_cn", label: "内置" });
+
+    const sorted = sortAccountsForFlatView([unknown, known], adapters);
+    expect(sorted.map((a) => a.id)).toEqual(["k", "u"]);
+  });
+
+  it("空输入返回空数组且不抛错", () => {
+    expect(sortAccountsForFlatView([], adapters)).toEqual([]);
   });
 });

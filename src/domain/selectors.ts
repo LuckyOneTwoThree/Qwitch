@@ -268,3 +268,81 @@ export function selectScopedStats(
     },
   };
 }
+
+/**
+ * 平铺视图的排序优先级。
+ *
+ * 数值越小越靠前。顺序体现「额度管理器」的核心意图：**先处理需要我动手的**。
+ */
+export const FLAT_SORT_TIER = {
+  /** 过期 / 风控暂停 / 未完成授权 —— 不处理就无法使用 */
+  attention: 0,
+  /** 今日可领取 —— 该去点一下 */
+  claimable: 1,
+  /** 本机客户端当前挂载 —— 正在使用中 */
+  activeOnClient: 2,
+  /** 其余正常账号 */
+  normal: 3,
+} as const;
+
+/**
+ * 平铺视图排序：语义优先，工具顺序与分组视图保持一致。
+ *
+ * 背景：平铺视图此前**不做任何排序**，直接继承后端
+ * `ORDER BY tool_id ASC, is_active_on_client DESC, created_at ASC`
+ * 的顺序。这带来两个实际问题：
+ *
+ * 1. 工具顺序是 `tool_id` 字典序（minimax → qoder → trae → workbuddy），
+ *    与分组视图的 `BUILTIN_TOOL_ORDER`（trae → workbuddy → qoder → minimax）
+ *    恰好相反。用户在两个视图间切换时所有卡片位置全变，观感混乱。
+ * 2. `is_active_on_client` 的优先级在 `tool_id` 之后，导致「当前挂载的账号」
+ *    会被字典序更靠前的工具挤到后面 —— 用户最该第一眼看到的信息被淹没。
+ *
+ * 本函数用**已存在的字段**（status / claimStatus / isActiveOnClient / toolId /
+ * label）重新排序，不依赖后端改动，也不扩展 DTO：
+ *
+ * - 分层：待处理 → 可领取 → 挂载中 → 其余
+ * - 层内：按 `BUILTIN_TOOL_ORDER` 排工具，与分组视图一致
+ * - 工具内：保持传入顺序（后端已按 created_at 稳定排序，等于「先导入的在前」）
+ *
+ * 排序是**稳定**的：同层同工具内不重排，避免每次刷新卡片跳动。
+ */
+export function sortAccountsForFlatView(
+  accounts: AccountSummary[],
+  adapters: AdapterManifest[]
+): AccountSummary[] {
+  const toolOrder = new Map<string, number>();
+  getVisibleTools(adapters).forEach((tool, index) => {
+    toolOrder.set(tool.id, index);
+  });
+
+  const tierOf = (acc: AccountSummary): number => {
+    // 已停用是用户主动关闭的，不需要提醒处理，归入 normal
+    if (acc.status !== "disabled" && isAccountNeedingAttention(acc)) {
+      return FLAT_SORT_TIER.attention;
+    }
+    if (isAccountClaimable(acc, adapters)) {
+      return FLAT_SORT_TIER.claimable;
+    }
+    if (acc.isActiveOnClient) {
+      return FLAT_SORT_TIER.activeOnClient;
+    }
+    return FLAT_SORT_TIER.normal;
+  };
+
+  // 先记录原始下标，作为同层同工具内的稳定兜底
+  const decorated = accounts.map((acc, index) => ({
+    acc,
+    index,
+    tier: tierOf(acc),
+    toolRank: toolOrder.get(acc.toolId) ?? Number.MAX_SAFE_INTEGER,
+  }));
+
+  decorated.sort((a, b) => {
+    if (a.tier !== b.tier) return a.tier - b.tier;
+    if (a.toolRank !== b.toolRank) return a.toolRank - b.toolRank;
+    return a.index - b.index;
+  });
+
+  return decorated.map((d) => d.acc);
+}

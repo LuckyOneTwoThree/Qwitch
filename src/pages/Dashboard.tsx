@@ -34,6 +34,7 @@ import {
   isAccountNeedingAttention,
   selectScopeAccounts,
   selectScopedStats,
+  sortAccountsForFlatView,
   type AccountFilter,
 } from "../domain/selectors";
 import type {
@@ -196,6 +197,13 @@ export function Dashboard() {
       return haystack.includes(q);
     });
   }, [scopeAccounts, searchQuery, statusFilter, adapters, cstDayKey]);
+
+  // 平铺视图排序：待处理 → 可领取 → 挂载中 → 其余；层内按工具顺序，
+  // 与分组视图共享 BUILTIN_TOOL_ORDER，避免切换视图时卡片位置全变。
+  const sortedFlatAccounts = useMemo(
+    () => sortAccountsForFlatView(filteredAccounts, adapters),
+    [filteredAccounts, adapters]
+  );
 
   const groupedModules = useMemo(() => {
     const isFiltering = Boolean(searchQuery.trim()) || statusFilter !== "all";
@@ -1083,7 +1091,7 @@ export function Dashboard() {
                 </div>
               ) : (
                 <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
-                  {filteredAccounts.map((acc) => (
+                  {sortedFlatAccounts.map((acc) => (
                     <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                   ))}
                 </div>

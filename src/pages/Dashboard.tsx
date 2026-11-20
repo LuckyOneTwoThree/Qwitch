@@ -1,25 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  RefreshCw,
-  Sparkles,
-  Plus,
-  ShieldCheck,
-  Layers,
-  ScrollText,
-  Settings,
-  Lock,
-  Moon,
-  Sun,
-  HardDriveDownload,
-  Globe,
-  Search,
-  X,
   Activity,
-  MonitorCheck,
   CheckCircle2,
+  Download,
+  Globe,
+  HardDriveDownload,
+  Layers,
   LayoutGrid,
   LayoutList,
+  Loader2,
+  Lock,
+  MonitorCheck,
+  Moon,
+  Plus,
   Power,
+  RefreshCw,
+  ScrollText,
+  Search,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Sun,
+  X,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { AccountCard } from "../components/AccountCard";
@@ -29,6 +31,7 @@ import { ImportAccountModal } from "../components/ImportAccountModal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
 import { UpdateBanner } from "../components/UpdateBanner";
+import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import {
   isAccountClaimable,
@@ -80,6 +83,14 @@ export function Dashboard() {
     quitApp,
     updateInfo,
   } = useQwitch();
+
+  // 更新动作统一走 hook（安装 / 打开下载页），避免三处入口各自实现导致分叉
+  const {
+    installing: updateInstalling,
+    runPrimaryAction: runUpdatePrimaryAction,
+    primaryLabel: updatePrimaryLabel,
+  } = useUpdateActions();
+  const hasUpdate = Boolean(updateInfo?.updateAvailable);
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const [nav, setNav] = useState<NavSection>("all");
@@ -493,7 +504,17 @@ export function Dashboard() {
         </div>
 
         <div className="space-y-2">
-          <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/80 p-2.5 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-400">
+          {/* 版本卡：把「我在什么版本」与「是否有新版」合并到同一个视觉锚点。
+              有新版本时整卡切换为可操作态（靛蓝描边 + 下载按钮），
+              无新版本时保持原有的静态信息卡外观 —— 不额外占用空间，
+              也让版本号的语义从「只读信息」变为「更新入口」。 */}
+          <div
+            className={`rounded-xl border p-2.5 text-[11px] transition ${
+              hasUpdate
+                ? "border-indigo-500/35 bg-indigo-500/[0.06] dark:border-indigo-400/30 dark:bg-indigo-400/[0.08]"
+                : "border-zinc-200/80 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-900/70"
+            }`}
+          >
             <div className="flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-100">
                 <span className="flex h-4 w-4 items-center justify-center rounded-[5px] bg-emerald-500/12 text-emerald-600 dark:text-emerald-400">
@@ -501,15 +522,48 @@ export function Dashboard() {
                 </span>
                 Local-First 加密库
               </span>
-              <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                v{__APP_VERSION__}
-              </span>
+              {hasUpdate ? (
+                <button
+                  type="button"
+                  onClick={() => void runUpdatePrimaryAction()}
+                  disabled={updateInstalling}
+                  title={updatePrimaryLabel}
+                  aria-label={updatePrimaryLabel}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+                >
+                  {updateInstalling ? (
+                    <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Download className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+                  )}
+                  v{updateInfo?.latestVersion}
+                </button>
+              ) : (
+                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                  v{__APP_VERSION__}
+                </span>
+              )}
             </div>
             <p className="mt-1.5 leading-snug">
-              凭据经系统钥匙串与 AES-256-GCM 加密落盘；
-              {appSettings.closeToTray !== false
-                ? "关闭主窗将隐藏窗口并仅留菜单栏常驻。"
-                : "关闭主窗将直接退出程序。"}
+              {hasUpdate ? (
+                <>
+                  当前 v{__APP_VERSION__}，可升级至 v{updateInfo?.latestVersion}。
+                  <button
+                    type="button"
+                    onClick={() => setNav("settings")}
+                    className="ml-1 font-medium text-indigo-700 underline-offset-2 hover:underline dark:text-indigo-300"
+                  >
+                    查看更新说明
+                  </button>
+                </>
+              ) : (
+                <>
+                  凭据经系统钥匙串与 AES-256-GCM 加密落盘；
+                  {appSettings.closeToTray !== false
+                    ? "关闭主窗将隐藏窗口并仅留菜单栏常驻。"
+                    : "关闭主窗将直接退出程序。"}
+                </>
+              )}
             </p>
           </div>
 

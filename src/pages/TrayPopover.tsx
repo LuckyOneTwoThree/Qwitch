@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeftRight,
   CheckCircle2,
@@ -14,6 +13,7 @@ import {
   Sun,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
+import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import { getEffectiveClaimStatus, selectScopedStats } from "../domain/selectors";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
@@ -46,43 +46,14 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     quitApp,
     updateInfo,
     isTauriRuntime,
-    showToast,
   } = useQwitch();
 
   const [toolFilter, setToolFilter] = useState<"all" | ToolId>("all");
-  const [updateInstalling, setUpdateInstalling] = useState(false);
-
-  // 托盘内的更新入口：此前托盘完全没有更新提醒，用户只能进设置页才能发现新版本。
-  // 这里提供「检查 / 下载 / 安装」的最小闭环，详情仍引导至主窗口设置页。
-  const openUpdateDownload = useCallback(async () => {
-    if (!updateInfo) return;
-    const url = updateInfo.assetUrl ?? updateInfo.releaseUrl;
-    if (!url) return;
-    try {
-      await invoke("open_update_url", { url });
-    } catch {
-      /* 打开失败时静默：托盘空间不足以展示错误，主窗口设置页有完整反馈 */
-    }
-  }, [updateInfo]);
-
-  const installUpdateFromTray = useCallback(async () => {
-    if (!updateInfo?.assetUrl || !updateInfo.assetName || !updateInfo.checksumsUrl) return;
-    if (updateInstalling) return;
-    setUpdateInstalling(true);
-    try {
-      // 成功后进程会自行退出以完成覆盖安装，无需恢复按钮状态
-      await invoke<string>("download_and_install_update", {
-        assetUrl: updateInfo.assetUrl,
-        assetName: updateInfo.assetName,
-        checksumsUrl: updateInfo.checksumsUrl,
-      });
-    } catch (err) {
-      // 此前是静默 catch，用户点击「立即更新」失败后毫无反馈，只能反复重试。
-      // 托盘空间不足以展示细节，因此用 Toast 提示并引导至主窗口设置页查看原因。
-      setUpdateInstalling(false);
-      showToast(`更新失败：${String(err)}`, "error");
-    }
-  }, [updateInfo, updateInstalling, showToast]);
+  const {
+    installing: updateInstalling,
+    runPrimaryAction: runUpdatePrimaryAction,
+    primaryLabel: updatePrimaryLabel,
+  } = useUpdateActions();
 
   useEffect(() => {
     void refreshClientStatuses();
@@ -255,21 +226,9 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           <button
             type="button"
             disabled={updateInstalling}
-            onClick={() =>
-              updateInfo.canAutoInstall && updateInfo.assetUrl
-                ? void installUpdateFromTray()
-                : void openUpdateDownload()
-            }
-            title={
-              updateInfo.canAutoInstall
-                ? `立即更新到 v${updateInfo.latestVersion}`
-                : `下载 v${updateInfo.latestVersion}`
-            }
-            aria-label={
-              updateInfo.canAutoInstall
-                ? `立即更新到 v${updateInfo.latestVersion}`
-                : `下载 v${updateInfo.latestVersion}`
-            }
+            onClick={() => void runUpdatePrimaryAction()}
+            title={updatePrimaryLabel}
+            aria-label={updatePrimaryLabel}
             className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-600 text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500 dark:hover:bg-indigo-400"
           >
             {updateInstalling ? (

@@ -1,7 +1,7 @@
-import { useCallback, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
 import { ArrowUpRight, Download, Loader2, Sparkles, X } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
+import { useUpdateActions } from "../context/useUpdateActions";
 
 /**
  * 主窗口顶部的「有新版本」提示条。
@@ -17,37 +17,13 @@ import { useQwitch } from "../context/QwitchContext";
  * - 主按钮区分平台：Windows 可直接应用内安装，macOS 走浏览器下载页。
  */
 export function UpdateBanner({ onOpenSettings }: { onOpenSettings: () => void }) {
-  const { isTauriRuntime, showToast, updateInfo: info } = useQwitch();
+  const { isTauriRuntime, updateInfo: info } = useQwitch();
   const [dismissed, setDismissed] = useState(false);
-  const [installing, setInstalling] = useState(false);
-
-  const openUrl = useCallback(
-    async (url?: string) => {
-      if (!url) return;
-      try {
-        await invoke("open_update_url", { url });
-      } catch (err) {
-        showToast(`打开下载页失败：${String(err)}`, "error");
-      }
-    },
-    [showToast]
-  );
-
-  const installOnWindows = useCallback(async () => {
-    if (!info?.assetUrl || !info.assetName || !info.checksumsUrl || installing) return;
-    setInstalling(true);
-    try {
-      const message = await invoke<string>("download_and_install_update", {
-        assetUrl: info.assetUrl,
-        assetName: info.assetName,
-        checksumsUrl: info.checksumsUrl,
-      });
-      showToast(message, "success");
-    } catch (err) {
-      setInstalling(false);
-      showToast(`更新失败：${String(err)}`, "error");
-    }
-  }, [info, installing, showToast]);
+  const {
+    installing,
+    runPrimaryAction,
+    primaryLabel,
+  } = useUpdateActions();
 
   // 仅在有新版本时出现；浏览器预览模式不提示
   if (!isTauriRuntime || !info?.updateAvailable || dismissed) return null;
@@ -69,30 +45,21 @@ export function UpdateBanner({ onOpenSettings }: { onOpenSettings: () => void })
         </span>
       </span>
 
-      {canAutoInstall ? (
-        <button
-          type="button"
-          disabled={installing}
-          onClick={() => void installOnWindows()}
-          className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap"
-        >
-          {installing ? (
-            <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
-          ) : (
-            <Download className="h-3 w-3 shrink-0" aria-hidden="true" />
-          )}
-          {installing ? "安装中..." : "立即更新"}
-        </button>
-      ) : (
-        <button
-          type="button"
-          onClick={() => void openUrl(info.assetUrl ?? info.releaseUrl)}
-          className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap"
-        >
+      <button
+        type="button"
+        disabled={installing}
+        onClick={() => void runPrimaryAction()}
+        title={primaryLabel}
+        aria-label={primaryLabel}
+        className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap"
+      >
+        {installing ? (
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+        ) : (
           <Download className="h-3 w-3 shrink-0" aria-hidden="true" />
-          下载
-        </button>
-      )}
+        )}
+        {installing ? "安装中..." : canAutoInstall ? "立即更新" : "下载"}
+      </button>
 
       <button
         type="button"

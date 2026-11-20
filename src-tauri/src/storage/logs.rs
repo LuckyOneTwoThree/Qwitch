@@ -104,12 +104,18 @@ impl QwitchDatabase {
     pub fn get_action_log_stats(&self) -> Result<ActionLogStats, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let stats = conn.query_row(
+            // 用 COUNT(*) + WHERE 替代单条 SUM(CASE...)：每种子查询都能命中
+            // idx_logs_archived_status(archived_at, result_status) 做覆盖扫描，
+            // 而原写法必须逐行求值四个 CASE 表达式，随日志量线性劣化。
             "SELECT
-                COALESCE(SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN archived_at IS NULL AND result_status = 'failed' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN archived_at IS NULL AND (result_status = 'skipped' OR (action_type = 'query' AND result_status = 'success')) THEN 1 ELSE 0 END), 0)
-             FROM action_logs",
+                (SELECT COUNT(*) FROM action_logs WHERE archived_at IS NULL),
+                (SELECT COUNT(*) FROM action_logs WHERE archived_at IS NOT NULL),
+                (SELECT COUNT(*) FROM action_logs
+                   WHERE archived_at IS NULL AND result_status = 'failed'),
+                (SELECT COUNT(*) FROM action_logs
+                   WHERE archived_at IS NULL
+                     AND (result_status = 'skipped'
+                          OR (action_type = 'query' AND result_status = 'success')))",
             [],
             |row| {
                 Ok(ActionLogStats {

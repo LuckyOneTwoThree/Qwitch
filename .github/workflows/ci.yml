@@ -46,12 +46,25 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Frontend lint
+        run: npm run lint
+
       - name: Frontend tests
         run: npm test
 
       - name: Shell script syntax check
         if: runner.os != 'Windows'
         run: bash -n scripts/export_trae_profile.sh scripts/check_device_isolation.sh scripts/trae_probe.sh
+
+      - name: Shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck -S warning scripts/*.sh
+
+      - name: Rust dependency audit
+        if: runner.os == 'Linux'
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Rust format check
         working-directory: src-tauri

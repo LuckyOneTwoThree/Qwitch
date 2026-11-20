@@ -86,7 +86,7 @@ Rust 后端通过统一的平台宿主接口屏蔽操作系统差异：
 
 后续外部扩展目录约定为 `<app_data>/adapters/<adapter_id>/`：
 * `manifest.json`：声明适配器 ID、名称、支持平台、能力清单、可执行入口命令及超时策略。
-* **通信协议**：核心引擎通过子进程 `stdin/stdout` 发送单行 JSON-RPC 请求（`inspect_quota`、`claim_daily`、`prepare_switch`），外部脚本（Python / Node / 二进制 Sidecar）返回标准化 JSON 响应与统一错误码。
+* **通信协议**：核心引擎通过子进程 `stdin/stdout` 发送单行 JSON-RPC 请求（`inspect_quota`、`claim_daily`、`apply_session`），外部脚本（Python / Node / 二进制 Sidecar）返回标准化 JSON 响应与统一错误码。
 
 ---
 

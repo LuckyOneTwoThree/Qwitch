@@ -822,31 +822,14 @@ impl MiniMaxAdapter {
         }
     }
 
+    /// 转发到共享实现（见 `adapter::common::merge_post_claim_quota`）。
+    /// 保留此薄封装以免改动调用点与既有测试。
     fn merge_post_claim_quota(
         inspected: Option<QuotaSnapshot>,
         precheck: Option<&QuotaSnapshot>,
         confirmed_claimed: bool,
     ) -> Option<QuotaSnapshot> {
-        match inspected {
-            Some(mut q) => {
-                if confirmed_claimed
-                    && matches!(
-                        q.claim_status,
-                        ClaimStatus::Unknown | ClaimStatus::Unsupported
-                    )
-                {
-                    q.claim_status = ClaimStatus::Claimed;
-                }
-                Some(q)
-            }
-            None if confirmed_claimed => Some(QuotaSnapshot {
-                plan_name: precheck.and_then(|p| p.plan_name.clone()),
-                claim_status: ClaimStatus::Claimed,
-                buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
-                fetched_at: Utc::now().to_rfc3339(),
-            }),
-            None => None,
-        }
+        crate::adapter::common::merge_post_claim_quota(inspected, precheck, confirmed_claimed)
     }
 
     fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AdapterError> {

@@ -1,7 +1,7 @@
 # Qwitch 项目认知总结（二次开发基线）
 
 > 基于当前 `main` 分支源码（v0.2.3）逐文件核验形成，作为后续优化与功能迭代的“先读这份”基线。
-> 核验事实：`npm test` 54 例通过；`cargo test --locked --all-targets` 82 例通过；前端 Vite 6.4.6 / React 18 / TS strict；后端 Rust + Tauri v2。
+> 核验事实：`npm test` 67 例通过；`cargo test --locked --all-targets` 106 例通过；前端 Vite 6.4.6 / React 18 / TS strict；后端 Rust + Tauri v2。
 
 ---
 
@@ -107,7 +107,7 @@ Qwitch/
 1. **导入账号**（`import_local_account` / `add_account_by_token` / `start_webview_oauth`）：适配器解析→生成 `CredentialEnvelope`→`upsert_account`/`bind_account_credential`（加密落库，`label` 不覆盖自定义、`disabled/risk_paused` 不被复活）→后台 `schedule_import_quota_check`（复用串行锁）→emit 事件。
 2. **查额**：单账号 `refresh_account_quota`（进 `queue_lock` 排队）；批量 `refresh_quota_batch`（≤200、去重、`try_lock_owned` 重入拒绝、spawn 后台跑 `run_quota_refresh_batch`）。
 3. **每日领取**：`claim_daily_batch`（≤200、去重、Trae CN 活跃账号排前）→`run_daily_claim_batch` 串行 + 幂等先查后领 + 抖动 + 工具熔断 + 设备日限。
-4. **冷切换**：`switch_desktop_account`→校验适配器/可执行文件→`SwitchFlagGuard` 互斥→运行则 `terminate_client_gracefully`→`backup_session`→`apply_session`→`launch_client`→15s 存活轮询（连续两次探测）→`set_active_on_client`→成功/失败均写日志并 `restore_session` 回滚。
+4. **冷切换**：`switch_desktop_account`→校验适配器/可执行文件→`SwitchFlagGuard` 互斥→运行则 `terminate_client_gracefully`→`backup_session`→`apply_session`→`launch_client`→45s 存活轮询（700ms×64 次，连续两次探测确认）→`set_active_on_client`→成功/失败均写日志并 `restore_session` 回滚。
 5. **软件更新**：`check_app_update`（启动静默 + 设置页手动）→`download_and_install_update`（校验后 Windows 拉起安装）。
 
 ---
@@ -139,9 +139,9 @@ npm install
 npm run dev            # 仅前端（浏览器 Mock 预览，无 Tauri）
 npm run tauri dev      # 桌面应用开发（Vite:1420 + Rust）
 npm run build          # tsc + vite build（产出 dist/）
-npm test               # Vitest（54 例）
+npm test               # Vitest（67 例）
 cd src-tauri
-cargo test --all-targets            # 82 例
+cargo test --all-targets            # 106 例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 npx tauri build        # 打包安装包
 ```
@@ -153,10 +153,10 @@ npx tauri build        # 打包安装包
 ## 10. 测试与 CI 配置
 
 - **前端**：`selectors.test.ts`（15）、`settingsUtils.test.ts`（6）、`logStateUtils.test.ts`（3）、`toolRegistry.test.ts`（3）、`mockStore.test.ts`（2）、`useToast.test.ts`（4）、`useAppUpdate.test.ts`（4）、`ToastViewport.test.tsx`（3）、`pages/dashboard/LogsView.test.tsx`（2）、`pages/dashboard/SettingsView.test.tsx`（7）、`pages/Dashboard.test.tsx`（5）= 54 例，`vitest run`；组件/Hook 测试用文件级 `// @vitest-environment jsdom` + `@testing-library/react`（jsdom 26，Node ≥ 18）。
-- **后端**：模块内 `#[cfg(test)]` 覆盖 storage（增删改/密钥指纹/PII 迁移/快照保留/跨日口径）、crypto（加解密/脱敏）、platform（主密钥决策矩阵/LaunchAgent）、adapter（外部信任/会话回滚/Trae 设备头/WorkBuddy 端点白名单）、commands（OAuth 白名单/UID 校验/切号互斥）、update（选产物/校验/URL 白名单）= 82 例（含 scheduler 5 个行为测试）。
+- **后端**：模块内 `#[cfg(test)]` 覆盖 storage（增删改/密钥指纹/PII 迁移/快照保留/跨日口径）、crypto（加解密/脱敏）、platform（主密钥决策矩阵/LaunchAgent）、adapter（外部信任/会话回滚/Trae 设备头/WorkBuddy 端点白名单）、commands（OAuth 白名单/UID 校验/切号互斥）、update（选产物/校验/URL 白名单）= 106 例（含 scheduler 8 个行为测试）。
 - **CI（`ci.yml`）**：push/PR 到 `main`，`macos-latest + windows-latest` 矩阵 → `npm ci` → `npm audit --omit=dev` → `npm run build` → `npm test` → `cargo fmt --check` → `cargo clippy -D warnings` → `cargo test --all-targets`。
 - **Release（`release.yml`）**：`v*` tag 触发（先 ubuntu verify）→ 构建 macOS arm64 / macOS x64 / Windows x64 三产物 → 压 SHA256SUMS → `gh release` 发布（预发布带 `-` 则 prerelease）。
-- **文档漂移提示**：测试数量以实测为准（当前 Rust 82 / Vitest 54）；二次开发时以代码为准。
+- **文档漂移提示**：测试数量以实测为准（当前 Rust 106 / Vitest 67）；二次开发时以代码为准。
 
 ---
 

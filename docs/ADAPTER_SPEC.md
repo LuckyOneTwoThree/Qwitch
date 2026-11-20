@@ -2,7 +2,7 @@
 
 > 本文档归档首批接入工具（**Trae / Trae CN**、**WorkBuddy**、**Qoder / Qoder CN**）在 macOS 与 Windows 上的本地会话存储路径、凭据加密格式、服务端接口及冷切换要点。
 >
-> **实现状态（2026-11-18）**：当前仅注册国内版内置适配器 `trae_cn` / `workbuddy` / `qoder_cn`；Trae/Qoder 国际版条目为格式参考归档，尚未注册实现。`trae` / `qoder` 等历史 ID 已被保留，禁止外部插件冒名。
+> **实现状态（2026-11-20）**：当前注册 **4 个**国内版内置适配器：`trae_cn` / `workbuddy` / `qoder_cn` / **`minimax_code_cn`**（见 §2.4）。Trae/Qoder 国际版条目为格式参考归档，尚未注册实现。`trae` / `qoder` 等历史 ID 已被保留，禁止外部插件冒名。
 
 ---
 
@@ -42,3 +42,25 @@
   * 查询活动列表：`GET /sash/api/v1/me/campaigns`（筛选 `actionType == "CLAIM_BENEFIT"` 且处于有效窗口的 `CLAIMABLE` / `CLAIMED` 项）。
   * 手动领取 Credits：`POST /sash/api/v1/me/campaigns/{campaignId}/claim`（幂等，成功返回 `status == "CLAIMED"`）。
   * **请求数说明**：Qoder 领取主路径需重新拉取活动列表（前置快照不携带 `campaignId`，无法直接领取），领取成功后再查一次额度以刷新权威状态；这两次额外请求为已知接受的设计约束。领取成功但领后查额失败/返回 Unknown 时，合成 Claimed 快照避免 UI 残留可领按钮。
+
+---
+
+## 2.4 MiniMax Code CN（`minimax_code_cn`）
+
+* **服务端点**：`https://agent.minimax.cn`（业务接口）、`https://account.minimax.cn`（OAuth）。
+* **凭据形态**：客户端 `auth.json` 中为**明文** `records[].accessToken`（无本地加密层），
+  因此本适配器是四个内置适配器中唯一**不需要外部运行时解密**的。
+* **凭据键派生**：`credential_record_key` 复刻客户端 FileStore 键
+  `service\0base64url(sha256(<home>/.minimax/auth\0mcode-public))`。
+* **授权方式**：自建 OAuth 2.0 **设备码（Device Code）+ PKCE** 流程，
+  端点 `https://account.minimax.cn/oauth2/device/code` 与 `/oauth2/token`。
+* **核心接口**（均带 `?timezone_offset=` 参数）：
+  * 查询积分：`/minimax-cloud/api/v1/credit/details`
+  * 签到状态：`/minimax-cloud/api/v1/signin/status`
+  * 每日签到：`/minimax-cloud/api/v1/signin/claim`
+* **令牌刷新**：唯一实现 `refresh_credential` 的内置适配器（`accessToken` 有效期约 1 小时）。
+* **已知约束**：
+  * 设备码轮询的 `expires_in` 未设上限（仅 `interval` 做了 clamp），
+    服务端若返回超长有效期会导致轮询长时间空转；
+  * `auth-state.json` 在导入时可选、切号时必填，缺失会导致切号失败；
+  * 不产出 `DeviceDailyLimitReached`，调度器的设备级短路对其不生效。

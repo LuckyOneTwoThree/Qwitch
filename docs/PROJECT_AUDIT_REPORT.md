@@ -247,10 +247,19 @@
 > - 前端：`npm test -- --run`（2 个测试文件、21 条用例全部通过）、`npx tsc --noEmit && npm run build` 退出码 `0`。
 > - 后端：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 均零告警通过；`cargo test --all-targets`（`qwitch_lib` 73 条用例全部通过，新增覆盖 10 条 Stage 1 回归测试）。
 
-### 第二阶段：防风控与核心体验加固（待规划实施）
-1. **P0-5 & P1-5**：拆分纯本地只读 `detect_local_active_uid` 取代 `reconcile_active_accounts` 里的 `import_from_local`，并在 `clear_active_on_client` 后广播事件；完善旧钥匙串条目冲突回退。
-2. **P1-6 & P1-7 & P2-12~P2-15**：修复日志 500 条截断、竞态串页与隐藏项误删；移除 `ToolBrandIcon` 的 `useQwitch` 订阅、补齐批量任务乐观锁；修复 `StrictMode` 更新检查、`UpdateCard` 缓存复用、`Dashboard` KPI 展示全部 4 个工具及各弹窗边界保护。
-3. **P1-8 & P2-7~P2-11**：修复 `scripts/*.sh`、`restore_files` WAL 原子性与 `0600` 权限、OAuth `without_url()` 脱敏、日志脱敏绕过和各适配器 P2 细节。
+### 第二阶段：防风控与核心体验加固（已完成）
+
+| 序号 | 对应问题 | 修复内容摘要 | 当前状态 |
+| :---: | --- | --- | :---: |
+| **1** | **P0-5 & P1-5** | 为 `ToolAdapter` 新增纯本地只读 `detect_local_active_uid`，`reconcile_active_accounts` 改为 `spawn_blocking` + 3s 原子节流并在 `clear_active_on_client` 后广播事件；完善旧钥匙串条目验证失败回退探测及 macOS Keychain 升级恢复引导 | 已完成 |
+| **2** | **P2-7 & P2-8 & P2-9** | 新增 `write_private_file_atomic`（Unix `0600` 原子创建写入）并覆盖各适配器；`restore_files` 主库失败保留 `-wal` 并加 `busy_timeout(2000)`；`switch_desktop_account` 与调度队列共用锁互斥，移除延迟清标志窗口并用事件时间戳替代；`platform` 层改由内存缓存与 `Once` 迁移、`terminate_client_gracefully` 统一清理子进程、macOS 多开传 `open -n` | 已完成 |
+| **3** | **P1-8 & P2-1 ~ P2-6 & P2-10 ~ P2-11** | 修复 `scripts/*.sh` 权限/退出码/`curl -K`/403/429 熔断；补全各适配器 `without_url()`、`validate_endpoint`、`poll_oauth_result` 故障熔断、MiniMax `_p_uid`/RFC 8628 轮询、`Trae` 已登出残留识别与 `aha/TinyStorage` 对齐、`Qoder` `auth.machine-id`/多活动状态/PowerShell 绝对路径、`common` UID 与分句幂等检查、`external` `stderr` 脱敏、`crypto` 伪脱敏邮箱与 `Authorization` scheme-preserving KV 脱敏、清理 `LocalAccountPreview` 明文 `uid` | 已完成 |
+| **4** | **P1-6 & P1-7 & P2-12 ~ P2-15** | 日志改为 `before_id` 游标分页（上限 `2000`）与竞态序号丢弃、`archiveLogs`/`unarchiveLogs`/`deleteLogs` 返回 `number \| null` 避免失败误清勾选；移除 `ToolBrandIcon` 的 Context 订阅并用 `React.memo` 优化；`vite.config.ts` 注入 `__APP_VERSION__` 并复用全局 10 分钟更新检查缓存与 Windows `checksumsUrl` 门禁；修复 `StrictMode` 启动更新检查、批量乐观锁与跨日 `cstDayKey` 刷新；加固 `ColdSwitchModal`/`TrayPopover`/`ImportAccountModal`/`AccountCard`/`BatchClaimBanner`/`Dashboard`（全部 4 个内置工具 KPI、平台感知自启文案、设置离开重置草稿与 `mockStore` MiniMax 对齐） | 已完成 |
+
+> **第二阶段回归验证记录**：
+> - 脚本：`bash -n scripts/export_trae_profile.sh scripts/check_device_isolation.sh scripts/trae_probe.sh` 退出码 `0`。
+> - 前端：`npm test -- --run`（2 个测试文件、21 条用例全部通过）、`npx tsc --noEmit` 与 `npm run build` 退出码 `0`。
+> - 后端：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 均零告警通过；`cargo test --all-targets`（`qwitch_lib` 76 条用例全部通过，`qwitch` 二进制 0 条测试）。
 
 ### 第三阶段：测试护栏、架构拆分与文档收敛（待规划实施）
 1. **补齐测试基线**：为 [scheduler/mod.rs](../src-tauri/src/scheduler/mod.rs) 补齐 Mock Adapter 行为测试（串行、抖动、跨设备冷却、熔断、幂等），补全组件集成测试与 Vitest 覆盖率。

@@ -87,8 +87,17 @@ fn resolve_client_executable(
     host.detect_client_executable(tool_id)
 }
 
+/// 临时解压目录守卫：无论正常返回还是提前 `?` 失败，Drop 时都会清理明文临时目录。
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// 在目录（含至多 4 层子目录）中查找 Trae CN 的 user-data 根：
-/// 即存在 `<root>/User/globalStorage/storage.json` 的目录。
+/// 即存在 `<root>/User/globalStorage/storage.json` 的目录（跳过符号链接防逃逸）。
 fn find_storage_root(dir: &Path, depth: u32) -> Option<PathBuf> {
     if depth > 4 {
         return None;
@@ -103,8 +112,12 @@ fn find_storage_root(dir: &Path, depth: u32) -> Option<PathBuf> {
     }
     let rd = std::fs::read_dir(dir).ok()?;
     for entry in rd.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
+        let is_real_dir = entry
+            .file_type()
+            .map(|t| t.is_dir() && !t.is_symlink())
+            .unwrap_or(false);
+        if is_real_dir {
+            let p = entry.path();
             if let Some(root) = find_storage_root(&p, depth + 1) {
                 return Some(root);
             }
@@ -113,72 +126,138 @@ fn find_storage_root(dir: &Path, depth: u32) -> Option<PathBuf> {
     None
 }
 
-#[cfg(target_os = "macos")]
-fn extract_zip_to(_zip: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| format!("创建解压目录失败: {e}"))?;
-    let z = _zip.to_string_lossy().to_string();
-    let d = dest.to_string_lossy().to_string();
-    // 优先 ditto（保留结构），回退 unzip
-    let ok1 = std::process::Command::new("ditto")
-        .args(["-x", "-k", &z, &d])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok1 {
-        return Ok(());
-    }
-    let ok2 = std::process::Command::new("unzip")
-        .args(["-o", "-q", &z, "-d", &d])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok2 {
-        return Ok(());
-    }
-    Err("解压 zip 失败：请安装 unzip，或改用“选择文件夹”".into())
+#[cfg(unix)]
+fn set_private_dir_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
 }
 
-#[cfg(target_os = "windows")]
-fn extract_zip_to(_zip: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| format!("创建解压目录失败: {e}"))?;
-    let z = _zip.to_string_lossy().to_string();
-    let d = dest.to_string_lossy().to_string();
-    let ps = format!(
-        "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-        z.replace('\'', "''"),
-        d.replace('\'', "''")
-    );
-    let mut cmd = std::process::Command::new("powershell");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps]);
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
-    if ok {
-        Ok(())
-    } else {
-        Err("解压 zip 失败（PowerShell Expand-Archive）".into())
-    }
+#[cfg(not(unix))]
+fn set_private_dir_perms(_path: &Path) {}
+
+#[cfg(unix)]
+fn set_private_file_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn extract_zip_to(_zip: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| format!("创建解压目录失败: {e}"))?;
-    let z = _zip.to_string_lossy().to_string();
-    let d = dest.to_string_lossy().to_string();
-    let ok = std::process::Command::new("unzip")
-        .args(["-o", "-q", &z, "-d", &d])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok {
-        Ok(())
-    } else {
-        Err("解压 zip 失败：请安装 unzip".into())
+#[cfg(not(unix))]
+fn set_private_file_perms(_path: &Path) {}
+
+fn extract_zip_to(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    use std::io::Read;
+
+    const MAX_ZIP_FILE_BYTES: u64 = 200 * 1024 * 1024;
+    const MAX_TOTAL_EXTRACTED_BYTES: u64 = 160 * 1024 * 1024;
+    const MAX_ARCHIVE_ENTRIES: usize = 4096;
+    const SMALL_FILE_CAP: u64 = 16 * 1024 * 1024;
+    const VSCDB_FILE_CAP: u64 = 128 * 1024 * 1024;
+
+    let meta = std::fs::metadata(zip_path).map_err(|e| format!("读取压缩包信息失败: {e}"))?;
+    if meta.len() > MAX_ZIP_FILE_BYTES {
+        return Err("导出包体积超过 200 MiB 上限，已拒绝解压".into());
     }
+
+    std::fs::create_dir_all(dest).map_err(|e| format!("创建解压目录失败: {e}"))?;
+    set_private_dir_perms(dest);
+
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("打开导出包失败: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("无效的 zip 导出包: {e}"))?;
+
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err("导出包内条目数超过 4096 上限，已拒绝解压".into());
+    }
+
+    let mut total_extracted: u64 = 0;
+
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取导出包条目失败: {e}"))?;
+
+        if entry.enclosed_name().is_none() {
+            return Err("导出包包含非法路径（疑含路径穿越）".into());
+        }
+
+        let parts: Vec<&str> = entry
+            .name()
+            .split(['/', '\\'])
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if parts.iter().any(|&p| p == ".." || p.contains('\0'))
+            || parts.first().is_some_and(|p| p.ends_with(':'))
+        {
+            return Err("导出包包含非法路径（疑含路径穿越）".into());
+        }
+
+        if entry.is_dir()
+            || entry.is_symlink()
+            || parts.contains(&"__MACOSX")
+            || parts.last().is_some_and(|f| f.starts_with("._"))
+        {
+            continue;
+        }
+
+        // 仅允许解压 Trae CN 登录与设备校验所需的白名单文件，并使用常量路径写盘
+        let (target_rel, file_cap): (&[&str], u64) =
+            if parts.ends_with(&["User", "globalStorage", "storage.json"]) {
+                (&["User", "globalStorage", "storage.json"], SMALL_FILE_CAP)
+            } else if parts.ends_with(&["User", "globalStorage", "state.vscdb"]) {
+                (&["User", "globalStorage", "state.vscdb"], VSCDB_FILE_CAP)
+            } else if parts.ends_with(&["aha", "TinyStorage"]) {
+                (&["aha", "TinyStorage"], SMALL_FILE_CAP)
+            } else {
+                continue;
+            };
+
+        if entry.size() > file_cap {
+            return Err(format!(
+                "导出包内文件 {} 超过大小限制",
+                target_rel.join("/")
+            ));
+        }
+
+        let mut target_path = dest.to_path_buf();
+        for seg in target_rel {
+            target_path.push(seg);
+        }
+        if let Some(parent) = target_path.parent() {
+            let mut cur = dest.to_path_buf();
+            if let Ok(rel_parent) = parent.strip_prefix(dest) {
+                for comp in rel_parent.components() {
+                    cur.push(comp);
+                    if !cur.exists() {
+                        std::fs::create_dir_all(&cur)
+                            .map_err(|e| format!("创建目标子目录失败: {e}"))?;
+                        set_private_dir_perms(&cur);
+                    }
+                }
+            }
+        }
+
+        let mut limited = entry.take(file_cap + 1);
+        let mut buf = Vec::new();
+        let written = limited
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("解压条目内容失败: {e}"))? as u64;
+        if written > file_cap {
+            return Err(format!(
+                "导出包内文件 {} 实际解压体积超限（疑似 zip 炸弹）",
+                target_rel.join("/")
+            ));
+        }
+
+        total_extracted = total_extracted.saturating_add(written);
+        if total_extracted > MAX_TOTAL_EXTRACTED_BYTES {
+            return Err("导出包总解压体积超过 160 MiB 上限，已拒绝解压".into());
+        }
+
+        std::fs::write(&target_path, &buf).map_err(|e| format!("写入解压文件失败: {e}"))?;
+        set_private_file_perms(&target_path);
+    }
+
+    Ok(())
 }
 
 /// 把用户给的「导出包」解析成 Trae CN 的 user-data 根目录。
@@ -187,8 +266,8 @@ fn extract_zip_to(_zip: &Path, dest: &Path) -> Result<(), String> {
 /// - 文件夹（自动在其及子目录里找 `User/globalStorage/storage.json`）
 /// - 直接选中 `storage.json`
 ///
-/// 返回 (根目录, 需要清理的临时目录)。
-fn resolve_profile_root_input(input: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
+/// 返回 (根目录, 临时解压目录 RAII 守卫)。
+fn resolve_profile_root_input(input: &str) -> Result<(PathBuf, Option<TempDirGuard>), String> {
     let p = PathBuf::from(input.trim());
     if !p.exists() {
         return Err(format!("路径不存在：{}", p.display()));
@@ -202,14 +281,12 @@ fn resolve_profile_root_input(input: &str) -> Result<(PathBuf, Option<PathBuf>),
         if name.ends_with(".zip") {
             let dest =
                 std::env::temp_dir().join(format!("qwitch-profile-{}", uuid::Uuid::new_v4()));
+            let guard = TempDirGuard(dest.clone());
             extract_zip_to(&p, &dest)?;
-            match find_storage_root(&dest, 0) {
-                Some(root) => return Ok((root, Some(dest))),
-                None => {
-                    let _ = std::fs::remove_dir_all(&dest);
-                    return Err("导出包内未找到 Trae CN 的 User/globalStorage/storage.json".into());
-                }
-            }
+            return match find_storage_root(&dest, 0) {
+                Some(root) => Ok((root, Some(guard))),
+                None => Err("导出包内未找到 Trae CN 的 User/globalStorage/storage.json".into()),
+            };
         }
         if name == "storage.json" {
             if let Some(root) = p.parent().and_then(|g| g.parent()).and_then(|u| u.parent()) {
@@ -230,10 +307,10 @@ fn resolve_import_host(
     host: &Arc<dyn PlatformHost>,
     tool_id: &str,
     profile: Option<&str>,
-) -> Result<(Arc<dyn PlatformHost>, Option<PathBuf>), String> {
+) -> Result<(Arc<dyn PlatformHost>, Option<TempDirGuard>), String> {
     match profile.map(str::trim).filter(|s| !s.is_empty()) {
         Some(input) => {
-            let (root, temp) = resolve_profile_root_input(input)?;
+            let (root, guard) = resolve_profile_root_input(input)?;
             let config_dir = root.join("User").join("globalStorage");
             Ok((
                 Arc::new(ScopedPlatformHost::new(
@@ -241,7 +318,7 @@ fn resolve_import_host(
                     tool_id,
                     config_dir,
                 )),
-                temp,
+                guard,
             ))
         }
         None => Ok((Arc::clone(host), None)),
@@ -293,42 +370,43 @@ pub struct ProfileInspectResult {
 }
 
 #[tauri::command]
-pub fn inspect_profile_dir(
+pub async fn inspect_profile_dir(
     state: State<'_, AppState>,
     tool_id: String,
     profile_dir: String,
 ) -> Result<ProfileInspectResult, String> {
-    let input = profile_dir.trim();
+    let input = profile_dir.trim().to_string();
     if input.is_empty() {
         return Err("设备导出包/目录为空".into());
     }
-    let (root, temp) = resolve_profile_root_input(input)?;
-    let storage = root.join("User").join("globalStorage").join("storage.json");
-    let has_storage = storage.is_file();
-    let device_id = if has_storage {
-        read_device_id_from_storage(&storage)
-    } else {
-        None
-    };
-    let local_id = state
-        .host
-        .client_config_dir(&tool_id)
-        .ok()
-        .map(|d| d.join("storage.json"))
-        .and_then(|p| read_device_id_from_storage(&p));
-    let same_as_local = match (&device_id, &local_id) {
-        (Some(a), Some(b)) => Some(a == b),
-        _ => None,
-    };
-    if let Some(t) = temp {
-        let _ = std::fs::remove_dir_all(&t);
-    }
-    Ok(ProfileInspectResult {
-        has_storage,
-        storage_path: storage.to_string_lossy().to_string(),
-        device_id_masked: device_id.as_deref().map(mask_device_id),
-        same_as_local,
+    let host = Arc::clone(&state.host);
+    tokio::task::spawn_blocking(move || {
+        let (root, _temp_guard) = resolve_profile_root_input(&input)?;
+        let storage = root.join("User").join("globalStorage").join("storage.json");
+        let has_storage = storage.is_file();
+        let device_id = if has_storage {
+            read_device_id_from_storage(&storage)
+        } else {
+            None
+        };
+        let local_id = host
+            .client_config_dir(&tool_id)
+            .ok()
+            .map(|d| d.join("storage.json"))
+            .and_then(|p| read_device_id_from_storage(&p));
+        let same_as_local = match (&device_id, &local_id) {
+            (Some(a), Some(b)) => Some(a == b),
+            _ => None,
+        };
+        Ok(ProfileInspectResult {
+            has_storage,
+            storage_path: storage.to_string_lossy().to_string(),
+            device_id_masked: device_id.as_deref().map(mask_device_id),
+            same_as_local,
+        })
     })
+    .await
+    .map_err(|e| format!("预检任务异常中断: {e}"))?
 }
 
 /// 原生“选择文件夹”对话框（macOS 需在主线程执行 rfd 弹窗）。
@@ -415,6 +493,8 @@ pub struct ExternalAdapterInfo {
     pub platforms: Vec<String>,
     pub trusted: bool,
     pub reserved: bool,
+    pub content_hash: String,
+    pub hash_mismatch: bool,
 }
 
 #[tauri::command]
@@ -433,11 +513,24 @@ pub fn list_external_adapters(
                             p == crate::adapter::external::ExternalAdapter::current_platform_tag()
                         }))
             })
-            .map(|(_, m)| {
+            .map(|(dir, m)| {
                 let reserved = crate::adapter::RESERVED_ADAPTER_IDS.contains(&m.id.as_str());
+                let trusted = !reserved && settings.trusted_adapters.iter().any(|t| t == &m.id);
+                let content_hash =
+                    crate::adapter::external::adapter_content_hash(&dir).unwrap_or_default();
+                let pinned_hash = settings
+                    .trusted_adapter_hashes
+                    .get(&m.id)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty());
+                let hash_mismatch = trusted
+                    && (content_hash.is_empty()
+                        || pinned_hash.is_none_or(|h| !h.eq_ignore_ascii_case(&content_hash)));
                 ExternalAdapterInfo {
-                    trusted: !reserved && settings.trusted_adapters.iter().any(|t| t == &m.id),
+                    trusted,
                     reserved,
+                    content_hash,
+                    hash_mismatch,
                     id: m.id,
                     name: m.name,
                     version: m.version,
@@ -493,6 +586,81 @@ pub fn save_app_settings(
     if settings.launch_at_login != previous.launch_at_login {
         state.host.set_launch_at_login(settings.launch_at_login)?;
     }
+
+    // 外部插件信任与内容哈希固定：规范化 trusted_adapters，并在首次信任或显式重签时固定磁盘 SHA-256
+    let mut normalized_trusted = Vec::new();
+    let mut seen_trusted = std::collections::HashSet::new();
+    for raw_id in &settings.trusted_adapters {
+        let id = raw_id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if crate::adapter::RESERVED_ADAPTER_IDS.contains(&id)
+            || !crate::adapter::is_valid_adapter_id(id)
+        {
+            return Err(format!("非法或保留的外部插件 ID，无法加入信任列表：{id}"));
+        }
+        if seen_trusted.insert(id.to_string()) {
+            normalized_trusted.push(id.to_string());
+        }
+    }
+    settings.trusted_adapters = normalized_trusted;
+
+    let mut resolved_hashes = HashMap::new();
+    if !settings.trusted_adapters.is_empty() {
+        let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
+        let disk_adapters: HashMap<String, PathBuf> =
+            crate::adapter::external::scan_external_manifests(&data_dir)
+                .into_iter()
+                .map(|(dir, m)| (m.id, dir))
+                .collect();
+
+        for id in &settings.trusted_adapters {
+            let requested_hash = settings
+                .trusted_adapter_hashes
+                .get(id)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let prev_trusted = previous.trusted_adapters.iter().any(|t| t == id);
+            let prev_hash = previous
+                .trusted_adapter_hashes
+                .get(id)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            if prev_trusted {
+                match (&prev_hash, &requested_hash) {
+                    (Some(ph), None) => {
+                        resolved_hashes.insert(id.clone(), ph.clone());
+                        continue;
+                    }
+                    (Some(ph), Some(rh)) if rh.eq_ignore_ascii_case(ph) => {
+                        resolved_hashes.insert(id.clone(), ph.clone());
+                        continue;
+                    }
+                    (None, None) => {
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            let dir = disk_adapters
+                .get(id)
+                .ok_or_else(|| format!("未找到外部插件 {id}，无法固定信任哈希"))?;
+            let disk_hash = crate::adapter::external::adapter_content_hash(dir)?;
+            if let Some(req) = requested_hash {
+                if !req.eq_ignore_ascii_case(&disk_hash) {
+                    return Err(format!(
+                        "外部插件 {id} 的内容校验哈希与磁盘不一致，可能已被修改，请刷新后重试"
+                    ));
+                }
+            }
+            resolved_hashes.insert(id.clone(), disk_hash);
+        }
+    }
+    settings.trusted_adapter_hashes = resolved_hashes;
+
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
     state
         .db
@@ -618,6 +786,7 @@ async fn restore_session_note(
 
 async fn record_import_quota_check(
     db: &Arc<QwitchDatabase>,
+    master_key: &[u8; 32],
     adapter: &Arc<dyn ToolAdapter>,
     summary: &AccountSummary,
     cred: &crate::domain::CredentialEnvelope,
@@ -625,7 +794,35 @@ async fn record_import_quota_check(
     if !summary.has_api_token || !adapter.manifest().capabilities.supports_quota_query {
         return;
     }
-    match adapter.inspect_quota(cred).await {
+    let effective_cred = match adapter.refresh_credential(cred).await {
+        Ok(Some(updated)) => {
+            let _ = db.bind_account_credential(master_key, &summary.id, None, &updated);
+            updated
+        }
+        Ok(None) => cred.clone(),
+        Err(AdapterError::Unified { code, message }) => {
+            let status = match code {
+                UnifiedErrorCode::AuthExpired => Some(AccountStatus::Expired),
+                UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited => {
+                    Some(AccountStatus::RiskPaused)
+                }
+                _ => None,
+            };
+            if let Some(status) = status {
+                let _ = db.update_account_status(&summary.id, status);
+            }
+            let _ = db.append_action_log(
+                Some(&summary.id),
+                &summary.tool_id,
+                "query",
+                "failed",
+                Some(&code),
+                &format!("导入后查额前刷新凭据失败：{message}"),
+            );
+            return;
+        }
+    };
+    match adapter.inspect_quota(&effective_cred).await {
         Ok(snapshot) => {
             if matches!(
                 summary.status,
@@ -661,6 +858,7 @@ async fn record_import_quota_check(
 async fn schedule_import_quota_check(
     app: &AppHandle,
     db: &Arc<QwitchDatabase>,
+    master_key: &[u8; 32],
     adapter: &Arc<dyn ToolAdapter>,
     summary: &AccountSummary,
     cred: &crate::domain::CredentialEnvelope,
@@ -670,20 +868,21 @@ async fn schedule_import_quota_check(
         return;
     }
     if let Ok(guard) = scheduler.queue_lock().try_lock_owned() {
-        record_import_quota_check(db, adapter, summary, cred).await;
+        record_import_quota_check(db, master_key, adapter, summary, cred).await;
         drop(guard);
         return;
     }
 
     let app_bg = app.clone();
     let db_bg = Arc::clone(db);
+    let key_bg = *master_key;
     let adapter_bg = Arc::clone(adapter);
     let summary_bg = summary.clone();
     let cred_bg = cred.clone();
     let scheduler_bg = Arc::clone(scheduler);
     tokio::spawn(async move {
         let _guard = scheduler_bg.queue_lock().lock_owned().await;
-        record_import_quota_check(&db_bg, &adapter_bg, &summary_bg, &cred_bg).await;
+        record_import_quota_check(&db_bg, &key_bg, &adapter_bg, &summary_bg, &cred_bg).await;
         let _ = app_bg.emit("qwitch://account-updated", &summary_bg.id);
         let _ = app_bg.emit("qwitch://logs-updated", ());
     });
@@ -712,14 +911,29 @@ pub async fn import_local_account(
         return Err(format!("适配器 {tool_id} 不支持本机导入"));
     }
 
-    let (host, temp_import) = resolve_import_host(&state.host, &tool_id, profile_dir.as_deref())?;
+    let is_external_profile = profile_dir
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+
+    let base_host = Arc::clone(&state.host);
+    let tool_for_resolve = tool_id.clone();
+    let profile_for_resolve = profile_dir.clone();
+    let (host, _temp_guard) = tokio::task::spawn_blocking(move || {
+        resolve_import_host(
+            &base_host,
+            &tool_for_resolve,
+            profile_for_resolve.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("解析导入目录任务异常: {e}"))??;
+
     let mut envelope = adapter
         .import_from_local(host.as_ref())
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(t) = temp_import.as_ref() {
-        let _ = std::fs::remove_dir_all(t);
-    }
+    drop(_temp_guard);
     if envelope.tool_id != tool_id {
         return Err(format!(
             "适配器返回工具标识不匹配：期望 {tool_id}，实际 {}",
@@ -727,20 +941,22 @@ pub async fn import_local_account(
         ));
     }
 
-    // 跨 OS 导入：按来源设备覆盖设备平台，避免 x-device-type 与本机不符
-    if let Some(plat) = device_platform
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| matches!(*p, "mac" | "win" | "linux"))
-    {
-        let current = if cfg!(target_os = "macos") {
-            "mac"
-        } else if cfg!(target_os = "windows") {
-            "win"
-        } else {
-            "linux"
-        };
-        envelope.override_device_platform(plat, plat != current);
+    // 跨 OS 导入：仅外部设备 profile 允许按来源设备覆盖平台，避免误删本机导入的 device_brand / os_version
+    if is_external_profile {
+        if let Some(plat) = device_platform
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| matches!(*p, "mac" | "win" | "linux"))
+        {
+            let current = if cfg!(target_os = "macos") {
+                "mac"
+            } else if cfg!(target_os = "windows") {
+                "win"
+            } else {
+                "linux"
+            };
+            envelope.override_device_platform(plat, plat != current);
+        }
     }
 
     let target_id = target_account_id.filter(|s| !s.trim().is_empty());
@@ -766,6 +982,7 @@ pub async fn import_local_account(
     schedule_import_quota_check(
         &app,
         &state.db,
+        &state.master_key,
         adapter,
         &summary,
         &cred_for_quota,
@@ -773,10 +990,6 @@ pub async fn import_local_account(
     )
     .await;
 
-    let is_external_profile = profile_dir
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty());
     // 仅“真·本机导入”才把该账号标记为本机使用中；外部设备 profile 只是采集设备身份，
     // 并不代表本机客户端当前登录的是它，否则会出现“状态错 / 切号按钮被误禁”。
     if !is_external_profile {
@@ -847,14 +1060,24 @@ pub async fn preview_local_account(
         return Err(format!("适配器 {tool_id} 不支持本机导入"));
     }
 
-    let (host, temp_import) = resolve_import_host(&state.host, &tool_id, profile_dir.as_deref())?;
+    let base_host = Arc::clone(&state.host);
+    let tool_for_resolve = tool_id.clone();
+    let profile_for_resolve = profile_dir.clone();
+    let (host, _temp_guard) = tokio::task::spawn_blocking(move || {
+        resolve_import_host(
+            &base_host,
+            &tool_for_resolve,
+            profile_for_resolve.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("解析导入目录任务异常: {e}"))??;
+
     let envelope = adapter
         .import_from_local(host.as_ref())
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(t) = temp_import.as_ref() {
-        let _ = std::fs::remove_dir_all(t);
-    }
+    drop(_temp_guard);
     let matched = state
         .db
         .find_account_id_by_uid(&tool_id, &envelope.uid)
@@ -970,6 +1193,7 @@ pub async fn add_account_by_token(
     schedule_import_quota_check(
         &app,
         &state.db,
+        &state.master_key,
         adapter,
         &summary,
         &cred_for_quota,
@@ -2280,11 +2504,19 @@ async fn persist_oauth_envelope(
             if summary.has_api_token && adapter.manifest().capabilities.supports_quota_query {
                 let app_bg = app.clone();
                 let db_bg = Arc::clone(db);
+                let key_bg = *master_key;
                 let adapter_bg = Arc::clone(adapter);
                 let scheduler_bg = Arc::clone(scheduler);
                 tauri::async_runtime::spawn(async move {
                     let _guard = scheduler_bg.queue_lock().lock_owned().await;
-                    record_import_quota_check(&db_bg, &adapter_bg, &summary, &cred_for_quota).await;
+                    record_import_quota_check(
+                        &db_bg,
+                        &key_bg,
+                        &adapter_bg,
+                        &summary,
+                        &cred_for_quota,
+                    )
+                    .await;
                     let _ = app_bg.emit("qwitch://account-updated", &summary.id);
                     let _ = app_bg.emit("qwitch://logs-updated", ());
                 });
@@ -2907,6 +3139,79 @@ mod profile_resolve_tests {
 
         // 不存在的路径报错
         assert!(resolve_profile_root_input("/no/such/path/xyz").is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_profile_root_extracts_valid_zip_and_guard_cleans_up_temp_dir() {
+        use std::io::Write;
+
+        let base = std::env::temp_dir().join(format!("qw_zip_ok_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let zip_path = base.join("TraeCN-profile.zip");
+
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+
+        writer
+            .start_file("Trae CN/User/globalStorage/storage.json", opts)
+            .unwrap();
+        writer
+            .write_all(br#"{"iCubeAuthInfo://icube-dc:dev123":"{}"}"#)
+            .unwrap();
+
+        writer.start_file("Trae CN/aha/TinyStorage", opts).unwrap();
+        writer.write_all(b"tiny-token").unwrap();
+
+        writer.start_file("Trae CN/ignored.txt", opts).unwrap();
+        writer.write_all(b"should-not-extract").unwrap();
+
+        writer
+            .start_file("__MACOSX/Trae CN/User/globalStorage/._storage.json", opts)
+            .unwrap();
+        writer.write_all(b"apple-double").unwrap();
+
+        writer.finish().unwrap();
+
+        let (root, guard) = resolve_profile_root_input(zip_path.to_str().unwrap()).unwrap();
+        assert!(guard.is_some());
+        assert!(root.join("User/globalStorage/storage.json").is_file());
+        assert!(root.join("aha/TinyStorage").is_file());
+        assert!(!root.join("ignored.txt").exists());
+        assert!(!root.join("Trae CN").exists());
+
+        let extracted_dir = root.clone();
+        assert!(extracted_dir.exists());
+        drop(guard);
+        assert!(!extracted_dir.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn extract_zip_to_rejects_zip_slip_traversal() {
+        use std::io::Write;
+
+        let base = std::env::temp_dir().join(format!("qw_zip_slip_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let zip_path = base.join("malicious.zip");
+        let dest = base.join("dest");
+
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        writer.start_file("../../escape.txt", opts).unwrap();
+        writer.write_all(b"evil").unwrap();
+        writer.finish().unwrap();
+
+        let err = extract_zip_to(&zip_path, &dest).unwrap_err();
+        assert!(
+            err.contains("路径穿越") || err.contains("非法路径"),
+            "unexpected err: {err}"
+        );
+        assert!(!base.join("escape.txt").exists());
 
         let _ = std::fs::remove_dir_all(&base);
     }

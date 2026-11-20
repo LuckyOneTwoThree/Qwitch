@@ -97,6 +97,7 @@ pub fn run() {
             let adapters = Arc::new(create_all_adapters(
                 &data_dir,
                 &startup_settings.trusted_adapters,
+                &startup_settings.trusted_adapter_hashes,
                 Arc::clone(&host),
             ));
             let state = AppState {

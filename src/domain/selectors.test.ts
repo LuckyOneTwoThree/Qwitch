@@ -44,10 +44,21 @@ function makeAdapter(id: string, supportsDailyClaim = true): AdapterManifest {
 
 describe("getEffectiveClaimStatus", () => {
   it("每日重置型工具今日已领时覆盖服务端缓存的 Available", () => {
+    for (const toolId of ["workbuddy", "minimax_code_cn"] as const) {
+      const acc = makeAcc({
+        toolId,
+        lastClaimedAt: NOW_ISO,
+        latestQuota: { claimStatus: "available", buckets: [], fetchedAt: NOW_ISO },
+      });
+      expect(getEffectiveClaimStatus(acc)).toBe("claimed");
+    }
+  });
+
+  it("claimed 快照若 lastClaimedAt 为今日即使 fetchedAt 陈旧仍保持 claimed", () => {
     const acc = makeAcc({
-      toolId: "workbuddy",
+      toolId: "qoder_cn",
       lastClaimedAt: NOW_ISO,
-      latestQuota: { claimStatus: "available", buckets: [], fetchedAt: NOW_ISO },
+      latestQuota: { claimStatus: "claimed", buckets: [], fetchedAt: STALE_ISO },
     });
     expect(getEffectiveClaimStatus(acc)).toBe("claimed");
   });

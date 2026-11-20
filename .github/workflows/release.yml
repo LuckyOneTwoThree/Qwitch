@@ -1,5 +1,8 @@
 name: Release
 
+permissions:
+  contents: read
+
 on:
   push:
     tags:
@@ -7,20 +10,68 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag name (e.g. v0.2.3)"
+        description: "Release tag name (e.g. v0.2.4)"
         required: true
-        default: "v0.2.3"
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
+      - name: Verify release tag matches project versions
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          REF_NAME: ${{ github.ref_name }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag format: $TAG" >&2
+            exit 1
+          fi
+          EXPECTED_VER="${TAG#v}"
+          PKG_VER="$(node -pe "require('./package.json').version")"
+          TAURI_VER="$(node -pe "require('./src-tauri/tauri.conf.json').version")"
+          CARGO_VER="$(node -e '
+            const fs = require("fs");
+            const lines = fs.readFileSync("src-tauri/Cargo.toml", "utf8").split(/\r?\n/);
+            let inPkg = false;
+            for (const line of lines) {
+              const t = line.trim();
+              if (t.startsWith("[")) { inPkg = (t === "[package]"); continue; }
+              if (inPkg) {
+                const m = t.match(/^version\s*=\s*"([^"]+)"/);
+                if (m) { console.log(m[1]); process.exit(0); }
+              }
+            }
+            process.exit(1);
+          ')"
+          echo "Tag: $TAG | Expected: $EXPECTED_VER | package.json: $PKG_VER | tauri.conf.json: $TAURI_VER | Cargo.toml: $CARGO_VER"
+          if [ "$PKG_VER" != "$EXPECTED_VER" ] || [ "$TAURI_VER" != "$EXPECTED_VER" ] || [ "$CARGO_VER" != "$EXPECTED_VER" ]; then
+            echo "Version mismatch against tag $TAG" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAG_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+            if [ "$TAG_SHA" != "$TARGET_SHA" ]; then
+              echo "Tag $TAG already points to $TAG_SHA, refusing to overwrite from $TARGET_SHA" >&2
+              exit 1
+            fi
+          fi
       - run: npm ci
+      - run: npm audit --omit=dev
       - run: npm run build
       - run: npm test
 
@@ -35,16 +86,19 @@ jobs:
             rust_target: "aarch64-apple-darwin"
             expected_arch: "arm64"
             artifact_name: "release-macos-arm64"
+            run_tests: true
           - platform: macos-latest
             rust_targets: "x86_64-apple-darwin"
             rust_target: "x86_64-apple-darwin"
             expected_arch: "x86_64"
             artifact_name: "release-macos-x64"
+            run_tests: false
           - platform: windows-latest
             rust_targets: "x86_64-pc-windows-msvc"
             rust_target: "x86_64-pc-windows-msvc"
             expected_arch: ""
             artifact_name: "release-windows-x64"
+            run_tests: true
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +113,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_targets }}
+          components: clippy, rustfmt
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -68,9 +123,20 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Rust tests
+      - name: Rust format check
+        if: matrix.run_tests
         working-directory: src-tauri
-        run: cargo test --all-targets
+        run: cargo fmt --check
+
+      - name: Rust clippy
+        if: matrix.run_tests
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Rust tests
+        if: matrix.run_tests
+        working-directory: src-tauri
+        run: cargo test --all-targets --locked
 
       - name: Build Tauri bundles
         run: npx tauri build --target ${{ matrix.rust_target }}
@@ -171,12 +237,20 @@ jobs:
           EOF
 
           if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING_BODY="$(gh release view "$TAG" --json body -q .body || true)"
             gh release upload "$TAG" release-assets/* --clobber
-            gh release edit "$TAG" \
-              --draft=false \
-              "$RELEASE_FLAG" \
-              --title "Qwitch $TAG" \
-              --notes-file release-notes.md
+            if [ -z "$EXISTING_BODY" ]; then
+              gh release edit "$TAG" \
+                --draft=false \
+                "$RELEASE_FLAG" \
+                --title "Qwitch $TAG" \
+                --notes-file release-notes.md
+            else
+              gh release edit "$TAG" \
+                --draft=false \
+                "$RELEASE_FLAG" \
+                --title "Qwitch $TAG"
+            fi
           else
             gh release create "$TAG" release-assets/* \
               --target "${{ github.sha }}" \

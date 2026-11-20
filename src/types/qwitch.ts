@@ -124,6 +124,7 @@ export interface AppSettings {
   autoRefreshIntervalMinutes?: number;
   autoClaimDaily?: boolean;
   trustedAdapters?: string[];
+  trustedAdapterHashes?: Record<string, string>;
 }
 
 export interface ProfileInspectResult {
@@ -140,6 +141,8 @@ export interface ExternalAdapterInfo {
   platforms: string[];
   trusted: boolean;
   reserved: boolean;
+  contentHash: string;
+  hashMismatch: boolean;
 }
 
 export type LogScope = "active" | "archived" | "all";

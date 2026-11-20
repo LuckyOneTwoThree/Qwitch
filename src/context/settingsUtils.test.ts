@@ -91,5 +91,18 @@ describe("settingsUtils", () => {
 
     expect(normalized.closeToTray).toBe(true);
     expect("hideDockIcon" in normalized).toBe(false);
+    expect(normalized.trustedAdapterHashes).toEqual({});
+  });
+
+  it("preserves trustedAdapterHashes across unrelated partial saves", () => {
+    const persisted = normalizeAppSettings({
+      ...DEFAULT_APP_SETTINGS,
+      trustedAdapters: ["custom_tool"],
+      trustedAdapterHashes: { custom_tool: "abc123" },
+    });
+
+    const payload = buildSettingsSavePayload({ theme: "dark" }, persisted);
+    expect(payload.trustedAdapters).toEqual(["custom_tool"]);
+    expect(payload.trustedAdapterHashes).toEqual({ custom_tool: "abc123" });
   });
 });

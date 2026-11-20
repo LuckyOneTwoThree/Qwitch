@@ -31,6 +31,9 @@ pub fn hash_fallback_uid(prefix: &str, raw: &[u8]) -> String {
 pub fn is_valid_path_segment(seg: &str) -> bool {
     !seg.is_empty()
         && seg.len() <= 128
+        && seg != "."
+        && !seg.starts_with('.')
+        && !seg.ends_with('.')
         && !seg.contains("..")
         && seg
             .chars()
@@ -232,6 +235,9 @@ mod tests {
 
         assert!(is_valid_path_segment("camp_2026-11.v1"));
         assert!(!is_valid_path_segment(""));
+        assert!(!is_valid_path_segment("."));
+        assert!(!is_valid_path_segment(".hidden"));
+        assert!(!is_valid_path_segment("camp."));
         assert!(!is_valid_path_segment("../admin"));
         assert!(!is_valid_path_segment("camp/sub"));
         assert!(!is_valid_path_segment("camp?x=1"));

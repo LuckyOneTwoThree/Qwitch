@@ -191,6 +191,7 @@ pub trait ToolAdapter: Send + Sync {
 pub fn create_all_adapters(
     data_dir: &Path,
     trusted_adapters: &[String],
+    trusted_adapter_hashes: &HashMap<String, String>,
     host: Arc<dyn PlatformHost>,
 ) -> HashMap<String, Arc<dyn ToolAdapter>> {
     let mut map: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
@@ -205,12 +206,21 @@ pub fn create_all_adapters(
         map.insert(adapter.manifest().id.clone(), adapter);
     }
 
-    // 外部适配器必须经用户显式信任后才注册；内置及历史保留 ID 一律不允许冒名
-    for (id, ext) in external::discover_external_adapters(data_dir) {
+    // 外部适配器必须经用户显式信任且目录内容哈希与已固定值一致后才注册；内置及保留 ID 一律不允许冒名
+    for (id, (ext, dir)) in external::discover_external_adapters(data_dir) {
         if !is_valid_adapter_id(&id) || RESERVED_ADAPTER_IDS.contains(&id.as_str()) {
             continue;
         }
         if !trusted_adapters.iter().any(|t| t == &id) {
+            continue;
+        }
+        let Some(expected_hash) = trusted_adapter_hashes.get(&id) else {
+            continue;
+        };
+        let Ok(actual_hash) = external::adapter_content_hash(&dir) else {
+            continue;
+        };
+        if &actual_hash != expected_hash {
             continue;
         }
         map.entry(id).or_insert(ext);
@@ -223,6 +233,9 @@ pub fn create_all_adapters(
 pub fn is_valid_adapter_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
+        && id != "."
+        && !id.starts_with('.')
+        && !id.ends_with('.')
         && !id.contains("..")
         && id
             .chars()
@@ -268,24 +281,63 @@ mod tests {
         write_manifest(&root, "trae");
 
         let host: Arc<dyn PlatformHost> = Arc::new(crate::platform::NativePlatformHost);
+        let plugin_hash =
+            external::adapter_content_hash(&root.join("adapters").join("evil_plugin"))
+                .expect("hash");
+        let trae_hash =
+            external::adapter_content_hash(&root.join("adapters").join("trae")).expect("hash");
+        let empty_hashes = HashMap::new();
+        let valid_hashes = HashMap::from([
+            ("evil_plugin".to_string(), plugin_hash),
+            ("trae".to_string(), trae_hash),
+        ]);
 
         // 未信任：外部插件不注册
-        let none = create_all_adapters(&root, &[], Arc::clone(&host));
+        let none = create_all_adapters(&root, &[], &empty_hashes, Arc::clone(&host));
         assert!(!none.contains_key("evil_plugin"));
         assert!(none.contains_key("trae_cn"));
 
-        // 显式信任后注册
-        let trusted = create_all_adapters(&root, &["evil_plugin".to_string()], Arc::clone(&host));
+        // 仅传 ID 无固定哈希：拒绝注册
+        let missing_hash = create_all_adapters(
+            &root,
+            &["evil_plugin".to_string()],
+            &empty_hashes,
+            Arc::clone(&host),
+        );
+        assert!(!missing_hash.contains_key("evil_plugin"));
+
+        // 显式信任且哈希匹配后注册
+        let trusted = create_all_adapters(
+            &root,
+            &["evil_plugin".to_string()],
+            &valid_hashes,
+            Arc::clone(&host),
+        );
         assert!(trusted.contains_key("evil_plugin"));
 
-        // 保留 ID 即使被"信任"也不允许冒名
+        // 保留 ID 即使被"信任"且哈希匹配也不允许冒名
         let spoof = create_all_adapters(
             &root,
             &["trae".to_string(), "evil_plugin".to_string()],
-            host,
+            &valid_hashes,
+            Arc::clone(&host),
         );
         assert!(!spoof.contains_key("trae"));
         assert!(spoof.contains_key("trae_cn"));
+
+        // 插件内容被篡改后，已固定的旧哈希失配，拒绝加载
+        std::fs::write(
+            root.join("adapters").join("evil_plugin").join("extra.py"),
+            b"evil",
+        )
+        .unwrap();
+        let tampered =
+            create_all_adapters(&root, &["evil_plugin".to_string()], &valid_hashes, host);
+        assert!(!tampered.contains_key("evil_plugin"));
+
+        assert!(!is_valid_adapter_id("."));
+        assert!(!is_valid_adapter_id(".hidden"));
+        assert!(!is_valid_adapter_id("plugin."));
 
         let _ = std::fs::remove_dir_all(&root);
     }

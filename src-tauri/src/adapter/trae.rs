@@ -853,6 +853,10 @@ impl TraeAdapter {
             message: format!("解析 Trae 额度响应失败: {e}"),
         })?;
 
+        Self::parse_entitlement_quota_body(&body)
+    }
+
+    fn parse_entitlement_quota_body(body: &Value) -> Result<QuotaSnapshot, AdapterError> {
         if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
             if code != 0 {
                 if let Some(err) = crate::adapter::common::map_business_code(code, "查询 Trae 额度")
@@ -870,11 +874,13 @@ impl TraeAdapter {
         let mut total = 0.0_f64;
         let mut plan_name: Option<String> = None;
         let mut reset_at: Option<String> = None;
+        let mut has_usage_data = false;
 
         if let Some(summary) = body
             .get("usage_summary")
             .or_else(|| body.pointer("/data/usage_summary"))
         {
+            has_usage_data = true;
             used = summary
                 .get("consumed_amount")
                 .or_else(|| summary.get("used"))
@@ -893,6 +899,7 @@ impl TraeAdapter {
             .and_then(|v| v.as_array());
 
         if let Some(packs) = packs {
+            has_usage_data = true;
             // 优先从主订阅包 (product_type == 0) 读取套餐名与过期时间
             for pack in packs {
                 let is_base_plan = pack
@@ -984,13 +991,17 @@ impl TraeAdapter {
             .or_else(|| body.pointer("/data/total_balance"))
             .and_then(|v| v.as_f64());
 
+        if total_balance.is_some() {
+            has_usage_data = true;
+        }
+
         if total <= 0.0 {
             if let Some(bal) = total_balance.filter(|b| *b >= 0.0) {
                 total = bal + used;
             }
         }
 
-        if total <= 0.0 {
+        if !has_usage_data && total <= 0.0 {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
                 message: "Trae 额度响应中未包含有效用量数据".into(),
@@ -1012,6 +1023,33 @@ impl TraeAdapter {
             }],
             fetched_at: Utc::now().to_rfc3339(),
         })
+    }
+
+    fn merge_post_claim_quota(
+        inspected: Option<QuotaSnapshot>,
+        precheck: Option<&QuotaSnapshot>,
+        confirmed_claimed: bool,
+    ) -> Option<QuotaSnapshot> {
+        match inspected {
+            Some(mut q) => {
+                if confirmed_claimed
+                    && matches!(
+                        q.claim_status,
+                        ClaimStatus::Unknown | ClaimStatus::Unsupported
+                    )
+                {
+                    q.claim_status = ClaimStatus::Claimed;
+                }
+                Some(q)
+            }
+            None if confirmed_claimed => Some(QuotaSnapshot {
+                plan_name: precheck.and_then(|p| p.plan_name.clone()),
+                claim_status: ClaimStatus::Claimed,
+                buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
+                fetched_at: Utc::now().to_rfc3339(),
+            }),
+            None => None,
+        }
     }
 
     /// 构造与 Trae CN 客户端一致的登录态载荷。
@@ -1617,7 +1655,8 @@ impl ToolAdapter for TraeAdapter {
             .or_else(|| body.get("credits"))
             .and_then(|v| v.as_i64())
             .or(credits_hint);
-        let refreshed = self.inspect_quota(cred).await.ok();
+        let refreshed =
+            Self::merge_post_claim_quota(self.inspect_quota(cred).await.ok(), precheck, true);
         let reward_summary = match gained_opt {
             Some(g) => format!("成功领取 {g} Credits"),
             None => "每日签到已完成".to_string(),
@@ -1732,7 +1771,7 @@ impl ToolAdapter for TraeAdapter {
         };
 
         // 仅清理并替换账号级登录态；设备密钥（icube-dc）与 usertag 属于本机，
-        // Token 导入的账号没有这两类快照，需保留以免破坏设备绑定
+        // 切号时必须保留本机条目并过滤外部快照里的 icube-dc:*，避免污染本机设备身份
         let preserved: Vec<(String, Value)> = root_obj
             .iter()
             .filter(|(k, _)| k.starts_with(DEVICE_CRED_PREFIX) || k.as_str() == USERTAG_KEY)
@@ -1740,11 +1779,14 @@ impl ToolAdapter for TraeAdapter {
             .collect();
         root_obj.retain(|k, _| !k.starts_with("iCubeAuthInfo://"));
         for (k, v) in preserved {
-            if !auth_entries.contains_key(&k) {
-                root_obj.insert(k, v);
-            }
+            root_obj.insert(k, v);
         }
         for (k, v) in &auth_entries {
+            if k.starts_with(DEVICE_CRED_PREFIX)
+                || (k.as_str() == USERTAG_KEY && root_obj.contains_key(USERTAG_KEY))
+            {
+                continue;
+            }
             root_obj.insert(k.clone(), v.clone());
         }
         Self::apply_server_entries(&mut root_obj, server_entries);
@@ -1771,8 +1813,12 @@ impl ToolAdapter for TraeAdapter {
             });
         }
 
-        // 以最终 storage.json 中的账号态为准覆盖 vscdb，同时保留快照里的历史条目
+        // 以最终 storage.json 中的账号态为准覆盖 vscdb，同时保留快照里的历史非设备条目
         let mut vscdb_entries = snapshot_vscdb.unwrap_or_default();
+        vscdb_entries.retain(|k, _| {
+            !k.starts_with(DEVICE_CRED_PREFIX)
+                && !(k.as_str() == USERTAG_KEY && root_obj.contains_key(USERTAG_KEY))
+        });
         for (k, v) in root_obj
             .iter()
             .filter(|(k, _)| k.starts_with("iCubeAuthInfo://"))
@@ -2192,6 +2238,82 @@ mod tests {
         assert_eq!(
             decoded.get("userId").and_then(|v| v.as_str()),
             Some("3704729780097880")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trae_entitlement_allows_zero_credit_account_and_rejects_empty_schema() {
+        let zero_body = serde_json::json!({
+            "code": 0,
+            "usage_summary": { "consumed_amount": 0, "total_amount": 0 },
+            "user_entitlement_pack_list": [],
+            "total_balance": 0
+        });
+        let snap = TraeAdapter::parse_entitlement_quota_body(&zero_body)
+            .expect("zero credit must succeed");
+        assert_eq!(snap.buckets.len(), 1);
+        assert_eq!(snap.buckets[0].total, 0.0);
+        assert_eq!(snap.buckets[0].remaining, 0.0);
+
+        let empty_body = serde_json::json!({ "code": 0 });
+        assert!(TraeAdapter::parse_entitlement_quota_body(&empty_body).is_err());
+    }
+
+    #[tokio::test]
+    async fn trae_external_snapshot_switch_does_not_leak_foreign_device_key() {
+        let dir = std::env::temp_dir().join(format!("qwitch_trae_ext_sw_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = serde_json::json!({
+            "iCubeAuthInfo://icube-dc:93900972767536": "local-dc",
+            "iCubeAuthInfo://usertag": "local-usertag",
+            "iCubeAuthInfo://icube.cloudide": "old-local-auth"
+        });
+        std::fs::write(dir.join(STORAGE_JSON), existing.to_string()).unwrap();
+
+        let ext_entries = serde_json::json!({
+            "iCubeAuthInfo://icube-dc:11100022233344": "foreign-dc",
+            "iCubeAuthInfo://usertag": "foreign-usertag",
+            "iCubeAuthInfo://icube.cloudide": "foreign-auth-entry"
+        });
+        let mut files = HashMap::new();
+        files.insert(
+            SNAPSHOT_AUTH_KEY.to_string(),
+            BASE64.encode(serde_json::to_vec(&ext_entries).unwrap()),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u_foreign".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+
+        let adapter = TraeAdapter::new(true);
+        adapter
+            .apply_session(&TestHost(dir.clone()), &cred)
+            .await
+            .expect("apply external snapshot");
+
+        let root: Value = serde_json::from_slice(&std::fs::read(dir.join(STORAGE_JSON)).unwrap())
+            .expect("storage json");
+        assert_eq!(
+            root.get("iCubeAuthInfo://icube-dc:93900972767536"),
+            Some(&Value::String("local-dc".into()))
+        );
+        assert!(
+            root.get("iCubeAuthInfo://icube-dc:11100022233344")
+                .is_none(),
+            "foreign icube-dc key must not pollute local storage.json"
+        );
+        assert_eq!(
+            root.get("iCubeAuthInfo://usertag"),
+            Some(&Value::String("local-usertag".into()))
+        );
+        assert_eq!(
+            root.get(PRIMARY_AUTH_KEY),
+            Some(&Value::String("foreign-auth-entry".into()))
         );
 
         let _ = std::fs::remove_dir_all(&dir);

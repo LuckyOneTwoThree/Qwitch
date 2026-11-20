@@ -42,6 +42,7 @@ export function ImportAccountModal({  open,
   const [profileDir, setProfileDir] = useState("");
   const [devicePlatform, setDevicePlatform] = useState<DevicePlatform>(detectImportPlatform);
   const [inspectResult, setInspectResult] = useState<ProfileInspectResult | null>(null);
+  const [inspectError, setInspectError] = useState<string | null>(null);
   const [inspecting, setInspecting] = useState(false);
 
   const wasOpenRef = useRef(false);
@@ -66,6 +67,9 @@ export function ImportAccountModal({  open,
 
     if (!open) {
       lastTargetIdRef.current = undefined;
+      setInspectResult(null);
+      setInspectError(null);
+      setInspecting(false);
       return;
     }
 
@@ -79,6 +83,9 @@ export function ImportAccountModal({  open,
     setRawInput("");
     setProfileMode("default");
     setProfileDir("");
+    setInspectResult(null);
+    setInspectError(null);
+    setInspecting(false);
     setDevicePlatform(detectImportPlatform());
 
     if (targetAccount) {
@@ -127,21 +134,33 @@ export function ImportAccountModal({  open,
   useEffect(() => {
     if (!open || !supportsDeviceProfile || method !== "local_import" || profileMode !== "device") {
       setInspectResult(null);
+      setInspectError(null);
+      setInspecting(false);
       return;
     }
     const dir = profileDir.trim();
     if (!dir) {
       setInspectResult(null);
+      setInspectError(null);
+      setInspecting(false);
       return;
     }
     let cancelled = false;
+    setInspectResult(null);
+    setInspectError(null);
+    setInspecting(true);
     const timer = window.setTimeout(async () => {
-      setInspecting(true);
       try {
         const res = await inspectProfileDir(toolId, dir);
-        if (!cancelled) setInspectResult(res);
-      } catch {
-        if (!cancelled) setInspectResult(null);
+        if (!cancelled) {
+          setInspectResult(res);
+          setInspectError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setInspectResult(null);
+          setInspectError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         if (!cancelled) setInspecting(false);
       }
@@ -172,8 +191,8 @@ export function ImportAccountModal({  open,
 
   const exportCommand = (os: DevicePlatform): string =>
     os === "win"
-      ? `$d="$env:APPDATA\\Trae CN"; $t="$env:TEMP\\TraeCN-profile\\Trae CN"; Remove-Item -Recurse -Force "$env:TEMP\\TraeCN-profile" -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force "$t\\User\\globalStorage","$t\\aha" | Out-Null; Copy-Item "$d\\User\\globalStorage\\storage.json" "$t\\User\\globalStorage\\" -Force; if(Test-Path "$d\\User\\globalStorage\\state.vscdb"){Copy-Item "$d\\User\\globalStorage\\state.vscdb" "$t\\User\\globalStorage\\" -Force}; if(Test-Path "$d\\aha"){Copy-Item "$d\\aha\\*" "$t\\aha\\" -Recurse -Force}; $o="$env:USERPROFILE\\Desktop\\TraeCN-profile.zip"; if(Test-Path $o){Remove-Item $o}; Compress-Archive -Path "$t\\*" -DestinationPath $o -Force; Write-Host "已导出 -> $o"`
-      : `D="$HOME/Library/Application Support/Trae CN"; T="$(mktemp -d)/Trae CN"; mkdir -p "$T/User/globalStorage" "$T/aha"; cp "$D/User/globalStorage/storage.json" "$T/User/globalStorage/" 2>/dev/null; [ -f "$D/User/globalStorage/state.vscdb" ] && cp "$D/User/globalStorage/state.vscdb" "$T/User/globalStorage/"; cp -R "$D/aha/." "$T/aha/" 2>/dev/null; O="$HOME/Desktop/TraeCN-profile.zip"; rm -f "$O"; ditto -c -k --sequesterRsrc "$T" "$O"; echo "已导出 -> $O"`;
+      ? `$d="$env:APPDATA\\Trae CN"; if(-not (Test-Path "$d\\User\\globalStorage\\storage.json")){Write-Error "未找到 storage.json"; return}; $w="$env:TEMP\\TraeCN-profile"; $t="$w\\Trae CN"; Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue; try { New-Item -ItemType Directory -Force "$t\\User\\globalStorage","$t\\aha" | Out-Null; Copy-Item "$d\\User\\globalStorage\\storage.json" "$t\\User\\globalStorage\\" -Force; if(Test-Path "$d\\User\\globalStorage\\state.vscdb"){Copy-Item "$d\\User\\globalStorage\\state.vscdb" "$t\\User\\globalStorage\\" -Force}; if(Test-Path "$d\\aha"){Copy-Item "$d\\aha\\*" "$t\\aha\\" -Recurse -Force}; $o="$env:USERPROFILE\\Desktop\\TraeCN-profile.zip"; if(Test-Path $o){Remove-Item $o}; Compress-Archive -Path "$t\\*" -DestinationPath $o -Force; Write-Host "已导出 -> $o" } finally { Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue }`
+      : `D="$HOME/Library/Application Support/Trae CN"; W="$(mktemp -d)"; T="$W/Trae CN"; trap 'rm -rf "$W"' EXIT; [ -f "$D/User/globalStorage/storage.json" ] || { echo "未找到 storage.json"; exit 1; }; mkdir -p "$T/User/globalStorage" "$T/aha"; cp "$D/User/globalStorage/storage.json" "$T/User/globalStorage/" && ([ -f "$D/User/globalStorage/state.vscdb" ] && cp "$D/User/globalStorage/state.vscdb" "$T/User/globalStorage/" || true) && ([ -d "$D/aha" ] && cp -R "$D/aha/." "$T/aha/" || true) && O="$HOME/Desktop/TraeCN-profile.zip" && rm -f "$O" && ditto -c -k --sequesterRsrc "$T" "$O" && echo "已导出 -> $O"`;
 
   const handleCopyExport = async () => {
     try {
@@ -184,12 +203,32 @@ export function ImportAccountModal({  open,
     }
   };
 
+  const isDeviceProfile =
+    supportsDeviceProfile && method === "local_import" && profileMode === "device";
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
     if (method === "token_paste" && !rawInput.trim()) {
       showToast("请粘贴有效的 Token 或 JSON 凭据", "warning");
       return;
+    }
+    if (isDeviceProfile) {
+      if (!profileDir.trim()) {
+        showToast("请先选择另一台设备的导出包或数据文件夹", "warning");
+        return;
+      }
+      if (inspecting) {
+        showToast("正在校验设备目录，请稍候", "info");
+        return;
+      }
+      if (inspectError || (inspectResult && !inspectResult.hasStorage)) {
+        showToast(
+          inspectError || "未找到有效的 storage.json，无法作为设备 profile 导入",
+          "warning"
+        );
+        return;
+      }
     }
     setSubmitting(true);
     try {
@@ -250,9 +289,10 @@ export function ImportAccountModal({  open,
           </div>
           <button
             type="button"
+            disabled={submitting}
             onClick={onClose}
             aria-label="关闭导入弹窗"
-            className="shrink-0 rounded-lg p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            className="shrink-0 rounded-lg p-1 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -460,6 +500,8 @@ export function ImportAccountModal({  open,
                       <p className="mt-1.5 text-[11px] leading-snug">
                         {inspecting ? (
                           <span className="text-zinc-500 dark:text-zinc-400">校验中…</span>
+                        ) : inspectError ? (
+                          <span className="text-rose-600 dark:text-rose-400">{inspectError}</span>
                         ) : inspectResult ? (
                           !inspectResult.hasStorage ? (
                             <span className="text-rose-600 dark:text-rose-400">无法识别：请选 Trae CN 导出的 zip，或含 User/globalStorage/storage.json 的文件夹</span>
@@ -531,14 +573,15 @@ export function ImportAccountModal({  open,
         <div className="mt-4 flex shrink-0 justify-end gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">
           <button
             type="button"
+            disabled={submitting}
             onClick={onClose}
-            className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 px-3.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-200 px-3.5 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             取消
           </button>
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || (isDeviceProfile && inspecting)}
             className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 rounded-lg bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
           >
             {submitting && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />}

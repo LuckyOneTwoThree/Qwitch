@@ -413,12 +413,14 @@ impl MiniMaxAdapter {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_text = resp.text().await.unwrap_or_default();
-            if crate::adapter::common::is_idempotent_claimed_phrase(&err_text) {
-                return Ok(serde_json::json!({
-                    "base_resp": { "status_code": 0 },
-                    "data": { "claim_result": 2 }
-                }));
+            if status.as_u16() == 400 || status.as_u16() == 409 {
+                let err_text = resp.text().await.unwrap_or_default();
+                if crate::adapter::common::is_idempotent_claimed_phrase(&err_text) {
+                    return Ok(serde_json::json!({
+                        "base_resp": { "status_code": 0 },
+                        "data": { "claim_result": 2 }
+                    }));
+                }
             }
             return Err(Self::map_http_status(status, "领取 MiniMax 签到积分"));
         }
@@ -741,12 +743,9 @@ impl MiniMaxAdapter {
                 "subUserName": name
             }),
         );
-        if !obj.contains_key("tokens") {
-            obj.insert("tokens".to_string(), serde_json::json!({}));
-        }
-        if !obj.contains_key("user") {
-            obj.insert("user".to_string(), serde_json::json!({}));
-        }
+        // 清空上一账号在模板配置里遗留的令牌与用户信息，防止跨账号会话污染
+        obj.insert("tokens".to_string(), serde_json::json!({}));
+        obj.insert("user".to_string(), serde_json::json!({}));
 
         let auth_bytes = serde_json::to_vec(&auth).map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
@@ -872,7 +871,7 @@ impl MiniMaxAdapter {
                 Some(q)
             }
             None if confirmed_claimed => Some(QuotaSnapshot {
-                plan_name: None,
+                plan_name: precheck.and_then(|p| p.plan_name.clone()),
                 claim_status: ClaimStatus::Claimed,
                 buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
                 fetched_at: Utc::now().to_rfc3339(),
@@ -1202,8 +1201,20 @@ impl ToolAdapter for MiniMaxAdapter {
     ) -> Result<QuotaSnapshot, AdapterError> {
         let token = Self::extract_access_token(cred)?;
         let credit = self.fetch_credit_details(&token).await?;
-        // 签到状态属于附加信息：查询失败时保留积分水位，仅将签到状态标记为未知
-        let signin = self.fetch_signin_status(&token).await.ok();
+        // 签到状态属于附加信息：网络/解析失败时保留积分水位，但认证/风控/限流错误必须向上熔断
+        let signin = match self.fetch_signin_status(&token).await {
+            Ok(v) => Some(v),
+            Err(
+                e @ AdapterError::Unified {
+                    code:
+                        UnifiedErrorCode::AuthExpired
+                        | UnifiedErrorCode::RiskTriggered
+                        | UnifiedErrorCode::RateLimited,
+                    ..
+                },
+            ) => return Err(e),
+            Err(_) => None,
+        };
         Ok(Self::build_quota_snapshot(&credit, signin.as_ref()))
     }
 
@@ -1212,22 +1223,39 @@ impl ToolAdapter for MiniMaxAdapter {
         cred: &CredentialEnvelope,
         precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
-        if precheck.is_some_and(|q| q.claim_status == ClaimStatus::Claimed) {
-            return Ok(ClaimResult {
-                claimed: false,
-                reward_summary: "今日已领取签到积分".into(),
-                updated_quota: precheck.cloned(),
-            });
-        }
-
         let token = Self::extract_access_token(cred)?;
-        let status = self.fetch_signin_status(&token).await?;
-        if Self::claim_status_from_signin(&status) == ClaimStatus::Claimed {
-            return Ok(ClaimResult {
-                claimed: false,
-                reward_summary: "今日已签到，无需重复领取".into(),
-                updated_quota: self.inspect_quota(cred).await.ok(),
-            });
+        let current_status = match precheck {
+            Some(q) => q.claim_status.clone(),
+            None => {
+                let status = self.fetch_signin_status(&token).await?;
+                Self::claim_status_from_signin(&status)
+            }
+        };
+        match current_status {
+            ClaimStatus::Claimed => {
+                return Ok(ClaimResult {
+                    claimed: false,
+                    reward_summary: "今日已领取签到积分".into(),
+                    updated_quota: match precheck {
+                        Some(q) => Some(q.clone()),
+                        None => self.inspect_quota(cred).await.ok(),
+                    },
+                });
+            }
+            ClaimStatus::Unsupported => {
+                return Ok(ClaimResult {
+                    claimed: false,
+                    reward_summary: "当前账号暂不支持每日签到".into(),
+                    updated_quota: None,
+                });
+            }
+            ClaimStatus::Unknown => {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: "MiniMax 签到状态未知，为避免重复请求已中止领取".into(),
+                });
+            }
+            ClaimStatus::Available => {}
         }
 
         let claim = self.post_signin_claim(&token).await?;
@@ -1251,7 +1279,7 @@ impl ToolAdapter for MiniMaxAdapter {
         let refreshed = Self::merge_post_claim_quota(
             self.inspect_quota(cred).await.ok(),
             precheck,
-            confirmed_claimed,
+            confirmed_claimed || already_claimed,
         );
 
         Ok(ClaimResult {
@@ -1721,5 +1749,100 @@ mod tests {
         let tokens = MiniMaxAdapter::tokens_from_snapshot(&files).expect("tokens");
         assert_eq!(tokens.access_token, "acc-token");
         assert_eq!(tokens.refresh_token.as_deref(), Some("ref-token"));
+    }
+
+    #[test]
+    fn build_session_snapshot_wipes_inherited_tokens_and_user() {
+        let base_config = br#"{
+            "sharedUser": {"deviceID": "keep-dev", "userID": "old-user"},
+            "tokens": {"accessToken": "leaked-token-a"},
+            "user": {"id": "old-user", "email": "old@example.com"},
+            "theme": "dark"
+        }"#;
+        let files = MiniMaxAdapter::build_session_snapshot(
+            "new-acc-token",
+            "new-ref-token",
+            1_800_000_000_000,
+            "new-uid",
+            Some("NewUser"),
+            Some(base_config),
+            None,
+        )
+        .expect("snapshot");
+        let config: Value =
+            serde_json::from_slice(&B64.decode(files.get(APP_CONFIG_JSON).unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(
+            config
+                .pointer("/sharedUser/deviceID")
+                .and_then(|v| v.as_str()),
+            Some("keep-dev")
+        );
+        assert_eq!(config.get("tokens"), Some(&serde_json::json!({})));
+        assert_eq!(config.get("user"), Some(&serde_json::json!({})));
+        assert_eq!(config.get("theme").and_then(|v| v.as_str()), Some("dark"));
+    }
+
+    #[tokio::test]
+    async fn claim_daily_fail_closed_on_unknown_and_unsupported_precheck() {
+        let adapter = MiniMaxAdapter::new();
+        let cred = CredentialEnvelope {
+            tool_id: "minimax_code_cn".to_string(),
+            uid: "u_mm_1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "mm-tok".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+
+        let unknown_snap = QuotaSnapshot {
+            plan_name: None,
+            claim_status: ClaimStatus::Unknown,
+            buckets: vec![],
+            fetched_at: "2026-11-20T00:00:00Z".into(),
+        };
+        assert!(adapter
+            .claim_daily(&cred, Some(&unknown_snap))
+            .await
+            .is_err());
+
+        let unsup_snap = QuotaSnapshot {
+            plan_name: None,
+            claim_status: ClaimStatus::Unsupported,
+            buckets: vec![],
+            fetched_at: "2026-11-20T00:00:00Z".into(),
+        };
+        let res = adapter
+            .claim_daily(&cred, Some(&unsup_snap))
+            .await
+            .expect("unsupported skips cleanly");
+        assert!(!res.claimed);
+    }
+
+    #[test]
+    fn merge_post_claim_quota_synthesizes_claimed_on_already_claimed() {
+        let pre = QuotaSnapshot {
+            plan_name: Some("Plus".into()),
+            claim_status: ClaimStatus::Available,
+            buckets: vec![],
+            fetched_at: "2026-11-20T00:00:00Z".into(),
+        };
+        let syn = MiniMaxAdapter::merge_post_claim_quota(None, Some(&pre), true).expect("merged");
+        assert_eq!(syn.claim_status, ClaimStatus::Claimed);
+        assert_eq!(syn.plan_name.as_deref(), Some("Plus"));
+
+        let unk = QuotaSnapshot {
+            plan_name: None,
+            claim_status: ClaimStatus::Unknown,
+            buckets: vec![],
+            fetched_at: "2026-11-20T00:01:00Z".into(),
+        };
+        let upgraded =
+            MiniMaxAdapter::merge_post_claim_quota(Some(unk), Some(&pre), true).expect("upgraded");
+        assert_eq!(upgraded.claim_status, ClaimStatus::Claimed);
     }
 }

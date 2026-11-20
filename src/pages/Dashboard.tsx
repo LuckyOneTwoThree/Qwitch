@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   RefreshCw,
   Sparkles,
@@ -191,20 +191,21 @@ export function Dashboard() {
   const [externalPlugins, setExternalPlugins] = useState<ExternalAdapterInfo[]>([]);
   const [trustedDraft, setTrustedDraft] = useState<string[]>([]);
 
+  const reloadExternalPlugins = useCallback(async () => {
+    if (!isTauriRuntime) return;
+    try {
+      const list = await invoke<ExternalAdapterInfo[]>("list_external_adapters");
+      setExternalPlugins(list);
+      setTrustedDraft(list.filter((p) => p.trusted).map((p) => p.id));
+    } catch {
+      // ignore plugin list errors
+    }
+  }, [isTauriRuntime]);
+
   useEffect(() => {
     if (nav !== "settings" || !isTauriRuntime) return;
-    let cancelled = false;
-    invoke<ExternalAdapterInfo[]>("list_external_adapters")
-      .then((list) => {
-        if (cancelled) return;
-        setExternalPlugins(list);
-        setTrustedDraft(list.filter((p) => p.trusted).map((p) => p.id));
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [nav, isTauriRuntime]);
+    void reloadExternalPlugins();
+  }, [nav, isTauriRuntime, reloadExternalPlugins]);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<AccountFilter>("all");
   const [viewMode, setViewMode] = useState<AllViewMode>("grouped");
@@ -2047,8 +2048,22 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={async () => {
-                        const ok = await saveAppSettings({ trustedAdapters: trustedDraft }, true);
+                        const hashesDraft: Record<string, string> = {};
+                        for (const id of trustedDraft) {
+                          const plugin = externalPlugins.find((p) => p.id === id);
+                          if (plugin?.contentHash) {
+                            hashesDraft[id] = plugin.contentHash;
+                          }
+                        }
+                        const ok = await saveAppSettings(
+                          {
+                            trustedAdapters: trustedDraft,
+                            trustedAdapterHashes: hashesDraft,
+                          },
+                          true
+                        );
                         if (ok) {
+                          await reloadExternalPlugins();
                           showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
                         }
                       }}
@@ -2081,6 +2096,11 @@ export function Dashboard() {
                               {plugin.reserved && (
                                 <div className="mt-0.5 text-[11px] text-rose-600 dark:text-rose-400">
                                   该 ID 为内置/历史保留，已被禁止加载
+                                </div>
+                              )}
+                              {!plugin.reserved && plugin.hashMismatch && (
+                                <div className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">
+                                  插件目录内容已变更或尚未固定校验哈希，当前已被阻止加载；确认安全后请重新点击「保存信任设置」
                                 </div>
                               )}
                             </div>

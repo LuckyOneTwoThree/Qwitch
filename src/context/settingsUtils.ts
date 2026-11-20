@@ -14,6 +14,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   autoRefreshIntervalMinutes: 0,
   autoClaimDaily: false,
   trustedAdapters: [],
+  trustedAdapterHashes: {},
 };
 
 export function sanitizeNonNegativeInt(value: unknown, fallback = 0): number {
@@ -58,6 +59,8 @@ export function normalizeAppSettings(
     ),
     autoClaimDaily: raw?.autoClaimDaily ?? fallback.autoClaimDaily ?? false,
     trustedAdapters: raw?.trustedAdapters ?? fallback.trustedAdapters ?? [],
+    trustedAdapterHashes:
+      raw?.trustedAdapterHashes ?? fallback.trustedAdapterHashes ?? {},
   };
 }
 

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::adapter::{
@@ -105,8 +105,8 @@ function decrypt(envelope) {
     if (plaintext) plaintext.fill(0);
   }
 }
-let chunks = [], size = 0;
-function reply(v) { process.stdout.write(JSON.stringify({version: 1, ...v}), () => process.exit(v.ok ? 0 : 1)); }
+let chunks = [], size = 0, replied = false;
+function reply(v) { if (replied) return; replied = true; process.stdout.write(JSON.stringify({version: 1, ...v}), () => process.exit(v.ok ? 0 : 1)); }
 process.stdin.on('data', c => { size += c.length; if (size > inputLimit) reply({ok: false, reason: 'INVALID_FORMAT'}); else chunks.push(c); });
 process.stdin.on('end', () => {
   try {
@@ -274,37 +274,77 @@ impl WorkBuddyAdapter {
             message: e.to_string(),
         })?;
 
-        let mut child = Command::new(runtime_bin)
-            .args(["-e", AUTH_HELPER_JS])
+        let mut cmd = Command::new(runtime_bin);
+        cmd.args(["-e", AUTH_HELPER_JS])
             .env("ELECTRON_RUN_AS_NODE", "1")
+            .env_remove("NODE_OPTIONS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::ClientNotFound,
-                message: format!("无法启动 WorkBuddy 运行时解密凭据: {e}"),
-            })?;
+            .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x0800_0000);
 
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(&req_bytes).await;
-            let _ = stdin.shutdown().await;
-        }
+        let mut child = cmd.spawn().map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::ClientNotFound,
+            message: format!("无法启动 WorkBuddy 运行时解密凭据: {e}"),
+        })?;
 
-        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-            .await
-            .map_err(|_| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: "WorkBuddy 解密助手执行超时".into(),
-            })?
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("等待 WorkBuddy 解密助手失败: {e}"),
-            })?;
+        let mut stdin_pipe = child.stdin.take();
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        let stdout_bytes = match tokio::time::timeout(Duration::from_secs(10), async {
+            let write_stdin = async {
+                if let Some(mut stdin) = stdin_pipe.take() {
+                    let _ = stdin.write_all(&req_bytes).await;
+                    let _ = stdin.shutdown().await;
+                }
+            };
+            let read_stdout = async {
+                let mut buf = Vec::new();
+                if let Some(stdout) = stdout_pipe {
+                    let mut reader = stdout.take(256 * 1024);
+                    reader.read_to_end(&mut buf).await?;
+                }
+                Ok::<Vec<u8>, std::io::Error>(buf)
+            };
+            let read_stderr = async {
+                let mut chunk = [0u8; 4096];
+                if let Some(mut stderr) = stderr_pipe {
+                    while let Ok(n) = stderr.read(&mut chunk).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                }
+            };
+            let (_, out_res, _, wait_res) =
+                tokio::join!(write_stdin, read_stdout, read_stderr, child.wait());
+            let out_buf = out_res?;
+            let _status = wait_res?;
+            Ok::<Vec<u8>, std::io::Error>(out_buf)
+        })
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("等待 WorkBuddy 解密助手失败: {e}"),
+                });
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: "WorkBuddy 解密助手执行超时".into(),
+                });
+            }
+        };
 
         let reply: Value =
-            serde_json::from_slice(&output.stdout).map_err(|_| AdapterError::Unified {
+            serde_json::from_slice(&stdout_bytes).map_err(|_| AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
                 message: "WorkBuddy 解密助手返回无效输出".into(),
             })?;
@@ -343,6 +383,25 @@ impl WorkBuddyAdapter {
                 code: UnifiedErrorCode::InvalidCredential,
                 message: "WorkBuddy 加密凭据解密失败 (DECRYPT_FAILED)".into(),
             })
+    }
+
+    fn parse_claim_response_body(
+        status: reqwest::StatusCode,
+        raw_text: &str,
+    ) -> Result<Value, AdapterError> {
+        if status.is_success() && raw_text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(raw_text).map_err(|e| {
+            if !status.is_success() {
+                Self::map_http_status(status, "WorkBuddy 每日签到")
+            } else {
+                AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!("解析 WorkBuddy 签到响应失败: {e}"),
+                }
+            }
+        })
     }
 
     /// 已签幂等契约（ADAPTER_SPEC）：2xx null body 直接算已签；
@@ -1458,22 +1517,9 @@ impl ToolAdapter for WorkBuddyAdapter {
             code: UnifiedErrorCode::NetworkError,
             message: format!("读取 WorkBuddy 签到响应失败: {e}"),
         })?;
-        // 契约（ADAPTER_SPEC）：已签幂等可返回 null body；仅 2xx 下解析失败按 null 处理，
-        // 400/409 解析失败保留原始 HTTP 错误，不得吞成"已签"
-        let body: Value = match serde_json::from_str(&raw_text) {
-            Ok(v) => v,
-            Err(_) if status.is_success() => Value::Null,
-            Err(e) => {
-                return Err(if !status.is_success() {
-                    Self::map_http_status(status, "WorkBuddy 每日签到")
-                } else {
-                    AdapterError::Unified {
-                        code: UnifiedErrorCode::NetworkError,
-                        message: format!("解析 WorkBuddy 签到响应失败: {e}"),
-                    }
-                });
-            }
-        };
+        // 契约（ADAPTER_SPEC）：仅 2xx 下空响应体或字面 "null" 按 null 处理；
+        // 非 JSON（如 HTML/WAF 错误页）必须失败而非误判"已签"
+        let body = Self::parse_claim_response_body(status, &raw_text)?;
 
         let code = body.get("code").and_then(|v| v.as_i64());
 
@@ -1528,7 +1574,21 @@ impl ToolAdapter for WorkBuddyAdapter {
                 message: "WorkBuddy 每日签到响应缺少有效结果字段，请刷新核实状态".into(),
             });
         }
-        let refreshed = self.fetch_quota_and_checkin(&endpoint, &headers).await.ok();
+        let mut refreshed = self
+            .fetch_quota_and_checkin(&endpoint, &headers)
+            .await
+            .unwrap_or_else(|_| QuotaSnapshot {
+                plan_name: current.plan_name.clone(),
+                claim_status: ClaimStatus::Claimed,
+                buckets: current.buckets.clone(),
+                fetched_at: Utc::now().to_rfc3339(),
+            });
+        if matches!(
+            refreshed.claim_status,
+            ClaimStatus::Unknown | ClaimStatus::Unsupported
+        ) {
+            refreshed.claim_status = ClaimStatus::Claimed;
+        }
         let reward_summary = match credit_opt {
             Some(c) => format!("成功领取 {c} 积分"),
             None => "每日签到已完成".to_string(),
@@ -1537,7 +1597,7 @@ impl ToolAdapter for WorkBuddyAdapter {
         Ok(ClaimResult {
             claimed: true,
             reward_summary,
-            updated_quota: refreshed,
+            updated_quota: Some(refreshed),
         })
     }
 
@@ -1922,6 +1982,31 @@ mod tests {
         assert!(
             headers_fallback.get("X-User-Id").is_none(),
             "兜底哈希 UID 不得作为 X-User-Id 发送"
+        );
+    }
+
+    #[test]
+    fn claim_response_rejects_html_on_200_and_accepts_empty_or_null() {
+        let html_err = WorkBuddyAdapter::parse_claim_response_body(
+            reqwest::StatusCode::OK,
+            "<html><body>WAF Challenge</body></html>",
+        )
+        .expect_err("HTML 200 must fail");
+        assert!(matches!(
+            html_err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                ..
+            }
+        ));
+
+        assert_eq!(
+            WorkBuddyAdapter::parse_claim_response_body(reqwest::StatusCode::OK, "  ").unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            WorkBuddyAdapter::parse_claim_response_body(reqwest::StatusCode::OK, "null").unwrap(),
+            Value::Null
         );
     }
 }

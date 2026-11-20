@@ -38,7 +38,10 @@ export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
   // 与后端 normalize_daily_claim_status 同口径：仅每日重置型工具
   // 以 lastClaimedAt 今日为权威；Qoder 活动按周期，不做自然日覆盖
   const dailyResetTool =
-    acc.toolId === "trae_cn" || acc.toolId === "trae" || acc.toolId === "workbuddy";
+    acc.toolId === "trae_cn" ||
+    acc.toolId === "trae" ||
+    acc.toolId === "workbuddy" ||
+    acc.toolId === "minimax_code_cn";
   if (dailyResetTool && acc.lastClaimedAt && isSameCstDay(acc.lastClaimedAt)) {
     return "claimed";
   }
@@ -48,7 +51,9 @@ export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
   }
 
   if (raw === "claimed") {
-    return isSameCstDay(acc.latestQuota.fetchedAt) ? "claimed" : "unknown";
+    return isSameCstDay(acc.latestQuota.fetchedAt) || isSameCstDay(acc.lastClaimedAt)
+      ? "claimed"
+      : "unknown";
   }
 
   if (raw === "available") {

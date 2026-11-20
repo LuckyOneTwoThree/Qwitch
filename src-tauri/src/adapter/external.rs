@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +13,29 @@ use uuid::Uuid;
 
 const MAX_ADAPTER_OUTPUT_BYTES: u64 = 1_048_576; // 1 MiB 上限
 const MAX_ADAPTER_TIMEOUT_MS: u64 = 60_000; // 60s 上限
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
+const MAX_HASH_FILES: usize = 500;
+const MAX_HASH_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_HASH_DEPTH: usize = 4;
+
+const ALLOWED_PLUGIN_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "SystemRoot",
+    "PATHEXT",
+    "WINDIR",
+    "COMSPEC",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+];
 
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, ToolAdapter,
@@ -127,6 +151,7 @@ impl ExternalAdapter {
             Some("AUTH_EXPIRED") => UnifiedErrorCode::AuthExpired,
             Some("RISK_TRIGGERED") => UnifiedErrorCode::RiskTriggered,
             Some("RATE_LIMITED") => UnifiedErrorCode::RateLimited,
+            Some("DEVICE_DAILY_LIMIT_REACHED") => UnifiedErrorCode::DeviceDailyLimitReached,
             Some("NETWORK_ERROR") => UnifiedErrorCode::NetworkError,
             Some("CLIENT_RUNNING") => UnifiedErrorCode::ClientRunning,
             Some("CLIENT_NOT_FOUND") => UnifiedErrorCode::ClientNotFound,
@@ -166,29 +191,39 @@ impl ExternalAdapter {
         })?;
         req_line.push(b'\n');
 
-        let mut child = Command::new(&self.entry.command)
-            .args(&self.entry.args)
+        let mut cmd = Command::new(&self.entry.command);
+        cmd.args(&self.entry.args)
             .current_dir(&self.adapter_dir)
+            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("启动外部适配器 {} 失败: {e}", self.manifest.id),
-            })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(&req_line).await;
-            let _ = stdin.shutdown().await;
+            .kill_on_drop(true);
+        for key in ALLOWED_PLUGIN_ENV_VARS {
+            if let Some(val) = std::env::var_os(key) {
+                cmd.env(key, val);
+            }
         }
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x0800_0000);
+
+        let mut child = cmd.spawn().map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("启动外部适配器 {} 失败: {e}", self.manifest.id),
+        })?;
 
         let timeout = Duration::from_millis(self.timeout_ms);
+        let mut stdin_pipe = child.stdin.take();
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
-        let (stdout_bytes, stderr_bytes, exit_status) = tokio::time::timeout(timeout, async {
+        let (stdout_bytes, stderr_bytes, exit_status) = match tokio::time::timeout(timeout, async {
+            let write_stdin = async {
+                if let Some(mut stdin) = stdin_pipe.take() {
+                    let _ = stdin.write_all(&req_line).await;
+                    let _ = stdin.shutdown().await;
+                }
+            };
             let read_stdout = async {
                 let mut buf = Vec::new();
                 if let Some(stdout) = stdout_pipe {
@@ -215,7 +250,8 @@ impl ExternalAdapter {
                 }
                 buf
             };
-            let (out_res, err_buf, wait_res) = tokio::join!(read_stdout, read_stderr, child.wait());
+            let (_, out_res, err_buf, wait_res) =
+                tokio::join!(write_stdin, read_stdout, read_stderr, child.wait());
             let out_buf = out_res?;
             let status = wait_res?;
             Ok::<(Vec<u8>, Vec<u8>, std::process::ExitStatus), std::io::Error>((
@@ -223,17 +259,25 @@ impl ExternalAdapter {
             ))
         })
         .await
-        .map_err(|_| AdapterError::Unified {
-            code: UnifiedErrorCode::NetworkError,
-            message: format!(
-                "外部适配器 {} 执行超时 ({}ms)",
-                self.manifest.id, self.timeout_ms
-            ),
-        })?
-        .map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("外部适配器执行异常: {e}"),
-        })?;
+        {
+            Ok(Ok(res)) => res,
+            Ok(Err(e)) => {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("外部适配器执行异常: {e}"),
+                });
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!(
+                        "外部适配器 {} 执行超时 ({}ms)",
+                        self.manifest.id, self.timeout_ms
+                    ),
+                });
+            }
+        };
 
         if stdout_bytes.len() as u64 > MAX_ADAPTER_OUTPUT_BYTES {
             return Err(AdapterError::Unified {
@@ -412,6 +456,124 @@ impl ToolAdapter for ExternalAdapter {
     }
 }
 
+fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    let cmd_path = Path::new(trimmed);
+    if cmd_path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return false;
+    }
+    if cmd_path.is_absolute() {
+        return true;
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.') {
+        let Ok(canon_dir) = std::fs::canonicalize(adapter_dir) else {
+            return false;
+        };
+        let joined = adapter_dir.join(cmd_path);
+        if joined.exists() {
+            return std::fs::canonicalize(&joined)
+                .is_ok_and(|canon_cmd| canon_cmd.starts_with(&canon_dir));
+        }
+        return true;
+    }
+    true
+}
+
+fn collect_adapter_files_for_hash(
+    root: &Path,
+    canon_root: &Path,
+    dir: &Path,
+    depth: usize,
+    total_bytes: &mut u64,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("读取插件目录失败 {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("遍历插件目录失败: {e}"))?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("读取插件文件元数据失败 {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "外部插件目录不允许包含符号链接: {}",
+                path.display()
+            ));
+        }
+        if meta.is_dir() {
+            if depth >= MAX_HASH_DEPTH {
+                return Err("外部插件目录层级过深（超过 4 层）".into());
+            }
+            collect_adapter_files_for_hash(root, canon_root, &path, depth + 1, total_bytes, out)?;
+        } else if meta.is_file() {
+            if out.len() >= MAX_HASH_FILES {
+                return Err("外部插件文件数量超过 500 个上限".into());
+            }
+            let len = meta.len();
+            *total_bytes = total_bytes
+                .checked_add(len)
+                .ok_or_else(|| "外部插件总大小溢出".to_string())?;
+            if *total_bytes > MAX_HASH_TOTAL_BYTES {
+                return Err("外部插件目录总大小超过 32MB 上限".into());
+            }
+            let canon_file = std::fs::canonicalize(&path)
+                .map_err(|e| format!("解析插件文件路径失败 {}: {e}", path.display()))?;
+            if !canon_file.starts_with(canon_root) {
+                return Err(format!("外部插件文件逃逸根目录: {}", path.display()));
+            }
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|_| "计算插件相对路径失败".to_string())?;
+            let rel_norm = rel
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(s) => s.to_str(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("读取插件文件失败 {}: {e}", path.display()))?;
+            out.push((rel_norm, bytes));
+        } else {
+            return Err(format!("外部插件目录包含非常规文件: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+/// 计算外部插件目录的内容 SHA-256 哈希，用于信任固定与篡改检测。
+pub fn adapter_content_hash(adapter_dir: &Path) -> Result<String, String> {
+    let canon_root = std::fs::canonicalize(adapter_dir)
+        .map_err(|e| format!("无法解析外部插件目录 {}: {e}", adapter_dir.display()))?;
+    let mut files = Vec::new();
+    let mut total_bytes = 0u64;
+    collect_adapter_files_for_hash(
+        adapter_dir,
+        &canon_root,
+        adapter_dir,
+        0,
+        &mut total_bytes,
+        &mut files,
+    )?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (rel, bytes) in files {
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\0");
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// 扫描 <qwitch_data_dir>/adapters/<adapter_id>/manifest.json（仅解析清单，不执行插件）
 pub fn scan_external_manifests(data_dir: &Path) -> Vec<(PathBuf, ExternalManifestFile)> {
     let mut out = Vec::new();
@@ -425,13 +587,26 @@ pub fn scan_external_manifests(data_dir: &Path) -> Vec<(PathBuf, ExternalManifes
     let mut dirs: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_dir())
+        .filter(|p| {
+            std::fs::symlink_metadata(p)
+                .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                .unwrap_or(false)
+        })
         .collect();
     dirs.sort();
 
     for dir in dirs {
+        let Some(dir_name) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         let manifest_path = dir.join("manifest.json");
-        if !manifest_path.is_file() {
+        let Ok(manifest_meta) = std::fs::symlink_metadata(&manifest_path) else {
+            continue;
+        };
+        if !manifest_meta.is_file()
+            || manifest_meta.file_type().is_symlink()
+            || manifest_meta.len() > MAX_MANIFEST_BYTES
+        {
             continue;
         }
         let Ok(bytes) = std::fs::read(&manifest_path) else {
@@ -440,22 +615,32 @@ pub fn scan_external_manifests(data_dir: &Path) -> Vec<(PathBuf, ExternalManifes
         let Ok(parsed) = serde_json::from_slice::<ExternalManifestFile>(&bytes) else {
             continue;
         };
+        // 目录名必须与 manifest.id 一致，且通过安全 ID 与入口路径校验，防止同名覆盖劫持
+        if dir_name != parsed.id
+            || !crate::adapter::is_valid_adapter_id(&parsed.id)
+            || !is_valid_entry_command(&dir, &parsed.entry.command)
+        {
+            continue;
+        }
         out.push((dir, parsed));
     }
     out
 }
 
-/// 加载适配当前平台的外部适配器（信任门禁由调用方 create_all_adapters 负责）
-pub fn discover_external_adapters(data_dir: &Path) -> HashMap<String, Arc<dyn ToolAdapter>> {
+/// 加载适配当前平台的外部适配器与目录路径（信任及哈希门禁由调用方 create_all_adapters 负责）
+pub fn discover_external_adapters(
+    data_dir: &Path,
+) -> HashMap<String, (Arc<dyn ToolAdapter>, PathBuf)> {
     let current_os = ExternalAdapter::current_platform_tag();
     scan_external_manifests(data_dir)
         .into_iter()
         .filter(|(_, m)| m.platforms.is_empty() || m.platforms.iter().any(|p| p == current_os))
         .map(|(dir, m)| {
             let id = m.id.clone();
+            let dir_clone = dir.clone();
             let adapter: Arc<dyn ToolAdapter> =
                 Arc::new(ExternalAdapter::from_manifest_file(dir, m));
-            (id, adapter)
+            (id, (adapter, dir_clone))
         })
         .collect()
 }
@@ -584,5 +769,61 @@ mod tests {
             .await
             .expect_err("spoofed tool_id must fail");
         assert!(spoof_err.to_string().contains("tool_id"));
+
+        // 4. 大 stdin 负载（>128 KiB）面对不读 stdin 直接挂起的子进程，必须在超时后退出而不死锁
+        let mut slow = make_ext("my_plugin", "/bin/sh", vec!["-c".into(), "sleep 5".into()]);
+        slow.timeout_ms = 300;
+        let big_payload = "x".repeat(256 * 1024);
+        let timeout_err = slow
+            .parse_manual_token(&big_payload)
+            .await
+            .expect_err("large stdin on slow child must time out without deadlock");
+        assert!(timeout_err.to_string().contains("超时"));
+    }
+
+    #[test]
+    fn scan_rejects_dir_id_mismatch_and_content_hash_detects_tampering() {
+        let root = std::env::temp_dir().join(format!("qwitch_ext_scan_{}", Uuid::new_v4()));
+        let mismatch_dir = root.join("adapters").join("wrong_dir");
+        std::fs::create_dir_all(&mismatch_dir).unwrap();
+        std::fs::write(
+            mismatch_dir.join("manifest.json"),
+            serde_json::json!({
+                "id": "spoofed_id",
+                "name": "Spoof",
+                "version": "0.1.0",
+                "entry": { "command": "python3" },
+                "capabilities": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(scan_external_manifests(&root).is_empty());
+
+        let valid_dir = root.join("adapters").join("valid_plugin");
+        std::fs::create_dir_all(&valid_dir).unwrap();
+        std::fs::write(
+            valid_dir.join("manifest.json"),
+            serde_json::json!({
+                "id": "valid_plugin",
+                "name": "Valid",
+                "version": "0.1.0",
+                "entry": { "command": "run.py" },
+                "capabilities": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(valid_dir.join("run.py"), b"print('v1')").unwrap();
+        let scanned = scan_external_manifests(&root);
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].1.id, "valid_plugin");
+
+        let hash1 = adapter_content_hash(&valid_dir).expect("hash1");
+        std::fs::write(valid_dir.join("run.py"), b"print('v2')").unwrap();
+        let hash2 = adapter_content_hash(&valid_dir).expect("hash2");
+        assert_ne!(hash1, hash2);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

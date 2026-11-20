@@ -1229,9 +1229,12 @@ fn normalize_daily_claim_status_on_date(
     today_cst: NaiveDate,
     tool_id: &str,
 ) -> ClaimStatus {
-    // 每日重置型工具（Trae/WorkBuddy）以 last_claimed_at 为权威；
+    // 每日重置型工具（Trae/WorkBuddy/MiniMax）以 last_claimed_at 为权威；
     // Qoder 活动按周期而非自然日，不适用"今日已领即 Claimed"覆盖
-    let daily_reset_tool = matches!(tool_id, "trae" | "trae_cn" | "workbuddy");
+    let daily_reset_tool = matches!(
+        tool_id,
+        "trae" | "trae_cn" | "workbuddy" | "minimax_code_cn"
+    );
     let claimed_today = last_claimed_at
         .map(|ts| is_same_cst_day(ts, today_cst))
         .unwrap_or(false);
@@ -1835,6 +1838,26 @@ mod tests {
                 Some("2026-11-18T01:00:00Z"),
                 today_cst,
                 "workbuddy"
+            ),
+            ClaimStatus::Claimed
+        );
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Available,
+                "2026-11-18T02:00:00Z",
+                Some("2026-11-18T01:00:00Z"),
+                today_cst,
+                "minimax_code_cn"
+            ),
+            ClaimStatus::Claimed
+        );
+        assert_eq!(
+            normalize_daily_claim_status_on_date(
+                ClaimStatus::Unknown,
+                "2026-11-18T02:00:00Z",
+                Some("2026-11-18T01:00:00Z"),
+                today_cst,
+                "minimax_code_cn"
             ),
             ClaimStatus::Claimed
         );

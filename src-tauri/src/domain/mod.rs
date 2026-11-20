@@ -130,6 +130,8 @@ pub struct AppSettingsDto {
     pub auto_claim_daily: bool,
     #[serde(default)]
     pub trusted_adapters: Vec<String>,
+    #[serde(default)]
+    pub trusted_adapter_hashes: HashMap<String, String>,
 }
 
 impl Default for AppSettingsDto {
@@ -148,6 +150,7 @@ impl Default for AppSettingsDto {
             auto_refresh_interval_minutes: default_auto_refresh_interval_minutes(),
             auto_claim_daily: false,
             trusted_adapters: Vec::new(),
+            trusted_adapter_hashes: HashMap::new(),
         }
     }
 }
@@ -289,9 +292,9 @@ impl CredentialEnvelope {
     }
 
     /// 跨 OS 导入时覆盖快照中的设备平台，使 `x-device-type` 与设备来源一致。
-    /// `platform`: "mac" | "win" | "linux"；`drop_brand` 为真时清空设备品牌
-    /// （避免把导入机的机型错配到别的平台设备上）。返回是否发生修改。
-    pub fn override_device_platform(&mut self, platform: &str, drop_brand: bool) -> bool {
+    /// `platform`: "mac" | "win" | "linux"；`drop_host_metadata` 为真时清空宿主机的
+    /// 设备品牌与系统版本（避免把导入机的机型与 OS 版本错配到别的平台设备上）。返回是否发生修改。
+    pub fn override_device_platform(&mut self, platform: &str, drop_host_metadata: bool) -> bool {
         let CredentialPayload::LocalSnapshot { files } = &mut self.payload else {
             return false;
         };
@@ -311,8 +314,9 @@ impl CredentialEnvelope {
             "device_type".to_string(),
             serde_json::Value::String(platform.to_string()),
         );
-        if drop_brand {
+        if drop_host_metadata {
             obj.remove("device_brand");
+            obj.remove("os_version");
         }
         match serde_json::to_vec(&value) {
             Ok(new_bytes) => {
@@ -543,7 +547,8 @@ mod tests {
                 serde_json::to_vec(&serde_json::json!({
                     "device_id": "93900972767536",
                     "device_type": "mac",
-                    "device_brand": "MacBookPro18,3"
+                    "device_brand": "MacBookPro18,3",
+                    "os_version": "macOS 15.1"
                 }))
                 .unwrap(),
             ),
@@ -565,6 +570,7 @@ mod tests {
                 .unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert!(value.get("device_brand").is_none());
+            assert!(value.get("os_version").is_none());
             assert_eq!(
                 value.get("device_id").and_then(|v| v.as_str()),
                 Some("93900972767536")
@@ -587,5 +593,6 @@ mod tests {
         assert_eq!(parsed.auto_refresh_interval_minutes, 0);
         assert!(!parsed.auto_claim_daily);
         assert!(parsed.trusted_adapters.is_empty());
+        assert!(parsed.trusted_adapter_hashes.is_empty());
     }
 }

@@ -187,7 +187,7 @@ impl QoderAdapter {
                 Some(q)
             }
             None if confirmed_claimed => Some(QuotaSnapshot {
-                plan_name: None,
+                plan_name: precheck.and_then(|p| p.plan_name.clone()),
                 claim_status: ClaimStatus::Claimed,
                 buckets: precheck.map(|p| p.buckets.clone()).unwrap_or_default(),
                 fetched_at: Utc::now().to_rfc3339(),
@@ -877,11 +877,8 @@ impl ToolAdapter for QoderAdapter {
             } else {
                 "当前暂无可领取的 Credits 活动".to_string()
             };
-            // 有前置快照时直接复用，避免重复查额
-            let refreshed = match precheck {
-                Some(q) => Some(q.clone()),
-                None => self.inspect_quota(cred).await.ok(),
-            };
+            // 直接基于本次已拉取的最新活动列表构建快照，避免复用过时 precheck 或重复查额
+            let refreshed = Some(Self::build_quota_snapshot(&payload));
             return Ok(ClaimResult {
                 claimed: false,
                 reward_summary: msg,
@@ -1196,12 +1193,23 @@ mod tests {
             ClaimStatus::Claimed
         );
 
-        // 领后查额失败（None）且已确认领取：合成 Claimed 快照
-        assert_eq!(
-            QoderAdapter::merge_post_claim_quota(None, Some(&pre), true)
-                .unwrap()
-                .claim_status,
-            ClaimStatus::Claimed
-        );
+        // 领后查额失败（None）且已确认领取：合成 Claimed 快照并保留套餐名
+        let synthetic = QoderAdapter::merge_post_claim_quota(None, Some(&pre), true).unwrap();
+        assert_eq!(synthetic.claim_status, ClaimStatus::Claimed);
+        assert_eq!(synthetic.plan_name.as_deref(), Some("Pro"));
+
+        // 空可领活动列表 + 已领活动列表应产出 Claimed（不滞留 Available）
+        let fresh_payload = serde_json::json!({
+            "campaigns": [
+                {
+                    "campaignId": "c1",
+                    "actionType": "CLAIM_BENEFIT",
+                    "claimStatus": "CLAIMED",
+                    "benefit": { "amount": 50 }
+                }
+            ]
+        });
+        let fresh_snap = QoderAdapter::build_quota_snapshot(&fresh_payload);
+        assert_eq!(fresh_snap.claim_status, ClaimStatus::Claimed);
     }
 }

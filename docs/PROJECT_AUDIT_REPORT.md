@@ -261,7 +261,10 @@
 > - 前端：`npm test -- --run`（2 个测试文件、21 条用例全部通过）、`npx tsc --noEmit` 与 `npm run build` 退出码 `0`。
 > - 后端：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 均零告警通过；`cargo test --all-targets`（`qwitch_lib` 76 条用例全部通过，`qwitch` 二进制 0 条测试）。
 
-### 第三阶段：测试护栏、架构拆分与文档收敛（待规划实施）
+### 第三阶段：测试护栏、架构拆分与文档收敛（已完成，Dashboard.tsx 视图拆分顺延）
 1. **补齐测试基线**：为 [scheduler/mod.rs](../src-tauri/src/scheduler/mod.rs) 补齐 Mock Adapter 行为测试（串行、抖动、跨设备冷却、熔断、幂等），补全组件集成测试与 Vitest 覆盖率。
 2. **文档与资产对齐**：一次性同步 `README.md`、`CORE_DESIGN.md`、`ADAPTER_SPEC.md`、`ARCHITECTURE.md` 与 `PROJECT_COGNITION_SUMMARY.md`，补全 `mockStore` 中的 MiniMax 并重截 5 张展示图，清理无用旧图标资产。
 3. **架构拆解与依赖收敛**：拆分 `commands/mod.rs`、`QwitchContext.tsx`、`Dashboard.tsx`，升级对齐 `reqwest 0.13` 并收窄 `tokio` features。
+
+
+**第三阶段落地记录**：后端 `commands/` 拆分为 6 个子模块；scheduler 新增 5 个行为测试；依赖/MSRV/CSP/CI 加固；前端新增 logStateUtils、toolRegistry、mockStore 测试、侧栏 `aria-current`、O(1) 工具计数；清理未引用的遗留素材。**未完成**：`Dashboard.tsx` 拆分为 LogsView/SettingsView 顺延至后续迭代。

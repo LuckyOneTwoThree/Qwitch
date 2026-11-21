@@ -649,6 +649,9 @@ pub async fn refresh_quota_batch(
     account_ids: Vec<String>,
 ) -> Result<(), String> {
     let account_ids = dedup_account_ids(account_ids);
+    if account_ids.is_empty() {
+        return Ok(());
+    }
     if account_ids.len() > 200 {
         return Err("单次批量最多 200 个账号".into());
     }
@@ -699,6 +702,9 @@ pub async fn claim_daily_batch(
     account_ids: Vec<String>,
 ) -> Result<(), String> {
     let account_ids = dedup_account_ids(account_ids);
+    if account_ids.is_empty() {
+        return Ok(());
+    }
     if account_ids.len() > 200 {
         return Err("单次批量最多 200 个账号".into());
     }

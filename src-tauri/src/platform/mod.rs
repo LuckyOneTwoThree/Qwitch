@@ -508,6 +508,23 @@ impl NativePlatformHost {
         Ok(fallback_status.success())
     }
 
+    /// 从 `ps` 输出的完整命令行中剥离 `argv[0]`（兼容含空格的 macOS `.app` 路径）。
+    #[cfg(target_os = "macos")]
+    fn strip_macos_argv0<'a>(command: &'a str, proc_name: &str) -> &'a str {
+        let trimmed = command.trim();
+        let needle = format!("/Contents/MacOS/{proc_name}");
+        if let Some(idx) = trimmed.find(&needle) {
+            let after = &trimmed[idx + needle.len()..];
+            if after.is_empty() || after.starts_with(char::is_whitespace) {
+                return after.trim();
+            }
+        }
+        match trimmed.find(' ') {
+            Some(idx) => trimmed[idx + 1..].trim(),
+            None => "",
+        }
+    }
+
     /// 在 `pgrep -x <proc_name>` 命中的进程里，筛选是否存在**非辅助**实例。
     ///
     /// 用于排除 Native Messaging Host / Renderer / GPU 等共享同名 `comm` 的辅助进程。
@@ -537,11 +554,37 @@ impl NativePlatformHost {
             if command.is_empty() {
                 continue;
             }
-            // 去掉 argv[0]（即 comm 对应的主二进制），只看额外参数
-            let rest = match command.find(' ') {
-                Some(idx) => command[idx + 1..].trim(),
-                None => "",
+            let rest = Self::strip_macos_argv0(command, proc_name);
+            if rest.is_empty() || !Self::is_macos_helper_argv(rest) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 解析 `ps -axo pid=,command=` 的输出，判断指定 `.app` bundle 是否存在非辅助主进程。
+    #[cfg(target_os = "macos")]
+    fn parse_macos_ps_has_main_process(ps_stdout: &str, app_name: &str) -> bool {
+        let clean = app_name.trim_end_matches(".app");
+        let main_bin = format!("/{app_name}/Contents/MacOS/{clean}");
+
+        for line in ps_stdout.lines() {
+            let mut parts = line.trim_start().splitn(2, char::is_whitespace);
+            let Some(_pid) = parts.next() else { continue };
+            let Some(command) = parts.next() else {
+                continue;
             };
+            let command = command.trim();
+            let Some(idx) = command.find(&main_bin) else {
+                continue;
+            };
+            let after = &command[idx + main_bin.len()..];
+            // 主二进制之后必须紧跟结尾或空白字符，防止前缀误命中（如 Helper 可执行文件）
+            if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+                continue;
+            }
+
+            let rest = after.trim();
             if rest.is_empty() || !Self::is_macos_helper_argv(rest) {
                 return true;
             }
@@ -568,9 +611,6 @@ impl NativePlatformHost {
     /// 「argv[0] 即主二进制且无辅助标识」的进程时才判定为运行中。
     #[cfg(target_os = "macos")]
     fn is_macos_app_bundle_running(app_name: &str) -> bool {
-        let clean = app_name.trim_end_matches(".app");
-        let main_bin = format!("/{}/Contents/MacOS/{}", app_name, clean);
-
         // 快速前置过滤：先用 pgrep 判断「是否存在任何同名进程」。
         // 绝大多数情况下（客户端未启动）在此直接返回，避免为一次探测付出
         // `ps -axo` 的全进程遍历开销（实测 ps ≈25ms vs pgrep ≈13ms，
@@ -598,29 +638,7 @@ impl NativePlatformHost {
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let mut parts = line.trim_start().splitn(2, ' ');
-            let Some(_pid) = parts.next() else { continue };
-            let Some(command) = parts.next() else {
-                continue;
-            };
-            let command = command.trim();
-            if !command.starts_with(&main_bin) {
-                continue;
-            }
-
-            // 主二进制之后的部分：为空 → 主进程；否则需排除辅助进程形态
-            let rest = command[main_bin.len()..].trim();
-            if rest.is_empty() {
-                return true;
-            }
-            if Self::is_macos_helper_argv(rest) {
-                continue;
-            }
-            // 非辅助参数的额外 argv（如 --no-sandbox / 打开的工程路径）视为主进程
-            return true;
-        }
-        false
+        Self::parse_macos_ps_has_main_process(&stdout, app_name)
     }
 
     /// 判断 Electron 应用主二进制之后的 argv 是否属于**辅助进程**。
@@ -2191,6 +2209,56 @@ mod macos_process_detection_tests {
         assert!(!NativePlatformHost::is_macos_helper_argv(
             "--no-sandbox /Users/me/my-workspace"
         ));
+    }
+
+    #[test]
+    fn parse_ps_output_handles_install_root_prefix_and_spaces() {
+        // 标准 /Applications 与 ~/Applications 安装路径应能正确识别主进程
+        let ps_main = "\
+  101 /Applications/Trae CN.app/Contents/MacOS/Trae CN
+  102 /Applications/Qoder CN.app/Contents/MacOS/Qoder CN --type=renderer
+";
+        assert!(NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_main,
+            "Trae CN.app"
+        ));
+        assert!(!NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_main,
+            "Qoder CN.app"
+        ));
+
+        let ps_custom = "\
+  201 /Users/alice/Applications/Qoder CN.app/Contents/MacOS/Qoder CN --no-sandbox
+";
+        assert!(NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_custom,
+            "Qoder CN.app"
+        ));
+
+        let ps_helper_only = "\
+  301 /Applications/Qoder CN.app/Contents/MacOS/Qoder CN /Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs
+  302 /Applications/Qoder CN.app/Contents/Frameworks/Qoder CN Helper.app/Contents/MacOS/Qoder CN Helper --type=gpu-process
+";
+        assert!(!NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_helper_only,
+            "Qoder CN.app"
+        ));
+
+        // 含空格可执行文件路径的参数剥离不得在空格处误截断
+        assert_eq!(
+            NativePlatformHost::strip_macos_argv0(
+                "/Applications/Qoder CN.app/Contents/MacOS/Qoder CN",
+                "Qoder CN"
+            ),
+            ""
+        );
+        assert_eq!(
+            NativePlatformHost::strip_macos_argv0(
+                "/Applications/Qoder CN.app/Contents/MacOS/Qoder CN /Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs",
+                "Qoder CN"
+            ),
+            "/Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs"
+        );
     }
 
     /// 端到端：真实探测本机 Qoder 主进程。

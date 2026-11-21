@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -70,20 +69,39 @@ pub async fn request_plugin_trust(
         .map(|(_, m)| m.clone())
         .ok_or_else(|| format!("未找到外部插件 {id}"))?;
 
+    let already_trusted = load_app_settings(&state.db)
+        .trusted_adapters
+        .iter()
+        .any(|t| t == &id);
     let store = Arc::clone(&state.plugin_trust_tickets);
     let id_for_dialog = id.clone();
     let display = format!("{} ({})", found.name, found.version);
 
     // 原生模态对话框必须在主线程执行，且是阻塞调用 → 放到阻塞线程池
     let confirmed = tokio::task::spawn_blocking(move || {
-        let result = rfd::MessageDialog::new()
-            .set_title("确认信任外部插件")
-            .set_description(format!(
+        let title = if already_trusted {
+            "确认重新信任已变更的外部插件"
+        } else {
+            "确认信任外部插件"
+        };
+        let detail = if already_trusted {
+            format!(
+                "插件：{display}\nID：{id_for_dialog}\n\n\
+                 检测到该插件的内容哈希已发生变更（或尚未固定校验哈希）。\
+                 重新信任后，系统将固定新的内容哈希，并在随 Qwitch 启动时允许其读取本机客户端凭据与当前用户目录下的文件。\n\n\
+                 仅在你确认该变更是安全升级或来源可信时继续。"
+            )
+        } else {
+            format!(
                 "插件：{display}\nID：{id_for_dialog}\n\n\
                  信任后，该插件将随 Qwitch 启动并被授予访问本机客户端凭据的能力，\
                  可读取当前用户目录下的文件。\n\n\
                  仅在你确认该插件来源可信时继续。"
-            ))
+            )
+        };
+        let result = rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(detail)
             .set_level(rfd::MessageLevel::Warning)
             .set_buttons(rfd::MessageButtons::YesNo)
             .show();
@@ -152,12 +170,116 @@ pub fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettingsDto, St
     Ok(load_app_settings(&state.db))
 }
 
+/// 校验并固定外部插件信任列表及内容哈希；返回需要新建/重签并经原生确认票据的插件 ID 及最终规范化后的结果。
+fn resolve_trusted_adapters_and_hashes(
+    previous: &AppSettingsDto,
+    requested_trusted: &[String],
+    requested_hashes: &HashMap<String, String>,
+    disk_hashes: &HashMap<String, String>,
+    tickets: Option<&HashMap<String, String>>,
+    ticket_store: &std::sync::Mutex<HashMap<String, (String, u64)>>,
+) -> Result<(Vec<String>, HashMap<String, String>), String> {
+    let mut normalized_trusted = Vec::new();
+    let mut seen_trusted = std::collections::HashSet::new();
+    for raw_id in requested_trusted {
+        let id = raw_id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if crate::adapter::RESERVED_ADAPTER_IDS.contains(&id)
+            || !crate::adapter::is_valid_adapter_id(id)
+        {
+            return Err(format!("非法或保留的外部插件 ID，无法加入信任列表：{id}"));
+        }
+        if seen_trusted.insert(id.to_string()) {
+            normalized_trusted.push(id.to_string());
+        }
+    }
+
+    let mut resolved_hashes = HashMap::new();
+    let mut plugins_needing_ticket = Vec::new();
+
+    for id in &normalized_trusted {
+        let prev_trusted = previous.trusted_adapters.iter().any(|t| t == id);
+        let requested_hash = requested_hashes
+            .get(id)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let prev_hash = previous
+            .trusted_adapter_hashes
+            .get(id)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // 若此前已信任且哈希未发生任何变化（未传新哈希或与历史哈希一致），
+        // 视为无关设置保存（如切换主题），保持历史哈希且不打断用户。
+        if prev_trusted {
+            match (&prev_hash, &requested_hash) {
+                (Some(ph), None) => {
+                    resolved_hashes.insert(id.clone(), ph.clone());
+                    continue;
+                }
+                (Some(ph), Some(rh)) if rh.eq_ignore_ascii_case(ph) => {
+                    resolved_hashes.insert(id.clone(), ph.clone());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        let disk_hash = disk_hashes
+            .get(id)
+            .ok_or_else(|| format!("未找到外部插件 {id}，无法固定信任哈希"))?
+            .clone();
+        if let Some(req) = requested_hash {
+            if !req.eq_ignore_ascii_case(&disk_hash) {
+                return Err(format!(
+                    "外部插件 {id} 的内容校验哈希与磁盘不一致，可能已被修改，请刷新后重试"
+                ));
+            }
+        }
+
+        // 新增信任，或已信任插件内容发生变更/原哈希缺失需要重签：均强制校验原生确认票据。
+        let needs_ticket = !prev_trusted
+            || prev_hash
+                .as_deref()
+                .is_none_or(|ph| !ph.eq_ignore_ascii_case(&disk_hash));
+        if needs_ticket {
+            plugins_needing_ticket.push(id.clone());
+        }
+        resolved_hashes.insert(id.clone(), disk_hash);
+    }
+
+    // 先检查全部所需票据都存在且合法（通过预先校验后再一次性消费），避免中途报错留下半消费状态。
+    if !plugins_needing_ticket.is_empty() {
+        let tickets_map = tickets.ok_or_else(|| {
+            format!(
+                "插件 {} 缺少原生信任确认：请在设置页重新点击启用并在系统弹窗中确认",
+                plugins_needing_ticket[0]
+            )
+        })?;
+        for id in &plugins_needing_ticket {
+            if !tickets_map.contains_key(id) {
+                return Err(format!(
+                    "插件 {id} 缺少原生信任确认：请在设置页重新点击启用并在系统弹窗中确认"
+                ));
+            }
+        }
+        for id in &plugins_needing_ticket {
+            let ticket = tickets_map.get(id).expect("checked above");
+            super::consume_plugin_trust_ticket(ticket_store, id, ticket)?;
+        }
+    }
+
+    Ok((normalized_trusted, resolved_hashes))
+}
+
 #[tauri::command]
 pub fn save_app_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     mut settings: AppSettingsDto,
-    // 每个「本次新增信任」的插件都必须携带原生确认签发的一次性票据。
+    // 每个「本次新增信任」或「重签变更内容哈希」的插件都必须携带原生确认签发的一次性票据。
     // 未提供时视为空表，等价于「无票据」，由下方逐项校验拒绝。
     trusted_adapter_tickets: Option<HashMap<String, String>>,
 ) -> Result<AppSettingsDto, String> {
@@ -190,88 +312,29 @@ pub fn save_app_settings(
         state.host.set_launch_at_login(settings.launch_at_login)?;
     }
 
-    // 外部插件信任与内容哈希固定：规范化 trusted_adapters，并在首次信任或显式重签时固定磁盘 SHA-256
-    let mut normalized_trusted = Vec::new();
-    let mut seen_trusted = std::collections::HashSet::new();
-    for raw_id in &settings.trusted_adapters {
-        let id = raw_id.trim();
-        if id.is_empty() {
-            continue;
-        }
-        if crate::adapter::RESERVED_ADAPTER_IDS.contains(&id)
-            || !crate::adapter::is_valid_adapter_id(id)
-        {
-            return Err(format!("非法或保留的外部插件 ID，无法加入信任列表：{id}"));
-        }
-        // 仅「本次新增信任」需要原生确认票据；取消信任或保持既有信任无需票据，
-        // 避免用户每次保存无关设置都被弹窗打断。
-        let already_trusted = previous.trusted_adapters.iter().any(|t| t == id);
-        if !already_trusted {
-            let tickets = trusted_adapter_tickets.as_ref();
-            let ticket = tickets.and_then(|t| t.get(id)).ok_or_else(|| {
-                format!("插件 {id} 缺少原生信任确认：请在设置页重新点击启用并在系统弹窗中确认")
-            })?;
-            super::consume_plugin_trust_ticket(&state.plugin_trust_tickets, id, ticket)?;
-        }
-        if seen_trusted.insert(id.to_string()) {
-            normalized_trusted.push(id.to_string());
-        }
-    }
-    settings.trusted_adapters = normalized_trusted;
-
-    let mut resolved_hashes = HashMap::new();
-    if !settings.trusted_adapters.is_empty() {
+    // 外部插件信任与内容哈希固定：规范化 trusted_adapters，并在首次信任或内容变更重签时强制票据校验
+    let mut disk_hashes = HashMap::new();
+    let has_non_empty_trusted = settings
+        .trusted_adapters
+        .iter()
+        .any(|id| !id.trim().is_empty());
+    if has_non_empty_trusted {
         let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
-        let disk_adapters: HashMap<String, PathBuf> =
-            crate::adapter::external::scan_external_manifests(&data_dir)
-                .into_iter()
-                .map(|(dir, m)| (m.id, dir))
-                .collect();
-
-        for id in &settings.trusted_adapters {
-            let requested_hash = settings
-                .trusted_adapter_hashes
-                .get(id)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let prev_trusted = previous.trusted_adapters.iter().any(|t| t == id);
-            let prev_hash = previous
-                .trusted_adapter_hashes
-                .get(id)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            if prev_trusted {
-                match (&prev_hash, &requested_hash) {
-                    (Some(ph), None) => {
-                        resolved_hashes.insert(id.clone(), ph.clone());
-                        continue;
-                    }
-                    (Some(ph), Some(rh)) if rh.eq_ignore_ascii_case(ph) => {
-                        resolved_hashes.insert(id.clone(), ph.clone());
-                        continue;
-                    }
-                    (None, None) => {
-                        continue;
-                    }
-                    _ => {}
-                }
+        for (dir, m) in crate::adapter::external::scan_external_manifests(&data_dir) {
+            if let Ok(hash) = crate::adapter::external::adapter_content_hash(&dir) {
+                disk_hashes.insert(m.id, hash);
             }
-
-            let dir = disk_adapters
-                .get(id)
-                .ok_or_else(|| format!("未找到外部插件 {id}，无法固定信任哈希"))?;
-            let disk_hash = crate::adapter::external::adapter_content_hash(dir)?;
-            if let Some(req) = requested_hash {
-                if !req.eq_ignore_ascii_case(&disk_hash) {
-                    return Err(format!(
-                        "外部插件 {id} 的内容校验哈希与磁盘不一致，可能已被修改，请刷新后重试"
-                    ));
-                }
-            }
-            resolved_hashes.insert(id.clone(), disk_hash);
         }
     }
+    let (normalized_trusted, resolved_hashes) = resolve_trusted_adapters_and_hashes(
+        &previous,
+        &settings.trusted_adapters,
+        &settings.trusted_adapter_hashes,
+        &disk_hashes,
+        trusted_adapter_tickets.as_ref(),
+        &state.plugin_trust_tickets,
+    )?;
+    settings.trusted_adapters = normalized_trusted;
     settings.trusted_adapter_hashes = resolved_hashes;
 
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
@@ -454,5 +517,78 @@ mod plugin_trust_ticket_tests {
     fn missing_ticket_is_rejected() {
         let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
         assert!(consume_plugin_trust_ticket(&store, "never_issued", "x").is_err());
+    }
+
+    #[test]
+    fn re_signing_changed_plugin_requires_fresh_ticket() {
+        use super::resolve_trusted_adapters_and_hashes;
+        use crate::domain::AppSettingsDto;
+
+        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
+        let previous = AppSettingsDto {
+            trusted_adapters: vec!["ext_demo".to_string()],
+            trusted_adapter_hashes: HashMap::from([(
+                "ext_demo".to_string(),
+                "old_hash".to_string(),
+            )]),
+            ..Default::default()
+        };
+        let disk_hashes = HashMap::from([("ext_demo".to_string(), "new_hash".to_string())]);
+
+        // 无关设置保存（未传新哈希或传回旧哈希）：保留旧哈希，无需票据
+        let (trusted_keep, hashes_keep) = resolve_trusted_adapters_and_hashes(
+            &previous,
+            &["ext_demo".to_string()],
+            &HashMap::new(),
+            &disk_hashes,
+            None,
+            &store,
+        )
+        .expect("unrelated save should keep pinned hash without ticket");
+        assert_eq!(trusted_keep, vec!["ext_demo".to_string()]);
+        assert_eq!(
+            hashes_keep.get("ext_demo").map(String::as_str),
+            Some("old_hash")
+        );
+
+        // 插件内容被修改，试图静默重签为 new_hash 且不带票据：必须拒绝
+        let req_new = HashMap::from([("ext_demo".to_string(), "new_hash".to_string())]);
+        let err = resolve_trusted_adapters_and_hashes(
+            &previous,
+            &["ext_demo".to_string()],
+            &req_new,
+            &disk_hashes,
+            None,
+            &store,
+        )
+        .expect_err("resigning modified plugin without ticket must be rejected");
+        assert!(err.contains("缺少原生信任确认"));
+
+        // 签发并携带原生确认票据后允许重签为 new_hash，且票据一次性消费
+        let ticket = issue_plugin_trust_ticket(&store, "ext_demo");
+        let tickets = HashMap::from([("ext_demo".to_string(), ticket)]);
+        let (_, hashes_resigned) = resolve_trusted_adapters_and_hashes(
+            &previous,
+            &["ext_demo".to_string()],
+            &req_new,
+            &disk_hashes,
+            Some(&tickets),
+            &store,
+        )
+        .expect("resigning with valid ticket should succeed");
+        assert_eq!(
+            hashes_resigned.get("ext_demo").map(String::as_str),
+            Some("new_hash")
+        );
+        // 重放同一票据失败
+        assert!(resolve_trusted_adapters_and_hashes(
+            &previous,
+            &["ext_demo".to_string()],
+            &req_new,
+            &disk_hashes,
+            Some(&tickets),
+            &store,
+        )
+        .is_err());
     }
 }

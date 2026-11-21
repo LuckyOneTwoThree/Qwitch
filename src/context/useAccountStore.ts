@@ -265,8 +265,24 @@ export function useAccountStore({
         const list = fetched as AccountSummary[];
         setAccounts((prev) => {
           const byId = new Map(list.map((a) => [a.id, a] as const));
+          // 若本次更新含某个工具新的本机使用中账号，清除本地同工具下其他账号的旧标记，
+          // 防止切号/本机导入/状态校正后跨窗口同时出现多个「使用中」账号。
+          const activeByTool = new Map<string, string>();
+          for (const item of list) {
+            if (item.isActiveOnClient) {
+              activeByTool.set(item.toolId, item.id);
+            }
+          }
           const prevIds = new Set(prev.map((p) => p.id));
-          const updated = prev.map((p) => byId.get(p.id) ?? p);
+          const updated = prev.map((p) => {
+            const incoming = byId.get(p.id);
+            if (incoming) return incoming;
+            const activeId = activeByTool.get(p.toolId);
+            if (activeId && activeId !== p.id && p.isActiveOnClient) {
+              return { ...p, isActiveOnClient: false };
+            }
+            return p;
+          });
           const added = list.filter((a) => !prevIds.has(a.id));
           return [...added, ...updated];
         });

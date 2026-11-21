@@ -531,11 +531,14 @@ pub async fn download_and_install_update(
         // 复用与 check_app_update 相同的取最新版本逻辑（API 优先，限流时降级跳转）。
         let latest = match fetch_release_via_api(&client).await {
             Ok(info) => info,
-            Err(api_err) => fetch_release_via_redirect(&client)
-                .await
-                .map_err(|redirect_err| {
-                    format!("无法确认最新版本，已中止自动安装：{api_err}；{redirect_err}")
-                })?,
+            Err(api_err) => {
+                let no_redirect_client = build_client_no_redirect(20)?;
+                fetch_release_via_redirect(&no_redirect_client)
+                    .await
+                    .map_err(|redirect_err| {
+                        format!("无法确认最新版本，已中止自动安装：{api_err}；{redirect_err}")
+                    })?
+            }
         };
         validate_update_target(
             &latest,

@@ -326,4 +326,77 @@ describe("useAccountStore", () => {
       vi.useRealTimers();
     }
   });
+
+  it("增量更新新活跃账号时，自动清除同工具旧账号的本机使用中标记", async () => {
+    const { deps } = makeDeps({ isTauriRuntime: true, isTrayWindow: true });
+    const now = new Date().toISOString();
+    const accA = {
+      id: "acc-a",
+      toolId: "trae_cn",
+      label: "账号 A",
+      uidMasked: "u_a***",
+      status: "active",
+      isActiveOnClient: true,
+      hasApiToken: true,
+      updatedAt: now,
+    };
+    const accB = {
+      id: "acc-b",
+      toolId: "trae_cn",
+      label: "账号 B",
+      uidMasked: "u_b***",
+      status: "active",
+      isActiveOnClient: false,
+      hasApiToken: true,
+      updatedAt: now,
+    };
+
+    const listeners = new Map<string, (ev: { payload: unknown }) => void>();
+    h.listen.mockImplementation(async (event: string, cb: (ev: { payload: unknown }) => void) => {
+      listeners.set(event, cb);
+      return () => {};
+    });
+
+    h.invoke.mockImplementation(async (cmd: string, args?: { accountId?: string }) => {
+      if (cmd === "list_adapters") return [];
+      if (cmd === "list_accounts") return [accA, accB];
+      if (cmd === "get_action_logs") return [];
+      if (cmd === "get_action_log_stats") {
+        return { activeCount: 0, archivedCount: 0, failedActiveCount: 0, noiseActiveCount: 0 };
+      }
+      if (cmd === "get_app_settings") return DEFAULT_SETTINGS;
+      if (cmd === "get_account_summary" && args?.accountId === "acc-b") {
+        return { ...accB, isActiveOnClient: true };
+      }
+      return null;
+    });
+
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useAccountStore(deps));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(result.current.accounts.find((a) => a.id === "acc-a")?.isActiveOnClient).toBe(true);
+      expect(result.current.accounts.find((a) => a.id === "acc-b")?.isActiveOnClient).toBe(false);
+
+      const onAccountUpdated = listeners.get("qwitch://account-updated");
+      expect(onAccountUpdated).toBeDefined();
+
+      await act(async () => {
+        onAccountUpdated!({ payload: "acc-b" });
+        vi.advanceTimersByTime(150);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(result.current.accounts.find((a) => a.id === "acc-b")?.isActiveOnClient).toBe(true);
+      expect(result.current.accounts.find((a) => a.id === "acc-a")?.isActiveOnClient).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

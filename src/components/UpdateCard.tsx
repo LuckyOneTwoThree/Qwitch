@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect } from "react";
 import {
   AlertCircle,
   ArrowUpRight,
@@ -10,6 +9,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
+import { useUpdateActions } from "../context/useUpdateActions";
 
 function formatSize(bytes?: number): string | null {
   if (!bytes || bytes <= 0) return null;
@@ -31,7 +31,7 @@ export function UpdateCard() {
     updateError: error,
     checkAppUpdate,
   } = useQwitch();
-  const [installing, setInstalling] = useState(false);
+  const { installing, runPrimaryAction, openDownloadPage } = useUpdateActions();
 
   const runCheck = useCallback(
     async (manual: boolean) => {
@@ -58,34 +58,6 @@ export function UpdateCard() {
     if (!isTauriRuntime) return;
     void runCheck(false);
   }, [isTauriRuntime, runCheck]);
-
-  const openUrl = useCallback(
-    async (url?: string) => {
-      if (!url) return;
-      try {
-        await invoke("open_update_url", { url });
-      } catch (err) {
-        showToast(`打开下载页失败：${String(err)}`, "error");
-      }
-    },
-    [showToast]
-  );
-
-  const installOnWindows = useCallback(async () => {
-    if (!info?.assetUrl || !info.assetName || !info.checksumsUrl || installing) return;
-    setInstalling(true);
-    try {
-      const message = await invoke<string>("download_and_install_update", {
-        assetUrl: info.assetUrl,
-        assetName: info.assetName,
-        checksumsUrl: info.checksumsUrl,
-      });
-      showToast(message, "success");
-    } catch (err) {
-      setInstalling(false);
-      showToast(`更新失败：${String(err)}`, "error");
-    }
-  }, [info, installing, showToast]);
 
   const currentVersion = info?.currentVersion ?? __APP_VERSION__;
   const publishedAt = formatTime(info?.publishedAt);
@@ -170,7 +142,7 @@ export function UpdateCard() {
                 <button
                   type="button"
                   disabled={installing}
-                  onClick={() => void installOnWindows()}
+                  onClick={() => void runPrimaryAction()}
                   className="btn btn-md btn-primary shrink-0 gap-1.5"
                 >
                   {installing ? (
@@ -189,7 +161,7 @@ export function UpdateCard() {
               <button
                 type="button"
                 disabled={!info.assetUrl}
-                onClick={() => void openUrl(info.assetUrl)}
+                onClick={() => void openDownloadPage(info.assetUrl)}
                 className="btn btn-md btn-primary shrink-0 gap-1.5"
               >
                 <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -198,7 +170,7 @@ export function UpdateCard() {
             )}
             <button
               type="button"
-              onClick={() => void openUrl(info.releaseUrl)}
+              onClick={() => void openDownloadPage(info.releaseUrl)}
               className="btn btn-sm btn-secondary shrink-0 gap-1"
             >
               <ArrowUpRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />

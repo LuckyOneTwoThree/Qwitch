@@ -100,8 +100,10 @@ fn extract_zip_to(zip_path: &Path, dest: &Path) -> Result<(), String> {
             return Err("导出包包含非法路径（疑含路径穿越）".into());
         }
 
-        let parts: Vec<&str> = entry
+        let entry_name = entry
             .name()
+            .map_err(|e| format!("读取导出包条目名称失败: {e}"))?;
+        let parts: Vec<&str> = entry_name
             .split(['/', '\\'])
             .filter(|s| !s.is_empty())
             .collect();

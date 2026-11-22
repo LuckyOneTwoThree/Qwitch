@@ -88,4 +88,5 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
 
       - name: Rust dependency audit
-        run: cargo audit --file src-tauri/Cargo.lock
+        # RUSTSEC-2024-0429 (glib 0.18.5) 为 tauri 2.x Linux gtk 传递依赖，不涉及 macOS/Windows 且未调用 VariantStrIter
+        run: cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429

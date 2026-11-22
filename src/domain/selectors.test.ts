@@ -45,7 +45,7 @@ function makeAdapter(id: string, supportsDailyClaim = true): AdapterManifest {
 
 describe("getEffectiveClaimStatus", () => {
   it("每日重置型工具今日已领时覆盖服务端缓存的 Available", () => {
-    for (const toolId of ["workbuddy", "minimax_code_cn"] as const) {
+    for (const toolId of ["workbuddy", "minimax_code_cn", "lobsterai"] as const) {
       const acc = makeAcc({
         toolId,
         lastClaimedAt: NOW_ISO,
@@ -212,6 +212,7 @@ describe("sortAccountsForFlatView", () => {
     makeAdapter("workbuddy"),
     makeAdapter("qoder_cn"),
     makeAdapter("minimax_code_cn"),
+    makeAdapter("lobsterai"),
   ];
 
   it("按「待处理 → 可领取 → 挂载中 → 其余」分层", () => {
@@ -250,8 +251,9 @@ describe("sortAccountsForFlatView", () => {
   });
 
   it("层内按工具顺序排列，与分组视图的 BUILTIN_TOOL_ORDER 一致", () => {
-    // 全部为 normal 层，验证工具顺序为 trae → workbuddy → qoder → minimax
+    // 全部为 normal 层，验证工具顺序为 trae → workbuddy → qoder → minimax → lobsterai
     const accounts = [
+      makeAcc({ id: "lb", toolId: "lobsterai", label: "有道龙虾" }),
       makeAcc({ id: "mm", toolId: "minimax_code_cn", label: "MiniMax" }),
       makeAcc({ id: "qd", toolId: "qoder_cn", label: "Qoder" }),
       makeAcc({ id: "tr", toolId: "trae_cn", label: "Trae" }),
@@ -265,6 +267,7 @@ describe("sortAccountsForFlatView", () => {
       "workbuddy",
       "qoder_cn",
       "minimax_code_cn",
+      "lobsterai",
     ]);
   });
 

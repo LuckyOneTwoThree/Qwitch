@@ -12,4 +12,9 @@ describe("mockStore parity", () => {
   it("minimax_code_cn supports daily claim", () => {
     expect(MOCK_ADAPTERS.find((a) => a.id === "minimax_code_cn")?.capabilities.supportsDailyClaim).toBe(true);
   });
+  it("lobsterai supports daily claim and client switch", () => {
+    const lobster = MOCK_ADAPTERS.find((a) => a.id === "lobsterai");
+    expect(lobster?.capabilities.supportsDailyClaim).toBe(true);
+    expect(lobster?.capabilities.supportsClientSwitch).toBe(true);
+  });
 });

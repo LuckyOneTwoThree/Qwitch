@@ -665,6 +665,26 @@ fn cross_day_claim_status_resets_stale_snapshot_and_keeps_same_cst_day() {
         ),
         ClaimStatus::Claimed
     );
+    assert_eq!(
+        normalize_daily_claim_status_on_date(
+            ClaimStatus::Available,
+            "2026-11-18T02:00:00Z",
+            Some("2026-11-18T01:00:00Z"),
+            today_cst,
+            "lobsterai"
+        ),
+        ClaimStatus::Claimed
+    );
+    assert_eq!(
+        normalize_daily_claim_status_on_date(
+            ClaimStatus::Unknown,
+            "2026-11-18T02:00:00Z",
+            Some("2026-11-18T01:00:00Z"),
+            today_cst,
+            "lobsterai"
+        ),
+        ClaimStatus::Claimed
+    );
     // Qoder 活动按周期：今日已领不覆盖新出现的 Available 活动
     assert_eq!(
         normalize_daily_claim_status_on_date(

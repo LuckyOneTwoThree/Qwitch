@@ -41,7 +41,8 @@ export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
     acc.toolId === "trae_cn" ||
     acc.toolId === "trae" ||
     acc.toolId === "workbuddy" ||
-    acc.toolId === "minimax_code_cn";
+    acc.toolId === "minimax_code_cn" ||
+    acc.toolId === "lobsterai";
   if (dailyResetTool && acc.lastClaimedAt && isSameCstDay(acc.lastClaimedAt)) {
     return "claimed";
   }
@@ -293,7 +294,7 @@ export const FLAT_SORT_TIER = {
  * 的顺序。这带来两个实际问题：
  *
  * 1. 工具顺序是 `tool_id` 字典序（minimax → qoder → trae → workbuddy），
- *    与分组视图的 `BUILTIN_TOOL_ORDER`（trae → workbuddy → qoder → minimax）
+ *    与分组视图的 `BUILTIN_TOOL_ORDER`（trae → workbuddy → qoder → minimax → lobsterai）
  *    恰好相反。用户在两个视图间切换时所有卡片位置全变，观感混乱。
  * 2. `is_active_on_client` 的优先级在 `tool_id` 之后，导致「当前挂载的账号」
  *    会被字典序更靠前的工具挤到后面 —— 用户最该第一眼看到的信息被淹没。

@@ -182,11 +182,15 @@ export function useAccountStore({
                 ? "/Applications/WorkBuddy.app"
                 : tid === "minimax_code_cn"
                   ? "/Applications/MiniMax.app"
-                  : "/Applications/Qoder.app",
+                  : tid === "lobsterai"
+                    ? "/Applications/LobsterAI.app"
+                    : "/Applications/Qoder.app",
           configDir:
             tid === "minimax_code_cn"
               ? "~/.minimax"
-              : `~/Library/Application Support/${tid}`,
+              : tid === "lobsterai"
+                ? "~/Library/Application Support/LobsterAI"
+                : `~/Library/Application Support/${tid}`,
           isRunning: tid === "trae_cn",
         } satisfies ClientHostStatus,
       ]);
@@ -1019,7 +1023,8 @@ export function useAccountStore({
         toolId === "trae_cn" ||
         toolId === "workbuddy" ||
         toolId === "qoder_cn" ||
-        toolId === "minimax_code_cn";
+        toolId === "minimax_code_cn" ||
+        toolId === "lobsterai";
       const newAcc: AccountSummary = {
         id,
         toolId,

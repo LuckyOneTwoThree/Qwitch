@@ -238,7 +238,10 @@ impl CredentialEnvelope {
     pub fn capability_flags(&self) -> (bool, bool) {
         match &self.payload {
             CredentialPayload::Token { .. } => {
-                let can_switch = matches!(self.tool_id.as_str(), "trae" | "trae_cn" | "workbuddy");
+                let can_switch = matches!(
+                    self.tool_id.as_str(),
+                    "trae" | "trae_cn" | "workbuddy" | "lobsterai"
+                );
                 (can_switch, true)
             }
             CredentialPayload::LocalSnapshot { files } => {
@@ -364,6 +367,7 @@ impl CredentialEnvelope {
             || uid.starts_with("wb_manual_")
             || uid.starts_with("wb_oauth_")
             || uid.starts_with("minimax_cn_")
+            || uid.starts_with("lobsterai_")
     }
 
     pub fn merge_from(&self, incoming: &CredentialEnvelope) -> CredentialEnvelope {

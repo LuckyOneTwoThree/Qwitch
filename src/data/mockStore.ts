@@ -73,6 +73,19 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
       supportsMultiInstance: false,
     },
   },
+  {
+    id: "lobsterai",
+    name: "有道龙虾",
+    version: "0.1.0",
+    isBuiltin: true,
+    capabilities: {
+      authMethods: ["local_import", "webview_oauth", "token_paste"],
+      supportsQuotaQuery: true,
+      supportsDailyClaim: true,
+      supportsClientSwitch: true,
+      supportsMultiInstance: false,
+    },
+  },
 ];
 
 export const INITIAL_ACCOUNTS: AccountSummary[] = [
@@ -311,6 +324,33 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
       ],
     },
     updatedAt: cstTimestamp(0, 10, 5),
+  },
+  {
+    id: "acc-lobster-1",
+    toolId: "lobsterai",
+    label: "有道龙虾 · 主号",
+    uidMasked: "17****38",
+    status: "active",
+    isActiveOnClient: true,
+    hasLocalSnapshot: true,
+    hasApiToken: true,
+    latestQuota: {
+      planName: "订阅版",
+      claimStatus: "available",
+      fetchedAt: cstTimestamp(0, 10, 2),
+      buckets: [
+        {
+          key: "credits",
+          label: "可用积分",
+          used: 420,
+          total: 3000,
+          remaining: 2580,
+          unit: "积分",
+          resetAt: nextMonthResetCst(),
+        },
+      ],
+    },
+    updatedAt: cstTimestamp(0, 10, 2),
   },
 ];
 

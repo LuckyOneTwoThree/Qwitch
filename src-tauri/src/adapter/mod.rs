@@ -1,5 +1,6 @@
 pub mod common;
 pub mod external;
+pub mod lobsterai;
 pub mod minimax;
 pub mod qoder;
 pub mod trae;
@@ -298,6 +299,7 @@ pub fn create_all_adapters(
         Arc::new(workbuddy::WorkBuddyAdapter::with_host(Arc::clone(&host))),
         Arc::new(qoder::QoderAdapter::with_host(Arc::clone(&host))),
         Arc::new(minimax::MiniMaxAdapter::new()),
+        Arc::new(lobsterai::LobsterAiAdapter::new()),
     ];
     for adapter in builtins {
         map.insert(adapter.manifest().id.clone(), adapter);
@@ -347,6 +349,7 @@ pub const RESERVED_ADAPTER_IDS: &[&str] = &[
     "workbuddy",
     "qoder_cn",
     "minimax_code_cn",
+    "lobsterai",
 ];
 
 #[cfg(test)]

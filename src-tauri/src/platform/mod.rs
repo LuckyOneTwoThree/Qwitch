@@ -253,6 +253,12 @@ pub fn client_spec(tool_id: &str) -> Option<ClientSpec> {
             win_exe_names: &["MiniMax Code.exe"],
             win_folder_names: &["MiniMax Code", "MiniMax"],
         }),
+        "lobsterai" => Some(ClientSpec {
+            mac_app_names: &["LobsterAI.app"],
+            mac_process_names: &["LobsterAI"],
+            win_exe_names: &["LobsterAI.exe"],
+            win_folder_names: &["LobsterAI"],
+        }),
         _ => None,
     }
 }
@@ -1108,6 +1114,7 @@ impl PlatformHost for NativePlatformHost {
                 "qoder_cn" => find_latest_prefixed_dir(&app_support, "com.qodercn.app")
                     .unwrap_or_else(|| app_support.join("com.qodercn.app")),
                 "minimax_code_cn" => app_support.join("MiniMax"),
+                "lobsterai" => app_support.join("LobsterAI"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)
@@ -1133,6 +1140,7 @@ impl PlatformHost for NativePlatformHost {
                 "qoder_cn" => find_latest_prefixed_dir(&roaming, "com.qodercn.app")
                     .unwrap_or_else(|| roaming.join("com.qodercn.app")),
                 "minimax_code_cn" => roaming.join("MiniMax"),
+                "lobsterai" => roaming.join("LobsterAI"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)
@@ -2147,6 +2155,7 @@ mod client_executable_validation_tests {
             ("workbuddy", "/Applications/WorkBuddy.app"),
             ("qoder_cn", "/Applications/Qoder CN.app"),
             ("minimax_code_cn", "/Applications/MiniMax Code.app"),
+            ("lobsterai", "/Applications/LobsterAI.app"),
         ];
         let mut checked = 0usize;
         for (tool, path) in cases {

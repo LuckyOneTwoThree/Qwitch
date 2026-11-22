@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::adapter::{
-    minimax::MiniMaxAdapter, qoder::QoderAdapter, workbuddy::WorkBuddyAdapter, AdapterError,
-    ToolAdapter,
+    lobsterai::LobsterAiAdapter, minimax::MiniMaxAdapter, qoder::QoderAdapter,
+    workbuddy::WorkBuddyAdapter, AdapterError, ToolAdapter,
 };
 use crate::domain::UnifiedErrorCode;
 use crate::platform::PlatformHost;
@@ -387,6 +387,20 @@ fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
             "apple.com",
             "weixin.qq.com",
         ],
+        "lobsterai" => &[
+            "youdao.com",
+            "163.com",
+            "netease.com",
+            "126.com",
+            "127.net",
+            "ydstatic.com",
+            "weixin.qq.com",
+            "wx.qq.com",
+            "qq.com",
+            "apple.com",
+            "github.com",
+            "microsoftonline.com",
+        ],
         _ => &[],
     }
 }
@@ -538,6 +552,48 @@ async fn persist_oauth_envelope(
     }
 }
 
+const LOBSTER_CALLBACK_PORT: u16 = 47821;
+const LOBSTER_CALLBACK_PATH: &str = "/auth/callback";
+const LOBSTER_CALLBACK_URI: &str = "http://127.0.0.1:47821/auth/callback";
+
+/// 识别并校验有道龙虾内置授权回调地址（本地回环回调与 `lobsterai://auth/callback`）。
+/// 返回 `None` 表示非回调导航，继续按官方 HTTPS 白名单放行。
+pub(crate) fn parse_lobster_callback_url(
+    nav_url: &tauri::Url,
+    expected_nonce: &str,
+) -> Option<Result<String, &'static str>> {
+    let is_loopback = nav_url.scheme() == "http"
+        && nav_url.host_str() == Some("127.0.0.1")
+        && nav_url.port() == Some(LOBSTER_CALLBACK_PORT)
+        && nav_url.path() == LOBSTER_CALLBACK_PATH;
+    let is_deeplink = nav_url.scheme() == "lobsterai"
+        && nav_url.host_str() == Some("auth")
+        && nav_url.path() == "/callback";
+
+    if !is_loopback && !is_deeplink {
+        return None;
+    }
+
+    let find_param = |key: &str| -> Option<String> {
+        nav_url
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+
+    if is_loopback && find_param("state").as_deref() != Some(expected_nonce) {
+        return Some(Err(
+            "有道龙虾内置授权回调校验失败（状态参数不匹配），已拒绝该请求",
+        ));
+    }
+
+    match find_param("code") {
+        Some(code) => Some(Ok(code)),
+        None => Some(Err("有道龙虾授权回调缺少 authCode，请重试")),
+    }
+}
+
 #[tauri::command]
 pub async fn start_webview_oauth(
     app: AppHandle,
@@ -558,6 +614,7 @@ pub async fn start_webview_oauth(
 
     enum OAuthMode {
         TraeCapture,
+        LobsterAiCallback,
         WorkBuddyPoll {
             state_token: String,
         },
@@ -576,6 +633,12 @@ pub async fn start_webview_oauth(
             "https://www.trae.cn/login".to_string(),
             OAuthMode::TraeCapture,
         ),
+        "lobsterai" => {
+            let auth_url =
+                LobsterAiAdapter::build_oauth_login_url(LOBSTER_CALLBACK_URI, &flow_nonce)
+                    .map_err(|e| format!("{e}"))?;
+            (auth_url, OAuthMode::LobsterAiCallback)
+        }
         "workbuddy" => {
             let (state_token, auth_url) = WorkBuddyAdapter::create_oauth_session().await?;
             (auth_url, OAuthMode::WorkBuddyPoll { state_token })
@@ -630,9 +693,9 @@ pub async fn start_webview_oauth(
     let win_label_popup = win_label.clone();
     let init_js: String = match mode {
         OAuthMode::TraeCapture => OAUTH_CAPTURE_JS.replace("__QWITCH_NONCE__", &flow_nonce),
-        OAuthMode::WorkBuddyPoll { .. } | OAuthMode::QoderPkcePoll { .. } => {
-            POPUP_REDIRECT_JS.to_string()
-        }
+        OAuthMode::LobsterAiCallback
+        | OAuthMode::WorkBuddyPoll { .. }
+        | OAuthMode::QoderPkcePoll { .. } => POPUP_REDIRECT_JS.to_string(),
         // MiniMax 官方登录页依赖自身 window.open / 验证码 iframe，注入任何脚本都可能干扰
         OAuthMode::MiniMaxDevicePoll { .. } => String::new(),
     };
@@ -776,6 +839,107 @@ pub async fn start_webview_oauth(
             }
             is_allowed_oauth_url(nav_url, allowed_hosts)
         });
+    } else if matches!(mode, OAuthMode::LobsterAiCallback) {
+        let app_nav = app_handle.clone();
+        let db_nav = Arc::clone(&db);
+        let scheduler_nav = Arc::clone(&scheduler_arc);
+        let host_nav = Arc::clone(&host_arc);
+        let adapter_nav = Arc::clone(&adapter);
+        let flow_seq_nav = Arc::clone(&flow_seq);
+        let expected_nonce = flow_nonce.clone();
+        let consumed_nonces = Arc::clone(&state.consumed_oauth_nonces);
+        let tid_nav = tool_id_owned.clone();
+        let lbl_nav = label_owned.clone();
+        let target_nav = target_id_owned.clone();
+        let win_label_nav = win_label.clone();
+
+        builder = builder.on_navigation(move |nav_url| {
+            if let Some(cb_res) = parse_lobster_callback_url(nav_url, &expected_nonce) {
+                if flow_seq_nav.load(Ordering::SeqCst) != flow_id {
+                    return false;
+                }
+                match consume_oauth_nonce(&consumed_nonces, &expected_nonce) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = app_nav.emit(
+                            "qwitch://oauth-error",
+                            "该授权回调已被使用过，已拒绝重复提交",
+                        );
+                        return false;
+                    }
+                    Err(()) => {
+                        let _ = app_nav.emit(
+                            "qwitch://oauth-error",
+                            "内置授权回调校验失败（内部状态不可用），已拒绝该请求",
+                        );
+                        return false;
+                    }
+                }
+
+                let close_cb_win = |app_ref: &AppHandle, win_l: &str| {
+                    if flow_seq_nav.load(Ordering::SeqCst) == flow_id {
+                        if let Some(win) = app_ref.get_webview_window(win_l) {
+                            let _ = win.close();
+                        }
+                    }
+                };
+
+                match cb_res {
+                    Ok(code) => {
+                        let app_clone = app_nav.clone();
+                        let db_clone = Arc::clone(&db_nav);
+                        let scheduler_clone = Arc::clone(&scheduler_nav);
+                        let host_clone = Arc::clone(&host_nav);
+                        let adapter_clone = Arc::clone(&adapter_nav);
+                        let flow_seq_clone = Arc::clone(&flow_seq_nav);
+                        let tid = tid_nav.clone();
+                        let lbl = lbl_nav.clone();
+                        let target_id = target_nav.clone();
+                        let win_l = win_label_nav.clone();
+
+                        tauri::async_runtime::spawn(async move {
+                            match LobsterAiAdapter::exchange_auth_code(&code).await {
+                                Ok(envelope) => {
+                                    persist_oauth_envelope(
+                                        &app_clone,
+                                        &db_clone,
+                                        &host_clone,
+                                        &master_key,
+                                        &adapter_clone,
+                                        &scheduler_clone,
+                                        &flow_seq_clone,
+                                        flow_id,
+                                        &win_l,
+                                        &tid,
+                                        &lbl,
+                                        target_id.as_deref(),
+                                        envelope,
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    let _ = app_clone.emit(
+                                        "qwitch://oauth-error",
+                                        format!("交换有道龙虾授权令牌失败: {e}"),
+                                    );
+                                    if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
+                                        if let Some(win) = app_clone.get_webview_window(&win_l) {
+                                            let _ = win.close();
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(msg) => {
+                        let _ = app_nav.emit("qwitch://oauth-error", msg);
+                        close_cb_win(&app_nav, &win_label_nav);
+                    }
+                }
+                return false;
+            }
+            is_allowed_oauth_url(nav_url, allowed_hosts)
+        });
     } else {
         builder =
             builder.on_navigation(move |nav_url| is_allowed_oauth_url(nav_url, allowed_hosts));
@@ -786,7 +950,7 @@ pub async fn start_webview_oauth(
         .map_err(|e| format!("打开内置授权窗口失败: {e}"))?;
 
     match mode {
-        OAuthMode::TraeCapture => {}
+        OAuthMode::TraeCapture | OAuthMode::LobsterAiCallback => {}
         OAuthMode::WorkBuddyPoll { state_token } => {
             tauri::async_runtime::spawn(async move {
                 let mut consecutive_errors = 0u32;
@@ -1134,5 +1298,50 @@ mod tests {
         assert_eq!(consume_oauth_nonce(&consumed, "nonce-A"), Ok(false));
         // 不同 nonce 互不影响
         assert_eq!(consume_oauth_nonce(&consumed, "nonce-B"), Ok(true));
+    }
+
+    #[test]
+    fn lobsterai_oauth_whitelist_and_callback_validation() {
+        let hosts = allowed_oauth_hosts("lobsterai");
+        for url in [
+            "https://lobsterai-server.youdao.com/login",
+            "https://lobsterai.youdao.com/portal",
+            "https://dun.163.com/api/v2/check",
+            "https://urs.netease.com/login",
+            "https://open.weixin.qq.com/connect/qrconnect",
+        ] {
+            assert!(
+                is_allowed_oauth_url(&url.parse().unwrap(), hosts),
+                "应允许 {url}"
+            );
+        }
+        for bad in [
+            "http://lobsterai.youdao.com/portal",
+            "https://evil.example.com/phish",
+        ] {
+            assert!(!is_allowed_oauth_url(&bad.parse().unwrap(), hosts));
+        }
+
+        let valid_loopback: tauri::Url =
+            "http://127.0.0.1:47821/auth/callback?code=c_123&state=nonce-ok"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            parse_lobster_callback_url(&valid_loopback, "nonce-ok"),
+            Some(Ok("c_123".to_string()))
+        );
+        assert!(matches!(
+            parse_lobster_callback_url(&valid_loopback, "wrong-nonce"),
+            Some(Err(_))
+        ));
+
+        let valid_deeplink: tauri::Url = "lobsterai://auth/callback?code=c_deep".parse().unwrap();
+        assert_eq!(
+            parse_lobster_callback_url(&valid_deeplink, "nonce-ok"),
+            Some(Ok("c_deep".to_string()))
+        );
+
+        let non_cb: tauri::Url = "https://lobsterai.youdao.com/portal".parse().unwrap();
+        assert_eq!(parse_lobster_callback_url(&non_cb, "nonce-ok"), None);
     }
 }

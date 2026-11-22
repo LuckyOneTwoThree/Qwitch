@@ -84,7 +84,8 @@ jobs:
       - name: Shellcheck
         run: shellcheck -S warning scripts/*.sh
 
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
       - name: Rust dependency audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo audit --file src-tauri/Cargo.lock

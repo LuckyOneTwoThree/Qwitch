@@ -447,7 +447,7 @@ impl LobsterAiAdapter {
             .await
             .map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: format!("解析{context}响应失败: {e}"),
+                message: format!("解析{context}响应失败: {}", e.without_url()),
             })
     }
 
@@ -651,7 +651,9 @@ impl LobsterAiAdapter {
                 .get("planName")
                 .and_then(non_empty_str)
                 .unwrap_or_else(|| "团队版".to_string());
-        } else if let Some(free_total) = opt_amount_field(raw_quota.get("freeCreditsTotal")) {
+        } else if let Some(free_total) =
+            opt_amount_field(raw_quota.get("freeCreditsTotal")).filter(|&v| v > 0.0)
+        {
             total = free_total;
             used = amount_field(raw_quota.get("freeCreditsUsed"));
             plan_name = raw_quota

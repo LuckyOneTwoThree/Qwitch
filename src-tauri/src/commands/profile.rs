@@ -365,8 +365,14 @@ pub fn launch_tool_profile(
     if dir.is_empty() {
         return Err("profile_dir 不能为空".into());
     }
-    if crate::platform::client_spec(&tool_id).is_none() {
-        return Err(format!("未知或不支持多实例的工具: {tool_id}"));
+    let Some(adapter) = state.adapters.get(&tool_id) else {
+        return Err(format!("未知工具适配器: {tool_id}"));
+    };
+    if !adapter.manifest().capabilities.supports_multi_instance {
+        return Err(format!(
+            "工具 {} 不支持多开隔离启动",
+            adapter.manifest().name
+        ));
     }
     let settings = load_app_settings(&state.db);
     let exe = resolve_client_executable(state.host.as_ref(), &settings, &tool_id)

@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tray",
+  "description": "Minimal read/switch/claim capability scope for the tray popover window.",
+  "windows": [
+    "tray"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-show-main-window",
+    "allow-quit-app",
+    "allow-get-app-settings",
+    "allow-list-adapters",
+    "allow-list-accounts",
+    "allow-get-account-summary",
+    "allow-detect-client-status",
+    "allow-reconcile-active-accounts",
+    "allow-refresh-quota-batch",
+    "allow-claim-daily-batch",
+    "allow-switch-desktop-account",
+    "allow-get-action-logs",
+    "allow-get-action-log-stats",
+    "allow-check-app-update",
+    "allow-download-and-install-update",
+    "allow-open-update-url"
+  ]
+}

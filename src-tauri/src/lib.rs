@@ -42,11 +42,14 @@ fn apply_macos_app_icon() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let pending_migration_warning = Arc::new(std::sync::Mutex::new(Option::<String>::None));
+    let pending_warning_setup = Arc::clone(&pending_migration_warning);
+
     let app_result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             commands::present_main_window(app);
         }))
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "macos")]
             apply_macos_app_icon();
 
@@ -117,19 +120,13 @@ pub fn run() {
             if startup_settings.launch_at_login {
                 let _ = host.set_launch_at_login(true);
             }
-            // 安全迁移未完成时，在窗口就绪后以原生弹窗明确告知用户。
-            // 放在后台线程：对话框是阻塞调用，不得阻塞 setup 主线程。
+            // 安全迁移未完成时，先暂存告警文案，等 RunEvent::Ready 事件循环就绪后在主线程弹窗，
+            // 避免 macOS 下 NSApplication::isRunning() 尚为 false 时调用 rfd 触发 panic。
             if !migration_warnings.is_empty() {
                 let detail = migration_warnings.join("\n\n");
-                std::thread::spawn(move || {
-                    rfd::MessageDialog::new()
-                        .set_title("Qwitch 安全升级未完全生效")
-                        .set_description(format!(
-                            "以下安全升级未能完成，应用仍可正常使用，但对应防护处于降级状态：\n\n{detail}"
-                        ))
-                        .set_level(rfd::MessageLevel::Warning)
-                        .show();
-                });
+                if let Ok(mut guard) = pending_warning_setup.lock() {
+                    *guard = Some(detail);
+                }
             }
 
             let launched_by_autostart = std::env::args().any(|a| a == "--autostart");
@@ -177,10 +174,9 @@ pub fn run() {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                         let db_iter = Arc::clone(&db_bg);
-                        let _ = tokio::task::spawn_blocking(move || {
-                            db_iter.checkpoint_wal_passive()
-                        })
-                        .await;
+                        let _ =
+                            tokio::task::spawn_blocking(move || db_iter.checkpoint_wal_passive())
+                                .await;
                     }
                 });
             }
@@ -190,11 +186,17 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "退出 Qwitch", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_main, &quit])?;
 
+            #[cfg(target_os = "macos")]
             let tray_icon = tauri::include_image!("icons/tray-template.png");
+            #[cfg(not(target_os = "macos"))]
+            let tray_icon = tauri::include_image!("icons/32x32.png");
 
-            TrayIconBuilder::with_id("qwitch-tray")
-                .icon(tray_icon)
-                .icon_as_template(true)
+            let mut tray_builder = TrayIconBuilder::with_id("qwitch-tray").icon(tray_icon);
+            #[cfg(target_os = "macos")]
+            {
+                tray_builder = tray_builder.icon_as_template(true);
+            }
+            tray_builder
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("Qwitch - AI 多账号与额度管理")
@@ -420,7 +422,25 @@ pub fn run() {
         .build(tauri::generate_context!());
 
     match app_result {
-        Ok(app) => app.run(|app_handle, event| {
+        Ok(app) => app.run(move |app_handle, event| {
+            if let tauri::RunEvent::Ready = &event {
+                if let Some(detail) = pending_migration_warning
+                    .lock()
+                    .ok()
+                    .and_then(|mut guard| guard.take())
+                {
+                    let _ = app_handle.run_on_main_thread(move || {
+                        rfd::MessageDialog::new()
+                            .set_title("Qwitch 安全升级未完全生效")
+                            .set_description(format!(
+                                "以下安全升级未能完成，应用仍可正常使用，但对应防护处于降级状态：\n\n{detail}"
+                            ))
+                            .set_level(rfd::MessageLevel::Warning)
+                            .show();
+                    });
+                }
+            }
+
             // 退出前把 WAL 合并回主库并清空 -wal：避免残留大体积 -wal 占用磁盘，
             // 也让下次启动直接读主库。覆盖所有退出路径（菜单退出 / 关闭窗口 / exit()）。
             if let tauri::RunEvent::Exit = event {

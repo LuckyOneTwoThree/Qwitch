@@ -166,6 +166,12 @@ pub fn validate_client_executable(tool_id: &str, executable: &Path) -> Result<()
         }
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (spec, file_name);
+        return Err("当前操作系统暂不支持客户端路径覆盖".to_string());
+    }
+
     // 目录白名单：仅允许受信任的安装位置或用户主目录之下
     let canonical = std::fs::canonicalize(executable)
         .map_err(|e| format!("客户端路径无法解析（{}）：{e}", executable.display()))?;
@@ -382,7 +388,8 @@ impl NativePlatformHost {
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())?;
                 let path = PathBuf::from(raw);
-                return path.exists().then_some(path);
+                return (path.exists() && validate_client_executable(tool_id, &path).is_ok())
+                    .then_some(path);
             }
         }
 
@@ -411,7 +418,7 @@ impl NativePlatformHost {
             .map(str::trim)
             .filter(|s| !s.is_empty())?;
         let path = PathBuf::from(raw);
-        if path.exists() {
+        if path.exists() && validate_client_executable(tool_id, &path).is_ok() {
             Some(path)
         } else {
             None
@@ -1514,9 +1521,15 @@ impl PlatformHost for NativePlatformHost {
                     std::env::current_exe().map_err(|e| format!("无法获取当前程序路径: {e}"))?;
                 std::fs::create_dir_all(&autostart_dir)
                     .map_err(|e| format!("创建 autostart 目录失败: {e}"))?;
+                let escaped_exe = exe
+                    .to_string_lossy()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('`', "\\`")
+                    .replace('$', "\\$")
+                    .replace('%', "%%");
                 let content = format!(
-                    "[Desktop Entry]\nType=Application\nName=Qwitch\nExec=\"{}\" --autostart\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-                    exe.to_string_lossy()
+                    "[Desktop Entry]\nType=Application\nName=Qwitch\nExec=\"{escaped_exe}\" --autostart\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
                 );
                 std::fs::write(&desktop_path, content.as_bytes())
                     .map_err(|e| format!("写入开机自启配置失败: {e}"))?;

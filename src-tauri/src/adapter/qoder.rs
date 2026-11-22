@@ -85,10 +85,12 @@ impl QoderAdapter {
                 })?;
 
         if local_uid != expected {
+            let masked_local = crate::storage::crypto::mask_uid(&local_uid);
+            let masked_expected = crate::storage::crypto::mask_uid(expected);
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
                 message: format!(
-                    "本机当前登录的不是目标账号（本机 {local_uid}，目标 {expected}）。\
+                    "本机当前登录的不是目标账号（本机 {masked_local}，目标 {masked_expected}）。\
                      请先在 Qoder 客户端中切换到该账号，再执行采集。"
                 ),
             });

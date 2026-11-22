@@ -89,7 +89,7 @@
 
 ### ✅ 工程质量
 
-- 109 个 Rust 单元 / 回归测试 + 89 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、ESLint、构建、测试、`cargo fmt` / `clippy -D warnings` / `cargo audit`。
+- 134 个 Rust 单元 / 回归测试 + 122 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、ESLint、构建、测试、`cargo fmt` / `clippy -D warnings` / `cargo audit`。
 - 标签触发 Release 流水线，自动构建并发布 macOS Apple Silicon（arm64）、macOS Intel（x64）与 Windows x64 三个独立安装包。
 
 ## 支持的工具
@@ -100,6 +100,8 @@
 | **WorkBuddy** | 本机凭据导入 · 内置授权 · Token | 签到状态监控、一键签到与积分领取 | ✅ 一键冷切换 |
 | **Qoder CN** | 本机导入 · 内置 PKCE 授权 · PAT | 活动 Credits 水位、一键领取 | ✅ 一键冷切换 |
 | **MiniMax Code CN** | 本机导入 · 内置设备码授权 · Token | 积分水位、每日签到领取 | ✅ 一键冷切换 |
+| **有道龙虾（LobsterAI）** | 内置 OAuth 授权 · 本机导入 · Token | 积分水位监控、每日签到领取 | ✅ 一键冷切换 |
+| **豆包工作（DoubaoWork）** | 内置 WebView Cookie 授权 · 本机导入 · Cookie/cURL | 多维度额度与额度包监控、每日签到 | ✅ 一键冷切换 |
 
 > Trae / Qoder 国际版无每日签到机制，暂未注册内置适配器；外部适配器协议可用于自行扩展。
 
@@ -156,13 +158,13 @@ npm run tauri build    # 构建本地安装包
 ## 安全与隐私
 
 - **本地优先**：凭据、会话快照、额度记录、操作日志全部存于本机数据目录，无任何云端上传与遥测。
-- **密钥托管**：主密钥优先存入系统原生钥匙串（macOS Keychain / Windows Credential Manager），不可用时降级为 `0600` 权限本地密钥文件；启动时以 `key_id` 指纹 + 密文样本**双重验证**候选密钥，冲突来源绝不误删，验证通过前不做任何清理。
-- **加密落盘**：业务凭据 AES-256-GCM 加密（随机 nonce），明文缓冲区用后即清零（zeroize）；SQLite 启用 WAL，数据库 / 导出文件 `0600`、数据目录 `0700`。
-- **PII 脱敏**：默认账号标签与审计日志自动脱敏邮箱 / 手机号 / UID，旧版数据一次性迁移修复。
+- **密钥托管**：主密钥优先存入系统原生钥匙串（macOS Keychain / Windows Credential Manager），并在数据目录同步维护受权限保护（Unix `0600`）的 `master.key` 备份以兼容跨证书/重装升级场景；启动时以 `key_id` 指纹 + 密文样本**双重验证**候选密钥，冲突来源绝不误删，验证通过前不做任何清理。
+- **加密落盘**：业务凭据 AES-256-GCM 加密（随机 nonce + `QWA1` 账号 AAD 绑定），明文缓冲区用后即清零（zeroize）；SQLite 启用 WAL，数据库 / 导出文件 `0600`、数据目录 `0700`。
+- **PII 脱敏**：默认账号标签与审计日志自动脱敏邮箱 / 手机号 / UID / Cookie 会话凭据，旧版数据一次性迁移修复。
 - **严格 CSP**：`script-src 'self'`，禁用内联脚本与外部加载，`object-src 'none'` / `base-uri 'self'` / `frame-ancestors 'none'`。
 - **授权隔离**：内置 OAuth 窗口校验一次性 nonce + 精确回调路径 + 流程序号，导航限定官方域名白名单；nonce **一次性消费**，同一回调重复投递会被拒绝。
-- **插件零信任**：外部适配器默认不加载、不接收凭据；信任需经**系统原生确认对话框**签发一次性票据（120 秒有效、用后即焚），前端无法自我批准。插件入口命令必须落在插件目录内（fail-closed），裸命令名按协议保留。
-- **IPC 最小权限**：35 个应用命令经 `build.rs` 声明并逐一授权（命令级 ACL），渲染进程无法调用未授权能力。
+- **插件零信任**：外部适配器默认不加载、不接收凭据；信任需经**系统原生确认对话框**签发与内容哈希绑定的一次性票据（120 秒有效、用后即焚），启动与每次 RPC 执行前均重校验目录内容哈希与入口命令/参数约束（仅放行插件目录内脚本与白名单解释器）。
+- **IPC 最小权限**：36 个应用命令经 `build.rs` 声明并按 `main` / `tray` 窗口拆分 capability（`tray` 仅开放只读、刷新、领取与切号所需最小命令集），渲染进程无法调用未授权能力。
 - **可执行文件白名单**：自定义客户端路径在保存与启动两个环节校验名称、bundle 结构与受信任安装目录，避免「写入任意路径 → 启动执行」链路。
 - **更新防降级**：安装前重新拉取最新版本，校验版本单调性与资产 / 校验和地址逐字一致，阻断降级安装与跨版本替换。
 - **失败熔断**：401 → 凭据过期、403/429 → 风控暂停并熔断该工具；5xx / 网络错误连续 3 次同样熔断，避免平台整体不可用时逐个账号硬打。
@@ -188,8 +190,9 @@ npm run tauri build    # 构建本地安装包
 │  Rust Core                                                             │
 │  commands ── scheduler（串行 + Jitter + 幂等 + 工具级熔断）            │
 │     └─ ToolAdapter trait                                               │
-│          ├─ trae_cn / workbuddy / qoder_cn / minimax_code_cn 内置适配器│
-│          └─ external：JSON-RPC 2.0 插件（原生确认 + 内容哈希固定）     │
+│          ├─ trae_cn / workbuddy / qoder_cn / minimax_code_cn           │
+│          ├─ lobsterai / doubaowork（共 6 个内置适配器）                 │
+│          └─ external：JSON-RPC 2.0 插件（原生确认 + 运行时哈希校验）   │
 │  platform（钥匙串 / 进程探测 / 路径解析）                              │
 │  storage（SQLite WAL + AES-256-GCM + 日志归档 + PII 迁移）             │
 └────────────────────────────────────────────────────────────────────────┘
@@ -235,8 +238,8 @@ npm run dev                  # 仅前端（浏览器 Mock 预览）
 npm run tauri dev            # 桌面应用开发模式
 npm run build                # 前端类型检查 + 生产构建
 npm run lint                 # ESLint（含 react-hooks/exhaustive-deps 作为 error）
-npm test                     # 前端测试（Vitest，89 例）
-cd src-tauri && cargo test   # 后端测试（109 例）
+npm test                     # 前端测试（Vitest，122 例）
+cd src-tauri && cargo test   # 后端测试（134 例）
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
@@ -272,7 +275,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 - [x] 归档日志自动清底（归档超保留窗口自动清除 + 5000 上限）
 - [x] Context 按更新频次拆分（Account/Log/Settings/Feedback 四 store）+ 单账号增量同步
 - [x] 组件级测试与 Tauri bundle CI 构建校验
-- [x] IPC 命令级 ACL（35 命令逐一授权）、插件信任原生确认票据、客户端可执行文件白名单
+- [x] IPC 命令级 ACL（36 命令按 `main` / `tray` 窗口最小授权）、插件信任原生确认票据（哈希绑定）、客户端可执行文件白名单
 - [x] 更新防降级（版本单调性 + 资产一致性校验）、OAuth nonce 一次性消费、5xx 连续熔断
 - [x] WAL 增长治理、日志统计覆盖索引与命令异步化、mock 数据隔离出生产包
 - [x] ESLint 接入 CI、wiremock HTTP 测试基建、核心 store 与 Modal 组件测试

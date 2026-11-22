@@ -5,7 +5,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -107,6 +106,7 @@ pub struct ExternalAdapter {
     adapter_dir: PathBuf,
     entry: ExternalEntry,
     timeout_ms: u64,
+    pinned_hash: Option<String>,
 }
 
 impl ExternalAdapter {
@@ -128,7 +128,13 @@ impl ExternalAdapter {
             adapter_dir,
             entry: raw.entry,
             timeout_ms: raw.timeout_ms.clamp(1000, MAX_ADAPTER_TIMEOUT_MS),
+            pinned_hash: None,
         }
+    }
+
+    pub fn with_pinned_hash(mut self, hash: String) -> Self {
+        self.pinned_hash = Some(hash);
+        self
     }
 
     pub(crate) fn current_platform_tag() -> &'static str {
@@ -178,6 +184,29 @@ impl ExternalAdapter {
     }
 
     async fn call_rpc(&self, method: &str, params: Value) -> Result<Value, AdapterError> {
+        if let Some(expected_hash) = &self.pinned_hash {
+            if !is_valid_entry(&self.adapter_dir, &self.entry) {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("外部适配器 {} 入口校验失败，已拒绝执行", self.manifest.id),
+                });
+            }
+            let actual_hash =
+                adapter_content_hash(&self.adapter_dir).map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("外部适配器 {} 完整性校验失败: {e}", self.manifest.id),
+                })?;
+            if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!(
+                        "外部适配器 {} 内容在启动后发生变更（哈希不一致），已拒绝执行",
+                        self.manifest.id
+                    ),
+                });
+            }
+        }
+
         let req_id = Uuid::new_v4().to_string();
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -191,7 +220,8 @@ impl ExternalAdapter {
         })?;
         req_line.push(b'\n');
 
-        let mut cmd = Command::new(&self.entry.command);
+        let exec_cmd = resolve_exec_command(&self.adapter_dir, &self.entry.command);
+        let mut cmd = Command::new(&exec_cmd);
         cmd.args(&self.entry.args)
             .current_dir(&self.adapter_dir)
             .env_clear()
@@ -493,6 +523,23 @@ fn looks_like_adapter_file(command: &str) -> bool {
 ///   插件协议（`entry.command` 可为解释器名）。残余风险：解析依赖继承的 `PATH`，
 ///   若用户 `PATH` 中存在同名恶意程序仍可能被选中；信任外部插件时应确认其入口
 ///   为自带脚本，或改用插件目录内的相对路径。
+const ALLOWED_BARE_INTERPRETERS: &[&str] = &["python3", "python", "node", "deno", "bun", "ruby"];
+
+fn is_path_within_adapter_dir(adapter_dir: &Path, candidate: &Path) -> bool {
+    let Ok(canon_dir) = std::fs::canonicalize(adapter_dir) else {
+        return false;
+    };
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        adapter_dir.join(candidate)
+    };
+    let Ok(canon_cmd) = std::fs::canonicalize(resolved) else {
+        return false;
+    };
+    canon_cmd.starts_with(&canon_dir) && canon_cmd.is_file()
+}
+
 fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
@@ -506,28 +553,78 @@ fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
         return false;
     }
 
-    // 执行体必须落在插件目录内且是普通文件
-    let within_adapter_dir = |candidate: &Path| -> bool {
-        let Ok(canon_dir) = std::fs::canonicalize(adapter_dir) else {
-            return false;
-        };
-        let Ok(canon_cmd) = std::fs::canonicalize(candidate) else {
-            return false;
-        };
-        canon_cmd.starts_with(&canon_dir) && canon_cmd.is_file()
-    };
-
-    if cmd_path.is_absolute() {
-        return within_adapter_dir(cmd_path);
+    if cmd_path.is_absolute() || looks_like_adapter_file(trimmed) {
+        return is_path_within_adapter_dir(adapter_dir, cmd_path);
     }
 
-    if looks_like_adapter_file(trimmed) {
-        // 不存在即拒绝（fail-closed），不再放行
-        return within_adapter_dir(&adapter_dir.join(cmd_path));
+    // 裸命令仅允许受控解释器白名单（禁止 sh / bash / cmd / osascript 等系统壳）
+    ALLOWED_BARE_INTERPRETERS.contains(&trimmed.to_ascii_lowercase().as_str())
+}
+
+fn is_valid_entry_args(adapter_dir: &Path, command: &str, args: &[String]) -> bool {
+    let cmd_trimmed = command.trim();
+    let is_bare_interpreter =
+        !Path::new(cmd_trimmed).is_absolute() && !looks_like_adapter_file(cmd_trimmed);
+    let mut has_local_script = false;
+
+    for raw in args {
+        let arg = raw.trim();
+        if raw.chars().any(|c| c.is_control()) {
+            return false;
+        }
+        let arg_path = Path::new(arg);
+        if arg_path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            return false;
+        }
+        if arg_path.is_absolute() && !is_path_within_adapter_dir(adapter_dir, arg_path) {
+            return false;
+        }
+
+        if is_bare_interpreter {
+            let lower = arg.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "-c" | "-e" | "--eval" | "-p" | "--print" | "--command"
+            ) || lower.starts_with("-c=")
+                || lower.starts_with("-e=")
+                || lower.starts_with("--eval=")
+                || lower.starts_with("-p=")
+                || lower.starts_with("--print=")
+                || lower.starts_with("--command=")
+            {
+                return false;
+            }
+            if !arg.is_empty()
+                && !arg.starts_with('-')
+                && is_path_within_adapter_dir(adapter_dir, arg_path)
+            {
+                has_local_script = true;
+            }
+        }
     }
 
-    // 裸命令名：按文档协议保留（解释器由 PATH 解析）
-    true
+    !is_bare_interpreter || has_local_script
+}
+
+fn is_valid_entry(adapter_dir: &Path, entry: &ExternalEntry) -> bool {
+    is_valid_entry_command(adapter_dir, &entry.command)
+        && is_valid_entry_args(adapter_dir, &entry.command, &entry.args)
+}
+
+fn resolve_exec_command(adapter_dir: &Path, command: &str) -> PathBuf {
+    let trimmed = command.trim();
+    let p = Path::new(trimmed);
+    if p.is_absolute() {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    } else if looks_like_adapter_file(trimmed) {
+        let joined = adapter_dir.join(p);
+        std::fs::canonicalize(&joined).unwrap_or(joined)
+    } else {
+        PathBuf::from(trimmed)
+    }
 }
 
 fn collect_adapter_files_for_hash(
@@ -660,10 +757,10 @@ pub fn scan_external_manifests(data_dir: &Path) -> Vec<(PathBuf, ExternalManifes
         let Ok(parsed) = serde_json::from_slice::<ExternalManifestFile>(&bytes) else {
             continue;
         };
-        // 目录名必须与 manifest.id 一致，且通过安全 ID 与入口路径校验，防止同名覆盖劫持
+        // 目录名必须与 manifest.id 一致，且通过安全 ID 与入口校验，防止同名覆盖或目录外执行
         if dir_name != parsed.id
             || !crate::adapter::is_valid_adapter_id(&parsed.id)
-            || !is_valid_entry_command(&dir, &parsed.entry.command)
+            || !is_valid_entry(&dir, &parsed.entry)
         {
             continue;
         }
@@ -673,9 +770,7 @@ pub fn scan_external_manifests(data_dir: &Path) -> Vec<(PathBuf, ExternalManifes
 }
 
 /// 加载适配当前平台的外部适配器与目录路径（信任及哈希门禁由调用方 create_all_adapters 负责）
-pub fn discover_external_adapters(
-    data_dir: &Path,
-) -> HashMap<String, (Arc<dyn ToolAdapter>, PathBuf)> {
+pub fn discover_external_adapters(data_dir: &Path) -> HashMap<String, (ExternalAdapter, PathBuf)> {
     let current_os = ExternalAdapter::current_platform_tag();
     scan_external_manifests(data_dir)
         .into_iter()
@@ -683,8 +778,7 @@ pub fn discover_external_adapters(
         .map(|(dir, m)| {
             let id = m.id.clone();
             let dir_clone = dir.clone();
-            let adapter: Arc<dyn ToolAdapter> =
-                Arc::new(ExternalAdapter::from_manifest_file(dir, m));
+            let adapter = ExternalAdapter::from_manifest_file(dir, m);
             (id, (adapter, dir_clone))
         })
         .collect()
@@ -917,6 +1011,69 @@ mod tests {
         assert!(!is_valid_entry_command(&dir, "   "));
         assert!(!is_valid_entry_command(&dir, "run.py\0"));
         assert!(!is_valid_entry_command(&dir, "run\n.py"));
+
+        // 裸壳命令必须拒绝，裸解释器参数必须落地在插件目录内
+        assert!(!is_valid_entry_command(&dir, "sh"));
+        assert!(!is_valid_entry_command(&dir, "osascript"));
+        assert!(!is_valid_entry(
+            &dir,
+            &ExternalEntry {
+                command: "python3".into(),
+                args: vec!["-c".into(), "print(1)".into()],
+            }
+        ));
+        assert!(!is_valid_entry(
+            &dir,
+            &ExternalEntry {
+                command: "python3".into(),
+                args: vec!["/etc/passwd".into()],
+            }
+        ));
+        assert!(is_valid_entry(
+            &dir,
+            &ExternalEntry {
+                command: "python3".into(),
+                args: vec!["run.py".into()],
+            }
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn call_rpc_rechecks_pinned_hash_against_runtime_tampering() {
+        let root = std::env::temp_dir().join(format!("qwitch_ext_toctou_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("run.py"), b"print('{}')").unwrap();
+        let manifest = ExternalManifestFile {
+            id: "toctou_demo".into(),
+            name: "TOCTOU Demo".into(),
+            version: "0.1.0".into(),
+            platforms: vec![],
+            entry: ExternalEntry {
+                command: "run.py".into(),
+                args: vec![],
+            },
+            timeout_ms: 3000,
+            capabilities: ExternalCapabilities {
+                auth_methods: vec![AuthMethod::TokenPaste],
+                supports_quota_query: true,
+                supports_daily_claim: false,
+                supports_client_switch: false,
+                supports_multi_instance: false,
+            },
+        };
+        let hash = adapter_content_hash(&root).expect("hash");
+        let adapter =
+            ExternalAdapter::from_manifest_file(root.clone(), manifest).with_pinned_hash(hash);
+
+        // 启动后篡改脚本，call_rpc 必须在 spawn 前拒绝执行
+        std::fs::write(root.join("run.py"), b"print('evil')").unwrap();
+        let err = adapter
+            .call_rpc("ping", serde_json::json!({}))
+            .await
+            .expect_err("tampered plugin must be rejected at call_rpc");
+        assert!(err.to_string().contains("哈希不一致"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -127,12 +127,8 @@ pub async fn export_action_logs(
             "logs": logs,
         });
         let pretty = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
-        std::fs::write(&file_path, pretty).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600));
-        }
+        crate::adapter::write_private_file_atomic(&file_path, pretty.as_bytes())
+            .map_err(|e| e.to_string())?;
 
         let archived_count = if archive_flag && !ids.is_empty() {
             db.archive_action_logs(&ActionLogCleanupRequest {

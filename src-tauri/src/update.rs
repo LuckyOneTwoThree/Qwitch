@@ -548,7 +548,7 @@ pub async fn download_and_install_update(
             Some(&checksums_url),
         )?;
 
-        let response = client
+        let mut response = client
             .get(url)
             .send()
             .await
@@ -565,17 +565,29 @@ pub async fn download_and_install_update(
             }
         }
         validate_github_url(response.url().as_str())?;
-        let bytes = response
-            .bytes()
+        let cap = response
+            .content_length()
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or(0)
+            .min(MAX_DOWNLOAD_BYTES as usize);
+        let mut bytes = Vec::with_capacity(cap);
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| format!("读取安装包失败：{e}"))?;
-        if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-            return Err("安装包体积异常，已中止安装".into());
+            .map_err(|e| format!("读取安装包失败：{e}"))?
+        {
+            if (bytes.len() as u64).saturating_add(chunk.len() as u64) > MAX_DOWNLOAD_BYTES {
+                return Err("安装包体积异常，已中止下载".into());
+            }
+            bytes.extend_from_slice(&chunk);
         }
 
         verify_checksum(&client, &checksums_url, &file_name, &bytes).await?;
 
-        let path = std::env::temp_dir().join(format!("qwitch-update-{file_name}"));
+        let path = std::env::temp_dir().join(format!(
+            "qwitch-update-{}-{file_name}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::write(&path, &bytes).map_err(|e| format!("写入临时安装包失败：{e}"))?;
         tokio::process::Command::new(&path)
             .spawn()

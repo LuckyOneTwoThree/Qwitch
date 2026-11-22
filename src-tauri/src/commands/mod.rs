@@ -107,6 +107,9 @@ pub(crate) fn resolve_client_executable(
     }
 }
 
+/// 外部插件信任的一次性挑战票据存储类型：`adapter_id -> (ticket, content_hash, issued_at_ms)`。
+pub type PluginTrustTicketMap = HashMap<String, (String, String, u64)>;
+
 pub struct AppState {
     pub db: Arc<QwitchDatabase>,
     pub master_key: [u8; 32],
@@ -123,12 +126,12 @@ pub struct AppState {
     pub switching_in_progress: Arc<AtomicBool>,
     pub last_reconcile_ms: Arc<AtomicU64>,
     pub tray_blur_suppress_until_ms: Arc<AtomicU64>,
-    /// 外部插件信任的一次性挑战票据：`adapter_id -> (challenge, 签发时间 ms)`。
+    /// 外部插件信任的一次性挑战票据：`adapter_id -> (challenge, 审批时 content_hash, 签发时间 ms)`。
     ///
     /// 信任决策不能只凭渲染进程的入参，否则一次前端污染即可自我批准插件加载。
-    /// 流程：前端请求 → 后端弹原生确认框 → 用户确认后签发短时效票据 →
-    /// 前端携带票据保存设置。票据一次性消费，防止重放。
-    pub plugin_trust_tickets: Arc<std::sync::Mutex<HashMap<String, (String, u64)>>>,
+    /// 流程：前端请求 → 后端弹原生确认框 → 用户确认后签发与当时哈希绑定的短时效票据 →
+    /// 前端携带票据保存设置。票据一次性消费且校验哈希未被偷换。
+    pub plugin_trust_tickets: Arc<std::sync::Mutex<PluginTrustTicketMap>>,
 }
 
 /// 信任票据有效期（毫秒）。用户从「点击启用」到「保存设置」通常数秒内完成。
@@ -141,34 +144,45 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 签发一次性信任票据（覆盖该插件此前未消费的票据）。
+/// 签发一次性信任票据（绑定当时磁盘 content_hash，并覆盖此前未消费票据）。
 pub fn issue_plugin_trust_ticket(
-    store: &std::sync::Mutex<HashMap<String, (String, u64)>>,
+    store: &std::sync::Mutex<PluginTrustTicketMap>,
     adapter_id: &str,
+    content_hash: &str,
 ) -> String {
     let ticket = uuid::Uuid::new_v4().to_string();
     if let Ok(mut map) = store.lock() {
-        map.insert(adapter_id.to_string(), (ticket.clone(), now_ms()));
+        map.insert(
+            adapter_id.to_string(),
+            (ticket.clone(), content_hash.to_string(), now_ms()),
+        );
     }
     ticket
 }
 
-/// 校验并消费信任票据。票据必须匹配、未过期、且仅能使用一次。
+/// 校验并消费信任票据。票据必须匹配、哈希与审批时一致、未过期且仅能使用一次。
 pub fn consume_plugin_trust_ticket(
-    store: &std::sync::Mutex<HashMap<String, (String, u64)>>,
+    store: &std::sync::Mutex<PluginTrustTicketMap>,
     adapter_id: &str,
     ticket: &str,
+    expected_hash: &str,
 ) -> Result<(), String> {
     let mut map = store
         .lock()
         .map_err(|_| "信任票据存储不可用，请重试".to_string())?;
-    let Some((expected, issued_at)) = map.get(adapter_id).cloned() else {
+    let Some((expected, approved_hash, issued_at)) = map.get(adapter_id).cloned() else {
         return Err(format!(
             "插件 {adapter_id} 缺少信任确认记录，请重新点击启用并在系统弹窗中确认"
         ));
     };
     if expected != ticket.trim() {
         return Err(format!("插件 {adapter_id} 的信任确认票据无效，请重新确认"));
+    }
+    if !approved_hash.eq_ignore_ascii_case(expected_hash.trim()) {
+        map.remove(adapter_id);
+        return Err(format!(
+            "插件 {adapter_id} 内容在确认后发生变化，请重新确认信任"
+        ));
     }
     if now_ms().saturating_sub(issued_at) > PLUGIN_TRUST_TICKET_TTL_MS {
         map.remove(adapter_id);

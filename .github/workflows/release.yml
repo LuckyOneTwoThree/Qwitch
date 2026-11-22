@@ -72,6 +72,7 @@ jobs:
           fi
       - run: npm ci
       - run: npm audit --omit=dev
+      - run: npm run lint
       - run: npm run build
       - run: npm test
 
@@ -138,30 +139,17 @@ jobs:
         working-directory: src-tauri
         run: cargo test --all-targets --locked
 
-      - name: Configure macOS code signing (opt-in)
-        # 默认 ad-hoc 未签名构建（与发布说明的 xattr -cr 指引一致）。
-        # 仅当仓库变量 MACOS_SIGNING_ENABLED=true 时才注入签名/公证 secrets；
-        # 避免误配/无效的 APPLE_CERTIFICATE 触发 security import 失败而中断发布。
-        if: runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          {
-            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
-            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
-            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
-            echo "APPLE_ID=$APPLE_ID"
-            echo "APPLE_PASSWORD=$APPLE_PASSWORD"
-            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
-          } >> "$GITHUB_ENV"
-
+      # 默认 ad-hoc 未签名构建（与发布说明的 xattr -cr 指引一致）。
+      # 仅当仓库变量 MACOS_SIGNING_ENABLED=true 时注入签名/公证 secrets，直接作用域限定到构建步，
+      # 避免 $GITHUB_ENV 换行损坏多行 Base64 证书并最小化 secrets 暴露面。
       - name: Build Tauri bundles
+        env:
+          APPLE_CERTIFICATE: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true' && secrets.APPLE_CERTIFICATE) || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD) || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true' && secrets.APPLE_SIGNING_IDENTITY) || '' }}
+          APPLE_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true' && secrets.APPLE_ID) || '' }}
+          APPLE_PASSWORD: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true' && secrets.APPLE_PASSWORD) || '' }}
+          APPLE_TEAM_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_ENABLED == 'true' && secrets.APPLE_TEAM_ID) || '' }}
         run: npx tauri build --target ${{ matrix.rust_target }}
 
       - name: Stage macOS architecture artifacts

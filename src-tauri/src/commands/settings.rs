@@ -51,7 +51,7 @@ pub struct ExternalAdapterInfo {
 /// 「信任插件 → 加载插件 → 插件读取本机凭据」的链路。
 #[tauri::command]
 pub async fn request_plugin_trust(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, AppState>,
     adapter_id: String,
 ) -> Result<String, String> {
@@ -63,11 +63,17 @@ pub async fn request_plugin_trust(
     }
     let data_dir = state.host.qwitch_data_dir().map_err(|e| e.to_string())?;
     let plugins = crate::adapter::external::scan_external_manifests(&data_dir);
-    let found = plugins
-        .iter()
+    let (plugin_dir, found) = plugins
+        .into_iter()
         .find(|(_, m)| m.id == id)
-        .map(|(_, m)| m.clone())
         .ok_or_else(|| format!("未找到外部插件 {id}"))?;
+    let content_hash = crate::adapter::external::adapter_content_hash(&plugin_dir)?;
+    let hash_preview = content_hash.chars().take(12).collect::<String>();
+    let entry_summary = if found.entry.args.is_empty() {
+        found.entry.command.clone()
+    } else {
+        format!("{} {}", found.entry.command, found.entry.args.join(" "))
+    };
 
     let already_trusted = load_app_settings(&state.db)
         .trusted_adapters
@@ -86,14 +92,14 @@ pub async fn request_plugin_trust(
         };
         let detail = if already_trusted {
             format!(
-                "插件：{display}\nID：{id_for_dialog}\n\n\
+                "插件：{display}\nID：{id_for_dialog}\n入口：{entry_summary}\n内容校验：{hash_preview}…\n\n\
                  检测到该插件的内容哈希已发生变更（或尚未固定校验哈希）。\
                  重新信任后，系统将固定新的内容哈希，并在随 Qwitch 启动时允许其读取本机客户端凭据与当前用户目录下的文件。\n\n\
                  仅在你确认该变更是安全升级或来源可信时继续。"
             )
         } else {
             format!(
-                "插件：{display}\nID：{id_for_dialog}\n\n\
+                "插件：{display}\nID：{id_for_dialog}\n入口：{entry_summary}\n内容校验：{hash_preview}…\n\n\
                  信任后，该插件将随 Qwitch 启动并被授予访问本机客户端凭据的能力，\
                  可读取当前用户目录下的文件。\n\n\
                  仅在你确认该插件来源可信时继续。"
@@ -110,12 +116,11 @@ pub async fn request_plugin_trust(
     .await
     .map_err(|e| format!("信任确认对话框执行失败: {e}"))?;
 
-    let _ = app.emit("qwitch://logs-updated", ());
     if !confirmed {
         return Err("已取消：未授予该插件的信任".into());
     }
 
-    Ok(super::issue_plugin_trust_ticket(&store, &id))
+    Ok(super::issue_plugin_trust_ticket(&store, &id, &content_hash))
 }
 
 #[tauri::command]
@@ -177,7 +182,7 @@ fn resolve_trusted_adapters_and_hashes(
     requested_hashes: &HashMap<String, String>,
     disk_hashes: &HashMap<String, String>,
     tickets: Option<&HashMap<String, String>>,
-    ticket_store: &std::sync::Mutex<HashMap<String, (String, u64)>>,
+    ticket_store: &std::sync::Mutex<super::PluginTrustTicketMap>,
 ) -> Result<(Vec<String>, HashMap<String, String>), String> {
     let mut normalized_trusted = Vec::new();
     let mut seen_trusted = std::collections::HashSet::new();
@@ -267,7 +272,8 @@ fn resolve_trusted_adapters_and_hashes(
         }
         for id in &plugins_needing_ticket {
             let ticket = tickets_map.get(id).expect("checked above");
-            super::consume_plugin_trust_ticket(ticket_store, id, ticket)?;
+            let expected_hash = resolved_hashes.get(id).map(String::as_str).unwrap_or("");
+            super::consume_plugin_trust_ticket(ticket_store, id, ticket, expected_hash)?;
         }
     }
 
@@ -464,43 +470,52 @@ pub async fn reconcile_active_accounts(
 #[cfg(test)]
 mod plugin_trust_ticket_tests {
     use super::super::{
-        consume_plugin_trust_ticket, issue_plugin_trust_ticket, PLUGIN_TRUST_TICKET_TTL_MS,
+        consume_plugin_trust_ticket, issue_plugin_trust_ticket, PluginTrustTicketMap,
+        PLUGIN_TRUST_TICKET_TTL_MS,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
 
     #[test]
-    fn ticket_is_single_use_and_bound_to_adapter_id() {
-        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
-        let ticket = issue_plugin_trust_ticket(&store, "my_plugin");
+    fn ticket_is_single_use_and_bound_to_adapter_id_and_hash() {
+        let store: Mutex<PluginTrustTicketMap> = Mutex::new(HashMap::new());
+        let ticket = issue_plugin_trust_ticket(&store, "my_plugin", "hash_v1");
 
         // 错配 adapter id 无效
-        assert!(consume_plugin_trust_ticket(&store, "other_plugin", &ticket).is_err());
+        assert!(consume_plugin_trust_ticket(&store, "other_plugin", &ticket, "hash_v1").is_err());
         // 错配票据无效
-        assert!(consume_plugin_trust_ticket(&store, "my_plugin", "bogus").is_err());
+        assert!(consume_plugin_trust_ticket(&store, "my_plugin", "bogus", "hash_v1").is_err());
         // 正确票据首次消费成功
-        consume_plugin_trust_ticket(&store, "my_plugin", &ticket).expect("first consume");
+        consume_plugin_trust_ticket(&store, "my_plugin", &ticket, "hash_v1")
+            .expect("first consume");
         // 二次消费失败（一次性）
         assert!(
-            consume_plugin_trust_ticket(&store, "my_plugin", &ticket).is_err(),
+            consume_plugin_trust_ticket(&store, "my_plugin", &ticket, "hash_v1").is_err(),
             "票据必须一次性，重放应被拒绝"
         );
+
+        // 审批后内容哈希变更必须拒绝并销毁原票据
+        let ticket2 = issue_plugin_trust_ticket(&store, "my_plugin", "hash_v1");
+        assert!(
+            consume_plugin_trust_ticket(&store, "my_plugin", &ticket2, "hash_tampered").is_err()
+        );
+        assert!(consume_plugin_trust_ticket(&store, "my_plugin", &ticket2, "hash_v1").is_err());
     }
 
     #[test]
     fn reissuing_invalidates_previous_ticket() {
-        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
-        let first = issue_plugin_trust_ticket(&store, "p1");
-        let second = issue_plugin_trust_ticket(&store, "p1");
+        let store: Mutex<PluginTrustTicketMap> = Mutex::new(HashMap::new());
+        let first = issue_plugin_trust_ticket(&store, "p1", "h1");
+        let second = issue_plugin_trust_ticket(&store, "p1", "h1");
         assert_ne!(first, second);
-        assert!(consume_plugin_trust_ticket(&store, "p1", &first).is_err());
-        consume_plugin_trust_ticket(&store, "p1", &second).expect("latest ticket valid");
+        assert!(consume_plugin_trust_ticket(&store, "p1", &first, "h1").is_err());
+        consume_plugin_trust_ticket(&store, "p1", &second, "h1").expect("latest ticket valid");
     }
 
     #[test]
     fn expired_ticket_is_rejected() {
-        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
-        let ticket = issue_plugin_trust_ticket(&store, "p2");
+        let store: Mutex<PluginTrustTicketMap> = Mutex::new(HashMap::new());
+        let ticket = issue_plugin_trust_ticket(&store, "p2", "h2");
         // 手动把签发时间回拨到超过 TTL
         {
             let mut map = store.lock().unwrap();
@@ -510,16 +525,20 @@ mod plugin_trust_ticket_tests {
                 .as_millis() as u64;
             map.insert(
                 "p2".to_string(),
-                (ticket.clone(), now - PLUGIN_TRUST_TICKET_TTL_MS - 1_000),
+                (
+                    ticket.clone(),
+                    "h2".to_string(),
+                    now - PLUGIN_TRUST_TICKET_TTL_MS - 1_000,
+                ),
             );
         }
-        assert!(consume_plugin_trust_ticket(&store, "p2", &ticket).is_err());
+        assert!(consume_plugin_trust_ticket(&store, "p2", &ticket, "h2").is_err());
     }
 
     #[test]
     fn missing_ticket_is_rejected() {
-        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
-        assert!(consume_plugin_trust_ticket(&store, "never_issued", "x").is_err());
+        let store: Mutex<PluginTrustTicketMap> = Mutex::new(HashMap::new());
+        assert!(consume_plugin_trust_ticket(&store, "never_issued", "x", "h").is_err());
     }
 
     #[test]
@@ -527,7 +546,7 @@ mod plugin_trust_ticket_tests {
         use super::resolve_trusted_adapters_and_hashes;
         use crate::domain::AppSettingsDto;
 
-        let store: Mutex<HashMap<String, (String, u64)>> = Mutex::new(HashMap::new());
+        let store: Mutex<PluginTrustTicketMap> = Mutex::new(HashMap::new());
         let previous = AppSettingsDto {
             trusted_adapters: vec!["ext_demo".to_string()],
             trusted_adapter_hashes: HashMap::from([(
@@ -568,7 +587,7 @@ mod plugin_trust_ticket_tests {
         assert!(err.contains("缺少原生信任确认"));
 
         // 签发并携带原生确认票据后允许重签为 new_hash，且票据一次性消费
-        let ticket = issue_plugin_trust_ticket(&store, "ext_demo");
+        let ticket = issue_plugin_trust_ticket(&store, "ext_demo", "new_hash");
         let tickets = HashMap::from([("ext_demo".to_string(), ticket)]);
         let (_, hashes_resigned) = resolve_trusted_adapters_and_hashes(
             &previous,

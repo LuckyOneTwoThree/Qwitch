@@ -324,7 +324,8 @@ pub fn create_all_adapters(
         if &actual_hash != expected_hash {
             continue;
         }
-        map.entry(id).or_insert(ext);
+        map.entry(id)
+            .or_insert_with(|| Arc::new(ext.with_pinned_hash(actual_hash)));
     }
 
     map

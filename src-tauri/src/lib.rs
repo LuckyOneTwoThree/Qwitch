@@ -187,15 +187,13 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show_main, &quit])?;
 
             #[cfg(target_os = "macos")]
-            let tray_icon = tauri::include_image!("icons/tray-template.png");
+            let tray_builder = TrayIconBuilder::with_id("qwitch-tray")
+                .icon(tauri::include_image!("icons/tray-template.png"))
+                .icon_as_template(true);
             #[cfg(not(target_os = "macos"))]
-            let tray_icon = tauri::include_image!("icons/32x32.png");
+            let tray_builder = TrayIconBuilder::with_id("qwitch-tray")
+                .icon(tauri::include_image!("icons/32x32.png"));
 
-            let mut tray_builder = TrayIconBuilder::with_id("qwitch-tray").icon(tray_icon);
-            #[cfg(target_os = "macos")]
-            {
-                tray_builder = tray_builder.icon_as_template(true);
-            }
             tray_builder
                 .menu(&menu)
                 .show_menu_on_left_click(false)

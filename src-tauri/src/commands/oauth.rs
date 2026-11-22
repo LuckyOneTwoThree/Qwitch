@@ -392,6 +392,7 @@ fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
             "163.com",
             "netease.com",
             "126.com",
+            "126.net",
             "127.net",
             "ydstatic.com",
             "weixin.qq.com",
@@ -1535,6 +1536,7 @@ mod tests {
         for url in [
             "https://lobsterai-server.youdao.com/login",
             "https://lobsterai.youdao.com/portal",
+            "https://cstatic.126.net/dummy.js",
             "https://dun.163.com/api/v2/check",
             "https://urs.netease.com/login",
             "https://open.weixin.qq.com/connect/qrconnect",

@@ -26,6 +26,7 @@ use crate::domain::{
 use crate::platform::PlatformHost;
 
 const DEFAULT_SERVER_BASE: &str = "https://lobsterai-server.youdao.com";
+const DEFAULT_PORTAL_LOGIN_URL: &str = "https://lobsterai.youdao.com/portal#/login";
 const CLIENT_VERSION: &str = "2026.11.20";
 const USER_AGENT_VALUE: &str = "LobsterAI/2026.11.20";
 const LOBSTERAI_DB_FILE: &str = "lobsterai.sqlite";
@@ -91,21 +92,16 @@ impl LobsterAiAdapter {
     }
 
     /// 构造官方桌面授权登录入口 URL（经由 Qwitch 内置 WebView loop-back 拦截回调）。
+    /// 对带 Hash 路由的门户地址（如 `.../portal#/login`），将参数写入 fragment 内查询串。
     pub fn build_oauth_login_url(redirect_uri: &str, state: &str) -> Result<String, AdapterError> {
-        let base = format!("{DEFAULT_SERVER_BASE}/login");
-        let url = reqwest::Url::parse_with_params(
-            &base,
+        append_login_params(
+            DEFAULT_PORTAL_LOGIN_URL,
             &[
                 ("source", "electron"),
                 ("redirect_uri", redirect_uri),
                 ("state", state),
             ],
         )
-        .map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("构造有道龙虾授权链接失败: {e}"),
-        })?;
-        Ok(url.into())
     }
 
     /// 通过授权回调一次性 `authCode` 换取双令牌并构建可落盘凭据。
@@ -1348,6 +1344,56 @@ impl ToolAdapter for LobsterAiAdapter {
     }
 }
 
+fn set_url_query_params(url: &mut reqwest::Url, params: &[(&str, &str)]) {
+    let mut merged: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| !params.iter().any(|(pk, _)| *pk == k.as_ref()))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    for (k, v) in params {
+        merged.push(((*k).to_string(), (*v).to_string()));
+    }
+    url.set_query(None);
+    if !merged.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (k, v) in &merged {
+            pairs.append_pair(k, v);
+        }
+    }
+}
+
+fn append_login_params(base_url: &str, params: &[(&str, &str)]) -> Result<String, AdapterError> {
+    let mut parsed = reqwest::Url::parse(base_url).map_err(|e| AdapterError::Unified {
+        code: UnifiedErrorCode::InternalError,
+        message: format!("构造有道龙虾授权链接失败: {e}"),
+    })?;
+    if let Some(frag) = parsed
+        .fragment()
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+    {
+        let (hash_path, hash_query) = frag.split_once('?').unwrap_or((&frag, ""));
+        let mut dummy = reqwest::Url::parse("https://placeholder.local/").map_err(|e| {
+            AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("构造有道龙虾授权链接参数失败: {e}"),
+            }
+        })?;
+        if !hash_query.is_empty() {
+            dummy.set_query(Some(hash_query));
+        }
+        set_url_query_params(&mut dummy, params);
+        let next_fragment = match dummy.query().filter(|q| !q.is_empty()) {
+            Some(q) => format!("{hash_path}?{q}"),
+            None => hash_path.to_string(),
+        };
+        parsed.set_fragment(Some(&next_fragment));
+    } else {
+        set_url_query_params(&mut parsed, params);
+    }
+    Ok(parsed.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2027,5 +2073,36 @@ mod tests {
         assert_eq!(env.uid, "8001");
         assert_eq!(env.display_name.as_deref(), Some("OAuth龙虾"));
         assert_eq!(env.capability_flags(), (true, true));
+    }
+
+    #[test]
+    fn build_oauth_login_url_targets_portal_hash_route() {
+        let redirect_uri = "http://127.0.0.1:47821/auth/callback";
+        let state = "nonce-abc-123";
+        let raw = LobsterAiAdapter::build_oauth_login_url(redirect_uri, state)
+            .expect("build oauth login url");
+        let parsed = reqwest::Url::parse(&raw).expect("valid url");
+
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(parsed.host_str(), Some("lobsterai.youdao.com"));
+        assert_eq!(parsed.path(), "/portal");
+        assert!(parsed.query().is_none(), "portal query 应放在 Hash 路由内");
+
+        let frag = parsed.fragment().expect("portal hash fragment");
+        let (hash_path, hash_query) = frag.split_once('?').expect("fragment query");
+        assert_eq!(hash_path, "/login");
+
+        let dummy = reqwest::Url::parse(&format!("https://placeholder.local/?{hash_query}"))
+            .expect("parse fragment query");
+        let params: HashMap<String, String> = dummy
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(params.get("source").map(String::as_str), Some("electron"));
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some(redirect_uri)
+        );
+        assert_eq!(params.get("state").map(String::as_str), Some(state));
     }
 }

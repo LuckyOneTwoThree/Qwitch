@@ -26,7 +26,8 @@ use crate::platform::PlatformHost;
 const DEFAULT_WEB_BASE: &str = "https://www.doubao.com";
 const DEFAULT_ACCOUNTS_BASE: &str = "https://accounts.doubao.com";
 const AID: &str = "1044603";
-const DOUBAO_QUERY: &str = "aid=1044603&device_platform=web&version_code=20800&pc_version=2.37.19";
+const DOUBAO_QUERY: &str = "aid=1044603&real_aid=1044603&device_platform=web&doubao_device_platform=desktop&web_platform=desktop&pkg_type=release_version&version_code=20800&pc_version=2.37.19&doubao_pc_version=2.37.19&runtime=web&runtime_version=3.46.7&language=zh&region=CN&sys_region=CN&samantha_web=1&use-olympus-account=1";
+const DEFAULT_CHECKIN_SCENE: &str = "pc_incentive_task_mvp_v3";
 const DOUBAO_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const SNAPSHOT_ZIP_KEY: &str = "doubaowork_profile.zip";
@@ -518,6 +519,7 @@ impl DoubaoWorkAdapter {
             .header(ACCEPT, "application/json")
             .header(CONTENT_TYPE, "application/json")
             .header(USER_AGENT, DOUBAO_USER_AGENT)
+            .header("agw-js-conv", "str")
             .header("Origin", DEFAULT_WEB_BASE)
             .header(REFERER, format!("{DEFAULT_WEB_BASE}/"))
             .header(COOKIE, cookie)
@@ -694,9 +696,12 @@ impl DoubaoWorkAdapter {
     }
 
     fn extract_landing_scene(data: &Value) -> Option<String> {
-        data.pointer("/extra_params/campaign_code")
+        data.get("campaign_group_code")
             .and_then(non_empty_str)
-            .or_else(|| data.get("campaign_group_code").and_then(non_empty_str))
+            .or_else(|| {
+                data.pointer("/extra_params/campaign_group_code")
+                    .and_then(non_empty_str)
+            })
     }
 }
 
@@ -1034,6 +1039,18 @@ fn epoch_num_to_rfc3339(n: i64) -> Option<String> {
     }
 }
 
+fn is_terminal_claim_error(err: &AdapterError) -> bool {
+    matches!(
+        err,
+        AdapterError::Unified {
+            code: UnifiedErrorCode::AuthExpired
+                | UnifiedErrorCode::RiskTriggered
+                | UnifiedErrorCode::RateLimited,
+            ..
+        }
+    )
+}
+
 fn finalize_claimed_quota(
     inspected: Option<QuotaSnapshot>,
     precheck: Option<&QuotaSnapshot>,
@@ -1173,66 +1190,96 @@ impl ToolAdapter for DoubaoWorkAdapter {
             });
         }
 
-        let body = match Self::extract_landing_scene(&landing) {
-            Some(scene) => serde_json::json!({ "scene": scene }),
-            None => serde_json::json!({}),
+        let candidates = match Self::extract_landing_scene(&landing) {
+            Some(scene) => [serde_json::json!({ "scene": scene }), serde_json::json!({})],
+            None => [
+                serde_json::json!({}),
+                serde_json::json!({ "scene": DEFAULT_CHECKIN_SCENE }),
+            ],
         };
         let checkin_path = format!("/alice/ug/campaign/landing/checkin?{DOUBAO_QUERY}");
-        let raw = self
-            .post_with_cookie(&checkin_path, &cookie, &body, "领取豆包工作每日签到额度")
-            .await?;
+        let mut last_err: Option<AdapterError> = None;
 
-        let code = raw.get("code").and_then(int_field);
-        let msg = raw
-            .get("msg")
-            .or_else(|| raw.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let data = raw.get("data").unwrap_or(&Value::Null);
-        let checked_in = data
-            .get("checked_in")
-            .is_some_and(|v| v.as_bool() == Some(true) || int_field(v) == Some(1));
-
-        if matches!(code, Some(0 | 200)) && checked_in {
-            let days = data.get("continuous_days").and_then(int_field).unwrap_or(0);
-            let reward_summary = if days > 0 {
-                format!("每日签到成功（已连续签到 {days} 天）")
-            } else {
-                "每日签到已完成".to_string()
+        for body in candidates {
+            let raw = match self
+                .post_with_cookie(&checkin_path, &cookie, &body, "领取豆包工作每日签到额度")
+                .await
+            {
+                Ok(v) => v,
+                Err(err) => {
+                    if is_terminal_claim_error(&err) {
+                        return Err(err);
+                    }
+                    last_err = Some(err);
+                    continue;
+                }
             };
-            let refreshed = finalize_claimed_quota(self.inspect_quota(cred).await.ok(), precheck);
-            return Ok(ClaimResult {
-                claimed: true,
-                reward_summary,
-                updated_quota: refreshed,
-            });
+
+            let code = raw.get("code").and_then(int_field);
+            let msg = raw
+                .get("msg")
+                .or_else(|| raw.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let data = raw.get("data").unwrap_or(&Value::Null);
+            let checked_in = data
+                .get("checked_in")
+                .is_some_and(|v| v.as_bool() == Some(true) || int_field(v) == Some(1));
+
+            if matches!(code, Some(0 | 200)) && checked_in {
+                let days = data.get("continuous_days").and_then(int_field).unwrap_or(0);
+                let reward_summary = if days > 0 {
+                    format!("每日签到成功（已连续签到 {days} 天）")
+                } else {
+                    "每日签到已完成".to_string()
+                };
+                let refreshed =
+                    finalize_claimed_quota(self.inspect_quota(cred).await.ok(), precheck);
+                return Ok(ClaimResult {
+                    claimed: true,
+                    reward_summary,
+                    updated_quota: refreshed,
+                });
+            }
+
+            let nested_msg = data
+                .get("msg")
+                .or_else(|| data.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if is_idempotent_claimed_phrase(msg) || is_idempotent_claimed_phrase(nested_msg) {
+                return Ok(ClaimResult {
+                    claimed: false,
+                    reward_summary: "今日已签过".into(),
+                    updated_quota: finalize_claimed_quota(
+                        self.inspect_quota(cred).await.ok(),
+                        precheck,
+                    ),
+                });
+            }
+
+            let attempt_err = match Self::check_agw_code(&raw, "领取豆包工作每日签到额度", true)
+            {
+                Ok(()) => AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: if msg.trim().is_empty() {
+                        "豆包工作每日签到未完成".into()
+                    } else {
+                        format!("豆包工作每日签到未完成：{msg}")
+                    },
+                },
+                Err(err) => err,
+            };
+            if is_terminal_claim_error(&attempt_err) {
+                return Err(attempt_err);
+            }
+            last_err = Some(attempt_err);
         }
 
-        let nested_msg = data
-            .get("msg")
-            .or_else(|| data.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if is_idempotent_claimed_phrase(msg) || is_idempotent_claimed_phrase(nested_msg) {
-            return Ok(ClaimResult {
-                claimed: false,
-                reward_summary: "今日已签过".into(),
-                updated_quota: finalize_claimed_quota(
-                    self.inspect_quota(cred).await.ok(),
-                    precheck,
-                ),
-            });
-        }
-
-        Self::check_agw_code(&raw, "领取豆包工作每日签到额度", true)?;
-        Err(AdapterError::Unified {
+        Err(last_err.unwrap_or_else(|| AdapterError::Unified {
             code: UnifiedErrorCode::NetworkError,
-            message: if msg.trim().is_empty() {
-                "豆包工作每日签到未完成".into()
-            } else {
-                format!("豆包工作每日签到未完成：{msg}")
-            },
-        })
+            message: "豆包工作每日签到未完成".into(),
+        }))
     }
 
     async fn apply_session(
@@ -1823,5 +1870,146 @@ mod tests {
             "landing_cards": [{ "card_code": "daily_signin", "buttons": [] }]
         }));
         assert_eq!(cards_without_btn, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn extract_landing_scene_ignores_campaign_code_and_reads_group_code() {
+        let only_campaign_code = serde_json::json!({
+            "chosen_type": 1,
+            "extra_params": { "campaign_code": "sub_task_only" }
+        });
+        assert_eq!(
+            DoubaoWorkAdapter::extract_landing_scene(&only_campaign_code),
+            None
+        );
+
+        let top_group_code = serde_json::json!({
+            "campaign_group_code": "pc_incentive_task_mvp_v3",
+            "extra_params": { "campaign_code": "sub_task_only" }
+        });
+        assert_eq!(
+            DoubaoWorkAdapter::extract_landing_scene(&top_group_code).as_deref(),
+            Some("pc_incentive_task_mvp_v3")
+        );
+
+        let extra_group_code = serde_json::json!({
+            "extra_params": {
+                "campaign_code": "sub_task_only",
+                "campaign_group_code": "extra_group_v1"
+            }
+        });
+        assert_eq!(
+            DoubaoWorkAdapter::extract_landing_scene(&extra_group_code).as_deref(),
+            Some("extra_group_v1")
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_daily_falls_back_to_default_scene_on_710010702_and_does_not_retry_auth_error() {
+        use wiremock::matchers::{body_json, header};
+
+        // 场景 A: landing 仅含 extra_params.campaign_code（无 campaign_group_code）
+        // 首次传 {} 返回 710010702，自动回退 {"scene": "pc_incentive_task_mvp_v3"} 并签到成功
+        let server = MockServer::start().await;
+        let adapter = DoubaoWorkAdapter::with_base_urls(server.uri(), server.uri());
+        let cred = CredentialEnvelope {
+            tool_id: "doubaowork".to_string(),
+            uid: "778899".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "sessionid=valid-cookie; odin_tt=xyz".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/alice/ug/campaign/landing/get"))
+            .and(header("agw-js-conv", "str"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "chosen_type": 1,
+                    "extra_params": { "campaign_code": "sub_task_code" },
+                    "main_page_info": {
+                        "title": "每日签到领额度",
+                        "buttons": [{ "button_type": 2, "content": "立即签到" }]
+                    }
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/alice/ug/campaign/landing/checkin"))
+            .and(header("agw-js-conv", "str"))
+            .and(body_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 710010702,
+                "msg": "系统错误"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/alice/ug/campaign/landing/checkin"))
+            .and(header("agw-js-conv", "str"))
+            .and(body_json(
+                serde_json::json!({ "scene": DEFAULT_CHECKIN_SCENE }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "checked_in": true, "continuous_days": 2 }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let res = adapter
+            .claim_daily(&cred, None)
+            .await
+            .expect("fallback claim should succeed");
+        assert!(res.claimed);
+        assert!(res.reward_summary.contains("2 天"));
+
+        // 场景 B: 首次返回 401/1009 等终态认证错误，必须立即中止，绝不触发第二次 fallback 请求
+        let auth_server = MockServer::start().await;
+        let auth_adapter = DoubaoWorkAdapter::with_base_urls(auth_server.uri(), auth_server.uri());
+        Mock::given(method("POST"))
+            .and(path("/alice/ug/campaign/landing/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "chosen_type": 1,
+                    "main_page_info": {
+                        "title": "每日签到",
+                        "buttons": [{ "button_type": 2, "content": "立即签到" }]
+                    }
+                }
+            })))
+            .mount(&auth_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/alice/ug/campaign/landing/checkin"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 401,
+                "msg": "login expired"
+            })))
+            .expect(1)
+            .mount(&auth_server)
+            .await;
+
+        let auth_err = auth_adapter.claim_daily(&cred, None).await.unwrap_err();
+        assert!(matches!(
+            auth_err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
     }
 }

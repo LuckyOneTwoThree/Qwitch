@@ -9,6 +9,7 @@ describe("toolRegistry", () => {
       "qoder_cn",
       "minimax_code_cn",
       "lobsterai",
+      "doubaowork",
     ]);
   });
   it("returns brand meta for every built-in tool", () => {

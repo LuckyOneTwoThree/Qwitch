@@ -109,4 +109,40 @@ describe("AccountCard", () => {
     // 关键：Qoder 不得走 importAccount(local_import)——macOS 上无法解密必然失败
     expect(captureLocalSession).toHaveBeenCalledWith("acc-qoder-1");
   });
+
+  it("缺在线凭据时徽章显示「待授权」而非「正常」，并展示授权入口", () => {
+    const onOpenBindModal = vi.fn();
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          hasApiToken: false,
+          hasLocalSnapshot: true,
+          latestQuota: undefined,
+        }}
+        onOpenBindModal={onOpenBindModal}
+      />
+    );
+
+    expect(screen.getByText("待授权")).toBeTruthy();
+    expect(screen.queryByText("正常")).toBeNull();
+    expect(screen.getByRole("button", { name: /在线授权/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /粘贴凭据/ }));
+    expect(onOpenBindModal).toHaveBeenCalledWith(expect.objectContaining({ id: account.id }), "token_paste");
+  });
+
+  it("缺本机切号快照时徽章显示「待关联」而非「正常」", () => {
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          hasApiToken: true,
+          hasLocalSnapshot: false,
+        }}
+      />
+    );
+
+    expect(screen.getByText("待关联")).toBeTruthy();
+    expect(screen.queryByText("正常")).toBeNull();
+  });
 });

@@ -86,6 +86,19 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
       supportsMultiInstance: false,
     },
   },
+  {
+    id: "doubaowork",
+    name: "豆包工作",
+    version: "0.1.0",
+    isBuiltin: true,
+    capabilities: {
+      authMethods: ["local_import", "webview_oauth", "token_paste"],
+      supportsQuotaQuery: true,
+      supportsDailyClaim: true,
+      supportsClientSwitch: true,
+      supportsMultiInstance: false,
+    },
+  },
 ];
 
 export const INITIAL_ACCOUNTS: AccountSummary[] = [
@@ -351,6 +364,33 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
       ],
     },
     updatedAt: cstTimestamp(0, 10, 2),
+  },
+  {
+    id: "acc-doubaowork-1",
+    toolId: "doubaowork",
+    label: "豆包工作 · 主号",
+    uidMasked: "dw_71****9e",
+    status: "active",
+    isActiveOnClient: true,
+    hasLocalSnapshot: true,
+    hasApiToken: true,
+    latestQuota: {
+      planName: "免费版",
+      claimStatus: "available",
+      fetchedAt: cstTimestamp(0, 9, 55),
+      buckets: [
+        {
+          key: "incentive_3_0_0",
+          label: "活动奖励额度",
+          used: 120,
+          total: 1000,
+          remaining: 880,
+          unit: "额度",
+          resetAt: nextMonthResetCst(),
+        },
+      ],
+    },
+    updatedAt: cstTimestamp(0, 9, 55),
   },
 ];
 

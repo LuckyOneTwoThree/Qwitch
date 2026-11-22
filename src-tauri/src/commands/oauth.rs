@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::adapter::{
-    lobsterai::LobsterAiAdapter, minimax::MiniMaxAdapter, qoder::QoderAdapter,
-    workbuddy::WorkBuddyAdapter, AdapterError, ToolAdapter,
+    doubaowork::DoubaoWorkAdapter, lobsterai::LobsterAiAdapter, minimax::MiniMaxAdapter,
+    qoder::QoderAdapter, workbuddy::WorkBuddyAdapter, AdapterError, ToolAdapter,
 };
 use crate::domain::UnifiedErrorCode;
 use crate::platform::PlatformHost;
@@ -401,6 +401,25 @@ fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
             "github.com",
             "microsoftonline.com",
         ],
+        "doubaowork" => &[
+            "doubao.com",
+            "doubaocdn.com",
+            "douyin.com",
+            "bytedance.com",
+            "bytegoofy.com",
+            "bytetos.com",
+            "byteimg.com",
+            "snssdk.com",
+            "feishu.cn",
+            "larkoffice.com",
+            "volcengine.com",
+            "yhgfb-cn-static.com",
+            "zijieapi.com",
+            "qq.com",
+            "weixin.qq.com",
+            "wx.qq.com",
+            "apple.com",
+        ],
         _ => &[],
     }
 }
@@ -615,6 +634,7 @@ pub async fn start_webview_oauth(
     enum OAuthMode {
         TraeCapture,
         LobsterAiCallback,
+        DoubaoCookiePoll,
         WorkBuddyPoll {
             state_token: String,
         },
@@ -639,6 +659,10 @@ pub async fn start_webview_oauth(
                     .map_err(|e| format!("{e}"))?;
             (auth_url, OAuthMode::LobsterAiCallback)
         }
+        "doubaowork" => (
+            "https://www.doubao.com/chat/".to_string(),
+            OAuthMode::DoubaoCookiePoll,
+        ),
         "workbuddy" => {
             let (state_token, auth_url) = WorkBuddyAdapter::create_oauth_session().await?;
             (auth_url, OAuthMode::WorkBuddyPoll { state_token })
@@ -696,8 +720,8 @@ pub async fn start_webview_oauth(
         OAuthMode::LobsterAiCallback
         | OAuthMode::WorkBuddyPoll { .. }
         | OAuthMode::QoderPkcePoll { .. } => POPUP_REDIRECT_JS.to_string(),
-        // MiniMax 官方登录页依赖自身 window.open / 验证码 iframe，注入任何脚本都可能干扰
-        OAuthMode::MiniMaxDevicePoll { .. } => String::new(),
+        // MiniMax / 豆包工作官方登录页依赖自身 window.open / 验证码及安全脚本，不注入自定义 JS
+        OAuthMode::MiniMaxDevicePoll { .. } | OAuthMode::DoubaoCookiePoll => String::new(),
     };
 
     let mut builder = WebviewWindowBuilder::new(&app, &win_label, WebviewUrl::External(parsed_url))
@@ -1166,9 +1190,189 @@ pub async fn start_webview_oauth(
                 }
             });
         }
+        OAuthMode::DoubaoCookiePoll => {
+            tauri::async_runtime::spawn(async move {
+                let mut consecutive_errors: u32 = 0;
+                let mut last_rejected_cookie: Option<String> = None;
+                let mut finished = false;
+                for _ in 0..180 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    if flow_seq.load(Ordering::SeqCst) != flow_id {
+                        finished = true;
+                        break;
+                    }
+                    let Some(win) = app_handle.get_webview_window(&win_label) else {
+                        finished = true;
+                        break;
+                    };
+                    let win_for_cookies = win.clone();
+                    let cookies = match tokio::task::spawn_blocking(move || {
+                        win_for_cookies.cookies()
+                    })
+                    .await
+                    {
+                        Ok(Ok(list)) => list,
+                        _ => continue,
+                    };
+                    let Some(cookie_header) = build_doubao_cookie_header(&cookies) else {
+                        continue;
+                    };
+                    if last_rejected_cookie.as_deref() == Some(cookie_header.as_str()) {
+                        continue;
+                    }
+                    match DoubaoWorkAdapter::verify_cookie_and_build_envelope(&cookie_header).await
+                    {
+                        Ok(envelope) => {
+                            finished = true;
+                            persist_oauth_envelope(
+                                &app_handle,
+                                &db,
+                                &host_arc,
+                                &master_key,
+                                &adapter,
+                                &scheduler_arc,
+                                &flow_seq,
+                                flow_id,
+                                &win_label,
+                                &tool_id_owned,
+                                &label_owned,
+                                target_id_owned.as_deref(),
+                                envelope,
+                            )
+                            .await;
+                            break;
+                        }
+                        Err(AdapterError::Unified {
+                            code:
+                                UnifiedErrorCode::InvalidCredential | UnifiedErrorCode::AuthExpired,
+                            ..
+                        }) => {
+                            last_rejected_cookie = Some(cookie_header);
+                            consecutive_errors = 0;
+                        }
+                        Err(err) => {
+                            consecutive_errors += 1;
+                            if consecutive_errors >= 5 {
+                                finished = true;
+                                if flow_seq.load(Ordering::SeqCst) == flow_id {
+                                    let _ = app_handle.emit(
+                                        "qwitch://oauth-error",
+                                        crate::storage::crypto::sanitize_log_message(&format!(
+                                            "{err}"
+                                        )),
+                                    );
+                                    let _ = win.close();
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !finished && flow_seq.load(Ordering::SeqCst) == flow_id {
+                    if let Some(win) = app_handle.get_webview_window(&win_label) {
+                        let _ = app_handle.emit(
+                            "qwitch://oauth-error",
+                            "豆包工作内置授权登录超时（4.5 分钟未完成），请重试",
+                        );
+                        let _ = win.close();
+                    }
+                }
+            });
+        }
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RawDoubaoCookie<'a> {
+    domain: Option<&'a str>,
+    name: &'a str,
+    value: &'a str,
+    expired: bool,
+}
+
+fn is_doubao_cookie_domain(raw_domain: Option<&str>) -> bool {
+    let Some(raw) = raw_domain else {
+        return false;
+    };
+    let d = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    d == "doubao.com" || d.ends_with(".doubao.com")
+}
+
+fn is_valid_http_cookie_pair(name: &str, value: &str) -> bool {
+    if name.is_empty()
+        || value.is_empty()
+        || name
+            .bytes()
+            .any(|b| !(0x21..0x7f).contains(&b) || matches!(b, b';' | b'='))
+        || value
+            .bytes()
+            .any(|b| !(0x20..0x7f).contains(&b) || b == b';')
+    {
+        return false;
+    }
+    reqwest::header::HeaderValue::from_str(&format!("{name}={value}")).is_ok()
+}
+
+fn build_doubao_cookie_header_from_entries(entries: &[RawDoubaoCookie<'_>]) -> Option<String> {
+    // 先按域名从泛到专排序（先 `.doubao.com`，后 `www.doubao.com`），确保主机级 Cookie 覆盖域级同名项
+    let mut matched: Vec<(usize, bool, &str, &str)> = Vec::new();
+    for entry in entries {
+        if entry.expired || !is_doubao_cookie_domain(entry.domain) {
+            continue;
+        }
+        let name = entry.name.trim();
+        let val = entry.value.trim();
+        if !is_valid_http_cookie_pair(name, val) {
+            continue;
+        }
+        let raw_dom = entry.domain.unwrap_or("").trim();
+        let norm_len = raw_dom.trim_start_matches('.').len();
+        let is_exact_host = !raw_dom.starts_with('.');
+        matched.push((norm_len, is_exact_host, name, val));
+    }
+    matched.sort_by_key(|(len, exact, _, _)| (*len, *exact));
+
+    let mut map = std::collections::BTreeMap::<&str, &str>::new();
+    for (_, _, name, val) in matched {
+        map.insert(name, val);
+    }
+
+    let has_session = ["sessionid", "sessionid_ss", "sid_tt"]
+        .iter()
+        .any(|k| map.get(k).is_some_and(|v| !v.is_empty()));
+    if !has_session {
+        return None;
+    }
+
+    let joined = map
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    reqwest::header::HeaderValue::from_str(&joined)
+        .ok()
+        .map(|_| joined)
+}
+
+fn build_doubao_cookie_header(cookies: &[tauri::webview::Cookie<'_>]) -> Option<String> {
+    let now_ts = chrono::Utc::now().timestamp();
+    let entries: Vec<RawDoubaoCookie<'_>> = cookies
+        .iter()
+        .map(|cookie| {
+            let expired = cookie
+                .expires_datetime()
+                .is_some_and(|dt| dt.unix_timestamp() <= now_ts);
+            RawDoubaoCookie {
+                domain: cookie.domain(),
+                name: cookie.name(),
+                value: cookie.value(),
+                expired,
+            }
+        })
+        .collect();
+    build_doubao_cookie_header_from_entries(&entries)
 }
 
 /// 尝试消费一个 OAuth 回调 nonce（一次性语义）。
@@ -1343,5 +1547,79 @@ mod tests {
 
         let non_cb: tauri::Url = "https://lobsterai.youdao.com/portal".parse().unwrap();
         assert_eq!(parse_lobster_callback_url(&non_cb, "nonce-ok"), None);
+    }
+
+    #[test]
+    fn doubaowork_oauth_whitelist_allows_official_domains_and_blocks_untrusted() {
+        let hosts = allowed_oauth_hosts("doubaowork");
+        for url in [
+            "https://www.doubao.com/chat/",
+            "https://accounts.doubao.com/passport/web/login/",
+            "https://open.douyin.com/platform/oauth/connect",
+            "https://lf-rc1.yhgfb-cn-static.com/obj/rc-verifycenter/captcha.js",
+            "https://passport.feishu.cn/suite/passport/page/login",
+        ] {
+            assert!(
+                is_allowed_oauth_url(&url.parse().unwrap(), hosts),
+                "应允许 {url}"
+            );
+        }
+        for bad in [
+            "http://www.doubao.com/chat/",
+            "https://evil.example.com/steal",
+        ] {
+            assert!(!is_allowed_oauth_url(&bad.parse().unwrap(), hosts));
+        }
+    }
+
+    #[test]
+    fn doubao_cookie_header_matches_subdomains_skips_expired_non_ascii_and_prefers_host() {
+        let entries = [
+            RawDoubaoCookie {
+                domain: Some(".doubao.com"),
+                name: "sessionid",
+                value: "wild-session",
+                expired: false,
+            },
+            RawDoubaoCookie {
+                domain: Some("www.doubao.com"),
+                name: "sessionid",
+                value: "host-session",
+                expired: false,
+            },
+            RawDoubaoCookie {
+                domain: Some(".doubao.com"),
+                name: "sid_tt",
+                value: "expired-sid",
+                expired: true,
+            },
+            RawDoubaoCookie {
+                domain: Some(".doubao.com"),
+                name: "cn_banner",
+                value: "豆包中文值",
+                expired: false,
+            },
+            RawDoubaoCookie {
+                domain: Some("evil-doubao.com"),
+                name: "sid_tt",
+                value: "evil-sid",
+                expired: false,
+            },
+            RawDoubaoCookie {
+                domain: Some("accounts.doubao.com"),
+                name: "odin_tt",
+                value: "ok_odin",
+                expired: false,
+            },
+        ];
+
+        let header =
+            build_doubao_cookie_header_from_entries(&entries).expect("valid cookie header");
+        assert!(header.contains("sessionid=host-session"));
+        assert!(header.contains("odin_tt=ok_odin"));
+        assert!(!header.contains("wild-session"));
+        assert!(!header.contains("expired-sid"));
+        assert!(!header.contains("cn_banner"));
+        assert!(!header.contains("evil-sid"));
     }
 }

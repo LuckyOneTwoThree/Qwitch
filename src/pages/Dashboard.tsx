@@ -60,6 +60,34 @@ import type {
 import { LogsPanel, LogsToolbar } from "./dashboard/LogsView";
 import { SettingsView } from "./dashboard/SettingsView";
 
+function SecondAccountGhostCard({
+  toolName,
+  scopeHint,
+  onClick,
+}: {
+  toolName: string;
+  scopeHint: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex min-h-[168px] flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-300/80 bg-white/50 p-4 text-center transition hover:border-zinc-400 hover:bg-white dark:border-zinc-700/80 dark:bg-zinc-900/40 dark:hover:border-zinc-600 dark:hover:bg-zinc-900/70"
+    >
+      <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-500 shadow-2xs transition group-hover:scale-105 group-hover:text-zinc-800 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400 dark:group-hover:text-zinc-200">
+        <Plus className="h-4 w-4" aria-hidden="true" />
+      </div>
+      <span className="mt-2.5 text-xs font-medium text-zinc-700 dark:text-zinc-300">
+        添加第 2 个 {toolName} 账号
+      </span>
+      <span className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+        {scopeHint}
+      </span>
+    </button>
+  );
+}
+
 export function Dashboard() {
   const {
     isInitializing,
@@ -372,6 +400,9 @@ export function Dashboard() {
   }, [nav, logStats, adapters.length, scopedStats, activeToolMeta]);
 
   const isFiltered = Boolean(searchQuery.trim()) || statusFilter !== "all";
+  const showFilterToolbar =
+    scopeAccounts.length > 0 &&
+    (nav === "all" || scopeAccounts.length > 1 || Boolean(searchQuery.trim()));
   const currentLogTotal =
     logScope === "archived" ? logStats.archivedCount : logStats.activeCount;
 
@@ -816,7 +847,15 @@ export function Dashboard() {
                   <span className="truncate text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
                     {scopedStats.eligibleClaimTotal > 0
                       ? `共 ${scopedStats.eligibleClaimTotal} 可签`
-                      : "仅查额/切号"}
+                      : scopedStats.unclaimedAuthMissingCount > 0
+                        ? "授权后可签"
+                        : scopedStats.unsupportedClaimCount > 0
+                          ? "当前套餐无签到"
+                          : activeToolFilter && activeToolSupportsClaim
+                            ? scopeAccounts.length === 0
+                              ? "导入后可签"
+                              : "暂无可签账号"
+                            : "仅查额/切号"}
                   </span>
                 </div>
               </button>
@@ -877,7 +916,7 @@ export function Dashboard() {
               </button>
             </section>
 
-            {scopeAccounts.length > 0 && (
+            {showFilterToolbar && (
               <div className="surface-card flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5">
                 <div className="relative min-w-[190px] flex-1 max-w-xs">
                   <Search
@@ -1010,7 +1049,7 @@ export function Dashboard() {
               {isInitializing && scopeAccounts.length === 0 ? (
                 <div
                   aria-label="正在加载本地账号库"
-                  className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]"
+                  className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))]"
                 >
                   {[0, 1, 2].map((idx) => (
                     <div
@@ -1135,37 +1174,38 @@ export function Dashboard() {
                         </button>
                       </div>
 
-                      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
+                      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))]">
                         {group.accounts.map((acc) => (
                           <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                         ))}
 
                         {group.accounts.length === 1 && !isFiltered && (
-                          <button
-                            type="button"
+                          <SecondAccountGhostCard
+                            toolName={group.name}
+                            scopeHint="新增副号后可在本模块内一键无缝切换桌面端登录态"
                             onClick={() => openImportModal("webview_oauth", group.id)}
-                            className="group flex min-h-[168px] flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-300/80 bg-white/50 p-4 text-center transition hover:border-zinc-400 hover:bg-white dark:border-zinc-700/80 dark:bg-zinc-900/40 dark:hover:border-zinc-600 dark:hover:bg-zinc-900/70"
-                          >
-                            <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-500 shadow-2xs transition group-hover:scale-105 group-hover:text-zinc-800 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400 dark:group-hover:text-zinc-200">
-                              <Plus className="h-4 w-4" aria-hidden="true" />
-                            </div>
-                            <span className="mt-2.5 text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                              添加第 2 个 {group.name} 账号
-                            </span>
-                            <span className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                              新增副号后可在本模块内一键无缝切换桌面端登录态
-                            </span>
-                          </button>
+                          />
                         )}
                       </div>
                     </section>
                   ))}
                 </div>
               ) : (
-                <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr))]">
+                <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))]">
                   {sortedFlatAccounts.map((acc) => (
                     <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                   ))}
+
+                  {activeToolFilter &&
+                    activeToolMeta &&
+                    sortedFlatAccounts.length === 1 &&
+                    !isFiltered && (
+                      <SecondAccountGhostCard
+                        toolName={activeToolMeta.name}
+                        scopeHint="新增副号后可在本页一键无缝切换桌面端登录态"
+                        onClick={() => openImportModal("webview_oauth", activeToolFilter)}
+                      />
+                    )}
                 </div>
               )}
             </>

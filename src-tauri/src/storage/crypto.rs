@@ -210,13 +210,27 @@ fn redact_kv_secrets(input: &str) -> String {
         "access_token",
         "refresh_token",
         "id_token",
+        "accessToken",
+        "refreshToken",
+        "idToken",
+        "authCode",
         "code_verifier",
         "client_secret",
         "authorization",
         "password",
         "verifier",
         "secret",
+        "set-cookie",
         "cookie",
+        "sessionid_ss",
+        "sessionid",
+        "sid_tt",
+        "sid_guard",
+        "uid_tt",
+        "sid_ucp_v1",
+        "ssid_ucp_v1",
+        "odin_tt",
+        "passport_csrf_token",
         "token",
         "state",
     ];
@@ -268,11 +282,17 @@ fn redact_kv_secrets(input: &str) -> String {
                 None
             };
             out.push_str(&input[i..j]);
+            let is_cookie_header = quote.is_none()
+                && (key.eq_ignore_ascii_case("cookie") || key.eq_ignore_ascii_case("set-cookie"));
             let val_start = j;
             while j < bytes.len() {
                 let b = bytes[j];
                 if let Some(q) = quote {
                     if b == q {
+                        break;
+                    }
+                } else if is_cookie_header {
+                    if matches!(b, b'\r' | b'\n') {
                         break;
                     }
                 } else if b.is_ascii_whitespace()
@@ -605,5 +625,19 @@ mod tests {
         let basic_auth = sanitize_log_message("header Authorization: Basic dXNlcjpwYXNz ok");
         assert!(!basic_auth.contains("dXNlcjpwYXNz"));
         assert!(basic_auth.contains("Authorization: Basic [REDACTED] ok"));
+
+        let cookie_header = sanitize_log_message(
+            "Header Cookie: a=1; sessionid=abc_secret_123; sid_tt=xyz_secret_789",
+        );
+        assert!(!cookie_header.contains("abc_secret_123"));
+        assert!(!cookie_header.contains("xyz_secret_789"));
+        assert!(cookie_header.contains("Cookie: [REDACTED]"));
+
+        let standalone_session =
+            sanitize_log_message("sessionid_ss=top_ss_999&odin_tt=odin_secret_88");
+        assert!(!standalone_session.contains("top_ss_999"));
+        assert!(!standalone_session.contains("odin_secret_88"));
+        assert!(standalone_session.contains("sessionid_ss=[REDACTED]"));
+        assert!(standalone_session.contains("odin_tt=[REDACTED]"));
     }
 }

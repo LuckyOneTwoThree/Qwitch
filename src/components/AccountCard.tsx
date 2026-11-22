@@ -216,15 +216,15 @@ export const AccountCard = React.memo(function AccountCard({
             <div className="flex min-w-0 flex-1 items-start gap-2.5">
               <ToolBrandIcon toolId={account.toolId} size="md" className="mt-0.5" decorative />
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {account.latestQuota?.planName && (
+                {account.latestQuota?.planName && (
+                  <div className="mb-0.5 flex flex-wrap items-center gap-1.5">
                     <span
                       className={`badge shrink-0 whitespace-nowrap ${toolMeta.badgeClass}`}
                     >
                       {account.latestQuota.planName}
                     </span>
-                  )}
-                </div>
+                  </div>
+                )}
 
                 {editingLabel ? (
                   <div className="mt-1 flex items-center gap-1">
@@ -267,7 +267,7 @@ export const AccountCard = React.memo(function AccountCard({
                     </button>
                   </div>
                 ) : (
-                  <div className="mt-0.5 flex items-center gap-1">
+                  <div className="flex items-center gap-1">
                     <h3 className="truncate text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">
                       {account.label}
                     </h3>
@@ -306,7 +306,11 @@ export const AccountCard = React.memo(function AccountCard({
             </div>
 
             <div className="flex shrink-0 flex-col items-end gap-1">
-              <AccountStatusBadge status={account.status} />
+              <AccountStatusBadge
+                status={account.status}
+                missingApiToken={missingApiToken}
+                missingLocalSnapshot={missingLocalSnapshot}
+              />
               {canClaim && !missingApiToken && (
                 <ClaimStatusBadge status={effectiveClaimStatus} />
               )}
@@ -315,11 +319,17 @@ export const AccountCard = React.memo(function AccountCard({
 
           <div className="mt-3 flex flex-col space-y-2">
             {missingApiToken ? (
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-xs">
-                <span className="leading-snug text-amber-900 dark:text-amber-200">
-                  已绑定切号快照 · 授权后开启查额与签到
-                </span>
-                <div className="flex shrink-0 items-center gap-1.5">
+              <div className="flex flex-col gap-2 rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2.5 text-xs">
+                <div className="flex items-start gap-1.5 text-amber-900 dark:text-amber-200">
+                  <AlertCircle
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+                    aria-hidden="true"
+                  />
+                  <span className="leading-snug">
+                    已绑定切号快照，授权后开启查额与签到
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
                     disabled={oauthLaunching}
@@ -335,6 +345,7 @@ export const AccountCard = React.memo(function AccountCard({
                       onClick={() => onOpenBindModal(account, "token_paste")}
                       className="btn btn-sm shrink-0 gap-1 whitespace-nowrap border border-amber-500/35 bg-white/80 text-[11px] font-medium text-amber-900 transition hover:bg-white dark:bg-zinc-900/70 dark:text-amber-200 dark:hover:bg-zinc-800"
                     >
+                      <ClipboardPaste className="h-3 w-3 shrink-0" aria-hidden="true" />
                       粘贴凭据
                     </button>
                   )}

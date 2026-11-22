@@ -1231,11 +1231,11 @@ fn normalize_daily_claim_status_on_date(
     today_cst: NaiveDate,
     tool_id: &str,
 ) -> ClaimStatus {
-    // 每日重置型工具（Trae/WorkBuddy/MiniMax/有道龙虾）以 last_claimed_at 为权威；
+    // 每日重置型工具（Trae/WorkBuddy/MiniMax/有道龙虾/豆包工作）以 last_claimed_at 为权威；
     // Qoder 活动按周期而非自然日，不适用"今日已领即 Claimed"覆盖
     let daily_reset_tool = matches!(
         tool_id,
-        "trae" | "trae_cn" | "workbuddy" | "minimax_code_cn" | "lobsterai"
+        "trae" | "trae_cn" | "workbuddy" | "minimax_code_cn" | "lobsterai" | "doubaowork"
     );
     let claimed_today = last_claimed_at
         .map(|ts| is_same_cst_day(ts, today_cst))

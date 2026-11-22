@@ -573,12 +573,16 @@ export function ImportAccountModal({  open,
             {method === "local_import"
               ? toolId === "qoder_cn"
                 ? "将读取本机 Qoder CN 当前登录会话用于快速切号；若该账号尚未在本工具内完成在线授权，导入后在卡片点击「在线授权」即可开启查额与签到。"
-                : "将自动识别本机已登录桌面端的会话与额度信息，同一账号重复导入将自动合并，不会产生冗余记录。"
+                : toolId === "doubaowork"
+                  ? "将采集本机豆包工作当前登录会话快照用于冷切换；若尚未关联在线 Cookie，导入后在卡片点击「在线授权」即可按同 UID 自动合并并开启查额与签到。"
+                  : "将自动识别本机已登录桌面端的会话与额度信息，同一账号重复导入将自动合并，不会产生冗余记录。"
               : method === "webview_oauth"
                 ? "将拉起无痕隔离的官方授权窗口（支持扫码/短信/2FA）；登录成功后若与本机桌面端为同一账号，将自动关联切号快照并同步最新额度。"
                 : toolId === "workbuddy"
                   ? "WorkBuddy 推荐直接粘贴完整会话 JSON（或包含用户标识的 JWT；企业版账号请附带 enterpriseId 字段），以便精准识别企业身份与接口头。"
-                  : "支持导入纯 Token 或结构化 JSON；若与已有账号 UID 匹配，将自动补充双轨凭据以开启查额与签到。"}
+                  : toolId === "doubaowork"
+                    ? "豆包工作支持直接粘贴 Cookie 请求头（含 sessionid）、cURL 命令或 JSON Cookie 映射；若与已有账号 UID 匹配，将自动合并开启查额与签到。"
+                    : "支持导入纯 Token 或结构化 JSON；若与已有账号 UID 匹配，将自动补充双轨凭据以开启查额与签到。"}
           </div>
         </div>
 

@@ -89,6 +89,17 @@ export const TOOL_BRAND_META: Record<string, ToolBrandMeta> = {
       "border-rose-500/20 bg-rose-500/10 text-rose-700 dark:text-rose-300",
     softBgClass: "bg-rose-500/8",
   },
+  doubaowork: {
+    id: "doubaowork",
+    name: "豆包工作",
+    shortTagline: "字节办公 Agent",
+    tagline: "字节跳动豆包工作桌面 Agent",
+    icon: "/icons/doubaowork.png",
+    accentDot: "bg-indigo-500",
+    badgeClass:
+      "border-indigo-500/20 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300",
+    softBgClass: "bg-indigo-500/8",
+  },
 };
 
 export const BUILTIN_TOOL_ORDER: ToolId[] = [
@@ -97,6 +108,7 @@ export const BUILTIN_TOOL_ORDER: ToolId[] = [
   "qoder_cn",
   "minimax_code_cn",
   "lobsterai",
+  "doubaowork",
 ];
 
 export function getToolBrandMeta(

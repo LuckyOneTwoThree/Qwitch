@@ -4,7 +4,24 @@ import type { AccountStatus, ClaimStatus } from "../types/qwitch";
  * 状态徽标统一使用 `.badge` 基元 + 语义色调，
  * 保证「正常 / 过期 / 风控 / 停用」四种状态在圆角、内边距、字重上完全一致。
  */
-export function AccountStatusBadge({ status }: { status: AccountStatus }) {
+export function AccountStatusBadge({
+  status,
+  missingApiToken = false,
+  missingLocalSnapshot = false,
+}: {
+  status: AccountStatus;
+  missingApiToken?: boolean;
+  missingLocalSnapshot?: boolean;
+}) {
+  if (status === "active" && (missingApiToken || missingLocalSnapshot)) {
+    return (
+      <span className="badge border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300">
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
+        {missingApiToken ? "待授权" : "待关联"}
+      </span>
+    );
+  }
+
   const styles: Record<AccountStatus, string> = {
     active: "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300",
     expired: "border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300",

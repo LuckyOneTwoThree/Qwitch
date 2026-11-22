@@ -17,4 +17,9 @@ describe("mockStore parity", () => {
     expect(lobster?.capabilities.supportsDailyClaim).toBe(true);
     expect(lobster?.capabilities.supportsClientSwitch).toBe(true);
   });
+  it("doubaowork supports daily claim and client switch", () => {
+    const dw = MOCK_ADAPTERS.find((a) => a.id === "doubaowork");
+    expect(dw?.capabilities.supportsDailyClaim).toBe(true);
+    expect(dw?.capabilities.supportsClientSwitch).toBe(true);
+  });
 });

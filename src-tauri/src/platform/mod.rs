@@ -259,6 +259,12 @@ pub fn client_spec(tool_id: &str) -> Option<ClientSpec> {
             win_exe_names: &["LobsterAI.exe"],
             win_folder_names: &["LobsterAI"],
         }),
+        "doubaowork" => Some(ClientSpec {
+            mac_app_names: &["DoubaoWork.app"],
+            mac_process_names: &["DoubaoWork", "DoubaoWork Browser"],
+            win_exe_names: &["DoubaoWork.exe"],
+            win_folder_names: &["DoubaoWork"],
+        }),
         _ => None,
     }
 }
@@ -485,33 +491,44 @@ impl NativePlatformHost {
     #[cfg(target_os = "macos")]
     fn is_macos_proc_running(proc_name: &str) -> Result<bool, HostError> {
         if proc_name.len() <= 15 {
-            let status = Command::new("pgrep")
+            let output = Command::new("pgrep")
                 .args(["-x", proc_name])
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
-                .status()?;
-            if !status.success() {
+                .output()?;
+            if !output.status.success() {
                 return Ok(false);
             }
             // 命中后复核：仅当存在非辅助进程的实例时才判定为运行中
-            return Ok(Self::has_non_helper_instance(proc_name));
+            return Ok(Self::has_non_helper_pids(
+                &String::from_utf8_lossy(&output.stdout),
+                proc_name,
+            ));
         }
         let needle = format!("/Contents/MacOS/{}", escape_pgrep_regex(proc_name));
-        let status = Command::new("pgrep")
+        let output = Command::new("pgrep")
             .args(["-f", &needle])
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()?;
-        if status.success() {
+            .output()?;
+        if output.status.success()
+            && Self::has_non_helper_pids(&String::from_utf8_lossy(&output.stdout), proc_name)
+        {
             return Ok(true);
         }
         let prefix: String = proc_name.chars().take(15).collect();
-        let fallback_status = Command::new("pgrep")
+        let fallback_output = Command::new("pgrep")
             .args(["-x", &prefix])
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()?;
-        Ok(fallback_status.success())
+            .output()?;
+        if !fallback_output.status.success() {
+            return Ok(false);
+        }
+        Ok(Self::has_non_helper_pids(
+            &String::from_utf8_lossy(&fallback_output.stdout),
+            proc_name,
+        ))
     }
 
     /// 从 `ps` 输出的完整命令行中剥离 `argv[0]`（兼容含空格的 macOS `.app` 路径）。
@@ -531,22 +548,12 @@ impl NativePlatformHost {
         }
     }
 
-    /// 在 `pgrep -x <proc_name>` 命中的进程里，筛选是否存在**非辅助**实例。
+    /// 在 `pgrep` 命中的 PID 列表中，筛选是否存在**非辅助**实例。
     ///
-    /// 用于排除 Native Messaging Host / Renderer / GPU 等共享同名 `comm` 的辅助进程。
+    /// 用于排除 Native Messaging Host / Renderer / GPU 等共享同名或截断名 `comm` 的辅助进程。
     #[cfg(target_os = "macos")]
-    fn has_non_helper_instance(proc_name: &str) -> bool {
-        let Ok(output) = Command::new("pgrep")
-            .args(["-x", proc_name])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-        else {
-            // pgrep 二次调用失败时保守返回 false（不误报运行中）
-            return false;
-        };
-        let pids = String::from_utf8_lossy(&output.stdout);
-        for pid in pids.split_whitespace() {
+    fn has_non_helper_pids(pids_stdout: &str, proc_name: &str) -> bool {
+        for pid in pids_stdout.split_whitespace() {
             let Ok(ps_out) = Command::new("ps")
                 .args(["-p", pid, "-o", "command="])
                 .stdout(Stdio::piped())
@@ -1115,6 +1122,7 @@ impl PlatformHost for NativePlatformHost {
                     .unwrap_or_else(|| app_support.join("com.qodercn.app")),
                 "minimax_code_cn" => app_support.join("MiniMax"),
                 "lobsterai" => app_support.join("LobsterAI"),
+                "doubaowork" => app_support.join("DoubaoWork"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)
@@ -1141,6 +1149,7 @@ impl PlatformHost for NativePlatformHost {
                     .unwrap_or_else(|| roaming.join("com.qodercn.app")),
                 "minimax_code_cn" => roaming.join("MiniMax"),
                 "lobsterai" => roaming.join("LobsterAI"),
+                "doubaowork" => local.join("DoubaoWork").join("User Data"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)
@@ -1315,6 +1324,14 @@ impl PlatformHost for NativePlatformHost {
                 if proc_name.len() <= 15 {
                     let _ = tokio::process::Command::new("pkill")
                         .args(["-TERM", "-x", proc_name])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .await;
+                } else {
+                    let needle = format!("/Contents/MacOS/{}", escape_pgrep_regex(proc_name));
+                    let _ = tokio::process::Command::new("pkill")
+                        .args(["-TERM", "-f", &needle])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .status()
@@ -2156,6 +2173,7 @@ mod client_executable_validation_tests {
             ("qoder_cn", "/Applications/Qoder CN.app"),
             ("minimax_code_cn", "/Applications/MiniMax Code.app"),
             ("lobsterai", "/Applications/LobsterAI.app"),
+            ("doubaowork", "/Applications/DoubaoWork.app"),
         ];
         let mut checked = 0usize;
         for (tool, path) in cases {

@@ -14,7 +14,7 @@ const ctxValue = vi.hoisted(() => ({ current: null as Record<string, unknown> | 
 vi.mock("../context/QwitchContext", () => ({
   useQwitch: () => ctxValue.current,
 }));
-ctxValue.current = {
+const baseCtx: Record<string, unknown> = {
   isInitializing: false,
   isTauriRuntime: false,
   accounts: INITIAL_ACCOUNTS,
@@ -35,6 +35,7 @@ ctxValue.current = {
   toggleTheme: vi.fn(),
   quitApp: vi.fn(),
 };
+ctxValue.current = { ...baseCtx };
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("../components/AccountCard", () => ({ AccountCard: () => null }));
 vi.mock("../components/BatchClaimBanner", () => ({ BatchClaimBanner: () => null }));
@@ -56,6 +57,7 @@ vi.mock("./dashboard/SettingsView", () => ({
 import { Dashboard } from "./Dashboard";
 
 beforeEach(() => {
+  ctxValue.current = { ...baseCtx };
   // jsdom 未实现 Element.scrollTo
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
   vi.stubGlobal("__APP_VERSION__", "0.0.0-test");
@@ -118,5 +120,32 @@ describe("Dashboard navigation", () => {
     expect(resetSettingsDrafts).not.toHaveBeenCalled();
     fireEvent.click(navButton(/全部账号/));
     expect(resetSettingsDrafts).toHaveBeenCalledTimes(1);
+  });
+
+  it("single-tool 1-account view with missing auth hides search toolbar, renders ghost card, and shows 授权后可签", () => {
+    ctxValue.current = {
+      ...baseCtx,
+      accounts: [
+        {
+          id: "acc-dw-single",
+          toolId: "doubaowork",
+          label: "Lucky",
+          uidMasked: "4311****39",
+          status: "active",
+          isActiveOnClient: true,
+          hasApiToken: false,
+          hasLocalSnapshot: true,
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    };
+
+    render(<Dashboard />);
+    fireEvent.click(navButton(/豆包工作/));
+
+    expect(screen.queryByLabelText("搜索账号")).toBeNull();
+    expect(screen.getByText("添加第 2 个 豆包工作 账号")).toBeTruthy();
+    expect(screen.getByText("授权后可签")).toBeTruthy();
+    expect(screen.queryByText("仅查额/切号")).toBeNull();
   });
 });

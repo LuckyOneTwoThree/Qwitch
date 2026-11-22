@@ -184,13 +184,17 @@ export function useAccountStore({
                   ? "/Applications/MiniMax.app"
                   : tid === "lobsterai"
                     ? "/Applications/LobsterAI.app"
-                    : "/Applications/Qoder.app",
+                    : tid === "doubaowork"
+                      ? "/Applications/DoubaoWork.app"
+                      : "/Applications/Qoder.app",
           configDir:
             tid === "minimax_code_cn"
               ? "~/.minimax"
               : tid === "lobsterai"
                 ? "~/Library/Application Support/LobsterAI"
-                : `~/Library/Application Support/${tid}`,
+                : tid === "doubaowork"
+                  ? "~/Library/Application Support/DoubaoWork"
+                  : `~/Library/Application Support/${tid}`,
           isRunning: tid === "trae_cn",
         } satisfies ClientHostStatus,
       ]);
@@ -1024,7 +1028,9 @@ export function useAccountStore({
         toolId === "workbuddy" ||
         toolId === "qoder_cn" ||
         toolId === "minimax_code_cn" ||
-        toolId === "lobsterai";
+        toolId === "lobsterai" ||
+        toolId === "doubaowork";
+      const isDualTrack = toolId === "qoder_cn" || toolId === "doubaowork";
       const newAcc: AccountSummary = {
         id,
         toolId,
@@ -1032,8 +1038,8 @@ export function useAccountStore({
         uidMasked: `${toolId.slice(0, 2)}_${randHex}****9f`,
         status: "active",
         isActiveOnClient: false,
-        hasLocalSnapshot: method === "local_import" || toolId !== "qoder_cn",
-        hasApiToken: method !== "local_import" || toolId !== "qoder_cn",
+        hasLocalSnapshot: method === "local_import" || !isDualTrack,
+        hasApiToken: method !== "local_import" || !isDualTrack,
         latestQuota: {
           planName: "Free",
           claimStatus: supportsClaim ? "available" : "unsupported",

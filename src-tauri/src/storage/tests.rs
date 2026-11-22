@@ -1440,3 +1440,38 @@ fn wal_pragmas_are_applied() {
     drop(conn);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn upsert_snapshot_only_preserves_expired_status() {
+    let dir = temp_data_dir("upsert_expired");
+    let key = [11u8; 32];
+    let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+
+    let mut snap_files = HashMap::new();
+    snap_files.insert("doubaowork_profile.zip".to_string(), "AAAA".to_string());
+    let mut env_tok = token_envelope("dw_u1");
+    env_tok.tool_id = "doubaowork".to_string();
+    let acc = db
+        .upsert_account(&key, Some("豆包号"), &env_tok)
+        .expect("insert");
+    db.update_account_status(&acc.id, AccountStatus::Expired)
+        .expect("mark expired");
+
+    let env_snap = CredentialEnvelope {
+        tool_id: "doubaowork".to_string(),
+        uid: "dw_u1".to_string(),
+        display_email: None,
+        display_name: Some("豆包号".to_string()),
+        payload: CredentialPayload::LocalSnapshot { files: snap_files },
+    };
+    db.upsert_account(&key, None, &env_snap)
+        .expect("upsert snapshot only");
+
+    let list = db.list_accounts(Some("doubaowork")).expect("list");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].status, AccountStatus::Expired);
+    assert!(list[0].has_local_snapshot);
+    assert!(list[0].has_api_token);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

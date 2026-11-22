@@ -99,8 +99,11 @@ export const AccountCard = React.memo(function AccountCard({
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await refreshAccountQuota(account.id);
-    setRefreshing(false);
+    try {
+      await refreshAccountQuota(account.id);
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const handleRecover = async () => {

@@ -108,6 +108,8 @@ export function useAccountStore({
   accountsRef.current = accounts;
   const adaptersRef = useRef(adapters);
   adaptersRef.current = adapters;
+  const clientStatusesRef = useRef(clientStatuses);
+  clientStatusesRef.current = clientStatuses;
   const batchRunningRef = useRef(Boolean(batchProgress?.running));
   batchRunningRef.current = Boolean(batchProgress?.running);
   const batchLaunchLockRef = useRef(false);
@@ -260,12 +262,16 @@ export function useAccountStore({
   const refreshAccountSummaries = useCallback(
     async (ids: string[]) => {
       if (!isTauriRuntime || ids.length === 0) return;
+      const seq = accountSyncSeqRef.current;
       try {
         const fetched = await Promise.all(
           ids.map((id) =>
             invoke<AccountSummary>("get_account_summary", { accountId: id }).catch(() => null)
           )
         );
+        if (seq !== accountSyncSeqRef.current) {
+          return;
+        }
         if (fetched.some((a) => a === null)) {
           await syncFromBackend();
           return;
@@ -804,13 +810,14 @@ export function useAccountStore({
       }
       coldSwitchSubmittingRef.current = false;
       const seq = ++coldSwitchDetectSeqRef.current;
-      setSwitchDialog({ account, phase: "confirm", isClientRunning: true });
+      const initialRunning = clientStatusesRef.current[account.toolId]?.isRunning ?? true;
+      setSwitchDialog({ account, phase: "confirm", isClientRunning: initialRunning });
       if (isTauriRuntime) {
         void invoke<ClientHostStatus>("detect_client_status", { toolId: account.toolId })
           .then((status) => {
             if (coldSwitchDetectSeqRef.current !== seq) return;
             setSwitchDialog((prev) =>
-              prev.account && prev.account.id === account.id
+              prev.account && prev.account.id === account.id && prev.phase === "confirm"
                 ? { ...prev, isClientRunning: status.isRunning }
                 : prev
             );
@@ -837,6 +844,7 @@ export function useAccountStore({
     const target = switchDialog.account;
     if (!target || coldSwitchSubmittingRef.current) return;
     coldSwitchSubmittingRef.current = true;
+    coldSwitchDetectSeqRef.current += 1;
 
     if (isTauriRuntime) {
       setSwitchDialog({
@@ -851,7 +859,7 @@ export function useAccountStore({
         });
         await syncFromBackend();
         void refreshClientStatuses([target.toolId]);
-        setSwitchDialog({ account: target, phase: "done" });
+        setSwitchDialog((prev) => ({ ...prev, account: target, phase: "done" }));
         if (coldSwitchDoneTimerRef.current !== null) {
           window.clearTimeout(coldSwitchDoneTimerRef.current);
         }
@@ -871,11 +879,11 @@ export function useAccountStore({
     }
 
     try {
-      setSwitchDialog({ account: target, phase: "closing" });
+      setSwitchDialog((prev) => ({ ...prev, account: target, phase: "closing" }));
       await sleep(600);
-      setSwitchDialog({ account: target, phase: "writing" });
+      setSwitchDialog((prev) => ({ ...prev, account: target, phase: "writing" }));
       await sleep(550);
-      setSwitchDialog({ account: target, phase: "launching" });
+      setSwitchDialog((prev) => ({ ...prev, account: target, phase: "launching" }));
       await sleep(600);
 
       setAccounts((prev) =>
@@ -892,7 +900,7 @@ export function useAccountStore({
         resultStatus: "success",
         messageSanitized: `已将本机客户端切换至 ${target.label} (${target.uidMasked}) 并重新拉起`,
       });
-      setSwitchDialog({ account: target, phase: "done" });
+      setSwitchDialog((prev) => ({ ...prev, account: target, phase: "done" }));
       if (coldSwitchDoneTimerRef.current !== null) {
         window.clearTimeout(coldSwitchDoneTimerRef.current);
       }
@@ -1297,12 +1305,9 @@ export function useAccountStore({
   }, [isTauriRuntime, showToast]);
 
   const triggerAutoClaimAvailable = useCallback(async () => {
-    if (isTrayWindow || batchRunningRef.current) return;
-    try {
-      const latestAccounts = isTauriRuntime
-        ? await invoke<AccountSummary[]>("list_accounts", { toolId: null })
-        : accountsRef.current;
-      const availableIds = latestAccounts
+    if (isTrayWindow || batchRunningRef.current || batchLaunchLockRef.current) return;
+    const pickAvailableIds = (list: AccountSummary[]) =>
+      list
         .filter((acc) => {
           const adapter = adaptersRef.current.find((ad) => ad.id === acc.toolId);
           return (
@@ -1313,12 +1318,26 @@ export function useAccountStore({
           );
         })
         .map((acc) => acc.id);
-      if (availableIds.length === 0) return;
-      if (isTauriRuntime) {
+
+    if (isTauriRuntime) {
+      batchLaunchLockRef.current = true;
+      try {
+        const latestAccounts = await invoke<AccountSummary[]>("list_accounts", { toolId: null });
+        const availableIds = pickAvailableIds(latestAccounts);
+        if (availableIds.length === 0) return;
         await invoke("claim_daily_batch", { accountIds: availableIds });
-      } else {
-        await claimDailyBatch(availableIds);
+      } catch {
+        // background automation errors should not crash UI
+      } finally {
+        batchLaunchLockRef.current = false;
       }
+      return;
+    }
+
+    try {
+      const availableIds = pickAvailableIds(accountsRef.current);
+      if (availableIds.length === 0) return;
+      await claimDailyBatch(availableIds);
     } catch {
       // background automation errors should not crash UI
     }

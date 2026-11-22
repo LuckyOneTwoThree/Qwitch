@@ -141,4 +141,38 @@ describe("TrayPopover", () => {
     );
     vi.doUnmock("@tauri-apps/api/core");
   });
+
+  it("缺在线凭据显示「待授权」并可点去授权，缺本机快照优先显示「未关联本机」", () => {
+    const onOpenMain = vi.fn();
+    ctx.accounts = [
+      {
+        id: "tray-dw-no-token",
+        toolId: "doubaowork",
+        label: "豆包缺授权",
+        uidMasked: "4311****39",
+        status: "active",
+        isActiveOnClient: true,
+        hasApiToken: false,
+        hasLocalSnapshot: true,
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: "tray-dw-no-local",
+        toolId: "doubaowork",
+        label: "豆包缺快照",
+        uidMasked: "4311****88",
+        status: "active",
+        isActiveOnClient: true,
+        hasApiToken: true,
+        hasLocalSnapshot: false,
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+    render(<TrayPopover onOpenMain={onOpenMain} />);
+    expect(screen.getByText("待授权")).toBeTruthy();
+    expect(screen.getByText("待关联")).toBeTruthy();
+    expect(screen.getByText("未关联本机")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /去授权/ }));
+    expect(onOpenMain).toHaveBeenCalled();
+  });
 });

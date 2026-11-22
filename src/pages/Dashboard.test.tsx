@@ -148,4 +148,18 @@ describe("Dashboard navigation", () => {
     expect(screen.getByText("授权后可签")).toBeTruthy();
     expect(screen.queryByText("仅查额/切号")).toBeNull();
   });
+
+  it("resets searchQuery and statusFilter when switching nav tabs", () => {
+    render(<Dashboard />);
+    const searchInput = screen.getByLabelText("搜索账号") as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "Trae" } });
+    expect(searchInput.value).toBe("Trae");
+
+    fireEvent.click(navButton(/豆包工作/));
+    expect(screen.queryByText("当前筛选条件下暂无匹配账号")).toBeNull();
+
+    fireEvent.click(navButton(/全部账号/));
+    const resetInput = screen.getByLabelText("搜索账号") as HTMLInputElement;
+    expect(resetInput.value).toBe("");
+  });
 });

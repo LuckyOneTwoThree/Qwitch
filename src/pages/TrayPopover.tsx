@@ -471,12 +471,14 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                             </div>
 
                             <div className="flex shrink-0 items-center gap-1">
-                              {acc.status !== "active" ? (
-                                <AccountStatusBadge status={acc.status} />
+                              {acc.status !== "active" || missingApiToken || missingLocal ? (
+                                <AccountStatusBadge
+                                  status={acc.status}
+                                  missingApiToken={missingApiToken}
+                                  missingLocalSnapshot={missingLocal}
+                                />
                               ) : (
-                                !missingApiToken && (
-                                  <ClaimStatusBadge status={effectiveClaim} />
-                                )
+                                supportsClaim && <ClaimStatusBadge status={effectiveClaim} />
                               )}
                             </div>
                           </div>
@@ -532,8 +534,18 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                               )}
                             </div>
                           ) : missingApiToken ? (
-                            <div className="mt-1.5 text-[11px] text-amber-800 dark:text-amber-300">
-                              仅绑本地快照 · 前往主面板授权后可查额与签到
+                            <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-amber-800 dark:text-amber-300">
+                              <span className="truncate">仅绑本地快照 · 授权后可查额与签到</span>
+                              {onOpenMain && (
+                                <button
+                                  type="button"
+                                  onClick={onOpenMain}
+                                  className="inline-flex shrink-0 items-center gap-0.5 font-medium underline underline-offset-2 transition hover:text-amber-950 dark:hover:text-amber-200"
+                                >
+                                  去授权
+                                  <ExternalLink className="h-2.5 w-2.5" aria-hidden="true" />
+                                </button>
+                              )}
                             </div>
                           ) : null}
 
@@ -556,14 +568,14 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                                 </button>
                               )}
 
-                              {acc.isActiveOnClient ? (
+                              {missingLocal ? (
+                                <span className="badge badge-neutral shrink-0 whitespace-nowrap">
+                                  未关联本机
+                                </span>
+                              ) : acc.isActiveOnClient ? (
                                 <span className="badge shrink-0 whitespace-nowrap border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300">
                                   <CheckCircle2 className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                                   使用中
-                                </span>
-                              ) : missingLocal ? (
-                                <span className="badge badge-neutral shrink-0 whitespace-nowrap">
-                                  未关联本机
                                 </span>
                               ) : (
                                 <button

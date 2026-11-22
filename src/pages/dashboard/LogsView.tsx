@@ -416,9 +416,13 @@ export function LogsPanel({
             </div>
           ) : (
             <div>
-              {groupedLogs.map((group) => (
+              {groupedLogs.map((group, idx) => (
                 <div key={group.day}>
-                  <div className="flex items-center justify-between border-y border-zinc-100 bg-zinc-50/80 px-4 py-1.5 text-xs font-medium text-zinc-600 first:border-t-0 dark:border-zinc-800 dark:bg-zinc-950/40 dark:text-zinc-400">
+                  <div
+                    className={`flex items-center justify-between border-y border-zinc-100 bg-zinc-50/80 px-4 py-1.5 text-xs font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-950/40 dark:text-zinc-400 ${
+                      idx === 0 ? "border-t-0" : ""
+                    }`}
+                  >
                     <span>{group.day}</span>
                     <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
                       {group.items.length} 条
@@ -428,7 +432,7 @@ export function LogsPanel({
                     {group.items.map((log) => {
                       const actionMeta = ACTION_TYPE_META[log.actionType] ?? {
                         label: log.actionType,
-                        style: "bg-zinc-100 text-zinc-700",
+                        style: "badge-neutral",
                       };
                       const toolName = getToolBrandMeta(log.toolId, adapters).name;
                       const checked = selectedLogIdSet.has(log.id);
@@ -578,8 +582,11 @@ export function LogsPanel({
                 disabled={loadingMoreLogs}
                 onClick={async () => {
                   setLoadingMoreLogs(true);
-                  await loadMoreLogs();
-                  setLoadingMoreLogs(false);
+                  try {
+                    await loadMoreLogs();
+                  } finally {
+                    setLoadingMoreLogs(false);
+                  }
                 }}
                 className="btn btn-md btn-secondary whitespace-normal"
               >

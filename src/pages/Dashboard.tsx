@@ -277,6 +277,11 @@ export function Dashboard() {
   }, [filteredAccounts, searchQuery, statusFilter, clientStatuses, accounts.length, visibleTools, adapters]);
 
   useEffect(() => {
+    setStatusFilter("all");
+    setSearchQuery("");
+  }, [nav]);
+
+  useEffect(() => {
     setSelectedLogIds([]);
     setConfirmLogAction(null);
     mainScrollRef.current?.scrollTo({ top: 0 });
@@ -402,7 +407,7 @@ export function Dashboard() {
   const isFiltered = Boolean(searchQuery.trim()) || statusFilter !== "all";
   const showFilterToolbar =
     scopeAccounts.length > 0 &&
-    (nav === "all" || scopeAccounts.length > 1 || Boolean(searchQuery.trim()));
+    (nav === "all" || scopeAccounts.length > 1 || isFiltered);
   const currentLogTotal =
     logScope === "archived" ? logStats.archivedCount : logStats.activeCount;
 
@@ -1076,8 +1081,8 @@ export function Dashboard() {
                   {activeToolFilter ? (
                     <ToolBrandIcon toolId={activeToolFilter} size="lg" decorative />
                   ) : (
-                    <div className="flex items-center gap-2">
-                      {visibleTools.slice(0, 4).map((t) => (
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      {visibleTools.map((t) => (
                         <ToolBrandIcon key={t.id} toolId={t.id} size="md" decorative />
                       ))}
                     </div>

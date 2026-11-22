@@ -258,13 +258,22 @@ impl QwitchDatabase {
                     }
                 };
 
-                conn.execute(
+                let (_, incoming_has_token) = envelope.capability_flags();
+                let status_sql = if incoming_has_token {
+                    "CASE WHEN status IN ('disabled', 'risk_paused') THEN status ELSE 'active' END"
+                } else {
+                    "CASE WHEN status IN ('disabled', 'risk_paused', 'expired') THEN status ELSE 'active' END"
+                };
+                let update_sql = format!(
                     "UPDATE accounts
                      SET label = ?1, uid_masked = ?2, email_masked = ?3,
-                         status = CASE WHEN status IN ('disabled', 'risk_paused') THEN status ELSE 'active' END,
+                         status = {status_sql},
                          encrypted_credential = ?4, has_local_snapshot = ?5, has_api_token = ?6,
                          device_id_masked = ?7, device_type = ?8, updated_at = ?9
-                     WHERE id = ?10",
+                     WHERE id = ?10"
+                );
+                conn.execute(
+                    &update_sql,
                     params![
                         effective_label,
                         uid_masked,

@@ -398,6 +398,9 @@ pub async fn refresh_account_quota(
     state: State<'_, AppState>,
     account_id: String,
 ) -> Result<QuotaSnapshot, String> {
+    // 先取队列锁再读数据库凭据，避免批量任务刚轮换刷新令牌后此处拿到过期副本
+    let _queue_guard = state.scheduler.queue_lock().lock_owned().await;
+
     let (summary, cred) = state
         .db
         .get_account_credential(&state.master_key, &account_id)
@@ -410,9 +413,6 @@ pub async fn refresh_account_quota(
     if !adapter.manifest().capabilities.supports_quota_query {
         return Err(format!("适配器 {} 不支持额度查询", summary.tool_id));
     }
-
-    // 单账号查额同样进入串行队列，批量运行中排队等待而非并发请求平台
-    let _queue_guard = state.scheduler.queue_lock().lock_owned().await;
 
     // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），刷新结果立即加密落盘
     let cred = match adapter.refresh_credential(&cred).await {

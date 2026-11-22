@@ -385,6 +385,9 @@ pub async fn reconcile_active_accounts(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    if state.switching_in_progress.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

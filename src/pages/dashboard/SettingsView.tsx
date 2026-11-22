@@ -1,8 +1,9 @@
+import { useMemo } from "react";
 import { RefreshCw, ShieldCheck, Puzzle, FolderSearch, Save, Archive, AppWindow, Timer } from "lucide-react";
 import { useQwitch } from "../../context/QwitchContext";
 import { UpdateCard } from "../../components/UpdateCard";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
-import { getToolBrandMeta } from "../../domain/toolRegistry";
+import { getToolBrandMeta, getVisibleTools } from "../../domain/toolRegistry";
 import type { Dispatch, SetStateAction } from "react";
 import type { ExternalAdapterInfo } from "../../types/qwitch";
 import type { ConfirmLogAction } from "./types";
@@ -88,6 +89,13 @@ export function SettingsView({
     saveAppSettings,
     showToast,
   } = useQwitch();
+  const orderedAdapters = useMemo(() => {
+    if (adapters.length === 0) return [];
+    const byId = new Map(adapters.map((ad) => [ad.id, ad] as const));
+    return getVisibleTools(adapters)
+      .map((entry) => byId.get(entry.id))
+      .filter((ad): ad is NonNullable<typeof ad> => Boolean(ad));
+  }, [adapters]);
   return (
       <div className="grid grid-cols-1 gap-4 @lg:grid-cols-2">
         <div className="surface-card p-5">
@@ -410,7 +418,7 @@ export function SettingsView({
             已注册适配器（内置 + 外部扩展）
           </div>
           <div className="mt-3 grid grid-cols-1 gap-2.5 @md:grid-cols-3">
-            {adapters.map((ad) => (
+            {orderedAdapters.map((ad) => (
               <div
                 key={ad.id}
                 className="flex items-center justify-between gap-3 rounded-xl border border-zinc-100 px-3 py-2.5 text-xs dark:border-zinc-800"
@@ -575,7 +583,7 @@ export function SettingsView({
           </div>
 
           <div className="mt-4 space-y-3">
-            {adapters
+            {orderedAdapters
               .filter((ad) => ad.capabilities.supportsClientSwitch)
               .map((ad) => {
                 const status = clientStatuses[ad.id];

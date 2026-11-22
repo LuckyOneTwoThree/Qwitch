@@ -307,13 +307,18 @@ pub(crate) async fn schedule_import_quota_check(
     let db_bg = Arc::clone(db);
     let key_bg = *master_key;
     let adapter_bg = Arc::clone(adapter);
-    let summary_bg = summary.clone();
-    let cred_bg = cred.clone();
+    let account_id_bg = summary.id.clone();
     let scheduler_bg = Arc::clone(scheduler);
     tokio::spawn(async move {
         let _guard = scheduler_bg.queue_lock().lock_owned().await;
-        record_import_quota_check(&db_bg, &key_bg, &adapter_bg, &summary_bg, &cred_bg).await;
-        let _ = app_bg.emit("qwitch://account-updated", &summary_bg.id);
+        let Ok((latest_summary, latest_cred)) =
+            db_bg.get_account_credential(&key_bg, &account_id_bg)
+        else {
+            return;
+        };
+        record_import_quota_check(&db_bg, &key_bg, &adapter_bg, &latest_summary, &latest_cred)
+            .await;
+        let _ = app_bg.emit("qwitch://account-updated", &latest_summary.id);
         let _ = app_bg.emit("qwitch://logs-updated", ());
     });
 }

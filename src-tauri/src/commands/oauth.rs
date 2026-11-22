@@ -601,7 +601,7 @@ pub(crate) fn parse_lobster_callback_url(
             .filter(|v| !v.is_empty())
     };
 
-    if is_loopback && find_param("state").as_deref() != Some(expected_nonce) {
+    if find_param("state").as_deref() != Some(expected_nonce) {
         return Some(Err(
             "有道龙虾内置授权回调校验失败（状态参数不匹配），已拒绝该请求",
         ));
@@ -610,6 +610,14 @@ pub(crate) fn parse_lobster_callback_url(
     match find_param("code") {
         Some(code) => Some(Ok(code)),
         None => Some(Err("有道龙虾授权回调缺少 authCode，请重试")),
+    }
+}
+
+fn close_existing_oauth_windows(app: &AppHandle) {
+    for (existing_label, existing_win) in app.webview_windows() {
+        if existing_label == "oauth-login" || existing_label.starts_with("oauth-login-") {
+            let _ = existing_win.close();
+        }
     }
 }
 
@@ -625,11 +633,7 @@ pub async fn start_webview_oauth(
     let flow_nonce = uuid::Uuid::new_v4().to_string();
     let win_label = format!("oauth-login-{flow_id}");
 
-    for (existing_label, existing_win) in app.webview_windows() {
-        if existing_label == "oauth-login" || existing_label.starts_with("oauth-login-") {
-            let _ = existing_win.close();
-        }
-    }
+    close_existing_oauth_windows(&app);
 
     enum OAuthMode {
         TraeCapture,
@@ -724,7 +728,11 @@ pub async fn start_webview_oauth(
         OAuthMode::MiniMaxDevicePoll { .. } | OAuthMode::DoubaoCookiePoll => String::new(),
     };
 
-    let mut builder = WebviewWindowBuilder::new(&app, &win_label, WebviewUrl::External(parsed_url))
+    let blank_url: tauri::Url = "about:blank"
+        .parse()
+        .map_err(|e| format!("构造空白授权初始地址失败: {e}"))?;
+
+    let mut builder = WebviewWindowBuilder::new(&app, &win_label, WebviewUrl::External(blank_url))
         .title(format!("Qwitch 内置授权登录 - {}", adapter.manifest().name))
         .inner_size(960.0, 720.0)
         .center()
@@ -848,8 +856,12 @@ pub async fn start_webview_oauth(
                                 .await;
                             }
                             Err(e) => {
-                                let _ = app_clone
-                                    .emit("qwitch://oauth-error", format!("解析授权凭据失败: {e}"));
+                                let _ = app_clone.emit(
+                                    "qwitch://oauth-error",
+                                    crate::storage::crypto::sanitize_log_message(&format!(
+                                        "解析授权凭据失败: {e}"
+                                    )),
+                                );
                                 if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
                                     if let Some(win) = app_clone.get_webview_window(&win_l) {
                                         let _ = win.close();
@@ -861,7 +873,7 @@ pub async fn start_webview_oauth(
                 }
                 return false;
             }
-            is_allowed_oauth_url(nav_url, allowed_hosts)
+            nav_url.as_str() == "about:blank" || is_allowed_oauth_url(nav_url, allowed_hosts)
         });
     } else if matches!(mode, OAuthMode::LobsterAiCallback) {
         let app_nav = app_handle.clone();
@@ -882,23 +894,6 @@ pub async fn start_webview_oauth(
                 if flow_seq_nav.load(Ordering::SeqCst) != flow_id {
                     return false;
                 }
-                match consume_oauth_nonce(&consumed_nonces, &expected_nonce) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        let _ = app_nav.emit(
-                            "qwitch://oauth-error",
-                            "该授权回调已被使用过，已拒绝重复提交",
-                        );
-                        return false;
-                    }
-                    Err(()) => {
-                        let _ = app_nav.emit(
-                            "qwitch://oauth-error",
-                            "内置授权回调校验失败（内部状态不可用），已拒绝该请求",
-                        );
-                        return false;
-                    }
-                }
 
                 let close_cb_win = |app_ref: &AppHandle, win_l: &str| {
                     if flow_seq_nav.load(Ordering::SeqCst) == flow_id {
@@ -910,6 +905,24 @@ pub async fn start_webview_oauth(
 
                 match cb_res {
                     Ok(code) => {
+                        match consume_oauth_nonce(&consumed_nonces, &expected_nonce) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let _ = app_nav.emit(
+                                    "qwitch://oauth-error",
+                                    "该授权回调已被使用过，已拒绝重复提交",
+                                );
+                                return false;
+                            }
+                            Err(()) => {
+                                let _ = app_nav.emit(
+                                    "qwitch://oauth-error",
+                                    "内置授权回调校验失败（内部状态不可用），已拒绝该请求",
+                                );
+                                return false;
+                            }
+                        }
+
                         let app_clone = app_nav.clone();
                         let db_clone = Arc::clone(&db_nav);
                         let scheduler_clone = Arc::clone(&scheduler_nav);
@@ -944,7 +957,9 @@ pub async fn start_webview_oauth(
                                 Err(e) => {
                                     let _ = app_clone.emit(
                                         "qwitch://oauth-error",
-                                        format!("交换有道龙虾授权令牌失败: {e}"),
+                                        crate::storage::crypto::sanitize_log_message(&format!(
+                                            "交换有道龙虾授权令牌失败: {e}"
+                                        )),
                                     );
                                     if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
                                         if let Some(win) = app_clone.get_webview_window(&win_l) {
@@ -962,16 +977,26 @@ pub async fn start_webview_oauth(
                 }
                 return false;
             }
-            is_allowed_oauth_url(nav_url, allowed_hosts)
+            nav_url.as_str() == "about:blank" || is_allowed_oauth_url(nav_url, allowed_hosts)
         });
     } else {
-        builder =
-            builder.on_navigation(move |nav_url| is_allowed_oauth_url(nav_url, allowed_hosts));
+        builder = builder.on_navigation(move |nav_url| {
+            nav_url.as_str() == "about:blank" || is_allowed_oauth_url(nav_url, allowed_hosts)
+        });
     }
 
-    builder
+    if state.oauth_flow_seq.load(Ordering::SeqCst) != flow_id {
+        return Ok(());
+    }
+    close_existing_oauth_windows(&app);
+
+    let oauth_win = builder
         .build()
         .map_err(|e| format!("打开内置授权窗口失败: {e}"))?;
+    let _ = oauth_win.clear_all_browsing_data();
+    oauth_win
+        .navigate(parsed_url)
+        .map_err(|e| format!("导航至授权页失败: {e}"))?;
 
     match mode {
         OAuthMode::TraeCapture | OAuthMode::LobsterAiCallback => {}
@@ -1539,11 +1564,19 @@ mod tests {
             Some(Err(_))
         ));
 
-        let valid_deeplink: tauri::Url = "lobsterai://auth/callback?code=c_deep".parse().unwrap();
+        let valid_deeplink: tauri::Url = "lobsterai://auth/callback?code=c_deep&state=nonce-ok"
+            .parse()
+            .unwrap();
         assert_eq!(
             parse_lobster_callback_url(&valid_deeplink, "nonce-ok"),
             Some(Ok("c_deep".to_string()))
         );
+        let missing_state_deeplink: tauri::Url =
+            "lobsterai://auth/callback?code=c_deep".parse().unwrap();
+        assert!(matches!(
+            parse_lobster_callback_url(&missing_state_deeplink, "nonce-ok"),
+            Some(Err(_))
+        ));
 
         let non_cb: tauri::Url = "https://lobsterai.youdao.com/portal".parse().unwrap();
         assert_eq!(parse_lobster_callback_url(&non_cb, "nonce-ok"), None);

@@ -13,6 +13,7 @@ import {
   Link2,
   Play,
   Plus,
+  RefreshCw,
   Settings2,
   ShieldAlert,
   ShieldCheck,
@@ -26,11 +27,12 @@ import {
   CHANNEL_META,
   MEMBER_TIER_META,
   POOL_STRATEGY_META,
-  UPSTREAM_MODEL_OPTIONS,
   buildAgentConfigSnippets,
   computeAgentExposedModels,
   computePoolAggregateQuota,
   computePoolServingAccounts,
+  formatModelRateBadge,
+  getMemberModelOptions,
   isHeterogeneousPool,
 } from "../../data/mockPoolData";
 import type {
@@ -68,6 +70,8 @@ export function PoolsView({
     candidates,
     agentBindings,
     nowMs,
+    isRefreshingModels,
+    refreshUpstreamModels,
     updatePool,
     deletePool,
     togglePoolEnabled,
@@ -683,14 +687,28 @@ export function PoolsView({
                             直接在账号卡片内点击模型标签即可多选/取消该账号承接的模型，随时调整 T1/T2 梯队
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => setAddMembersOpen(true)}
-                          className="btn btn-xs btn-primary gap-1"
-                        >
-                          <Plus className="h-3 w-3" aria-hidden="true" />
-                          添加账号 / 追加模型
-                        </button>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={isRefreshingModels}
+                            onClick={() => void refreshUpstreamModels()}
+                            className="btn btn-xs btn-secondary gap-1"
+                          >
+                            <RefreshCw
+                              className={`h-3 w-3 ${isRefreshingModels ? "animate-spin" : ""}`}
+                              aria-hidden="true"
+                            />
+                            {isRefreshingModels ? "探测模型中..." : "刷新真实模型"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAddMembersOpen(true)}
+                            className="btn btn-xs btn-primary gap-1"
+                          >
+                            <Plus className="h-3 w-3" aria-hidden="true" />
+                            添加账号 / 追加模型
+                          </button>
+                        </div>
                       </div>
 
                       {TIER_ORDER.map((tierKey) => {
@@ -719,8 +737,10 @@ export function PoolsView({
                                 const globalIdx = sortedMembers.findIndex(
                                   (m) => m.id === member.id
                                 );
-                                const modelOptions =
-                                  UPSTREAM_MODEL_OPTIONS[member.toolId] ?? [];
+                                const modelOptions = getMemberModelOptions(
+                                  member,
+                                  candidates
+                                );
                                 const cooldownLeftSec =
                                   typeof member.cooldownUntilMs === "number" &&
                                   member.cooldownUntilMs > nowMs
@@ -938,11 +958,13 @@ export function PoolsView({
                                         </span>
                                         {modelOptions.map((opt) => {
                                           const active = member.supportedModels.includes(opt.id);
+                                          const rateLabel = formatModelRateBadge(opt);
                                           return (
                                             <button
                                               key={opt.id}
                                               type="button"
                                               aria-pressed={active}
+                                              title={`标准 ID: ${opt.id} · 底层 Wire ID: ${opt.vendorWireId}`}
                                               onClick={() =>
                                                 togglePoolMemberModel(
                                                   selectedPool.id,
@@ -959,7 +981,18 @@ export function PoolsView({
                                               {active && (
                                                 <Check className="h-2.5 w-2.5" aria-hidden="true" />
                                               )}
-                                              <span>{opt.id}</span>
+                                              <span>{opt.displayName || opt.id}</span>
+                                              {rateLabel && (
+                                                <span
+                                                  className={`rounded px-1 font-sans text-[9px] ${
+                                                    opt.isFree
+                                                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                                                      : "bg-black/5 text-zinc-500 dark:bg-white/10 dark:text-zinc-400"
+                                                  }`}
+                                                >
+                                                  {rateLabel}
+                                                </span>
+                                              )}
                                             </button>
                                           );
                                         })}

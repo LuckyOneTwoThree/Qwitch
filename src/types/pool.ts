@@ -147,6 +147,16 @@ export interface GatewayRuntimeState {
   globalProxyDetected: boolean;
 }
 
+export interface UpstreamModelOption {
+  id: string;
+  displayName: string;
+  vendorWireId: string;
+  creditMultiplier?: number;
+  isFree?: boolean;
+  family: string;
+  source: string;
+}
+
 export interface UpstreamAccountCandidate {
   accountId: string;
   toolId: string;
@@ -154,6 +164,7 @@ export interface UpstreamAccountCandidate {
   uidMasked: string;
   channel: UpstreamChannel;
   defaultModels: string[];
+  modelOptions?: UpstreamModelOption[];
   defaultTier: MemberTier;
   quotaPercent: number;
   quotaText: string;

@@ -29,12 +29,18 @@ import {
   INITIAL_POOLS,
   INITIAL_ROUTING_TRACES,
   MEMBER_TIER_META,
+  TOOL_SHORT_LABELS,
   UPSTREAM_MODEL_OPTIONS,
   buildAgentConfigSnippets,
+  buildClaudeModelAlias,
   computeAgentExposedModels,
   createInitialAgentBindings,
+  formatScopedModelId,
+  getCatalogModelsForTool,
   makeDefaultModelKey,
+  splitScopedModelId,
   syncPoolModelPolicies,
+  type CatalogModelEntry,
 } from "../data/mockPoolData";
 
 export interface CreatePoolMemberInput {
@@ -68,6 +74,8 @@ export interface PoolPrototypeContextValue {
   agentBindings: AgentBinding[];
   traces: RoutingTraceItem[];
   nowMs: number;
+  isRefreshingModels: boolean;
+  refreshUpstreamModels: (accountId?: string) => Promise<void>;
   toggleGateway: () => void;
   updateGatewayPort: (port: number) => void;
   cycleBridgeRuntime: () => void;
@@ -101,6 +109,57 @@ export interface PoolPrototypeContextValue {
   toggleAgentOption: (agentId: TargetAgentId, key: keyof AgentBindingOptions) => void;
   detectAgentEnvironment: () => void;
   runPoolSimulation: (input: RunPoolSimulationInput) => RunPoolSimulationResult;
+  getAgentToolModelOptions: (toolId: string) => CatalogModelEntry[];
+  getAgentToolEnabledModelIds: (agentId: TargetAgentId, toolId: string) => string[];
+  getAgentToolAccounts: (agentId: TargetAgentId, toolId: string) => PoolMember[];
+  getAgentPrimaryPool: (agentId: TargetAgentId) => AccountPool | null;
+  setAgentToolModels: (agentId: TargetAgentId, toolId: string, modelIds: string[]) => void;
+  selectAllAgentToolModels: (
+    agentId: TargetAgentId,
+    toolId: string,
+    filterModelIds?: string[]
+  ) => void;
+  selectRecommendedAgentToolModels: (agentId: TargetAgentId, toolId: string) => void;
+  selectLowRateAgentToolModels: (agentId: TargetAgentId, toolId: string) => void;
+  invertAgentToolModels: (
+    agentId: TargetAgentId,
+    toolId: string,
+    scopeModelIds?: string[]
+  ) => void;
+  clearAgentToolModels: (agentId: TargetAgentId, toolId: string) => void;
+  setAgentDefaultToolModel: (agentId: TargetAgentId, toolId: string, modelId: string) => void;
+  promoteAgentToolPrimaryAccount: (
+    agentId: TargetAgentId,
+    toolId: string,
+    accountId: string
+  ) => void;
+  reorderAgentToolAccount: (
+    agentId: TargetAgentId,
+    toolId: string,
+    accountId: string,
+    direction: "up" | "down"
+  ) => void;
+  toggleAgentToolAccountEnabled: (
+    agentId: TargetAgentId,
+    toolId: string,
+    accountId: string
+  ) => void;
+  setAllAgentToolAccountsEnabled: (
+    agentId: TargetAgentId,
+    toolId: string,
+    onlyPrimary: boolean
+  ) => void;
+  sortAgentToolAccountsByQuota: (agentId: TargetAgentId, toolId: string) => void;
+  updateAgentToolRoutingOptions: (
+    agentId: TargetAgentId,
+    toolId: string,
+    patch: {
+      strategy?: AccountPool["strategy"];
+      skipActiveClientAccount?: boolean;
+      cooldownSeconds?: number;
+    }
+  ) => void;
+  syncToolScheduleToAllAgents: (sourceAgentId: TargetAgentId, toolId: string) => void;
 }
 
 interface PoolWorkspaceState {
@@ -124,6 +183,8 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   agentBindings: createInitialAgentBindings(INITIAL_POOLS, INITIAL_GATEWAY_STATE),
   traces: INITIAL_ROUTING_TRACES,
   nowMs: Date.now(),
+  isRefreshingModels: false,
+  refreshUpstreamModels: async () => {},
   toggleGateway: () => {},
   updateGatewayPort: () => {},
   cycleBridgeRuntime: () => {},
@@ -155,6 +216,25 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   runPoolSimulation: () => ({
     trace: INITIAL_ROUTING_TRACES[0],
   }),
+  getAgentToolModelOptions: (toolId: string) =>
+    getCatalogModelsForTool(toolId, AVAILABLE_UPSTREAM_CANDIDATES),
+  getAgentToolEnabledModelIds: () => [],
+  getAgentToolAccounts: () => [],
+  getAgentPrimaryPool: () => INITIAL_POOLS[0] ?? null,
+  setAgentToolModels: () => {},
+  selectAllAgentToolModels: () => {},
+  selectRecommendedAgentToolModels: () => {},
+  selectLowRateAgentToolModels: () => {},
+  invertAgentToolModels: () => {},
+  clearAgentToolModels: () => {},
+  setAgentDefaultToolModel: () => {},
+  promoteAgentToolPrimaryAccount: () => {},
+  reorderAgentToolAccount: () => {},
+  toggleAgentToolAccountEnabled: () => {},
+  setAllAgentToolAccountsEnabled: () => {},
+  sortAgentToolAccountsByQuota: () => {},
+  updateAgentToolRoutingOptions: () => {},
+  syncToolScheduleToAllAgents: () => {},
 };
 
 const PoolPrototypeContext = createContext<PoolPrototypeContextValue | null>(null);
@@ -251,6 +331,188 @@ function sortMembersInTier(
   return byPriority;
 }
 
+const RECOMMENDED_FLAGSHIP_IDS = new Set([
+  "deepseek-v4-pro",
+  "glm-5.3",
+  "kimi-k3.1-pro",
+  "qwen4-max",
+  "minimax-m3.1-flash",
+  "doubao-seed-2.1-pro",
+  "openpangu-coder-pro",
+  "claude-sonnet-4.6",
+]);
+
+function materializeDedicatedPoolForAgent(
+  prevPools: AccountPool[],
+  prevBindings: AgentBinding[],
+  allCandidates: UpstreamAccountCandidate[],
+  agentId: TargetAgentId
+): {
+  dedicatedId: string;
+  nextPools: AccountPool[];
+  nextBindings: AgentBinding[];
+} {
+  const dedicatedId = `pool-agent-${agentId}`;
+  const binding = prevBindings.find((b) => b.agentId === agentId);
+  const existing = prevPools.find((p) => p.id === dedicatedId);
+
+  if (existing) {
+    const existingAccIds = new Set(existing.members.map((m) => m.accountId));
+    const missingCandidates = allCandidates.filter(
+      (c) => !existingAccIds.has(c.accountId) && c.codeArtsMode !== "client_readonly"
+    );
+    let updatedPool = existing;
+    if (missingCandidates.length > 0) {
+      let nextPrio =
+        existing.members.reduce((max, m) => Math.max(max, m.priority), 0) + 1;
+      const appended: PoolMember[] = missingCandidates.map((cand) => ({
+        id: `pm-${agentId}-${cand.accountId}`,
+        accountId: cand.accountId,
+        toolId: cand.toolId,
+        label: cand.label,
+        uidMasked: cand.uidMasked,
+        supportedModels: [],
+        tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
+        channel: cand.channel,
+        enabled: true,
+        priority: nextPrio++,
+        quotaPercent: cand.quotaPercent,
+        quotaText: cand.quotaText,
+        isActiveOnClient: cand.isActiveOnClient,
+        accountStatus: cand.accountStatus,
+        codeArtsMode: cand.codeArtsMode,
+        lastLatencyMs: 540,
+      }));
+      updatedPool = {
+        ...existing,
+        members: [...existing.members, ...appended],
+      };
+    }
+
+    const nextPools = prevPools.map((p) => (p.id === dedicatedId ? updatedPool : p));
+    const nextBindings =
+      binding?.mountedPoolIds.length === 1 && binding.mountedPoolIds[0] === dedicatedId
+        ? prevBindings
+        : prevBindings.map((b) =>
+            b.agentId === agentId ? { ...b, mountedPoolIds: [dedicatedId] } : b
+          );
+    return { dedicatedId, nextPools, nextBindings };
+  }
+
+  const sourcePools = (binding?.mountedPoolIds ?? [])
+    .map((pid) => prevPools.find((p) => p.id === pid))
+    .filter((p): p is AccountPool => Boolean(p));
+  const seenAccIds = new Set<string>();
+  const builtMembers: PoolMember[] = [];
+
+  for (const srcPool of sourcePools) {
+    const enabledSet = new Set(
+      srcPool.modelPolicies.filter((mp) => mp.enabled).map((mp) => mp.modelId)
+    );
+    for (const m of [...srcPool.members].sort((a, b) => a.priority - b.priority)) {
+      if (seenAccIds.has(m.accountId)) continue;
+      seenAccIds.add(m.accountId);
+      const scoped = Array.from(
+        new Set(
+          m.supportedModels
+            .filter(
+              (mid) =>
+                enabledSet.size === 0 ||
+                enabledSet.has(mid) ||
+                enabledSet.has(formatScopedModelId(m.toolId, mid))
+            )
+            .map((mid) => formatScopedModelId(m.toolId, mid))
+        )
+      );
+      builtMembers.push({
+        ...m,
+        id: `pm-${agentId}-${m.accountId}`,
+        supportedModels: scoped,
+        priority: builtMembers.length + 1,
+      });
+    }
+  }
+
+  for (const cand of allCandidates) {
+    if (seenAccIds.has(cand.accountId)) continue;
+    if (cand.codeArtsMode === "client_readonly") continue;
+    seenAccIds.add(cand.accountId);
+    builtMembers.push({
+      id: `pm-${agentId}-${cand.accountId}`,
+      accountId: cand.accountId,
+      toolId: cand.toolId,
+      label: cand.label,
+      uidMasked: cand.uidMasked,
+      supportedModels: [],
+      tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
+      channel: cand.channel,
+      enabled: true,
+      priority: builtMembers.length + 1,
+      quotaPercent: cand.quotaPercent,
+      quotaText: cand.quotaText,
+      isActiveOnClient: cand.isActiveOnClient,
+      accountStatus: cand.accountStatus,
+      codeArtsMode: cand.codeArtsMode,
+      lastLatencyMs: 540,
+    });
+  }
+
+  const primarySrc = sourcePools[0];
+  const agentName = binding?.name ?? agentId;
+  const dedicatedPool: AccountPool = {
+    id: dedicatedId,
+    slug: agentId,
+    name: `${agentName} 专属路由`,
+    description: `直接为 ${agentName} 配置订阅工具、开放模型与同工具主备调度`,
+    sceneTag: "Agent 专属",
+    enabled: true,
+    strategy: primarySrc?.strategy ?? "order",
+    affinityMode: primarySrc?.affinityMode ?? "auto_cache",
+    skipActiveClientAccount: primarySrc?.skipActiveClientAccount ?? true,
+    cooldownSeconds: primarySrc?.cooldownSeconds ?? 60,
+    autoRefreshOn401: primarySrc?.autoRefreshOn401 ?? true,
+    fallbackApiKeyEnabled: primarySrc?.fallbackApiKeyEnabled ?? true,
+    modelPolicies: syncPoolModelPolicies(agentId, builtMembers, []),
+    members: builtMembers,
+    todayRequests: primarySrc?.todayRequests ?? 0,
+    todayFailovers: primarySrc?.todayFailovers ?? 0,
+    cacheHitRate: primarySrc?.cacheHitRate ?? 0,
+    createdAt: new Date().toISOString(),
+  };
+
+  let mappedDefaultKey = binding?.defaultModelKey ?? null;
+  if (mappedDefaultKey && mappedDefaultKey.includes("::")) {
+    const [srcPid, rawMid] = mappedDefaultKey.split("::");
+    const srcPool = sourcePools.find((p) => p.id === srcPid) ?? primarySrc;
+    const { toolId: existingTid, modelId: bare } = splitScopedModelId(rawMid);
+    const matchingMember = existingTid
+      ? builtMembers.find((m) => m.toolId === existingTid)
+      : srcPool?.members.find((m) =>
+          m.supportedModels.some(
+            (s) => s === rawMid || splitScopedModelId(s).modelId === bare
+          )
+        );
+    if (matchingMember) {
+      mappedDefaultKey = makeDefaultModelKey(
+        dedicatedId,
+        formatScopedModelId(matchingMember.toolId, bare)
+      );
+    }
+  }
+
+  const nextPools = [dedicatedPool, ...prevPools];
+  const nextBindings = prevBindings.map((b) =>
+    b.agentId === agentId
+      ? {
+          ...b,
+          mountedPoolIds: [dedicatedId],
+          defaultModelKey: mappedDefaultKey,
+        }
+      : b
+  );
+  return { dedicatedId, nextPools, nextBindings };
+}
+
 export function PoolPrototypeProvider({
   children,
   onToast,
@@ -282,7 +544,12 @@ export function PoolPrototypeProvider({
     isTauriRuntime ? [] : INITIAL_ROUTING_TRACES
   );
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [isRefreshingModels, setIsRefreshingModels] = useState<boolean>(false);
   const sessionAffinityRef = useRef<Record<string, string>>({});
+  const poolsRef = useRef<AccountPool[]>(pools);
+  poolsRef.current = pools;
+  const rawBindingsRef = useRef<AgentBinding[]>(rawBindings);
+  rawBindingsRef.current = rawBindings;
 
   const hasActiveCooldown = useMemo(
     () =>
@@ -328,6 +595,35 @@ export function PoolPrototypeProvider({
       notify(`加载网关与号池状态失败：${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }, [applyWorkspaceState, isTauriRuntime, notify]);
+
+  const refreshUpstreamModels = useCallback(
+    async (accountId?: string) => {
+      setIsRefreshingModels(true);
+      try {
+        if (!isTauriRuntime) {
+          notify("原型预览模式已按最新上游协议目录对齐各账号模型", "info");
+          return;
+        }
+        const { invoke } = await import("@tauri-apps/api/core");
+        const ws = await invoke<PoolWorkspaceState>("refresh_upstream_models_cmd", {
+          accountId: accountId ?? null,
+        });
+        applyWorkspaceState(ws);
+        notify(
+          accountId ? "已完成该账号实时模型探测与缓存刷新" : "已完成全部上游账号真实模型目录探测",
+          "success"
+        );
+      } catch (err) {
+        notify(
+          `刷新上游模型失败：${err instanceof Error ? err.message : String(err)}`,
+          "error"
+        );
+      } finally {
+        setIsRefreshingModels(false);
+      }
+    },
+    [applyWorkspaceState, isTauriRuntime, notify]
+  );
 
   const syncWorkspaceCommand = useCallback(
     async (command: string, args?: Record<string, unknown>) => {
@@ -1300,7 +1596,7 @@ export function PoolPrototypeProvider({
           poolName: input.poolId,
           incomingProtocol,
           upstreamProtocol: "openai_chat",
-          requestedModel: input.modelId || "claude-sonnet-4.6",
+          requestedModel: input.modelId || "deepseek-v4-pro",
           finalAccountLabel: "无可用成员",
           finalToolId: "custom_api_key",
           finalModel: "—",
@@ -1316,7 +1612,7 @@ export function PoolPrototypeProvider({
         input.modelId ||
         pool.modelPolicies.find((mp) => mp.enabled)?.modelId ||
         pool.members[0]?.supportedModels[0] ||
-        "claude-sonnet-4.6";
+        "deepseek-v4-pro";
 
       const collectEligibleForModel = (
         targetModel: string,
@@ -1327,9 +1623,17 @@ export function PoolPrototypeProvider({
           t2_backup: [],
           t3_fallback: [],
         };
+        const { toolId: scopedTid, modelId: bareTarget } = splitScopedModelId(targetModel);
 
         for (const m of pool.members) {
-          if (!m.supportedModels.includes(targetModel)) continue;
+          if (scopedTid && m.toolId !== scopedTid) continue;
+          if (
+            !m.supportedModels.some(
+              (id) => id === targetModel || splitScopedModelId(id).modelId === bareTarget
+            )
+          ) {
+            continue;
+          }
           if (!m.enabled) continue;
           if (m.toolId === "custom_api_key" && !pool.fallbackApiKeyEnabled) continue;
           if (m.accountStatus === "risk_paused" || m.accountStatus === "expired") continue;
@@ -1619,6 +1923,597 @@ export function PoolPrototypeProvider({
     [isTauriRuntime, notify, pools, refreshWorkspace]
   );
 
+  const getAgentToolModelOptions = useCallback(
+    (toolId: string) => getCatalogModelsForTool(toolId, candidates),
+    [candidates]
+  );
+
+  const getAgentPrimaryPool = useCallback(
+    (agentId: TargetAgentId): AccountPool | null => {
+      const binding = rawBindings.find((b) => b.agentId === agentId);
+      const dedicated = pools.find((p) => p.id === `pool-agent-${agentId}`);
+      if (dedicated) return dedicated;
+      const firstId = binding?.mountedPoolIds[0];
+      return pools.find((p) => p.id === firstId) ?? null;
+    },
+    [pools, rawBindings]
+  );
+
+  const getAgentToolEnabledModelIds = useCallback(
+    (agentId: TargetAgentId, toolId: string): string[] => {
+      const binding = rawBindings.find((b) => b.agentId === agentId);
+      if (!binding) return [];
+      const mountedPools = binding.mountedPoolIds
+        .map((id) => pools.find((p) => p.id === id))
+        .filter((p): p is AccountPool => Boolean(p && p.enabled));
+      const enabled = new Set<string>();
+      for (const pool of mountedPools) {
+        const enabledPolicyIds = new Set(
+          pool.modelPolicies.filter((mp) => mp.enabled).map((mp) => mp.modelId)
+        );
+        const toolMembers = pool.members.filter((m) => m.toolId === toolId);
+        for (const m of toolMembers) {
+          for (const rawMid of m.supportedModels) {
+            const { toolId: scopedTid, modelId: bare } = splitScopedModelId(rawMid);
+            if (scopedTid && scopedTid !== toolId) continue;
+            if (
+              enabledPolicyIds.has(rawMid) ||
+              enabledPolicyIds.has(formatScopedModelId(toolId, bare)) ||
+              (!scopedTid && enabledPolicyIds.has(bare))
+            ) {
+              enabled.add(bare);
+            }
+          }
+        }
+      }
+      return Array.from(enabled);
+    },
+    [pools, rawBindings]
+  );
+
+  const getAgentToolAccounts = useCallback(
+    (agentId: TargetAgentId, toolId: string): PoolMember[] => {
+      const binding = rawBindings.find((b) => b.agentId === agentId);
+      const dedicated = pools.find((p) => p.id === `pool-agent-${agentId}`);
+      const sourcePool =
+        dedicated ??
+        (binding?.mountedPoolIds[0]
+          ? pools.find((p) => p.id === binding.mountedPoolIds[0])
+          : undefined);
+      const result: PoolMember[] = [];
+      const seenAccIds = new Set<string>();
+      if (sourcePool) {
+        const sortedMembers = [...sourcePool.members]
+          .filter((m) => m.toolId === toolId)
+          .sort((a, b) => a.priority - b.priority);
+        for (const m of sortedMembers) {
+          if (seenAccIds.has(m.accountId)) continue;
+          seenAccIds.add(m.accountId);
+          result.push(m);
+        }
+      }
+      let nextPrio = result.reduce((max, m) => Math.max(max, m.priority), 0) + 1;
+      for (const cand of candidates) {
+        if (cand.toolId !== toolId || seenAccIds.has(cand.accountId)) continue;
+        seenAccIds.add(cand.accountId);
+        result.push({
+          id: `cand-${agentId}-${cand.accountId}`,
+          accountId: cand.accountId,
+          toolId: cand.toolId,
+          label: cand.label,
+          uidMasked: cand.uidMasked,
+          supportedModels: [],
+          tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
+          channel: cand.channel,
+          enabled: result.length === 0 && cand.codeArtsMode !== "client_readonly",
+          priority: nextPrio++,
+          quotaPercent: cand.quotaPercent,
+          quotaText: cand.quotaText,
+          isActiveOnClient: cand.isActiveOnClient,
+          accountStatus: cand.accountStatus,
+          codeArtsMode: cand.codeArtsMode,
+          lastLatencyMs: 540,
+        });
+      }
+      return result;
+    },
+    [candidates, pools, rawBindings]
+  );
+
+  const setAgentToolModels = useCallback(
+    (agentId: TargetAgentId, toolId: string, modelIds: string[]) => {
+      const uniqueBare = Array.from(
+        new Set(modelIds.map((m) => splitScopedModelId(m).modelId).filter(Boolean))
+      );
+      const scopedList = uniqueBare.map((bare) => formatScopedModelId(toolId, bare));
+
+      const { dedicatedId, nextPools, nextBindings } = materializeDedicatedPoolForAgent(
+        poolsRef.current,
+        rawBindingsRef.current,
+        candidates,
+        agentId
+      );
+
+      const updatedPools = nextPools.map((p) => {
+        if (p.id !== dedicatedId) return p;
+        const nextMembers = p.members.map((m) =>
+          m.toolId === toolId ? { ...m, supportedModels: scopedList } : m
+        );
+        const existingPolicies = p.modelPolicies.filter(
+          (mp) => splitScopedModelId(mp.modelId).toolId !== toolId
+        );
+        const toolPolicies = scopedList.map((scopedId) => {
+          const prev = p.modelPolicies.find((mp) => mp.modelId === scopedId);
+          return (
+            prev
+              ? { ...prev, enabled: true }
+              : {
+                  modelId: scopedId,
+                  enabled: true,
+                  fallbackModelId: null,
+                  claudeAliasId: buildClaudeModelAlias(p.slug, scopedId),
+                }
+          );
+        });
+        const nextPolicies = syncPoolModelPolicies(p.slug, nextMembers, [
+          ...existingPolicies,
+          ...toolPolicies,
+        ]);
+        return {
+          ...p,
+          members: nextMembers,
+          modelPolicies: nextPolicies,
+        };
+      });
+
+      let computedDefaultKey: string | null = null;
+      const updatedBindings: AgentBinding[] = nextBindings.map((b) => {
+        if (b.agentId !== agentId) return b;
+        const validDefault = resolveValidDefaultModelKey(
+          agentId,
+          [dedicatedId],
+          b.defaultModelKey,
+          updatedPools
+        );
+        computedDefaultKey = validDefault;
+        const needsRestart = agentId === "claude_desktop" || agentId === "codex_desktop";
+        const nextStatus: AgentBinding["status"] =
+          b.status === "drifted"
+            ? "bound"
+            : needsRestart
+              ? "needs_restart"
+              : "bound";
+        return {
+          ...b,
+          mountedPoolIds: [dedicatedId],
+          defaultModelKey: validDefault,
+          status: nextStatus,
+          driftReason: undefined,
+          restartHint:
+            agentId === "claude_desktop"
+              ? "Claude 桌面版模型清单已更新，请重启以拉取最新 /v1/models"
+              : agentId === "codex_desktop"
+                ? "已更新 Codex Catalog，请重启 app-server 使新模型清单生效"
+                : undefined,
+          options: {
+            ...b.options,
+            dshDualCredsWritten:
+              agentId === "dsh" ? true : b.options.dshDualCredsWritten,
+          },
+        };
+      });
+
+      poolsRef.current = updatedPools;
+      rawBindingsRef.current = updatedBindings;
+      setPools(updatedPools);
+      setRawBindings(updatedBindings);
+
+      const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
+      notify(
+        scopedList.length === 0
+          ? `已清空 ${toolLabel} 的开放模型`
+          : `已更新 ${toolLabel} 对该 Agent 开放 ${scopedList.length} 个模型`,
+        "success"
+      );
+
+      void syncWorkspaceCommand("set_agent_tool_models_cmd", {
+        agentId,
+        toolId,
+        modelIds: uniqueBare,
+        defaultModelKey: computedDefaultKey,
+      });
+    },
+    [candidates, notify, syncWorkspaceCommand]
+  );
+
+  const selectAllAgentToolModels = useCallback(
+    (agentId: TargetAgentId, toolId: string, filterModelIds?: string[]) => {
+      const options = getCatalogModelsForTool(toolId, candidates);
+      const targetIds = filterModelIds
+        ? filterModelIds
+        : options.map((o) => o.id);
+      const current = getAgentToolEnabledModelIds(agentId, toolId);
+      const merged = filterModelIds
+        ? Array.from(new Set([...current, ...targetIds]))
+        : targetIds;
+      setAgentToolModels(agentId, toolId, merged);
+    },
+    [candidates, getAgentToolEnabledModelIds, setAgentToolModels]
+  );
+
+  const selectRecommendedAgentToolModels = useCallback(
+    (agentId: TargetAgentId, toolId: string) => {
+      const options = getCatalogModelsForTool(toolId, candidates);
+      const flagship = options
+        .filter(
+          (o) =>
+            RECOMMENDED_FLAGSHIP_IDS.has(o.id) ||
+            (typeof o.creditMultiplier === "number" && o.creditMultiplier >= 0.45)
+        )
+        .map((o) => o.id);
+      const chosen =
+        flagship.length > 0 ? flagship.slice(0, 4) : options.slice(0, 3).map((o) => o.id);
+      setAgentToolModels(agentId, toolId, chosen);
+    },
+    [candidates, setAgentToolModels]
+  );
+
+  const selectLowRateAgentToolModels = useCallback(
+    (agentId: TargetAgentId, toolId: string) => {
+      const options = getCatalogModelsForTool(toolId, candidates);
+      const lowRate = options
+        .filter(
+          (o) =>
+            o.isFree ||
+            (typeof o.creditMultiplier === "number" && o.creditMultiplier <= 0.25) ||
+            /flash|turbo|mini|fast/i.test(o.id)
+        )
+        .map((o) => o.id);
+      if (lowRate.length === 0) {
+        notify("该工具暂无明显低倍率或 Flash 模型，已保留前 2 个模型", "info");
+        setAgentToolModels(
+          agentId,
+          toolId,
+          options.slice(0, 2).map((o) => o.id)
+        );
+        return;
+      }
+      setAgentToolModels(agentId, toolId, lowRate);
+    },
+    [candidates, notify, setAgentToolModels]
+  );
+
+  const invertAgentToolModels = useCallback(
+    (agentId: TargetAgentId, toolId: string, scopeModelIds?: string[]) => {
+      const options = getCatalogModelsForTool(toolId, candidates);
+      const scope = new Set(scopeModelIds ?? options.map((o) => o.id));
+      const current = new Set(getAgentToolEnabledModelIds(agentId, toolId));
+      const next: string[] = [];
+      for (const opt of options) {
+        if (scope.has(opt.id)) {
+          if (!current.has(opt.id)) next.push(opt.id);
+        } else if (current.has(opt.id)) {
+          next.push(opt.id);
+        }
+      }
+      setAgentToolModels(agentId, toolId, next);
+    },
+    [candidates, getAgentToolEnabledModelIds, setAgentToolModels]
+  );
+
+  const clearAgentToolModels = useCallback(
+    (agentId: TargetAgentId, toolId: string) => {
+      setAgentToolModels(agentId, toolId, []);
+    },
+    [setAgentToolModels]
+  );
+
+  const setAgentDefaultToolModel = useCallback(
+    (agentId: TargetAgentId, toolId: string, modelId: string) => {
+      const bare = splitScopedModelId(modelId).modelId;
+      const currentEnabled = getAgentToolEnabledModelIds(agentId, toolId);
+      const nextModels = currentEnabled.includes(bare)
+        ? currentEnabled
+        : [...currentEnabled, bare];
+
+      const { dedicatedId, nextPools, nextBindings } = materializeDedicatedPoolForAgent(
+        poolsRef.current,
+        rawBindingsRef.current,
+        candidates,
+        agentId
+      );
+      const scopedDefault = formatScopedModelId(toolId, bare);
+      const nextDefaultKey = makeDefaultModelKey(dedicatedId, scopedDefault);
+
+      const scopedList = nextModels.map((id) => formatScopedModelId(toolId, id));
+      const updatedPools = nextPools.map((p) => {
+        if (p.id !== dedicatedId) return p;
+        const nextMembers = p.members.map((m) =>
+          m.toolId === toolId ? { ...m, supportedModels: scopedList } : m
+        );
+        const existingPolicies = p.modelPolicies.filter(
+          (mp) => splitScopedModelId(mp.modelId).toolId !== toolId
+        );
+        const toolPolicies = scopedList.map((scopedId) => {
+          const prev = p.modelPolicies.find((mp) => mp.modelId === scopedId);
+          return prev
+            ? { ...prev, enabled: true }
+            : {
+                modelId: scopedId,
+                enabled: true,
+                fallbackModelId: null,
+                claudeAliasId: buildClaudeModelAlias(p.slug, scopedId),
+              };
+        });
+        return {
+          ...p,
+          members: nextMembers,
+          modelPolicies: syncPoolModelPolicies(p.slug, nextMembers, [
+            ...existingPolicies,
+            ...toolPolicies,
+          ]),
+        };
+      });
+
+      const updatedBindings: AgentBinding[] = nextBindings.map((b) => {
+        if (b.agentId !== agentId) return b;
+        const needsRestart = agentId === "claude_desktop" || agentId === "codex_desktop";
+        const nextStatus: AgentBinding["status"] = needsRestart
+          ? "needs_restart"
+          : "bound";
+        return {
+          ...b,
+          mountedPoolIds: [dedicatedId],
+          defaultModelKey: nextDefaultKey,
+          status: nextStatus,
+        };
+      });
+
+      poolsRef.current = updatedPools;
+      rawBindingsRef.current = updatedBindings;
+      setPools(updatedPools);
+      setRawBindings(updatedBindings);
+
+      const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
+      notify(`已将 ${toolLabel} · ${bare} 设为默认首选模型`, "success");
+
+      void syncWorkspaceCommand("set_agent_tool_models_cmd", {
+        agentId,
+        toolId,
+        modelIds: nextModels,
+        defaultModelKey: nextDefaultKey,
+      });
+    },
+    [candidates, getAgentToolEnabledModelIds, notify, syncWorkspaceCommand]
+  );
+
+  const commitAgentToolAccountSchedule = useCallback(
+    (
+      agentId: TargetAgentId,
+      toolId: string,
+      transformToolMembers: (toolMembers: PoolMember[]) => PoolMember[],
+      patch?: {
+        strategy?: AccountPool["strategy"];
+        skipActiveClientAccount?: boolean;
+        cooldownSeconds?: number;
+      },
+      toastMsg?: string
+    ) => {
+      const { dedicatedId, nextPools, nextBindings } = materializeDedicatedPoolForAgent(
+        poolsRef.current,
+        rawBindingsRef.current,
+        candidates,
+        agentId
+      );
+
+      let orderedAccIds: string[] = [];
+      let enabledAccIds: string[] = [];
+
+      const updatedPools = nextPools.map((p) => {
+        if (p.id !== dedicatedId) return p;
+        const currentToolMembers = p.members
+          .filter((m) => m.toolId === toolId)
+          .sort((a, b) => a.priority - b.priority);
+        const nextToolMembers = transformToolMembers(currentToolMembers);
+        orderedAccIds = nextToolMembers.map((m) => m.accountId);
+        enabledAccIds = nextToolMembers
+          .filter((m) => m.enabled)
+          .map((m) => m.accountId);
+
+        const toolPrioritySlots = currentToolMembers
+          .map((m) => m.priority)
+          .sort((a, b) => a - b);
+        const updatedByAcc = new Map<string, PoolMember>();
+        nextToolMembers.forEach((m, idx) => {
+          updatedByAcc.set(m.accountId, {
+            ...m,
+            priority: toolPrioritySlots[idx] ?? p.members.length + idx + 1,
+          });
+        });
+
+        const nextMembers = p.members
+          .map((m) => (m.toolId === toolId ? (updatedByAcc.get(m.accountId) ?? m) : m))
+          .sort((a, b) => a.priority - b.priority);
+
+        return {
+          ...p,
+          ...(patch?.strategy !== undefined ? { strategy: patch.strategy } : {}),
+          ...(patch?.skipActiveClientAccount !== undefined
+            ? { skipActiveClientAccount: patch.skipActiveClientAccount }
+            : {}),
+          ...(patch?.cooldownSeconds !== undefined
+            ? { cooldownSeconds: patch.cooldownSeconds }
+            : {}),
+          members: nextMembers,
+        };
+      });
+
+      poolsRef.current = updatedPools;
+      rawBindingsRef.current = nextBindings;
+      setPools(updatedPools);
+      setRawBindings(nextBindings);
+
+      if (toastMsg) {
+        notify(toastMsg, "success");
+      }
+
+      void syncWorkspaceCommand("update_agent_tool_schedule_cmd", {
+        agentId,
+        toolId,
+        orderedAccountIds: orderedAccIds,
+        enabledAccountIds: enabledAccIds,
+        strategy: patch?.strategy ?? null,
+        skipActiveClientAccount: patch?.skipActiveClientAccount ?? null,
+        cooldownSeconds: patch?.cooldownSeconds ?? null,
+      });
+    },
+    [candidates, notify, syncWorkspaceCommand]
+  );
+
+  const promoteAgentToolPrimaryAccount = useCallback(
+    (agentId: TargetAgentId, toolId: string, accountId: string) => {
+      commitAgentToolAccountSchedule(
+        agentId,
+        toolId,
+        (list) => {
+          const target = list.find((m) => m.accountId === accountId);
+          if (!target) return list;
+          const rest = list.filter((m) => m.accountId !== accountId);
+          return [{ ...target, enabled: true }, ...rest];
+        },
+        undefined,
+        "已切换为 #1 当前主账号，后续请求将优先消耗该账号"
+      );
+    },
+    [commitAgentToolAccountSchedule]
+  );
+
+  const reorderAgentToolAccount = useCallback(
+    (agentId: TargetAgentId, toolId: string, accountId: string, direction: "up" | "down") => {
+      commitAgentToolAccountSchedule(agentId, toolId, (list) => {
+        const idx = list.findIndex((m) => m.accountId === accountId);
+        if (idx === -1) return list;
+        const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+        if (swapIdx < 0 || swapIdx >= list.length) return list;
+        const copy = [...list];
+        const tmp = copy[idx];
+        copy[idx] = copy[swapIdx];
+        copy[swapIdx] = tmp;
+        return copy;
+      });
+    },
+    [commitAgentToolAccountSchedule]
+  );
+
+  const toggleAgentToolAccountEnabled = useCallback(
+    (agentId: TargetAgentId, toolId: string, accountId: string) => {
+      commitAgentToolAccountSchedule(agentId, toolId, (list) =>
+        list.map((m) =>
+          m.accountId === accountId ? { ...m, enabled: !m.enabled } : m
+        )
+      );
+    },
+    [commitAgentToolAccountSchedule]
+  );
+
+  const setAllAgentToolAccountsEnabled = useCallback(
+    (agentId: TargetAgentId, toolId: string, onlyPrimary: boolean) => {
+      commitAgentToolAccountSchedule(
+        agentId,
+        toolId,
+        (list) =>
+          list.map((m, idx) => ({
+            ...m,
+            enabled: onlyPrimary ? idx === 0 : m.codeArtsMode !== "client_readonly",
+          })),
+        undefined,
+        onlyPrimary ? "已切换为仅启用 #1 主账号（暂停备用号）" : "已启用该工具下全部可用账号参与调度"
+      );
+    },
+    [commitAgentToolAccountSchedule]
+  );
+
+  const sortAgentToolAccountsByQuota = useCallback(
+    (agentId: TargetAgentId, toolId: string) => {
+      commitAgentToolAccountSchedule(
+        agentId,
+        toolId,
+        (list) =>
+          [...list].sort(
+            (a, b) => b.quotaPercent - a.quotaPercent || a.priority - b.priority
+          ),
+        undefined,
+        "已按当前剩余额度降序重排主备顺位"
+      );
+    },
+    [commitAgentToolAccountSchedule]
+  );
+
+  const updateAgentToolRoutingOptions = useCallback(
+    (
+      agentId: TargetAgentId,
+      toolId: string,
+      patch: {
+        strategy?: AccountPool["strategy"];
+        skipActiveClientAccount?: boolean;
+        cooldownSeconds?: number;
+      }
+    ) => {
+      commitAgentToolAccountSchedule(
+        agentId,
+        toolId,
+        (list) => list,
+        patch,
+        "已保存该 Agent 的账号调度方案"
+      );
+    },
+    [commitAgentToolAccountSchedule]
+  );
+
+  const syncToolScheduleToAllAgents = useCallback(
+    (sourceAgentId: TargetAgentId, toolId: string) => {
+      const sourcePool = getAgentPrimaryPool(sourceAgentId);
+      const sourceOrder = getAgentToolAccounts(sourceAgentId, toolId);
+      const orderedIds = sourceOrder.map((m) => m.accountId);
+      const enabledSet = new Set(sourceOrder.filter((m) => m.enabled).map((m) => m.accountId));
+      const allAgents: TargetAgentId[] = ["claude_desktop", "opencode", "dsh", "codex_desktop"];
+      for (const targetAgentId of allAgents) {
+        if (targetAgentId === sourceAgentId) continue;
+        commitAgentToolAccountSchedule(
+          targetAgentId,
+          toolId,
+          (list) => {
+            const byId = new Map(list.map((m) => [m.accountId, m]));
+            const sorted: PoolMember[] = [];
+            for (const aid of orderedIds) {
+              const found = byId.get(aid);
+              if (found) {
+                sorted.push({ ...found, enabled: enabledSet.has(aid) });
+                byId.delete(aid);
+              }
+            }
+            for (const rem of byId.values()) {
+              sorted.push(rem);
+            }
+            return sorted;
+          },
+          sourcePool
+            ? {
+                strategy: sourcePool.strategy,
+                skipActiveClientAccount: sourcePool.skipActiveClientAccount,
+                cooldownSeconds: sourcePool.cooldownSeconds,
+              }
+            : undefined
+        );
+      }
+      notify(
+        `已将「${TOOL_SHORT_LABELS[toolId] ?? toolId}」的主备顺位同步至全部 Agent`,
+        "success"
+      );
+    },
+    [commitAgentToolAccountSchedule, getAgentPrimaryPool, getAgentToolAccounts, notify]
+  );
+
   const value = useMemo<PoolPrototypeContextValue>(
     () => ({
       isTauriRuntime,
@@ -1630,6 +2525,8 @@ export function PoolPrototypeProvider({
       agentBindings,
       traces,
       nowMs,
+      isRefreshingModels,
+      refreshUpstreamModels,
       toggleGateway,
       updateGatewayPort,
       cycleBridgeRuntime,
@@ -1659,6 +2556,24 @@ export function PoolPrototypeProvider({
       toggleAgentOption,
       detectAgentEnvironment,
       runPoolSimulation,
+      getAgentToolModelOptions,
+      getAgentToolEnabledModelIds,
+      getAgentToolAccounts,
+      getAgentPrimaryPool,
+      setAgentToolModels,
+      selectAllAgentToolModels,
+      selectRecommendedAgentToolModels,
+      selectLowRateAgentToolModels,
+      invertAgentToolModels,
+      clearAgentToolModels,
+      setAgentDefaultToolModel,
+      promoteAgentToolPrimaryAccount,
+      reorderAgentToolAccount,
+      toggleAgentToolAccountEnabled,
+      setAllAgentToolAccountsEnabled,
+      sortAgentToolAccountsByQuota,
+      updateAgentToolRoutingOptions,
+      syncToolScheduleToAllAgents,
     }),
     [
       isTauriRuntime,
@@ -1669,6 +2584,8 @@ export function PoolPrototypeProvider({
       agentBindings,
       traces,
       nowMs,
+      isRefreshingModels,
+      refreshUpstreamModels,
       toggleGateway,
       updateGatewayPort,
       cycleBridgeRuntime,
@@ -1698,6 +2615,24 @@ export function PoolPrototypeProvider({
       toggleAgentOption,
       detectAgentEnvironment,
       runPoolSimulation,
+      getAgentToolModelOptions,
+      getAgentToolEnabledModelIds,
+      getAgentToolAccounts,
+      getAgentPrimaryPool,
+      setAgentToolModels,
+      selectAllAgentToolModels,
+      selectRecommendedAgentToolModels,
+      selectLowRateAgentToolModels,
+      invertAgentToolModels,
+      clearAgentToolModels,
+      setAgentDefaultToolModel,
+      promoteAgentToolPrimaryAccount,
+      reorderAgentToolAccount,
+      toggleAgentToolAccountEnabled,
+      setAllAgentToolAccountsEnabled,
+      sortAgentToolAccountsByQuota,
+      updateAgentToolRoutingOptions,
+      syncToolScheduleToAllAgents,
     ]
   );
 

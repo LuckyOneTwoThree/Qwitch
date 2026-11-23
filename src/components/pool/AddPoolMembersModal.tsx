@@ -1,8 +1,12 @@
 import { useEffect, useId, useMemo, useState } from "react";
-import { Check, Lock, Plus, ShieldAlert, Sparkles, X } from "lucide-react";
+import { Check, Lock, Plus, RefreshCw, ShieldAlert, Sparkles, X } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
-import { MEMBER_TIER_META, UPSTREAM_MODEL_OPTIONS } from "../../data/mockPoolData";
+import {
+  MEMBER_TIER_META,
+  formatModelRateBadge,
+  getCandidateModelOptions,
+} from "../../data/mockPoolData";
 import { getToolBrandMeta } from "../../domain/toolRegistry";
 import type { AccountPool, MemberTier, UpstreamAccountCandidate } from "../../types/pool";
 import { UpstreamMemberIcon } from "../AgentBrandIcon";
@@ -22,7 +26,13 @@ export function AddPoolMembersModal({
   onClose: () => void;
 }) {
   const titleId = useId();
-  const { candidates, addMembersToPool, authorizeCodeArtsIsolated } = usePoolPrototype();
+  const {
+    candidates,
+    isRefreshingModels,
+    refreshUpstreamModels,
+    addMembersToPool,
+    authorizeCodeArtsIsolated,
+  } = usePoolPrototype();
   const [toolFilter, setToolFilter] = useState<string>("all");
   const [pickedMap, setPickedMap] = useState<Record<string, PendingPick>>({});
 
@@ -100,7 +110,7 @@ export function AddPoolMembersModal({
   const toggleWholeCandidate = (c: UpstreamAccountCandidate) => {
     if (c.codeArtsMode === "client_readonly") return;
     const existingMember = existingMemberByAccountId.get(c.accountId);
-    const allOptions = (UPSTREAM_MODEL_OPTIONS[c.toolId] ?? []).map((m) => m.id);
+    const allOptions = getCandidateModelOptions(c).map((m) => m.id);
     const availableToAdd = allOptions.filter(
       (id) => !existingMember?.supportedModels.includes(id)
     );
@@ -148,24 +158,38 @@ export function AddPoolMembersModal({
         </div>
 
         <div className="border-b border-zinc-200/80 px-5 py-2.5 dark:border-zinc-800">
-          <div className="flex flex-wrap items-center gap-1">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setToolFilter("all")}
+                className={`chip ${toolFilter === "all" ? "chip-active" : ""}`}
+              >
+                全部工具 ({candidates.length})
+              </button>
+              {toolTabs.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setToolFilter(t.id)}
+                  className={`chip ${toolFilter === t.id ? "chip-active" : ""}`}
+                >
+                  {t.name}
+                </button>
+              ))}
+            </div>
             <button
               type="button"
-              onClick={() => setToolFilter("all")}
-              className={`chip ${toolFilter === "all" ? "chip-active" : ""}`}
+              disabled={isRefreshingModels}
+              onClick={() => void refreshUpstreamModels()}
+              className="btn btn-xs btn-ghost gap-1 text-brand-700 dark:text-brand-300"
             >
-              全部工具 ({candidates.length})
+              <RefreshCw
+                className={`h-3 w-3 ${isRefreshingModels ? "animate-spin" : ""}`}
+                aria-hidden="true"
+              />
+              {isRefreshingModels ? "探测中..." : "刷新真实模型"}
             </button>
-            {toolTabs.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setToolFilter(t.id)}
-                className={`chip ${toolFilter === t.id ? "chip-active" : ""}`}
-              >
-                {t.name}
-              </button>
-            ))}
           </div>
         </div>
 
@@ -173,7 +197,7 @@ export function AddPoolMembersModal({
           {filteredCandidates.map((c) => {
             const existingMember = existingMemberByAccountId.get(c.accountId);
             const readonlyBlocked = c.codeArtsMode === "client_readonly";
-            const models = UPSTREAM_MODEL_OPTIONS[c.toolId] ?? [];
+            const models = getCandidateModelOptions(c);
             const availableToAdd = models.filter(
               (m) => !existingMember?.supportedModels.includes(m.id)
             );
@@ -293,6 +317,7 @@ export function AddPoolMembersModal({
                         existingMember?.supportedModels.includes(m.id)
                       );
                       const picked = Boolean(currentPick?.models.includes(m.id));
+                      const rateLabel = formatModelRateBadge(m);
                       return (
                         <button
                           key={m.id}
@@ -300,6 +325,7 @@ export function AddPoolMembersModal({
                           disabled={alreadyOnMember}
                           onClick={() => toggleModelForCandidate(c, m.id)}
                           aria-pressed={alreadyOnMember || picked}
+                          title={`标准 ID: ${m.id} · 底层 Wire ID: ${m.vendorWireId}`}
                           className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] transition ${
                             alreadyOnMember
                               ? "cursor-default border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
@@ -311,7 +337,18 @@ export function AddPoolMembersModal({
                           {(alreadyOnMember || picked) && (
                             <Check className="h-2.5 w-2.5" aria-hidden="true" />
                           )}
-                          <span>{m.id}</span>
+                          <span>{m.displayName || m.id}</span>
+                          {rateLabel && (
+                            <span
+                              className={`rounded px-1 font-sans text-[9px] ${
+                                m.isFree
+                                  ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                                  : "bg-black/5 text-zinc-500 dark:bg-white/10 dark:text-zinc-400"
+                              }`}
+                            >
+                              {rateLabel}
+                            </span>
+                          )}
                           {alreadyOnMember && (
                             <span className="font-sans text-[9px] opacity-80">已在池</span>
                           )}

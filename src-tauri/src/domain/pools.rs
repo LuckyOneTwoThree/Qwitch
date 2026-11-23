@@ -293,6 +293,27 @@ pub struct GatewayRuntimeState {
     pub global_proxy_detected: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamModelOption {
+    /// 跨工具统一归一化后的标准模型 ID（例如 "deepseek-v4-pro", "glm-5.3"）
+    pub id: String,
+    /// 人类可读的标准展示名（例如 "DeepSeek-V4-Pro", "GLM-5.3"）
+    pub display_name: String,
+    /// 该上游工具实际发请求时使用的底层模型 ID（例如 Qoder CN 为 "dmodel", Trae CN 为 "DeepSeek-V4-Pro"）
+    pub vendor_wire_id: String,
+    /// 积分消耗倍率（如 Some(0.5), Some(0.0)），未知时为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_multiplier: Option<f64>,
+    /// 是否为 0 积分免费模型
+    #[serde(default)]
+    pub is_free: bool,
+    /// 模型家族分类（"DeepSeek" | "GLM" | "Kimi" | "Qwen" | "MiniMax" | "Doubao" | "Hunyuan" | "Step" | "MiMo" | "Pangu" | "Claude" | "GPT" | "Other"）
+    pub family: String,
+    /// 数据来源（"live" 表示实时接口探测，"catalog" 表示真实协议目录兜底）
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpstreamAccountCandidate {
@@ -302,6 +323,8 @@ pub struct UpstreamAccountCandidate {
     pub uid_masked: String,
     pub channel: UpstreamChannel,
     pub default_models: Vec<String>,
+    #[serde(default)]
+    pub model_options: Vec<UpstreamModelOption>,
     pub default_tier: MemberTier,
     pub quota_percent: u8,
     pub quota_text: String,
@@ -390,6 +413,46 @@ pub struct PoolWorkspaceState {
     pub traces: Vec<RoutingTraceItem>,
 }
 
+pub fn split_scoped_model_id(raw: &str) -> (Option<&str>, &str) {
+    if let Some((prefix, rest)) = raw.trim().split_once('/') {
+        if matches!(
+            prefix,
+            "workbuddy"
+                | "minimax_code_cn"
+                | "qoder_cn"
+                | "qoder"
+                | "trae_cn"
+                | "lobsterai"
+                | "doubaowork"
+                | "codearts"
+                | "custom_api_key"
+        ) && !rest.trim().is_empty()
+        {
+            return (Some(prefix), rest.trim());
+        }
+    }
+    (None, raw.trim())
+}
+
+pub fn format_scoped_model_id(tool_id: &str, model_id: &str) -> String {
+    let (_, bare) = split_scoped_model_id(model_id);
+    format!("{tool_id}/{bare}")
+}
+
+pub fn tool_short_display_name(tool_id: &str) -> &'static str {
+    match tool_id {
+        "workbuddy" => "WorkBuddy",
+        "minimax_code_cn" => "MiniMax",
+        "qoder_cn" | "qoder" => "Qoder CN",
+        "trae_cn" => "Trae CN",
+        "lobsterai" => "有道龙虾",
+        "doubaowork" => "豆包工作",
+        "codearts" => "码道 CodeArts",
+        "custom_api_key" => "标准 API",
+        _ => "订阅工具",
+    }
+}
+
 pub fn is_anthropic_model_name(model_id: &str) -> bool {
     let lower = model_id.to_ascii_lowercase();
     ["claude", "sonnet", "opus", "haiku", "fable", "mythos", "anthropic"]
@@ -398,8 +461,9 @@ pub fn is_anthropic_model_name(model_id: &str) -> bool {
 }
 
 pub fn build_claude_model_alias(pool_slug: &str, model_id: &str) -> String {
-    if is_anthropic_model_name(model_id) {
-        return model_id.to_string();
+    let (scoped_tid, bare) = split_scoped_model_id(model_id);
+    if is_anthropic_model_name(bare) && scoped_tid.is_none() {
+        return bare.to_string();
     }
     let seed = format!("{pool_slug}/{model_id}");
     let mut hash: u32 = 2166136261;
@@ -418,22 +482,403 @@ pub fn default_channel_for_tool(tool_id: &str) -> UpstreamChannel {
     }
 }
 
-pub fn default_models_for_tool(tool_id: &str) -> Vec<String> {
-    match tool_id {
-        "workbuddy" => vec!["claude-sonnet-4.6".into(), "claude-opus-4.6".into()],
-        "minimax_code_cn" => vec!["MiniMax-M2.5".into(), "MiniMax-M2.5-highspeed".into()],
-        "qoder_cn" => vec!["claude-sonnet-4.6".into(), "qwen3-coder-plus".into()],
-        "trae_cn" => vec!["claude-sonnet-4.6".into(), "deepseek-v4".into()],
-        "lobsterai" => vec!["lobster-coder-pro".into(), "deepseek-v4".into()],
-        "doubaowork" => vec!["doubao-seed-2.1-pro".into()],
-        "codearts" => vec!["pangu-coder-pro".into()],
-        "custom_api_key" => vec![
-            "claude-sonnet-4.6".into(),
-            "deepseek-v4".into(),
-            "deepseek-chat".into(),
-        ],
-        _ => vec!["claude-sonnet-4.6".into()],
+struct CanonicalModelSpec {
+    canonical_id: &'static str,
+    display_name: &'static str,
+    family: &'static str,
+}
+
+const CANONICAL_MODEL_SPECS: &[CanonicalModelSpec] = &[
+    CanonicalModelSpec { canonical_id: "deepseek-v4-pro", display_name: "DeepSeek-V4-Pro", family: "DeepSeek" },
+    CanonicalModelSpec { canonical_id: "deepseek-v4.1-flash", display_name: "DeepSeek-V4.1-Flash", family: "DeepSeek" },
+    CanonicalModelSpec { canonical_id: "glm-5.3", display_name: "GLM-5.3", family: "GLM" },
+    CanonicalModelSpec { canonical_id: "glm-5.3-flash", display_name: "GLM-5.3-Flash", family: "GLM" },
+    CanonicalModelSpec { canonical_id: "glm-5.2", display_name: "GLM-5.2", family: "GLM" },
+    CanonicalModelSpec { canonical_id: "kimi-k3.1-pro", display_name: "Kimi-K3.1-Pro", family: "Kimi" },
+    CanonicalModelSpec { canonical_id: "kimi-k3", display_name: "Kimi-K3", family: "Kimi" },
+    CanonicalModelSpec { canonical_id: "kimi-k2.8-preview", display_name: "Kimi-K2.8-Preview", family: "Kimi" },
+    CanonicalModelSpec { canonical_id: "kimi-k2.7-code", display_name: "Kimi-K2.7-Code", family: "Kimi" },
+    CanonicalModelSpec { canonical_id: "minimax-m3.1-flash", display_name: "MiniMax-M3.1-Flash", family: "MiniMax" },
+    CanonicalModelSpec { canonical_id: "minimax-m3", display_name: "MiniMax-M3", family: "MiniMax" },
+    CanonicalModelSpec { canonical_id: "minimax-m2.7", display_name: "MiniMax-M2.7", family: "MiniMax" },
+    CanonicalModelSpec { canonical_id: "minimax-m2.7-highspeed", display_name: "MiniMax-M2.7-Highspeed", family: "MiniMax" },
+    CanonicalModelSpec { canonical_id: "qwen4-max", display_name: "Qwen4-Max", family: "Qwen" },
+    CanonicalModelSpec { canonical_id: "qwen3.8-max", display_name: "Qwen3.8-Max", family: "Qwen" },
+    CanonicalModelSpec { canonical_id: "qwen3.8-flash", display_name: "Qwen3.8-Flash", family: "Qwen" },
+    CanonicalModelSpec { canonical_id: "step-5-preview", display_name: "Step-5-Preview", family: "Step" },
+    CanonicalModelSpec { canonical_id: "mimo-v2.6-pro", display_name: "MiMo-V2.6-Pro", family: "MiMo" },
+    CanonicalModelSpec { canonical_id: "mimo-v2.6-flash", display_name: "MiMo-V2.6-Flash", family: "MiMo" },
+    CanonicalModelSpec { canonical_id: "hy4flash-free", display_name: "Hy4-Flash-Free", family: "Hunyuan" },
+    CanonicalModelSpec { canonical_id: "hy4std", display_name: "Hy4", family: "Hunyuan" },
+    CanonicalModelSpec { canonical_id: "hy4flash", display_name: "Hy4-Flash", family: "Hunyuan" },
+    CanonicalModelSpec { canonical_id: "space-bunny", display_name: "Space-Bunny", family: "Hunyuan" },
+    CanonicalModelSpec { canonical_id: "doubao-seed-2.1-pro", display_name: "Doubao-Seed-2.1-Pro", family: "Doubao" },
+    CanonicalModelSpec { canonical_id: "doubao-seed-2.1-turbo", display_name: "Doubao-Seed-2.1-Turbo", family: "Doubao" },
+    CanonicalModelSpec { canonical_id: "doubao-seed-code", display_name: "Doubao-Seed-Code", family: "Doubao" },
+    CanonicalModelSpec { canonical_id: "openpangu-coder-pro", display_name: "openPangu-Coder-Pro", family: "Pangu" },
+    CanonicalModelSpec { canonical_id: "fast", display_name: "Fast", family: "Other" },
+    CanonicalModelSpec { canonical_id: "auto", display_name: "Auto", family: "Other" },
+];
+
+/// 工具层原始模型 ID / Qoder 槽位 Key -> 跨工具标准 Canonical ID 的对齐表
+fn map_raw_to_canonical_id(tool_id: &str, raw_id: &str, raw_display_name: Option<&str>) -> Option<&'static str> {
+    let trimmed = raw_id.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let display_lower = raw_display_name.unwrap_or("").trim().to_ascii_lowercase();
+
+    // 1. Qoder CN 专有底层槽位 key 映射
+    if tool_id == "qoder_cn" || tool_id == "qoder" {
+        match lower.as_str() {
+            "dmodel" => return Some("deepseek-v4-pro"),
+            "dfmodel" => return Some("deepseek-v4.1-flash"),
+            "gmodel" => return Some("glm-5.3"),
+            "gfmodel" => return Some("glm-5.3-flash"),
+            "kmodel_latest" => return Some("kimi-k3.1-pro"),
+            "kmodel" => return Some("kimi-k2.8-preview"),
+            "mmodel" => return Some("minimax-m3.1-flash"),
+            "qmodel_latest" => return Some("qwen4-max"),
+            "qmodel_38max" => return Some("qwen3.8-max"),
+            "qfmodel" => return Some("qwen3.8-flash"),
+            "jmodel" => return Some("step-5-preview"),
+            "fast" => return Some("fast"),
+            _ => {}
+        }
     }
+
+    // 2. 跨工具标准 ID 与常见别名映射
+    match lower.as_str() {
+        "deepseek-v4-pro" | "deepseek-v4-pro-official" => Some("deepseek-v4-pro"),
+        "deepseek-v4.1-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-official" | "deepseek-flash" => {
+            Some("deepseek-v4.1-flash")
+        }
+        "glm-5.3" => Some("glm-5.3"),
+        "glm-5.3-flash" => Some("glm-5.3-flash"),
+        "glm-5.2" => Some("glm-5.2"),
+        "kimi-k3.1-pro" => Some("kimi-k3.1-pro"),
+        "kimi-k3" | "kimi-k3-1" => Some("kimi-k3"),
+        "kimi-k2.8-preview" => Some("kimi-k2.8-preview"),
+        "kimi-k2.7-code" => Some("kimi-k2.7-code"),
+        "minimax-m3.1-flash" | "minimax-m3.1-flash-preview" | "m3.1-flash-preview" => {
+            Some("minimax-m3.1-flash")
+        }
+        "minimax-m3" => Some("minimax-m3"),
+        "minimax-m2.7" => Some("minimax-m2.7"),
+        "minimax-m2.7-highspeed" => Some("minimax-m2.7-highspeed"),
+        "qwen4-max" | "qwen-4-max" => Some("qwen4-max"),
+        "qwen3.8-max" | "qwen-3.8-max" | "qwen3.8-max-preview" => Some("qwen3.8-max"),
+        "qwen3.8-flash" | "qwen-3.8-flash" => Some("qwen3.8-flash"),
+        "step-5-preview" => Some("step-5-preview"),
+        "mimo-v2.6-pro" | "xiaomi-mimo-v2.6-pro" => Some("mimo-v2.6-pro"),
+        "mimo-v2.6-flash" => Some("mimo-v2.6-flash"),
+        "hy4flash-free" => Some("hy4flash-free"),
+        "hy4std" => Some("hy4std"),
+        "hy4flash" => Some("hy4flash"),
+        "space-bunny" => Some("space-bunny"),
+        "doubao-seed-2.1-pro" | "seed-2.1-pro" | "seed-2.1-pro-0915" | "seed-code-pro-0430" => {
+            Some("doubao-seed-2.1-pro")
+        }
+        "doubao-seed-2.1-turbo" | "seed-2.1-turbo" | "doubao-seed-2.0-code" => {
+            Some("doubao-seed-2.1-turbo")
+        }
+        "doubao-seed-code" | "doubao_1_6" | "seed-code" => Some("doubao-seed-code"),
+        "openpangu-coder-pro" => Some("openpangu-coder-pro"),
+        "fast" => Some("fast"),
+        "auto" => Some("auto"),
+        _ => {
+            // 如果原始 ID 未命中（如动态新模型），结合展示名匹配常见规范名称
+            match display_lower.as_str() {
+                "deepseek-v4-pro" => Some("deepseek-v4-pro"),
+                "deepseek-v4.1-flash" | "deepseek-flash" => Some("deepseek-v4.1-flash"),
+                "glm-5.3" => Some("glm-5.3"),
+                "glm-5.3-flash" => Some("glm-5.3-flash"),
+                "glm-5.2" => Some("glm-5.2"),
+                "kimi-k3.1-pro" => Some("kimi-k3.1-pro"),
+                "kimi-k3" => Some("kimi-k3"),
+                "kimi-k2.8-preview" => Some("kimi-k2.8-preview"),
+                "minimax-m3.1-flash" | "m3.1-flash-preview" => Some("minimax-m3.1-flash"),
+                "minimax-m3" => Some("minimax-m3"),
+                "qwen4-max" => Some("qwen4-max"),
+                "qwen3.8-max" => Some("qwen3.8-max"),
+                "qwen3.8-flash" => Some("qwen3.8-flash"),
+                "step-5-preview" => Some("step-5-preview"),
+                "xiaomi mimo-v2.6-pro" | "mimo-v2.6-pro" => Some("mimo-v2.6-pro"),
+                _ => None,
+            }
+        }
+    }
+}
+
+pub fn infer_model_family(model_id: &str) -> String {
+    let lower = model_id.to_ascii_lowercase();
+    if lower.contains("deepseek") || lower == "dmodel" || lower == "dfmodel" {
+        "DeepSeek".into()
+    } else if lower.contains("glm") || lower == "gmodel" || lower == "gfmodel" {
+        "GLM".into()
+    } else if lower.contains("kimi") || lower == "kmodel" || lower == "kmodel_latest" {
+        "Kimi".into()
+    } else if lower.contains("minimax") || lower.contains("m3.") || lower == "mmodel" {
+        "MiniMax".into()
+    } else if lower.contains("qwen") || lower.starts_with("qm") || lower == "qfmodel" {
+        "Qwen".into()
+    } else if lower.contains("doubao") || lower.contains("seed") {
+        "Doubao".into()
+    } else if lower.contains("hy") || lower.contains("hunyuan") || lower.contains("bunny") {
+        "Hunyuan".into()
+    } else if lower.contains("step") || lower == "jmodel" {
+        "Step".into()
+    } else if lower.contains("mimo") {
+        "MiMo".into()
+    } else if lower.contains("pangu") {
+        "Pangu".into()
+    } else if is_anthropic_model_name(&lower) {
+        "Claude".into()
+    } else if lower.contains("gpt") || lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4") {
+        "GPT".into()
+    } else {
+        "Other".into()
+    }
+}
+
+pub fn normalize_upstream_model(
+    tool_id: &str,
+    raw_id: &str,
+    raw_display_name: Option<&str>,
+    credit_multiplier: Option<f64>,
+    is_free: bool,
+    source: &str,
+) -> UpstreamModelOption {
+    let wire = raw_id.trim().to_string();
+    let canonical = map_raw_to_canonical_id(tool_id, &wire, raw_display_name);
+    if let Some(cid) = canonical {
+        if let Some(spec) = CANONICAL_MODEL_SPECS.iter().find(|s| s.canonical_id == cid) {
+            return UpstreamModelOption {
+                id: spec.canonical_id.to_string(),
+                display_name: spec.display_name.to_string(),
+                vendor_wire_id: wire,
+                credit_multiplier,
+                is_free,
+                family: spec.family.to_string(),
+                source: source.to_string(),
+            };
+        }
+    }
+
+    let normalized_id = wire.to_ascii_lowercase();
+    let display_name = raw_display_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "-")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| wire.clone());
+    UpstreamModelOption {
+        id: normalized_id.clone(),
+        display_name,
+        vendor_wire_id: wire,
+        credit_multiplier,
+        is_free,
+        family: infer_model_family(&normalized_id),
+        source: source.to_string(),
+    }
+}
+
+pub fn normalize_canonical_model_id(tool_id: &str, raw_or_canonical: &str) -> String {
+    let (scoped_tid, bare) = split_scoped_model_id(raw_or_canonical);
+    let effective_tid = scoped_tid.unwrap_or(tool_id);
+    let canonical_bare = normalize_upstream_model(effective_tid, bare, None, None, false, "catalog").id;
+    if scoped_tid.is_some() {
+        format!("{effective_tid}/{canonical_bare}")
+    } else {
+        canonical_bare
+    }
+}
+
+/// 同一账号拉取结果去重：若多个变体对齐到同一标准 ID（如 `deepseek-v4.1-flash` 与 `DeepSeek-V4-Flash-Official`），
+/// 优先保留 `vendor_wire_id` 更直接一致（大小写忽略相等）的条目。
+pub fn dedup_model_options(options: Vec<UpstreamModelOption>) -> Vec<UpstreamModelOption> {
+    let mut out: Vec<UpstreamModelOption> = Vec::with_capacity(options.len());
+    let mut idx_by_id: HashMap<String, usize> = HashMap::new();
+    for opt in options {
+        if let Some(&pos) = idx_by_id.get(&opt.id) {
+            let existing = &out[pos];
+            let incoming_exact = existing.vendor_wire_id.to_ascii_lowercase() != existing.id
+                && opt.vendor_wire_id.to_ascii_lowercase() == opt.id;
+            let incoming_cheaper = match (opt.credit_multiplier, existing.credit_multiplier) {
+                (Some(a), Some(b)) => a < b && opt.vendor_wire_id.to_ascii_lowercase() == opt.id,
+                _ => false,
+            };
+            if incoming_exact || incoming_cheaper {
+                out[pos] = opt;
+            }
+        } else {
+            idx_by_id.insert(opt.id.clone(), out.len());
+            out.push(opt);
+        }
+    }
+    out
+}
+
+/// 将号池内归一化标准模型 ID（或原始 ID）还原为指定上游工具 API 所需的真实 `vendor_wire_id`
+pub fn resolve_vendor_wire_model_id(tool_id: &str, canonical_or_raw_model_id: &str) -> String {
+    let trimmed = canonical_or_raw_model_id.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let cid = map_raw_to_canonical_id(tool_id, trimmed, None).unwrap_or(lower.as_str());
+
+    match tool_id {
+        "qoder_cn" | "qoder" => match cid {
+            "deepseek-v4-pro" => "dmodel".into(),
+            "deepseek-v4.1-flash" => "dfmodel".into(),
+            "glm-5.3" => "gmodel".into(),
+            "glm-5.3-flash" => "gfmodel".into(),
+            "kimi-k3.1-pro" => "kmodel_latest".into(),
+            "kimi-k2.8-preview" => "kmodel".into(),
+            "minimax-m3.1-flash" => "mmodel".into(),
+            "qwen4-max" => "qmodel_latest".into(),
+            "qwen3.8-max" => "qmodel_38max".into(),
+            "qwen3.8-flash" => "qfmodel".into(),
+            "step-5-preview" => "jmodel".into(),
+            "fast" => "fast".into(),
+            _ => trimmed.to_string(),
+        },
+        "workbuddy" => match cid {
+            "kimi-k3" => "kimi-k3-1".into(),
+            _ => {
+                if CANONICAL_MODEL_SPECS.iter().any(|s| s.canonical_id == cid) {
+                    cid.to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            }
+        },
+        "trae_cn" => match cid {
+            "deepseek-v4-pro" => "DeepSeek-V4-Pro".into(),
+            "doubao-seed-2.1-pro" => "Doubao-Seed-2.1-Pro".into(),
+            "doubao-seed-2.1-turbo" => "Doubao-Seed-2.1-Turbo".into(),
+            "doubao-seed-code" => "Doubao-Seed-Code".into(),
+            "glm-5.3" | "glm-5.3-flash" | "glm-5.2" | "kimi-k3.1-pro" | "kimi-k3"
+            | "kimi-k2.8-preview" | "kimi-k2.7-code" | "deepseek-v4.1-flash"
+            | "minimax-m3" | "minimax-m3.1-flash" | "mimo-v2.6-pro" | "mimo-v2.6-flash"
+            | "step-5-preview" | "qwen4-max" | "qwen3.8-max" | "qwen3.8-flash" => cid.to_string(),
+            _ => trimmed.to_string(),
+        },
+        "minimax_code_cn" => match cid {
+            "minimax-m3.1-flash" => "MiniMax-M3.1-Flash-Preview".into(),
+            "minimax-m3" => "MiniMax-M3".into(),
+            "minimax-m2.7" => "MiniMax-M2.7".into(),
+            "minimax-m2.7-highspeed" => "MiniMax-M2.7-highspeed".into(),
+            _ => trimmed.to_string(),
+        },
+        "codearts" => match cid {
+            "openpangu-coder-pro" => "openPangu-Coder-Pro".into(),
+            "glm-5.3" => "glm-5.3".into(),
+            "glm-5.2" => "glm-5.2".into(),
+            "deepseek-v4-pro" => "deepseek-v4-pro".into(),
+            _ => trimmed.to_string(),
+        },
+        _ => trimmed.to_string(),
+    }
+}
+
+fn catalog_opt(tool_id: &str, raw_id: &str, rate: Option<f64>, is_free: bool) -> UpstreamModelOption {
+    normalize_upstream_model(tool_id, raw_id, None, rate, is_free, "catalog")
+}
+
+/// 经各厂商真实线上协议报文核验的兜底模型目录（在网络不可达或尚无在线缓存时启用）
+pub fn default_model_options_for_tool(tool_id: &str) -> Vec<UpstreamModelOption> {
+    match tool_id {
+        "workbuddy" => vec![
+            catalog_opt(tool_id, "deepseek-v4-pro", Some(0.51), false),
+            catalog_opt(tool_id, "deepseek-v4.1-flash", Some(0.11), false),
+            catalog_opt(tool_id, "glm-5.3", Some(0.69), false),
+            catalog_opt(tool_id, "glm-5.3-flash", Some(0.08), false),
+            catalog_opt(tool_id, "glm-5.2", Some(0.79), false),
+            catalog_opt(tool_id, "kimi-k3.1-pro", Some(0.97), false),
+            catalog_opt(tool_id, "kimi-k3-1", Some(1.62), false),
+            catalog_opt(tool_id, "kimi-k2.8-preview", Some(0.77), false),
+            catalog_opt(tool_id, "minimax-m3.1-flash", Some(0.08), false),
+            catalog_opt(tool_id, "step-5-preview", Some(0.33), false),
+            catalog_opt(tool_id, "mimo-v2.6-pro", Some(0.13), false),
+            catalog_opt(tool_id, "hy4flash-free", Some(0.0), true),
+            catalog_opt(tool_id, "hy4std", Some(0.29), false),
+            catalog_opt(tool_id, "hy4flash", Some(0.03), false),
+            catalog_opt(tool_id, "space-bunny", Some(0.08), false),
+            catalog_opt(tool_id, "auto", Some(0.0), false),
+        ],
+        "qoder_cn" => vec![
+            catalog_opt(tool_id, "dmodel", Some(0.5), false),
+            catalog_opt(tool_id, "dfmodel", Some(0.1), false),
+            catalog_opt(tool_id, "gmodel", Some(0.8), false),
+            catalog_opt(tool_id, "gfmodel", Some(0.1), false),
+            catalog_opt(tool_id, "kmodel_latest", Some(1.0), false),
+            catalog_opt(tool_id, "kmodel", Some(0.8), false),
+            catalog_opt(tool_id, "mmodel", Some(0.1), false),
+            catalog_opt(tool_id, "qmodel_latest", Some(0.4), false),
+            catalog_opt(tool_id, "qmodel_38max", Some(0.5), false),
+            catalog_opt(tool_id, "qfmodel", Some(0.1), false),
+            catalog_opt(tool_id, "jmodel", Some(0.3), false),
+            catalog_opt(tool_id, "fast", Some(0.6), false),
+        ],
+        "trae_cn" => vec![
+            catalog_opt(tool_id, "DeepSeek-V4-Pro", Some(0.72), false),
+            catalog_opt(tool_id, "deepseek-v4.1-flash", Some(0.12), false),
+            catalog_opt(tool_id, "glm-5.3", Some(0.78), false),
+            catalog_opt(tool_id, "glm-5.3-flash", Some(0.08), false),
+            catalog_opt(tool_id, "glm-5.2", Some(0.78), false),
+            catalog_opt(tool_id, "kimi-k3.1-pro", Some(1.2), false),
+            catalog_opt(tool_id, "kimi-k3", Some(1.83), false),
+            catalog_opt(tool_id, "kimi-k2.8-preview", Some(0.98), false),
+            catalog_opt(tool_id, "kimi-k2.7-code", Some(0.83), false),
+            catalog_opt(tool_id, "minimax-m3.1-flash", Some(0.09), false),
+            catalog_opt(tool_id, "minimax-m3", Some(0.26), false),
+            catalog_opt(tool_id, "qwen3.8-flash", Some(0.08), false),
+            catalog_opt(tool_id, "step-5-preview", Some(0.48), false),
+            catalog_opt(tool_id, "mimo-v2.6-pro", Some(0.15), false),
+            catalog_opt(tool_id, "Doubao-Seed-2.1-Pro", Some(0.8), false),
+            catalog_opt(tool_id, "Doubao-Seed-2.1-Turbo", Some(0.2), false),
+            catalog_opt(tool_id, "Doubao-Seed-Code", Some(0.06), false),
+        ],
+        "minimax_code_cn" => vec![
+            catalog_opt(tool_id, "MiniMax-M3.1-Flash-Preview", Some(0.0), false),
+            catalog_opt(tool_id, "MiniMax-M3", Some(0.0), false),
+            catalog_opt(tool_id, "MiniMax-M2.7", Some(0.0), false),
+            catalog_opt(tool_id, "MiniMax-M2.7-highspeed", Some(0.0), false),
+        ],
+        "codearts" => vec![
+            catalog_opt(tool_id, "deepseek-v4-pro", None, false),
+            catalog_opt(tool_id, "glm-5.3", None, false),
+            catalog_opt(tool_id, "glm-5.2", None, false),
+            catalog_opt(tool_id, "openPangu-Coder-Pro", None, false),
+        ],
+        "doubaowork" => vec![
+            catalog_opt(tool_id, "Doubao-Seed-2.1-Pro", None, false),
+            catalog_opt(tool_id, "Doubao-Seed-Code", None, false),
+            catalog_opt(tool_id, "DeepSeek-V4-Pro", None, false),
+            catalog_opt(tool_id, "GLM-5.3", None, false),
+            catalog_opt(tool_id, "Kimi-K3.1-Pro", None, false),
+        ],
+        "lobsterai" => vec![
+            catalog_opt(tool_id, "deepseek-v4-pro", None, false),
+            catalog_opt(tool_id, "deepseek-v4.1-flash", None, false),
+            catalog_opt(tool_id, "glm-5.3", None, false),
+            catalog_opt(tool_id, "kimi-k3.1-pro", None, false),
+            catalog_opt(tool_id, "qwen4-max", None, false),
+        ],
+        "custom_api_key" => vec![
+            catalog_opt(tool_id, "deepseek-v4-pro", None, false),
+            catalog_opt(tool_id, "glm-5.3", None, false),
+            catalog_opt(tool_id, "deepseek-chat", None, false),
+            catalog_opt(tool_id, "claude-sonnet-4.6", None, false),
+        ],
+        _ => vec![
+            catalog_opt(tool_id, "deepseek-v4-pro", None, false),
+            catalog_opt(tool_id, "glm-5.3", None, false),
+        ],
+    }
+}
+
+pub fn default_models_for_tool(tool_id: &str) -> Vec<String> {
+    default_model_options_for_tool(tool_id)
+        .into_iter()
+        .map(|m| m.id)
+        .collect()
 }
 
 pub fn upstream_model_protocol(tool_id: &str, model_id: &str) -> WireProtocolKind {
@@ -501,10 +946,16 @@ pub fn compute_pool_serving_accounts(
     model_id: &str,
     now_ms: i64,
 ) -> (usize, usize, String) {
+    let (scoped_tid, bare_model) = split_scoped_model_id(model_id);
     let serving: Vec<&PoolMember> = pool
         .members
         .iter()
-        .filter(|m| m.supported_models.iter().any(|id| id == model_id))
+        .filter(|m| {
+            scoped_tid.is_none_or(|tid| m.tool_id == tid)
+                && m.supported_models
+                    .iter()
+                    .any(|id| id == model_id || split_scoped_model_id(id).1 == bare_model)
+        })
         .collect();
 
     let mut healthy = 0usize;
@@ -608,21 +1059,44 @@ pub fn compute_agent_exposed_models(
                 .copied()
                 .unwrap_or(0)
                 > 1;
-            let display_name = if collision {
+            let (scoped_tid, bare_model) = split_scoped_model_id(&item.policy.model_id);
+            let display_name = if let Some(tid) = scoped_tid {
+                let human_label = default_model_options_for_tool(tid)
+                    .into_iter()
+                    .find(|o| o.id == bare_model)
+                    .map(|o| o.display_name)
+                    .unwrap_or_else(|| bare_model.to_string());
+                let base_name = format!("{} · {}", tool_short_display_name(tid), human_label);
+                if collision {
+                    format!("{base_name} · {}", item.pool.name)
+                } else {
+                    base_name
+                }
+            } else if collision {
                 format!("{} · {}", item.policy.model_id, item.pool.name)
             } else {
                 item.policy.model_id.clone()
             };
             let wire_model_id = if agent_id == TargetAgentId::ClaudeDesktop {
-                item.policy
-                    .claude_alias_id
-                    .clone()
-                    .unwrap_or_else(|| build_claude_model_alias(&item.pool.slug, &item.policy.model_id))
+                if scoped_tid.is_some() && is_anthropic_model_name(bare_model) && !collision {
+                    bare_model.to_string()
+                } else {
+                    item.policy
+                        .claude_alias_id
+                        .clone()
+                        .unwrap_or_else(|| build_claude_model_alias(&item.pool.slug, &item.policy.model_id))
+                }
+            } else if let Some(tid) = scoped_tid {
+                if collision {
+                    format!("{}/{tid}/{bare_model}", item.pool.slug)
+                } else {
+                    format!("{tid}/{bare_model}")
+                }
             } else {
                 format!("{}/{}", item.pool.slug, item.policy.model_id)
             };
             let is_claude_disguised =
-                agent_id == TargetAgentId::ClaudeDesktop && wire_model_id != item.policy.model_id;
+                agent_id == TargetAgentId::ClaudeDesktop && wire_model_id != bare_model;
             let is_default = if has_explicit_default {
                 default_model_key == Some(key.as_str())
             } else {
@@ -662,6 +1136,32 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_cross_tool_models_and_resolves_vendor_wire_ids() {
+        let wb = normalize_upstream_model("workbuddy", "deepseek-v4-pro", Some("DeepSeek-V4-Pro"), Some(0.51), false, "live");
+        let qd = normalize_upstream_model("qoder_cn", "dmodel", Some("DeepSeek-V4-Pro"), Some(0.5), false, "live");
+        let tr = normalize_upstream_model("trae_cn", "DeepSeek-V4-Pro", Some("DeepSeek-V4-Pro"), Some(0.72), false, "live");
+
+        assert_eq!(wb.id, "deepseek-v4-pro");
+        assert_eq!(qd.id, "deepseek-v4-pro");
+        assert_eq!(tr.id, "deepseek-v4-pro");
+        assert_eq!(qd.vendor_wire_id, "dmodel");
+
+        assert_eq!(resolve_vendor_wire_model_id("qoder_cn", "deepseek-v4-pro"), "dmodel");
+        assert_eq!(resolve_vendor_wire_model_id("qoder_cn", "glm-5.3"), "gmodel");
+        assert_eq!(resolve_vendor_wire_model_id("qoder_cn", "kimi-k3.1-pro"), "kmodel_latest");
+        assert_eq!(resolve_vendor_wire_model_id("workbuddy", "kimi-k3"), "kimi-k3-1");
+        assert_eq!(resolve_vendor_wire_model_id("trae_cn", "deepseek-v4-pro"), "DeepSeek-V4-Pro");
+        assert_eq!(
+            resolve_vendor_wire_model_id("minimax_code_cn", "minimax-m3.1-flash"),
+            "MiniMax-M3.1-Flash-Preview"
+        );
+
+        let wb_defaults = default_models_for_tool("workbuddy");
+        assert!(wb_defaults.contains(&"deepseek-v4-pro".to_string()));
+        assert!(!wb_defaults.contains(&"claude-sonnet-4.6".to_string()));
+    }
+
+    #[test]
     fn member_tier_serde_matches_frontend_strings() {
         assert_eq!(
             serde_json::to_string(&MemberTier::T1Primary).unwrap(),
@@ -675,5 +1175,96 @@ mod tests {
             serde_json::to_string(&MemberTier::T3Fallback).unwrap(),
             r#""t3_fallback""#
         );
+    }
+
+    #[test]
+    fn scoped_model_ids_separate_tools_cleanly_in_agent_menu() {
+        let pool = AccountPool {
+            id: "pool-agent-opencode".into(),
+            slug: "opencode".into(),
+            name: "OpenCode 专属路由".into(),
+            description: "".into(),
+            scene_tag: "Agent".into(),
+            enabled: true,
+            strategy: PoolStrategy::Order,
+            affinity_mode: AffinityMode::AutoCache,
+            skip_active_client_account: false,
+            cooldown_seconds: 60,
+            auto_refresh_on_401: true,
+            fallback_api_key_enabled: true,
+            model_policies: vec![
+                PoolModelPolicy {
+                    model_id: "workbuddy/deepseek-v4-pro".into(),
+                    enabled: true,
+                    fallback_model_id: None,
+                    claude_alias_id: None,
+                },
+                PoolModelPolicy {
+                    model_id: "qoder_cn/deepseek-v4-pro".into(),
+                    enabled: true,
+                    fallback_model_id: None,
+                    claude_alias_id: None,
+                },
+            ],
+            members: vec![
+                PoolMember {
+                    id: "m1".into(),
+                    account_id: "a1".into(),
+                    tool_id: "workbuddy".into(),
+                    label: "WB 主号".into(),
+                    uid_masked: "u1".into(),
+                    supported_models: vec!["workbuddy/deepseek-v4-pro".into()],
+                    tier: MemberTier::T1Primary,
+                    channel: UpstreamChannel::OpencodeBridge,
+                    enabled: true,
+                    priority: 1,
+                    quota_percent: 80,
+                    quota_text: "".into(),
+                    cooldown_until_ms: None,
+                    is_active_on_client: Some(false),
+                    account_status: Some("active".into()),
+                    code_arts_mode: None,
+                    last_latency_ms: Some(400),
+                },
+                PoolMember {
+                    id: "m2".into(),
+                    account_id: "a2".into(),
+                    tool_id: "qoder_cn".into(),
+                    label: "Qoder 主号".into(),
+                    uid_masked: "u2".into(),
+                    supported_models: vec!["qoder_cn/deepseek-v4-pro".into()],
+                    tier: MemberTier::T1Primary,
+                    channel: UpstreamChannel::OpencodeBridge,
+                    enabled: true,
+                    priority: 2,
+                    quota_percent: 60,
+                    quota_text: "".into(),
+                    cooldown_until_ms: None,
+                    is_active_on_client: Some(false),
+                    account_status: Some("active".into()),
+                    code_arts_mode: None,
+                    last_latency_ms: Some(420),
+                },
+            ],
+            today_requests: 0,
+            today_failovers: 0,
+            cache_hit_rate: 0,
+            created_at: "".into(),
+        };
+
+        let exposed = compute_agent_exposed_models(
+            TargetAgentId::Opencode,
+            &["pool-agent-opencode".to_string()],
+            None,
+            &[pool],
+            1000,
+        );
+        assert_eq!(exposed.len(), 2);
+        assert_eq!(exposed[0].wire_model_id, "workbuddy/deepseek-v4-pro");
+        assert_eq!(exposed[0].display_name, "WorkBuddy · DeepSeek-V4-Pro");
+        assert_eq!(exposed[0].account_count, 1);
+        assert_eq!(exposed[1].wire_model_id, "qoder_cn/deepseek-v4-pro");
+        assert_eq!(exposed[1].display_name, "Qoder CN · DeepSeek-V4-Pro");
+        assert_eq!(exposed[1].account_count, 1);
     }
 }

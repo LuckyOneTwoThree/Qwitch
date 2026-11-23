@@ -13,6 +13,7 @@ import type {
   TargetAgentId,
   UpstreamAccountCandidate,
   UpstreamChannel,
+  UpstreamModelOption,
   WireProtocolKind,
 } from "../types/pool";
 
@@ -147,51 +148,184 @@ export const CHANNEL_META: Record<
   },
 };
 
-export const UPSTREAM_MODEL_OPTIONS: Record<
-  string,
-  { id: string; label: string; protocol: WireProtocolKind }[]
-> = {
+export interface CatalogModelEntry extends UpstreamModelOption {
+  label: string;
+  protocol: WireProtocolKind;
+}
+
+function makeCatalogModel(
+  id: string,
+  displayName: string,
+  vendorWireId: string,
+  family: string,
+  protocol: WireProtocolKind = "openai_chat",
+  creditMultiplier?: number,
+  isFree = false
+): CatalogModelEntry {
+  return {
+    id,
+    label: displayName,
+    displayName,
+    vendorWireId,
+    family,
+    protocol,
+    creditMultiplier,
+    isFree,
+    source: "catalog",
+  };
+}
+
+export const UPSTREAM_MODEL_OPTIONS: Record<string, CatalogModelEntry[]> = {
   workbuddy: [
-    { id: "claude-sonnet-4.6", label: "claude-sonnet-4.6", protocol: "openai_chat" },
-    { id: "claude-opus-4.6", label: "claude-opus-4.6", protocol: "openai_chat" },
-    { id: "deepseek-v4", label: "deepseek-v4", protocol: "openai_chat" },
-    { id: "glm-5.3", label: "glm-5.3", protocol: "openai_chat" },
+    makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "deepseek-v4-pro", "DeepSeek", "openai_chat", 0.51),
+    makeCatalogModel("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", "deepseek-v4.1-flash", "DeepSeek", "openai_chat", 0.11),
+    makeCatalogModel("glm-5.3", "GLM-5.3", "glm-5.3", "GLM", "openai_chat", 0.69),
+    makeCatalogModel("glm-5.3-flash", "GLM-5.3-Flash", "glm-5.3-flash", "GLM", "openai_chat", 0.08),
+    makeCatalogModel("glm-5.2", "GLM-5.2", "glm-5.2", "GLM", "openai_chat", 0.79),
+    makeCatalogModel("kimi-k3.1-pro", "Kimi-K3.1-Pro", "kimi-k3.1-pro", "Kimi", "openai_chat", 0.97),
+    makeCatalogModel("kimi-k3", "Kimi-K3", "kimi-k3-1", "Kimi", "openai_chat", 1.62),
+    makeCatalogModel("kimi-k2.8-preview", "Kimi-K2.8-Preview", "kimi-k2.8-preview", "Kimi", "openai_chat", 0.77),
+    makeCatalogModel("minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax-m3.1-flash", "MiniMax", "openai_chat", 0.08),
+    makeCatalogModel("step-5-preview", "Step-5-Preview", "step-5-preview", "Step", "openai_chat", 0.33),
+    makeCatalogModel("mimo-v2.6-pro", "MiMo-V2.6-Pro", "mimo-v2.6-pro", "MiMo", "openai_chat", 0.13),
+    makeCatalogModel("hy4flash-free", "Hy4-Flash-Free", "hy4flash-free", "Hunyuan", "openai_chat", 0, true),
+    makeCatalogModel("hy4std", "Hy4", "hy4std", "Hunyuan", "openai_chat", 0.29),
+    makeCatalogModel("hy4flash", "Hy4-Flash", "hy4flash", "Hunyuan", "openai_chat", 0.03),
+    makeCatalogModel("space-bunny", "Space-Bunny", "space-bunny", "Hunyuan", "openai_chat", 0.08),
   ],
   minimax_code_cn: [
-    { id: "MiniMax-M2.5", label: "MiniMax-M2.5", protocol: "anthropic_messages" },
-    { id: "MiniMax-M2.5-highspeed", label: "MiniMax-M2.5-highspeed", protocol: "anthropic_messages" },
+    makeCatalogModel("minimax-m3.1-flash", "MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash-Preview", "MiniMax", "anthropic_messages"),
+    makeCatalogModel("minimax-m3", "MiniMax-M3", "MiniMax-M3", "MiniMax", "anthropic_messages"),
+    makeCatalogModel("minimax-m2.7", "MiniMax-M2.7", "MiniMax-M2.7", "MiniMax", "anthropic_messages"),
+    makeCatalogModel("minimax-m2.7-highspeed", "MiniMax-M2.7-Highspeed", "MiniMax-M2.7-highspeed", "MiniMax", "anthropic_messages"),
   ],
   qoder_cn: [
-    { id: "qwen3-coder-plus", label: "qwen3-coder-plus", protocol: "openai_chat" },
-    { id: "qwen3-max-thinking", label: "qwen3-max-thinking", protocol: "openai_chat" },
-    { id: "claude-sonnet-4.6", label: "claude-sonnet-4.6", protocol: "openai_chat" },
-    { id: "kimi-k3-coder", label: "kimi-k3-coder", protocol: "openai_chat" },
+    makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "dmodel", "DeepSeek", "openai_chat", 0.5),
+    makeCatalogModel("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", "dfmodel", "DeepSeek", "openai_chat", 0.1),
+    makeCatalogModel("glm-5.3", "GLM-5.3", "gmodel", "GLM", "openai_chat", 0.8),
+    makeCatalogModel("glm-5.3-flash", "GLM-5.3-Flash", "gfmodel", "GLM", "openai_chat", 0.1),
+    makeCatalogModel("kimi-k3.1-pro", "Kimi-K3.1-Pro", "kmodel_latest", "Kimi", "openai_chat", 1.0),
+    makeCatalogModel("kimi-k2.8-preview", "Kimi-K2.8-Preview", "kmodel", "Kimi", "openai_chat", 0.8),
+    makeCatalogModel("minimax-m3.1-flash", "MiniMax-M3.1-Flash", "mmodel", "MiniMax", "openai_chat", 0.1),
+    makeCatalogModel("qwen4-max", "Qwen4-Max", "qmodel_latest", "Qwen", "openai_chat", 0.4),
+    makeCatalogModel("qwen3.8-max", "Qwen3.8-Max", "qmodel_38max", "Qwen", "openai_chat", 0.5),
+    makeCatalogModel("qwen3.8-flash", "Qwen3.8-Flash", "qfmodel", "Qwen", "openai_chat", 0.1),
+    makeCatalogModel("step-5-preview", "Step-5-Preview", "jmodel", "Step", "openai_chat", 0.3),
+    makeCatalogModel("fast", "Fast", "fast", "Other", "openai_chat", 0.6),
   ],
   trae_cn: [
-    { id: "claude-sonnet-4.6", label: "claude-sonnet-4.6", protocol: "openai_chat" },
-    { id: "deepseek-v4", label: "deepseek-v4", protocol: "openai_chat" },
-    { id: "doubao-seed-2.1-code", label: "doubao-seed-2.1-code", protocol: "openai_chat" },
+    makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "DeepSeek-V4-Pro", "DeepSeek", "openai_chat", 0.72),
+    makeCatalogModel("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", "deepseek-v4.1-flash", "DeepSeek", "openai_chat", 0.12),
+    makeCatalogModel("glm-5.3", "GLM-5.3", "glm-5.3", "GLM", "openai_chat", 0.78),
+    makeCatalogModel("glm-5.3-flash", "GLM-5.3-Flash", "glm-5.3-flash", "GLM", "openai_chat", 0.08),
+    makeCatalogModel("glm-5.2", "GLM-5.2", "glm-5.2", "GLM", "openai_chat", 0.78),
+    makeCatalogModel("kimi-k3.1-pro", "Kimi-K3.1-Pro", "kimi-k3.1-pro", "Kimi", "openai_chat", 1.2),
+    makeCatalogModel("kimi-k3", "Kimi-K3", "kimi-k3", "Kimi", "openai_chat", 1.83),
+    makeCatalogModel("kimi-k2.8-preview", "Kimi-K2.8-Preview", "kimi-k2.8-preview", "Kimi", "openai_chat", 0.98),
+    makeCatalogModel("kimi-k2.7-code", "Kimi-K2.7-Code", "kimi-k2.7-code", "Kimi", "openai_chat", 0.83),
+    makeCatalogModel("minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax-m3.1-flash", "MiniMax", "openai_chat", 0.09),
+    makeCatalogModel("minimax-m3", "MiniMax-M3", "minimax-m3", "MiniMax", "openai_chat", 0.26),
+    makeCatalogModel("qwen3.8-flash", "Qwen3.8-Flash", "qwen3.8-flash", "Qwen", "openai_chat", 0.08),
+    makeCatalogModel("step-5-preview", "Step-5-Preview", "step-5-preview", "Step", "openai_chat", 0.48),
+    makeCatalogModel("mimo-v2.6-pro", "MiMo-V2.6-Pro", "mimo-v2.6-pro", "MiMo", "openai_chat", 0.15),
+    makeCatalogModel("doubao-seed-2.1-pro", "Doubao-Seed-2.1-Pro", "Doubao-Seed-2.1-Pro", "Doubao", "openai_chat", 0.8),
+    makeCatalogModel("doubao-seed-2.1-turbo", "Doubao-Seed-2.1-Turbo", "Doubao-Seed-2.1-Turbo", "Doubao", "openai_chat", 0.2),
+    makeCatalogModel("doubao-seed-code", "Doubao-Seed-Code", "Doubao-Seed-Code", "Doubao", "openai_chat", 0.06),
   ],
   lobsterai: [
-    { id: "lobster-coder-pro", label: "lobster-coder-pro", protocol: "openai_chat" },
-    { id: "deepseek-v4", label: "deepseek-v4", protocol: "openai_chat" },
-    { id: "lobster-reasoner", label: "lobster-reasoner", protocol: "openai_chat" },
+    makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "deepseek-v4-pro", "DeepSeek"),
+    makeCatalogModel("deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", "deepseek-v4.1-flash", "DeepSeek"),
+    makeCatalogModel("glm-5.3", "GLM-5.3", "glm-5.3", "GLM"),
+    makeCatalogModel("kimi-k3.1-pro", "Kimi-K3.1-Pro", "kimi-k3.1-pro", "Kimi"),
+    makeCatalogModel("qwen4-max", "Qwen4-Max", "qwen4-max", "Qwen"),
   ],
   doubaowork: [
-    { id: "doubao-seed-2.1-pro", label: "doubao-seed-2.1-pro", protocol: "openai_chat" },
-    { id: "doubao-seed-2.0-code", label: "doubao-seed-2.0-code", protocol: "openai_chat" },
+    makeCatalogModel("doubao-seed-2.1-pro", "Doubao-Seed-2.1-Pro", "Doubao-Seed-2.1-Pro", "Doubao"),
+    makeCatalogModel("doubao-seed-code", "Doubao-Seed-Code", "Doubao-Seed-Code", "Doubao"),
+    makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "DeepSeek-V4-Pro", "DeepSeek"),
+    makeCatalogModel("glm-5.3", "GLM-5.3", "GLM-5.3", "GLM"),
+    makeCatalogModel("kimi-k3.1-pro", "Kimi-K3.1-Pro", "Kimi-K3.1-Pro", "Kimi"),
   ],
   codearts: [
-    { id: "pangu-coder-pro", label: "pangu-coder-pro", protocol: "openai_chat" },
-    { id: "qwen3-coder-32b", label: "qwen3-coder-32b", protocol: "openai_chat" },
+    makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "deepseek-v4-pro", "DeepSeek"),
+    makeCatalogModel("glm-5.3", "GLM-5.3", "glm-5.3", "GLM"),
+    makeCatalogModel("glm-5.2", "GLM-5.2", "glm-5.2", "GLM"),
+    makeCatalogModel("openpangu-coder-pro", "openPangu-Coder-Pro", "openPangu-Coder-Pro", "Pangu"),
   ],
   custom_api_key: [
-    { id: "claude-sonnet-4.6", label: "claude-sonnet-4.6 (Anthropic)", protocol: "anthropic_messages" },
-    { id: "deepseek-v4", label: "deepseek-v4 (OpenAI 兼容)", protocol: "openai_chat" },
-    { id: "deepseek-chat", label: "deepseek-chat (OpenAI 兼容)", protocol: "openai_chat" },
-    { id: "deepseek-reasoner", label: "deepseek-reasoner (OpenAI 兼容)", protocol: "openai_chat" },
+    makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "deepseek-v4-pro", "DeepSeek"),
+    makeCatalogModel("glm-5.3", "GLM-5.3", "glm-5.3", "GLM"),
+    makeCatalogModel("deepseek-chat", "deepseek-chat", "deepseek-chat", "DeepSeek"),
+    makeCatalogModel("claude-sonnet-4.6", "claude-sonnet-4.6", "claude-sonnet-4.6", "Claude", "anthropic_messages"),
   ],
 };
+
+function mergeFallbackModelIds(
+  base: CatalogModelEntry[],
+  extraIds: string[],
+  toolId: string
+): CatalogModelEntry[] {
+  const seen = new Set(base.map((m) => m.id));
+  const out = [...base];
+  for (const id of extraIds) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      out.push(
+        makeCatalogModel(
+          id,
+          id,
+          id,
+          "Other",
+          toolId === "minimax_code_cn" ? "anthropic_messages" : "openai_chat"
+        )
+      );
+    }
+  }
+  return out;
+}
+
+export function getCandidateModelOptions(
+  candidate: UpstreamAccountCandidate
+): CatalogModelEntry[] {
+  const proto = (id: string): WireProtocolKind =>
+    candidate.toolId === "minimax_code_cn" ||
+    (candidate.toolId === "custom_api_key" && isAnthropicModelName(id))
+      ? "anthropic_messages"
+      : "openai_chat";
+
+  if (candidate.modelOptions && candidate.modelOptions.length > 0) {
+    return candidate.modelOptions.map((m) => ({
+      ...m,
+      label: m.displayName || m.id,
+      protocol: proto(m.id),
+    }));
+  }
+  const fallback = UPSTREAM_MODEL_OPTIONS[candidate.toolId] ?? [];
+  return mergeFallbackModelIds(fallback, candidate.defaultModels ?? [], candidate.toolId);
+}
+
+export function getMemberModelOptions(
+  member: Pick<PoolMember, "accountId" | "toolId" | "supportedModels">,
+  candidates: UpstreamAccountCandidate[]
+): CatalogModelEntry[] {
+  const matched = candidates.find((c) => c.accountId === member.accountId);
+  const base = matched
+    ? getCandidateModelOptions(matched)
+    : (UPSTREAM_MODEL_OPTIONS[member.toolId] ?? []);
+  return mergeFallbackModelIds(base, member.supportedModels, member.toolId);
+}
+
+export function formatModelRateBadge(
+  opt?: Pick<UpstreamModelOption, "creditMultiplier" | "isFree">
+): string | null {
+  if (!opt) return null;
+  if (opt.isFree) return "免费";
+  if (typeof opt.creditMultiplier === "number" && opt.creditMultiplier > 0) {
+    const rounded = Number(opt.creditMultiplier.toFixed(2));
+    return `${rounded}×`;
+  }
+  return null;
+}
 
 export const TOOL_DEFAULT_CHANNEL: Record<string, UpstreamChannel> = {
   minimax_code_cn: "rust_native",
@@ -211,7 +345,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "WorkBuddy · 主号",
     uidMasked: "wb_72a1****8e",
     channel: "opencode_bridge",
-    defaultModels: ["claude-sonnet-4.6", "claude-opus-4.6"],
+    defaultModels: ["deepseek-v4-pro", "glm-5.3", "kimi-k3.1-pro"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.workbuddy,
     defaultTier: "t1_primary",
     quotaPercent: 73,
     quotaText: "1,450 / 2,000 积分",
@@ -224,7 +359,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "WorkBuddy · 副号",
     uidMasked: "wb_39f0****14",
     channel: "opencode_bridge",
-    defaultModels: ["claude-sonnet-4.6", "claude-opus-4.6"],
+    defaultModels: ["deepseek-v4-pro", "kimi-k3.1-pro", "glm-5.3"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.workbuddy,
     defaultTier: "t1_primary",
     quotaPercent: 62,
     quotaText: "620 / 1,000 积分",
@@ -237,7 +373,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "WorkBuddy · 备用号 03",
     uidMasked: "wb_91c2****5a",
     channel: "opencode_bridge",
-    defaultModels: ["deepseek-v4"],
+    defaultModels: ["hy4flash-free", "deepseek-v4.1-flash"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.workbuddy,
     defaultTier: "t2_backup",
     quotaPercent: 30,
     quotaText: "300 / 1,000 积分",
@@ -250,7 +387,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "MiniMax Code CN · 主号",
     uidMasked: "mm_91c4****7e",
     channel: "rust_native",
-    defaultModels: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+    defaultModels: ["minimax-m3.1-flash", "minimax-m3"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.minimax_code_cn,
     defaultTier: "t1_primary",
     quotaPercent: 86,
     quotaText: "855 / 1,000 Credits",
@@ -263,7 +401,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "Qoder · 日常主力",
     uidMasked: "qd_5e82****4d",
     channel: "opencode_bridge",
-    defaultModels: ["claude-sonnet-4.6", "qwen3-coder-plus"],
+    defaultModels: ["deepseek-v4-pro", "glm-5.3", "qwen4-max"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.qoder_cn,
     defaultTier: "t2_backup",
     quotaPercent: 56,
     quotaText: "280 / 500 Credits",
@@ -276,7 +415,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "Qoder · 实验号",
     uidMasked: "qd_2b44****9a",
     channel: "opencode_bridge",
-    defaultModels: ["qwen3-max-thinking", "qwen3-coder-plus"],
+    defaultModels: ["qwen4-max", "qwen3.8-max", "kimi-k3.1-pro"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.qoder_cn,
     defaultTier: "t1_primary",
     quotaPercent: 82,
     quotaText: "410 / 500 Credits",
@@ -289,7 +429,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "Trae CN · 主力工作号",
     uidMasked: "u_8f3a****91c",
     channel: "opencode_bridge",
-    defaultModels: ["deepseek-v4", "claude-sonnet-4.6"],
+    defaultModels: ["deepseek-v4-pro", "glm-5.3", "doubao-seed-2.1-pro"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.trae_cn,
     defaultTier: "t1_primary",
     quotaPercent: 63,
     quotaText: "380 / 600 次",
@@ -302,7 +443,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "Trae CN · 个人备用号",
     uidMasked: "u_4c19****02b",
     channel: "opencode_bridge",
-    defaultModels: ["claude-sonnet-4.6", "deepseek-v4"],
+    defaultModels: ["deepseek-v4-pro", "glm-5.3", "minimax-m3.1-flash"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.trae_cn,
     defaultTier: "t2_backup",
     quotaPercent: 42,
     quotaText: "42 / 100 次",
@@ -315,7 +457,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "LobsterAI · 主号",
     uidMasked: "17****38",
     channel: "opencode_bridge",
-    defaultModels: ["lobster-coder-pro", "deepseek-v4"],
+    defaultModels: ["deepseek-v4-pro", "deepseek-v4.1-flash", "glm-5.3"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.lobsterai,
     defaultTier: "t2_backup",
     quotaPercent: 86,
     quotaText: "2,580 / 3,000 积分",
@@ -328,7 +471,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "豆包工作 · 主号",
     uidMasked: "dw_71****9e",
     channel: "opencode_bridge",
-    defaultModels: ["doubao-seed-2.1-pro"],
+    defaultModels: ["doubao-seed-2.1-pro", "doubao-seed-code"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.doubaowork,
     defaultTier: "t1_primary",
     quotaPercent: 88,
     quotaText: "880 / 1,000 额度",
@@ -341,7 +485,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "码道 CodeArts · 独立 OAuth 推理号",
     uidMasked: "ca_98e1****3d2",
     channel: "opencode_bridge",
-    defaultModels: ["pangu-coder-pro"],
+    defaultModels: ["openpangu-coder-pro", "glm-5.3"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.codearts,
     defaultTier: "t2_backup",
     quotaPercent: 94,
     quotaText: "3,760 / 4,000 积分",
@@ -355,7 +500,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "码道 CodeArts · 主号（客户端导入）",
     uidMasked: "ca_c02b****8f7",
     channel: "opencode_bridge",
-    defaultModels: ["pangu-coder-pro"],
+    defaultModels: ["openpangu-coder-pro", "glm-5.3"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.codearts,
     defaultTier: "t2_backup",
     quotaPercent: 100,
     quotaText: "4,500 / 4,500 积分",
@@ -369,7 +515,8 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     label: "官方按量 API Key · 末位兜底",
     uidMasked: "sk-ds****91f4",
     channel: "api_key",
-    defaultModels: ["claude-sonnet-4.6", "deepseek-v4", "deepseek-chat"],
+    defaultModels: ["deepseek-v4-pro", "glm-5.3", "deepseek-chat", "claude-sonnet-4.6"],
+    modelOptions: UPSTREAM_MODEL_OPTIONS.custom_api_key,
     defaultTier: "t3_fallback",
     quotaPercent: 95,
     quotaText: "余额 ¥48.20",
@@ -384,7 +531,7 @@ export const POOL_SCENE_TEMPLATES: PoolSceneTemplate[] = [
     title: "全栈 Coding 多模型池",
     sceneTag: "主力 Coding",
     description:
-      "聚合多工具编程账号并显式暴露 claude-sonnet-4.6 等主力模型，严格按 T1→T2→T3 梯队 + 同工具水位调度",
+      "聚合多工具编程账号并显式暴露 DeepSeek-V4-Pro / GLM-5.3 / MiniMax-M3.1-Flash，严格按 T1→T2→T3 梯队 + 同工具水位调度",
     defaultName: "主力全栈 Coding 池",
     strategy: "quota_first",
     affinityMode: "auto_cache",
@@ -438,13 +585,98 @@ export const POOL_SCENE_TEMPLATES: PoolSceneTemplate[] = [
   },
 ];
 
+export const SCOPED_TOOL_IDS = new Set([
+  "workbuddy",
+  "minimax_code_cn",
+  "qoder_cn",
+  "qoder",
+  "trae_cn",
+  "lobsterai",
+  "doubaowork",
+  "codearts",
+  "custom_api_key",
+]);
+
+export const TOOL_SHORT_LABELS: Record<string, string> = {
+  workbuddy: "WorkBuddy",
+  minimax_code_cn: "MiniMax",
+  qoder_cn: "Qoder CN",
+  qoder: "Qoder CN",
+  trae_cn: "Trae CN",
+  lobsterai: "有道龙虾",
+  doubaowork: "豆包工作",
+  codearts: "码道 CodeArts",
+  custom_api_key: "标准 API",
+};
+
+export function splitScopedModelId(raw: string): {
+  toolId: string | null;
+  modelId: string;
+} {
+  const trimmed = raw.trim();
+  const slashIdx = trimmed.indexOf("/");
+  if (slashIdx > 0) {
+    const prefix = trimmed.slice(0, slashIdx);
+    const rest = trimmed.slice(slashIdx + 1).trim();
+    if (SCOPED_TOOL_IDS.has(prefix) && rest.length > 0) {
+      return { toolId: prefix, modelId: rest };
+    }
+  }
+  return { toolId: null, modelId: trimmed };
+}
+
+export function formatScopedModelId(toolId: string, modelId: string): string {
+  const { modelId: bare } = splitScopedModelId(modelId);
+  return `${toolId}/${bare}`;
+}
+
+export function getCatalogModelsForTool(
+  toolId: string,
+  candidates: UpstreamAccountCandidate[] = []
+): CatalogModelEntry[] {
+  const catalog = UPSTREAM_MODEL_OPTIONS[toolId] ?? [];
+  const catalogMap = new Map(catalog.map((c) => [c.id, c]));
+  const result: CatalogModelEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const cand of candidates) {
+    if (cand.toolId !== toolId || !cand.modelOptions) continue;
+    for (const opt of cand.modelOptions) {
+      if (seen.has(opt.id)) continue;
+      seen.add(opt.id);
+      const base = catalogMap.get(opt.id);
+      result.push({
+        id: opt.id,
+        label: opt.displayName || base?.label || opt.id,
+        displayName: opt.displayName || base?.displayName || opt.id,
+        vendorWireId: opt.vendorWireId || base?.vendorWireId || opt.id,
+        family: opt.family || base?.family || "Other",
+        protocol:
+          base?.protocol ??
+          (toolId === "minimax_code_cn" ? "anthropic_messages" : "openai_chat"),
+        creditMultiplier: opt.creditMultiplier ?? base?.creditMultiplier,
+        isFree: opt.isFree ?? base?.isFree ?? false,
+        source: opt.source || "live",
+      });
+    }
+  }
+
+  for (const item of catalog) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+}
+
 export function isAnthropicModelName(modelId: string): boolean {
   return /claude|sonnet|opus|haiku|fable|mythos|anthropic/i.test(modelId);
 }
 
 export function buildClaudeModelAlias(poolSlug: string, modelId: string): string {
-  if (isAnthropicModelName(modelId)) {
-    return modelId;
+  const { toolId, modelId: bare } = splitScopedModelId(modelId);
+  if (isAnthropicModelName(bare) && !toolId) {
+    return bare;
   }
   const seed = `${poolSlug}/${modelId}`;
   let hash = 2166136261;
@@ -519,7 +751,14 @@ export function computePoolServingAccounts(
   healthy: number;
   tierSummary: string;
 } {
-  const serving = pool.members.filter((m) => m.supportedModels.includes(modelId));
+  const { toolId: scopedTid, modelId: bareModel } = splitScopedModelId(modelId);
+  const serving = pool.members.filter(
+    (m) =>
+      (!scopedTid || m.toolId === scopedTid) &&
+      m.supportedModels.some(
+        (id) => id === modelId || splitScopedModelId(id).modelId === bareModel
+      )
+  );
   let healthy = 0;
   let t1 = 0;
   let t2 = 0;
@@ -593,11 +832,28 @@ export function computeAgentExposedModels(
   return rawItems.map(({ pool, policy, serving }, idx) => {
     const key = makeDefaultModelKey(pool.id, policy.modelId);
     const collision = (modelCount.get(policy.modelId) ?? 0) > 1;
-    const displayName = collision ? `${policy.modelId} · ${pool.name}` : policy.modelId;
+    const { toolId: scopedTid, modelId: bareModel } = splitScopedModelId(policy.modelId);
+    const humanLabel = scopedTid
+      ? (UPSTREAM_MODEL_OPTIONS[scopedTid]?.find((o) => o.id === bareModel)?.displayName ??
+        bareModel)
+      : policy.modelId;
+    const displayName = scopedTid
+      ? collision
+        ? `${TOOL_SHORT_LABELS[scopedTid] ?? scopedTid} · ${humanLabel} · ${pool.name}`
+        : `${TOOL_SHORT_LABELS[scopedTid] ?? scopedTid} · ${humanLabel}`
+      : collision
+        ? `${policy.modelId} · ${pool.name}`
+        : policy.modelId;
     const wireModelId =
       binding.agentId === "claude_desktop"
-        ? policy.claudeAliasId ?? buildClaudeModelAlias(pool.slug, policy.modelId)
-        : `${pool.slug}/${policy.modelId}`;
+        ? scopedTid && isAnthropicModelName(bareModel) && !collision
+          ? bareModel
+          : policy.claudeAliasId ?? buildClaudeModelAlias(pool.slug, policy.modelId)
+        : scopedTid
+          ? collision
+            ? `${pool.slug}/${scopedTid}/${bareModel}`
+            : `${scopedTid}/${bareModel}`
+          : `${pool.slug}/${policy.modelId}`;
     return {
       key,
       poolId: pool.id,
@@ -606,7 +862,7 @@ export function computeAgentExposedModels(
       displayName,
       wireModelId,
       isClaudeDisguised:
-        binding.agentId === "claude_desktop" && wireModelId !== policy.modelId,
+        binding.agentId === "claude_desktop" && wireModelId !== bareModel,
       accountCount: serving.total,
       healthyAccountCount: serving.healthy,
       tierSummary: serving.tierSummary,
@@ -632,7 +888,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "workbuddy",
     label: "WorkBuddy · 主号",
     uidMasked: "wb_72a1****8e",
-    supportedModels: ["claude-sonnet-4.6", "claude-opus-4.6", "deepseek-v4"],
+    supportedModels: ["deepseek-v4-pro", "kimi-k3.1-pro", "glm-5.3"],
     tier: "t1_primary",
     channel: "opencode_bridge",
     enabled: true,
@@ -649,7 +905,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "workbuddy",
     label: "WorkBuddy · 副号",
     uidMasked: "wb_39f0****14",
-    supportedModels: ["claude-sonnet-4.6", "claude-opus-4.6"],
+    supportedModels: ["deepseek-v4-pro", "kimi-k3.1-pro"],
     tier: "t1_primary",
     channel: "opencode_bridge",
     enabled: true,
@@ -666,7 +922,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "minimax_code_cn",
     label: "MiniMax Code CN · 主号",
     uidMasked: "mm_91c4****7e",
-    supportedModels: ["MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+    supportedModels: ["minimax-m3.1-flash", "minimax-m3"],
     tier: "t1_primary",
     channel: "rust_native",
     enabled: true,
@@ -683,7 +939,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "qoder_cn",
     label: "Qoder · 日常主力",
     uidMasked: "qd_5e82****4d",
-    supportedModels: ["claude-sonnet-4.6", "qwen3-coder-plus"],
+    supportedModels: ["deepseek-v4-pro", "qwen4-max"],
     tier: "t2_backup",
     channel: "opencode_bridge",
     enabled: true,
@@ -700,7 +956,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "trae_cn",
     label: "Trae CN · 个人备用号",
     uidMasked: "u_4c19****02b",
-    supportedModels: ["claude-sonnet-4.6", "deepseek-v4"],
+    supportedModels: ["deepseek-v4-pro", "glm-5.3"],
     tier: "t2_backup",
     channel: "opencode_bridge",
     enabled: true,
@@ -717,7 +973,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "lobsterai",
     label: "LobsterAI · 主号",
     uidMasked: "17****38",
-    supportedModels: ["lobster-coder-pro", "deepseek-v4"],
+    supportedModels: ["deepseek-v4-pro", "deepseek-v4.1-flash"],
     tier: "t2_backup",
     channel: "opencode_bridge",
     enabled: true,
@@ -734,7 +990,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "codearts",
     label: "码道 CodeArts · 独立 OAuth 推理号",
     uidMasked: "ca_98e1****3d2",
-    supportedModels: ["pangu-coder-pro", "qwen3-coder-32b"],
+    supportedModels: ["openpangu-coder-pro", "glm-5.3"],
     tier: "t2_backup",
     channel: "opencode_bridge",
     enabled: true,
@@ -752,7 +1008,7 @@ const POOL_1_MEMBERS: PoolMember[] = [
     toolId: "custom_api_key",
     label: "官方按量 API Key · 末位兜底",
     uidMasked: "sk-ds****91f4",
-    supportedModels: ["claude-sonnet-4.6", "deepseek-v4", "deepseek-chat"],
+    supportedModels: ["deepseek-v4-pro", "glm-5.3", "deepseek-chat"],
     tier: "t3_fallback",
     channel: "api_key",
     enabled: true,
@@ -772,7 +1028,7 @@ const POOL_2_MEMBERS: PoolMember[] = [
     toolId: "doubaowork",
     label: "豆包工作 · 主号",
     uidMasked: "dw_71****9e",
-    supportedModels: ["doubao-seed-2.1-pro", "doubao-seed-2.0-code"],
+    supportedModels: ["doubao-seed-2.1-pro", "doubao-seed-code"],
     tier: "t1_primary",
     channel: "opencode_bridge",
     enabled: true,
@@ -789,7 +1045,7 @@ const POOL_2_MEMBERS: PoolMember[] = [
     toolId: "qoder_cn",
     label: "Qoder · 实验号",
     uidMasked: "qd_2b44****9a",
-    supportedModels: ["qwen3-max-thinking"],
+    supportedModels: ["qwen4-max"],
     tier: "t1_primary",
     channel: "opencode_bridge",
     enabled: true,
@@ -806,7 +1062,7 @@ const POOL_2_MEMBERS: PoolMember[] = [
     toolId: "workbuddy",
     label: "WorkBuddy · 副号",
     uidMasked: "wb_39f0****14",
-    supportedModels: ["claude-opus-4.6"],
+    supportedModels: ["kimi-k3.1-pro"],
     tier: "t1_primary",
     channel: "opencode_bridge",
     enabled: true,
@@ -826,7 +1082,7 @@ const POOL_3_MEMBERS: PoolMember[] = [
     toolId: "trae_cn",
     label: "Trae CN · 主力工作号",
     uidMasked: "u_8f3a****91c",
-    supportedModels: ["deepseek-v4", "claude-sonnet-4.6"],
+    supportedModels: ["deepseek-v4.1-flash", "glm-5.3-flash"],
     tier: "t1_primary",
     channel: "opencode_bridge",
     enabled: true,
@@ -843,7 +1099,7 @@ const POOL_3_MEMBERS: PoolMember[] = [
     toolId: "qoder_cn",
     label: "Qoder · 实验号",
     uidMasked: "qd_2b44****9a",
-    supportedModels: ["qwen3-coder-plus"],
+    supportedModels: ["qwen3.8-flash"],
     tier: "t1_primary",
     channel: "opencode_bridge",
     enabled: true,
@@ -860,7 +1116,7 @@ const POOL_3_MEMBERS: PoolMember[] = [
     toolId: "workbuddy",
     label: "WorkBuddy · 备用号 03",
     uidMasked: "wb_91c2****5a",
-    supportedModels: ["deepseek-v4"],
+    supportedModels: ["hy4flash-free", "deepseek-v4.1-flash"],
     tier: "t2_backup",
     channel: "opencode_bridge",
     enabled: true,
@@ -879,7 +1135,7 @@ export const INITIAL_POOLS: AccountPool[] = [
     slug: "coding-main",
     name: "主力全栈 Coding 池",
     description:
-      "覆盖 7 大内置工具 + T3 付费兜底：外部客户端直选具体模型，后台严格按 T1→T2→T3 与同工具水位自动选号",
+      "覆盖 7 大内置工具 + T3 付费兜底：跨工具标准模型归一化，网关严格按 T1→T2→T3 与同工具水位自动选号并还原底层 Wire ID",
     sceneTag: "主力 Coding",
     enabled: true,
     strategy: "quota_first",
@@ -893,11 +1149,11 @@ export const INITIAL_POOLS: AccountPool[] = [
       POOL_1_MEMBERS,
       [],
       new Set([
-        "claude-sonnet-4.6",
-        "claude-opus-4.6",
-        "MiniMax-M2.5",
-        "deepseek-v4",
-        "pangu-coder-pro",
+        "deepseek-v4-pro",
+        "kimi-k3.1-pro",
+        "minimax-m3.1-flash",
+        "glm-5.3",
+        "openpangu-coder-pro",
       ])
     ),
     members: POOL_1_MEMBERS,
@@ -911,7 +1167,7 @@ export const INITIAL_POOLS: AccountPool[] = [
     slug: "deep-reason",
     name: "深度推理与长文池",
     description:
-      "开放 doubao-seed-2.1-pro / qwen3-max-thinking / claude-opus-4.6，开启整会话亲和防止跨账号思维签名失效",
+      "开放 doubao-seed-2.1-pro / qwen4-max / kimi-k3.1-pro，开启整会话亲和防止跨账号思维签名失效",
     sceneTag: "深度推理",
     enabled: true,
     strategy: "drain",
@@ -924,7 +1180,7 @@ export const INITIAL_POOLS: AccountPool[] = [
       "deep-reason",
       POOL_2_MEMBERS,
       [],
-      new Set(["doubao-seed-2.1-pro", "qwen3-max-thinking", "claude-opus-4.6"])
+      new Set(["doubao-seed-2.1-pro", "qwen4-max", "kimi-k3.1-pro"])
     ),
     members: POOL_2_MEMBERS,
     todayRequests: 52,
@@ -937,7 +1193,7 @@ export const INITIAL_POOLS: AccountPool[] = [
     slug: "fast-daily",
     name: "每日签到免费收割池",
     description:
-      "优先消耗每日签到免费短效额度，自动跳过本机客户端正在使用的活跃账号防互踢",
+      "优先消耗 hy4flash-free / Flash 免费与低倍率短效额度，自动跳过本机客户端正在使用的活跃账号防互踢",
     sceneTag: "免费收割",
     enabled: true,
     strategy: "order",
@@ -950,7 +1206,7 @@ export const INITIAL_POOLS: AccountPool[] = [
       "fast-daily",
       POOL_3_MEMBERS,
       [],
-      new Set(["deepseek-v4", "qwen3-coder-plus"])
+      new Set(["deepseek-v4.1-flash", "qwen3.8-flash", "hy4flash-free"])
     ),
     members: POOL_3_MEMBERS,
     todayRequests: 31,
@@ -975,7 +1231,7 @@ export function buildAgentConfigSnippets(
     allPools
   );
   const defaultItem = exposed.find((e) => e.isDefault) ?? exposed[0] ?? null;
-  const fallbackWireModel = defaultItem?.wireModelId ?? "coding-main/claude-sonnet-4.6";
+  const fallbackWireModel = defaultItem?.wireModelId ?? "coding-main/deepseek-v4-pro";
 
   switch (agentId) {
     case "claude_desktop": {
@@ -1005,7 +1261,7 @@ export function buildAgentConfigSnippets(
           : "#   - (未挂载号池)";
       return {
         beforeSnippet: `# ~/.codex/config.toml\nmodel = "gpt-5.4"\n# 未写入 Qwitch provider`,
-        afterSnippet: `# ~/.codex/config.toml\n# qwitch:managed-start\nmodel_provider = "qwitch"\nmodel = "${fallbackWireModel}"\n# qwitch:managed-end\n\n[model_providers.qwitch]\nname = "Qwitch Multi-Pool Gateway"\nbase_url = "${baseUrl}/v1"\nwire_api = "responses"\nexperimental_bearer_token = "qwitch-bind-codex-desktop"\n# 关联 Catalog 暴露的模型清单（支持在 Codex 内直接切换）:\n${catalogComment}\n# 注：解绑时仅还原顶层 model_provider，保留此表防历史线程加载崩溃`,
+        afterSnippet: `# ~/.codex/config.toml\n# qwitch:managed-start\nmodel_provider = "qwitch"\nmodel = "${fallbackWireModel}"\nmodel_catalog_json = "~/.codex/qwitch_models.json"\n# qwitch:managed-end\n\n[model_providers.qwitch]\nname = "Qwitch Multi-Pool Gateway"\nbase_url = "${baseUrl}/v1"\nwire_api = "responses"\nexperimental_bearer_token = "qwitch-bind-codex-desktop"\nhttp_headers = { "x-openai-actor-authorization" = "qwitch" }\nrequires_openai_auth = true\n# 关联 Catalog 暴露的模型清单（支持在 Codex 内直接切换）:\n${catalogComment}\n# 注：解绑时仅还原顶层 model_provider，保留此表防历史线程加载崩溃`,
       };
     }
     case "dsh": {
@@ -1015,19 +1271,30 @@ export function buildAgentConfigSnippets(
       const modelsYaml =
         exposed.length > 0
           ? exposed
-              .map((m) => `          - id: "${m.wireModelId}"\n            name: "${m.displayName}"`)
+              .map(
+                (m) =>
+                  `          - id: "${m.wireModelId}"\n            name: "${m.displayName}"\n            contextWindow: 200000\n            maxTokens: 64000\n            input: [text, image]`
+              )
               .join("\n")
-          : `          - id: "${fallbackWireModel}"\n            name: "Qwitch Default"`;
+          : `          - id: "${fallbackWireModel}"\n            name: "Qwitch Default"\n            contextWindow: 200000\n            maxTokens: 64000\n            input: [text, image]`;
       return {
         beforeSnippet: `# ~/.dsh/profiles/desktop/cordis.patch.yml\n- id: llm-deepseek\n  config:\n    model: deepseek-chat\n\n${beforeCreds}`,
-        afterSnippet: `# ~/.dsh/profiles/desktop/cordis.patch.yml\n- id: llm-pi-ai\n  config:\n    providers:\n      qwitch:\n        baseUrl: "${baseUrl}/v1"\n        apiKeyEnv: "QWITCH_GATEWAY_KEY"\n        models:\n${modelsYaml}\n    agent-default-model: "qwitch/${fallbackWireModel}"\n\n# ~/.dsh/.env & ~/.dsh/.credentials.yaml（桌面端强依赖）\nrefs:\n  QWITCH_GATEWAY_KEY: "qwitch-bind-dsh"`,
+        afterSnippet: `# ~/.dsh/profiles/desktop/cordis.patch.yml\n- id: llm-pi-ai\n  name: "@deepseek-ai/dsh-llm-pi-ai"\n  config:\n    providers:\n      qwitch:\n        displayName: Qwitch\n        apiKeyEnv: QWITCH_GATEWAY_KEY\n        api: openai-completions\n        baseURL: "${baseUrl}/v1"\n        models:\n${modelsYaml}\n        streamIdleTimeoutMs: 600000\n\n# ~/.dsh/.env & ~/.dsh/.credentials.yaml（桌面端强依赖）\nversion: 1\nrefs:\n  QWITCH_GATEWAY_KEY: "qwitch-bind-dsh"`,
       };
     }
     case "opencode": {
-      const modelsObj = Object.fromEntries(
-        exposed.map((m) => [m.wireModelId, { name: m.displayName }])
-      );
       if (options.opencodeSchemaVersion === "v1") {
+        const modelsObj = Object.fromEntries(
+          exposed.map((m) => [
+            m.wireModelId,
+            {
+              name: m.displayName,
+              limit: { context: 200000, output: 64000 },
+              modalities: { input: ["text", "image"], output: ["text"] },
+              tool_call: true,
+            },
+          ])
+        );
         return {
           beforeSnippet: `// ~/.config/opencode/opencode.jsonc\n{\n  "model": "deepseek/deepseek-chat"\n}`,
           afterSnippet: `// ~/.config/opencode/opencode.jsonc (OpenCode v1)\n${JSON.stringify(
@@ -1050,6 +1317,20 @@ export function buildAgentConfigSnippets(
           )}`,
         };
       }
+      const modelsMapV2 = Object.fromEntries(
+        exposed.map((m) => [
+          m.wireModelId,
+          {
+            name: m.displayName,
+            capabilities: {
+              tools: true,
+              input: ["text", "image"],
+              output: ["text"],
+            },
+            limit: { context: 200000, output: 64000 },
+          },
+        ])
+      );
       return {
         beforeSnippet: `// ~/.config/opencode/opencode.jsonc\n{\n  "model": "deepseek/deepseek-chat"\n}`,
         afterSnippet: `// ~/.config/opencode/opencode.jsonc (OpenCode v2 providers)\n${JSON.stringify(
@@ -1063,10 +1344,7 @@ export function buildAgentConfigSnippets(
                   baseURL: `${baseUrl}/v1`,
                   apiKey: "qwitch-bind-opencode",
                 },
-                models: exposed.map((m) => ({
-                  id: m.wireModelId,
-                  name: m.displayName,
-                })),
+                models: modelsMapV2,
               },
             },
           },
@@ -1088,15 +1366,15 @@ export function createInitialAgentBindings(
       name: "Claude 桌面版",
       subtitle: "官方 3p 网关模式 · 同时挂载多号池，下拉框直选具体模型",
       protocol: "anthropic_messages",
-      configPath: "~/Library/Application Support/Claude-Qwitch-3p/configLibrary/",
+      configPath: "~/Library/Application Support/Claude-3p/configLibrary/",
       installed: true,
       version: "2.7032.0",
       status: "bound",
       mountedPoolIds: ["pool-coding-main", "pool-deep-reason"],
-      defaultModelKey: makeDefaultModelKey("pool-coding-main", "claude-sonnet-4.6"),
+      defaultModelKey: makeDefaultModelKey("pool-coding-main", "deepseek-v4-pro"),
       lastHitAt: "3 分钟前",
       options: {
-        claudeIsolatedTwin: true,
+        claudeIsolatedTwin: false,
       },
     },
     {
@@ -1109,7 +1387,7 @@ export function createInitialAgentBindings(
       version: "2.2.6",
       status: "bound",
       mountedPoolIds: ["pool-coding-main", "pool-fast-daily"],
-      defaultModelKey: makeDefaultModelKey("pool-coding-main", "claude-sonnet-4.6"),
+      defaultModelKey: makeDefaultModelKey("pool-coding-main", "deepseek-v4-pro"),
       lastHitAt: "12 分钟前",
       options: {
         opencodeSchemaVersion: "v2",
@@ -1179,10 +1457,10 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
     poolName: "主力全栈 Coding 池",
     incomingProtocol: "anthropic_messages",
     upstreamProtocol: "openai_chat",
-    requestedModel: "claude-sonnet-4.6",
+    requestedModel: "deepseek-v4-pro",
     finalAccountLabel: "WorkBuddy · 副号",
     finalToolId: "workbuddy",
-    finalModel: "claude-sonnet-4.6",
+    finalModel: "deepseek-v4-pro",
     status: "failover_success",
     cacheAffinityHit: false,
     ttftMs: 740,
@@ -1191,20 +1469,20 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "WorkBuddy · 主号",
         toolId: "workbuddy",
-        model: "claude-sonnet-4.6",
+        model: "deepseek-v4-pro",
         tier: "t1_primary",
         outcome: "429_cooldown",
         latencyMs: 195,
-        detail: "T1 首号并发限流 HTTP 429，置入 60s 冷却；严格锁定 claude-sonnet-4.6 切换下一候选",
+        detail: "T1 首号并发限流 HTTP 429，置入 60s 冷却；严格锁定 deepseek-v4-pro 切换下一候选",
       },
       {
         accountLabel: "WorkBuddy · 副号",
         toolId: "workbuddy",
-        model: "claude-sonnet-4.6",
+        model: "deepseek-v4-pro",
         tier: "t1_primary",
         outcome: "ok",
         latencyMs: 545,
-        detail: "T1 备选号无感接管成功（同工具水位 62%），模型保持 claude-sonnet-4.6 未漂移",
+        detail: "T1 备选号无感接管成功（同工具水位 62%），模型保持 deepseek-v4-pro 未漂移",
       },
     ],
   },
@@ -1216,10 +1494,10 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
     poolName: "主力全栈 Coding 池",
     incomingProtocol: "anthropic_messages",
     upstreamProtocol: "openai_chat",
-    requestedModel: "claude-sonnet-4.6",
+    requestedModel: "deepseek-v4-pro",
     finalAccountLabel: "WorkBuddy · 主号",
     finalToolId: "workbuddy",
-    finalModel: "claude-sonnet-4.6",
+    finalModel: "deepseek-v4-pro",
     status: "success",
     cacheAffinityHit: true,
     ttftMs: 490,
@@ -1228,7 +1506,7 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "WorkBuddy · 主号",
         toolId: "workbuddy",
-        model: "claude-sonnet-4.6",
+        model: "deepseek-v4-pro",
         tier: "t1_primary",
         outcome: "ok",
         latencyMs: 490,
@@ -1244,10 +1522,10 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
     poolName: "主力全栈 Coding 池",
     incomingProtocol: "openai_chat",
     upstreamProtocol: "anthropic_messages",
-    requestedModel: "MiniMax-M2.5",
+    requestedModel: "minimax-m3.1-flash",
     finalAccountLabel: "MiniMax Code CN · 主号",
     finalToolId: "minimax_code_cn",
-    finalModel: "MiniMax-M2.5",
+    finalModel: "minimax-m3.1-flash",
     status: "failover_success",
     cacheAffinityHit: false,
     ttftMs: 595,
@@ -1256,7 +1534,7 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "MiniMax Code CN · 主号",
         toolId: "minimax_code_cn",
-        model: "MiniMax-M2.5",
+        model: "minimax-m3.1-flash",
         tier: "t1_primary",
         outcome: "401_refreshed",
         latencyMs: 185,
@@ -1265,11 +1543,11 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "MiniMax Code CN · 主号",
         toolId: "minimax_code_cn",
-        model: "MiniMax-M2.5",
+        model: "minimax-m3.1-flash",
         tier: "t1_primary",
         outcome: "ok",
         latencyMs: 410,
-        detail: "使用新凭据经 Rust 原生通道原地重试成功，OpenCode 全程无感知",
+        detail: "已转换为底层 MiniMax-M3.1-Flash-Preview，经 Rust 原生通道原地重试成功",
       },
     ],
   },
@@ -1281,10 +1559,10 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
     poolName: "主力全栈 Coding 池",
     incomingProtocol: "anthropic_messages",
     upstreamProtocol: "openai_chat",
-    requestedModel: `pangu-coder-pro (${buildClaudeModelAlias("coding-main", "pangu-coder-pro")})`,
+    requestedModel: `openpangu-coder-pro (${buildClaudeModelAlias("coding-main", "openpangu-coder-pro")})`,
     finalAccountLabel: "码道 CodeArts · 独立 OAuth 推理号",
     finalToolId: "codearts",
-    finalModel: "pangu-coder-pro",
+    finalModel: "openpangu-coder-pro",
     status: "success",
     cacheAffinityHit: true,
     ttftMs: 640,
@@ -1293,7 +1571,7 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "码道 CodeArts · 独立 OAuth 推理号",
         toolId: "codearts",
-        model: "pangu-coder-pro",
+        model: "openpangu-coder-pro",
         tier: "t2_backup",
         outcome: "ok",
         latencyMs: 640,
@@ -1337,10 +1615,10 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
     poolName: "每日签到免费收割池",
     incomingProtocol: "openai_chat",
     upstreamProtocol: "openai_chat",
-    requestedModel: "deepseek-v4",
+    requestedModel: "deepseek-v4.1-flash",
     finalAccountLabel: "Trae CN · 主力工作号",
     finalToolId: "trae_cn",
-    finalModel: "deepseek-v4",
+    finalModel: "deepseek-v4.1-flash",
     status: "success",
     cacheAffinityHit: false,
     ttftMs: 710,
@@ -1349,7 +1627,7 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "Trae CN · 主力工作号",
         toolId: "trae_cn",
-        model: "deepseek-v4",
+        model: "deepseek-v4.1-flash",
         tier: "t1_primary",
         outcome: "ok",
         latencyMs: 710,
@@ -1365,10 +1643,10 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
     poolName: "每日签到免费收割池",
     incomingProtocol: "openai_chat",
     upstreamProtocol: "openai_chat",
-    requestedModel: "qwen3-coder-plus",
+    requestedModel: "qwen3.8-flash",
     finalAccountLabel: "Qoder · 实验号",
     finalToolId: "qoder_cn",
-    finalModel: "qwen3-coder-plus",
+    finalModel: "qwen3.8-flash",
     status: "success",
     cacheAffinityHit: false,
     ttftMs: 650,
@@ -1377,11 +1655,11 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "Qoder · 实验号",
         toolId: "qoder_cn",
-        model: "qwen3-coder-plus",
+        model: "qwen3.8-flash",
         tier: "t1_primary",
         outcome: "ok",
         latencyMs: 650,
-        detail: "严格匹配 qwen3-coder-plus 轨道，顺位命中每日签到免费 Credits 账号",
+        detail: "自动映射为 Qoder 底层槽位 qfmodel，顺位命中每日签到免费 Credits 账号",
       },
     ],
   },
@@ -1392,11 +1670,11 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
     poolId: "pool-coding-main",
     poolName: "主力全栈 Coding 池",
     incomingProtocol: "anthropic_messages",
-    upstreamProtocol: "anthropic_messages",
-    requestedModel: "claude-sonnet-4.6",
+    upstreamProtocol: "openai_chat",
+    requestedModel: "deepseek-v4-pro",
     finalAccountLabel: "官方按量 API Key · 末位兜底",
     finalToolId: "custom_api_key",
-    finalModel: "claude-sonnet-4.6",
+    finalModel: "deepseek-v4-pro",
     status: "failover_success",
     cacheAffinityHit: false,
     ttftMs: 550,
@@ -1405,20 +1683,20 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       {
         accountLabel: "WorkBuddy · 主号",
         toolId: "workbuddy",
-        model: "claude-sonnet-4.6",
+        model: "deepseek-v4-pro",
         tier: "t1_primary",
         outcome: "429_cooldown",
         latencyMs: 190,
-        detail: "T1 WorkBuddy 并发限流 429；T2 Qoder/Trae 同步冷却中",
+        detail: "T1 WorkBuddy 并发限流 429；T2 Qoder (dmodel) / Trae 同步冷却中",
       },
       {
         accountLabel: "官方按量 API Key · 末位兜底",
         toolId: "custom_api_key",
-        model: "claude-sonnet-4.6",
+        model: "deepseek-v4-pro",
         tier: "t3_fallback",
         outcome: "ok",
         latencyMs: 360,
-        detail: "T1/T2 免费订阅全冷却后触发 T3 末位兜底，保持 claude-sonnet-4.6 连续响应",
+        detail: "T1/T2 免费订阅全冷却后触发 T3 末位兜底，保持 deepseek-v4-pro 连续响应",
       },
     ],
   },

@@ -173,14 +173,15 @@ describe("Dashboard navigation", () => {
     expect(resetInput.value).toBe("");
   });
 
-  it("switches to pools and agents workspaces from the consolidated sidebar", () => {
+  it("switches to agents and routing workspaces from the consolidated sidebar", () => {
     render(<Dashboard />);
     const mainNav = within(screen.getByRole("navigation", { name: "主功能导航" }));
 
-    fireEvent.click(mainNav.getByRole("button", { name: /号池编排/ }));
-    expect(screen.getByRole("heading", { name: "号池编排与调度策略" })).toBeTruthy();
+    expect(mainNav.queryByRole("button", { name: /号池编排/ })).toBeNull();
+    fireEvent.click(mainNav.getByRole("button", { name: /Agent 接入与调度/ }));
+    expect(screen.getByRole("heading", { name: "Agent 接入与号池调度" })).toBeTruthy();
 
-    fireEvent.click(mainNav.getByRole("button", { name: /Agent 指向/ }));
-    expect(screen.getByRole("heading", { name: "Agent 指向与配置挂载" })).toBeTruthy();
+    fireEvent.click(mainNav.getByRole("button", { name: /路由观测/ }));
+    expect(screen.getByRole("heading", { name: "网关路由观测与决策链路" })).toBeTruthy();
   });
 });

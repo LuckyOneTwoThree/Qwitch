@@ -42,6 +42,7 @@
     "allow-delete-action-logs",
     "allow-export-action-logs",
     "allow-get-pool-workspace-state",
+    "allow-refresh-upstream-models-cmd",
     "allow-toggle-gateway-server",
     "allow-update-gateway-port-cmd",
     "allow-cycle-bridge-runtime-cmd",
@@ -71,6 +72,8 @@
     "allow-toggle-agent-option-cmd",
     "allow-detect-agent-environment-cmd",
     "allow-run-pool-simulation-cmd",
+    "allow-set-agent-tool-models-cmd",
+    "allow-update-agent-tool-schedule-cmd",
     "allow-check-app-update",
     "allow-download-and-install-update",
     "allow-open-update-url"

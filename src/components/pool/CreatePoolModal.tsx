@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Check, Cpu, Lock, Plus, ShieldAlert, Sparkles, X } from "lucide-react";
+import { Check, Cpu, Lock, Plus, RefreshCw, ShieldAlert, Sparkles, X } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
 import {
@@ -7,7 +7,8 @@ import {
   MEMBER_TIER_META,
   POOL_SCENE_TEMPLATES,
   POOL_STRATEGY_META,
-  UPSTREAM_MODEL_OPTIONS,
+  formatModelRateBadge,
+  getCandidateModelOptions,
 } from "../../data/mockPoolData";
 import { getToolBrandMeta } from "../../domain/toolRegistry";
 import type {
@@ -38,6 +39,8 @@ export function CreatePoolModal({
   const {
     candidates,
     agentBindings,
+    isRefreshingModels,
+    refreshUpstreamModels,
     createPool,
     mountPoolToAgents,
     authorizeCodeArtsIsolated,
@@ -46,7 +49,7 @@ export function CreatePoolModal({
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("tpl-coding");
   const [name, setName] = useState<string>("主力 Coding 混编池");
   const [description, setDescription] = useState<string>(
-    "聚合多工具编程账号并显式暴露 claude-sonnet-4.6 等主力模型，严格按 T1→T2→T3 梯队 + 同工具水位调度"
+    "聚合多工具编程账号并显式暴露 DeepSeek-V4-Pro / GLM-5.3 / MiniMax-M3.1-Flash，严格按 T1→T2→T3 梯队 + 同工具水位调度"
   );
   const [sceneTag, setSceneTag] = useState<string>("主力 Coding");
   const [strategy, setStrategy] = useState<PoolStrategy>("quota_first");
@@ -419,9 +422,23 @@ export function CreatePoolModal({
               <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
                 2. 勾选账号并多选该账号参与调度的模型（已选 {selectedList.length} 个账号）
               </span>
-              <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                跨工具按 T1→T2→T3 梯队降级 · API Key 自动锁定 T3
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isRefreshingModels}
+                  onClick={() => void refreshUpstreamModels()}
+                  className="btn btn-xs btn-ghost gap-1 text-brand-700 dark:text-brand-300"
+                >
+                  <RefreshCw
+                    className={`h-3 w-3 ${isRefreshingModels ? "animate-spin" : ""}`}
+                    aria-hidden="true"
+                  />
+                  {isRefreshingModels ? "探测中..." : "刷新真实模型"}
+                </button>
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  跨工具按 T1→T2→T3 梯队降级 · API Key 自动锁定 T3
+                </span>
+              </div>
             </div>
 
             <div className="max-h-64 space-y-2 overflow-y-auto rounded-xl border border-zinc-200 bg-zinc-50/70 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/60">
@@ -429,7 +446,7 @@ export function CreatePoolModal({
                 const isReadonlyCodeArts = c.codeArtsMode === "client_readonly";
                 const draft = selectedAccounts[c.accountId];
                 const checked = Boolean(draft) && !isReadonlyCodeArts;
-                const models = UPSTREAM_MODEL_OPTIONS[c.toolId] ?? [];
+                const models = getCandidateModelOptions(c);
                 const toolName =
                   c.toolId === "custom_api_key"
                     ? "标准 API Key"
@@ -537,12 +554,14 @@ export function CreatePoolModal({
                         <span className="text-[10px] text-zinc-400">开放模型:</span>
                         {models.map((m) => {
                           const modelPicked = Boolean(draft?.models.includes(m.id));
+                          const rateLabel = formatModelRateBadge(m);
                           return (
                             <button
                               key={m.id}
                               type="button"
                               onClick={() => toggleCandidateModel(c, m.id)}
                               aria-pressed={modelPicked}
+                              title={`标准 ID: ${m.id} · 底层 Wire ID: ${m.vendorWireId}`}
                               className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] transition ${
                                 modelPicked
                                   ? "border-brand-500/50 bg-brand-500/12 text-brand-800 dark:border-brand-400/50 dark:text-brand-200"
@@ -550,7 +569,18 @@ export function CreatePoolModal({
                               }`}
                             >
                               {modelPicked && <Check className="h-2.5 w-2.5" aria-hidden="true" />}
-                              <span>{m.id}</span>
+                              <span>{m.displayName || m.id}</span>
+                              {rateLabel && (
+                                <span
+                                  className={`rounded px-1 font-sans text-[9px] ${
+                                    m.isFree
+                                      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                                      : "bg-black/5 text-zinc-500 dark:bg-white/10 dark:text-zinc-400"
+                                  }`}
+                                >
+                                  {rateLabel}
+                                </span>
+                              )}
                             </button>
                           );
                         })}

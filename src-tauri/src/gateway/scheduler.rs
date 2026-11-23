@@ -66,9 +66,19 @@ fn collect_for_model(
     let mut t1 = Vec::new();
     let mut t2 = Vec::new();
     let mut t3 = Vec::new();
+    let (scoped_tid, bare_target) = crate::domain::split_scoped_model_id(target_model);
 
     for m in &pool.members {
-        if !m.supported_models.iter().any(|id| id == target_model) {
+        if let Some(tid) = scoped_tid {
+            if m.tool_id != tid {
+                continue;
+            }
+        }
+        if !m
+            .supported_models
+            .iter()
+            .any(|id| id == target_model || crate::domain::split_scoped_model_id(id).1 == bare_target)
+        {
             continue;
         }
         if !m.enabled {
@@ -342,5 +352,49 @@ mod tests {
         assert!(fb_plan.used_explicit_fallback);
         assert_eq!(fb_plan.effective_model, "claude-sonnet-4.6");
         assert_eq!(fb_plan.candidates[0].account_id, "sonnet-acc");
+    }
+
+    #[test]
+    fn scoped_request_filters_strictly_within_target_tool_accounts() {
+        let pool = AccountPool {
+            id: "pool-agent-codex_desktop".into(),
+            slug: "codex_desktop".into(),
+            name: "Codex 专属".into(),
+            description: "".into(),
+            scene_tag: "Agent".into(),
+            enabled: true,
+            strategy: PoolStrategy::Order,
+            affinity_mode: AffinityMode::AutoCache,
+            skip_active_client_account: false,
+            cooldown_seconds: 60,
+            auto_refresh_on_401: true,
+            fallback_api_key_enabled: false,
+            model_policies: vec![PoolModelPolicy {
+                model_id: "qoder_cn/deepseek-v4-pro".into(),
+                enabled: true,
+                fallback_model_id: None,
+                claude_alias_id: None,
+            }],
+            members: vec![
+                make_member("wb-1", "workbuddy", MemberTier::T1Primary, 1, 95, &["deepseek-v4-pro"]),
+                make_member("qd-1", "qoder_cn", MemberTier::T1Primary, 2, 40, &["deepseek-v4-pro"]),
+                make_member("qd-2", "qoder_cn", MemberTier::T1Primary, 3, 75, &["deepseek-v4-pro"]),
+            ],
+            today_requests: 0,
+            today_failovers: 0,
+            cache_hit_rate: 0,
+            created_at: "".into(),
+        };
+
+        let plan = select_candidates_for_request(
+            &pool,
+            "qoder_cn/deepseek-v4-pro",
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            1000,
+        );
+        let ids: Vec<&str> = plan.candidates.iter().map(|c| c.account_id.as_str()).collect();
+        assert_eq!(ids, vec!["qd-1", "qd-2"]);
     }
 }

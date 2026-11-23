@@ -6,12 +6,15 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::domain::{
-    default_channel_for_tool, default_models_for_tool, sync_pool_model_policies, AccountPool,
+    default_channel_for_tool, default_model_options_for_tool, format_scoped_model_id,
+    normalize_canonical_model_id, split_scoped_model_id, sync_pool_model_policies, AccountPool,
     AccountStatus, AffinityMode, AgentBindingOptions, AgentBindingStatus, CodeArtsAuthMode,
     CreatePoolInput, CreatePoolMemberInput, CredentialPayload, MemberTier, PoolMember,
     PoolModelPolicy, PoolStrategy, RoutingAttempt, RoutingTraceItem, RoutingTraceStatus,
-    TargetAgentId, UpdatePoolPatch, UpstreamAccountCandidate, WireProtocolKind,
+    TargetAgentId, UpdatePoolPatch, UpstreamAccountCandidate, UpstreamModelOption,
+    WireProtocolKind,
 };
+use crate::storage::model_discovery::load_magpie_provider_models;
 use crate::storage::{crypto, QwitchDatabase, StorageError};
 
 #[derive(Debug, Clone)]
@@ -239,11 +242,55 @@ impl QwitchDatabase {
         Ok(())
     }
 
+    pub fn save_cached_account_models(
+        &self,
+        account_id: &str,
+        tool_id: &str,
+        models: &[UpstreamModelOption],
+    ) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+        let json = serde_json::to_string(models)?;
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        conn.execute(
+            "INSERT INTO account_discovered_models (account_id, tool_id, models_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id) DO UPDATE SET
+                tool_id = excluded.tool_id,
+                models_json = excluded.models_json,
+                updated_at = excluded.updated_at",
+            params![account_id, tool_id, json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_cached_models_map(
+        &self,
+    ) -> Result<HashMap<String, Vec<UpstreamModelOption>>, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        let mut stmt = conn.prepare(
+            "SELECT account_id, models_json FROM account_discovered_models",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut map = HashMap::new();
+        for (aid, raw_json) in rows {
+            if let Ok(list) = serde_json::from_str::<Vec<UpstreamModelOption>>(&raw_json) {
+                if !list.is_empty() {
+                    map.insert(aid, list);
+                }
+            }
+        }
+        Ok(map)
+    }
+
     pub fn list_upstream_candidates(
         &self,
         master_key: &[u8; 32],
     ) -> Result<Vec<UpstreamAccountCandidate>, StorageError> {
         let accounts = self.list_accounts(None)?;
+        let cached_map = self.load_cached_models_map().unwrap_or_default();
+        let mut tool_cache: HashMap<String, Vec<UpstreamModelOption>> = HashMap::new();
         let mut out = Vec::with_capacity(accounts.len());
         for acc in accounts {
             let (quota_percent, quota_text) = format_quota_stats(&acc);
@@ -259,13 +306,25 @@ impl QwitchDatabase {
             } else {
                 MemberTier::T1Primary
             };
+            let model_options = if let Some(cached) = cached_map.get(&acc.id) {
+                cached.clone()
+            } else if let Some(shared) = tool_cache.get(&acc.tool_id) {
+                shared.clone()
+            } else {
+                let resolved = load_magpie_provider_models(&acc.tool_id)
+                    .unwrap_or_else(|| default_model_options_for_tool(&acc.tool_id));
+                tool_cache.insert(acc.tool_id.clone(), resolved.clone());
+                resolved
+            };
+            let default_models: Vec<String> = model_options.iter().map(|m| m.id.clone()).collect();
             out.push(UpstreamAccountCandidate {
                 account_id: acc.id.clone(),
                 tool_id: acc.tool_id.clone(),
                 label: acc.label,
                 uid_masked: acc.uid_masked,
                 channel: default_channel_for_tool(&acc.tool_id),
-                default_models: default_models_for_tool(&acc.tool_id),
+                default_models,
+                model_options,
                 default_tier,
                 quota_percent,
                 quota_text,
@@ -385,8 +444,14 @@ impl QwitchDatabase {
             let Some(cand) = candidate_map.get(&account_id) else {
                 continue;
             };
-            let supported_models: Vec<String> =
+            let raw_models: Vec<String> =
                 serde_json::from_str(&models_json).unwrap_or_else(|_| cand.default_models.clone());
+            let mut seen_norm = HashSet::new();
+            let supported_models: Vec<String> = raw_models
+                .into_iter()
+                .map(|m| normalize_canonical_model_id(&cand.tool_id, &m))
+                .filter(|m| seen_norm.insert(m.clone()))
+                .collect();
             let tier = if cand.tool_id == "custom_api_key" {
                 MemberTier::T3Fallback
             } else {
@@ -491,8 +556,8 @@ impl QwitchDatabase {
                 let mut seen = HashSet::new();
                 item.supported_models
                     .iter()
-                    .filter(|m| seen.insert((*m).clone()))
-                    .cloned()
+                    .map(|m| normalize_canonical_model_id(&cand.tool_id, m))
+                    .filter(|m| seen.insert(m.clone()))
                     .collect()
             };
             built_members.push(PoolMember {
@@ -810,18 +875,28 @@ impl QwitchDatabase {
         model_id: &str,
     ) -> Result<(), StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let json: Option<String> = conn
+        let row: Option<(String, String)> = conn
             .query_row(
-                "SELECT supported_models_json FROM pool_members WHERE id = ?1 AND pool_id = ?2",
+                "SELECT pm.supported_models_json, a.tool_id
+                 FROM pool_members pm
+                 JOIN accounts a ON a.id = pm.account_id
+                 WHERE pm.id = ?1 AND pm.pool_id = ?2",
                 params![member_id, pool_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some(raw_json) = json else {
+        let Some((raw_json, tool_id)) = row else {
             return Err(StorageError::NotFound(member_id.to_string()));
         };
-        let mut models: Vec<String> = serde_json::from_str(&raw_json).unwrap_or_default();
-        if let Some(pos) = models.iter().position(|m| m == model_id) {
+        let norm_id = normalize_canonical_model_id(&tool_id, model_id);
+        let mut seen = HashSet::new();
+        let mut models: Vec<String> = serde_json::from_str::<Vec<String>>(&raw_json)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| normalize_canonical_model_id(&tool_id, &m))
+            .filter(|m| seen.insert(m.clone()))
+            .collect();
+        if let Some(pos) = models.iter().position(|m| m == &norm_id) {
             if models.len() <= 1 {
                 return Err(StorageError::Validation(
                     "每个账号成员至少需保留 1 个服务模型；若不再需要请移出该账号".into(),
@@ -829,7 +904,7 @@ impl QwitchDatabase {
             }
             models.remove(pos);
         } else {
-            models.push(model_id.to_string());
+            models.push(norm_id);
         }
         conn.execute(
             "UPDATE pool_members SET supported_models_json = ?1 WHERE id = ?2",
@@ -910,6 +985,402 @@ impl QwitchDatabase {
         Ok(())
     }
 
+    pub fn ensure_agent_dedicated_pool(
+        &self,
+        master_key: &[u8; 32],
+        agent_id: TargetAgentId,
+    ) -> Result<(String, StoredAgentBinding), StorageError> {
+        let dedicated_id = format!("pool-agent-{}", agent_id.as_str());
+        let pools = self.list_pools(master_key, &HashMap::new())?;
+        let stored_opt = self
+            .get_stored_agent_bindings()?
+            .into_iter()
+            .find(|b| b.agent_id == agent_id);
+
+        if pools.iter().any(|p| p.id == dedicated_id) {
+            let mut binding = stored_opt.unwrap_or(StoredAgentBinding {
+                agent_id,
+                mounted_pool_ids: vec![dedicated_id.clone()],
+                default_model_key: None,
+                options: Default::default(),
+                status: AgentBindingStatus::Bound,
+                last_hit_at: None,
+            });
+            if binding.mounted_pool_ids != vec![dedicated_id.clone()] {
+                binding.mounted_pool_ids = vec![dedicated_id.clone()];
+                self.upsert_agent_binding(&binding)?;
+            }
+            return Ok((dedicated_id, binding));
+        }
+
+        let agent_name = match agent_id {
+            TargetAgentId::ClaudeDesktop => "Claude 桌面版",
+            TargetAgentId::Opencode => "OpenCode",
+            TargetAgentId::Dsh => "DeepSeek Harness",
+            TargetAgentId::CodexDesktop => "Codex 桌面版",
+        };
+        let now = Utc::now().to_rfc3339();
+        let candidates = self.list_upstream_candidates(master_key)?;
+        let candidate_map: HashMap<String, UpstreamAccountCandidate> = candidates
+            .iter()
+            .map(|c| (c.account_id.clone(), c.clone()))
+            .collect();
+
+        let source_pool = stored_opt
+            .as_ref()
+            .and_then(|b| b.mounted_pool_ids.first())
+            .and_then(|pid| pools.iter().find(|p| &p.id == pid));
+
+        let strategy = source_pool.map(|p| p.strategy).unwrap_or(PoolStrategy::Order);
+        let affinity_mode = source_pool
+            .map(|p| p.affinity_mode)
+            .unwrap_or(AffinityMode::AutoCache);
+        let skip_active = source_pool
+            .map(|p| p.skip_active_client_account)
+            .unwrap_or(true);
+        let cooldown_seconds = source_pool.map(|p| p.cooldown_seconds).unwrap_or(60);
+        let auto_401 = source_pool.map(|p| p.auto_refresh_on_401).unwrap_or(true);
+        let fallback_key = source_pool
+            .map(|p| p.fallback_api_key_enabled)
+            .unwrap_or(true);
+
+        let mut built_members: Vec<PoolMember> = Vec::new();
+        let mut seen_acc = HashSet::new();
+        if let Some(src) = source_pool {
+            let enabled_policies: HashSet<&str> = src
+                .model_policies
+                .iter()
+                .filter(|mp| mp.enabled)
+                .map(|mp| mp.model_id.as_str())
+                .collect();
+            for m in &src.members {
+                if !seen_acc.insert(m.account_id.clone()) {
+                    continue;
+                }
+                let scoped_models: Vec<String> = m
+                    .supported_models
+                    .iter()
+                    .filter(|mid| {
+                        enabled_policies.is_empty()
+                            || enabled_policies.contains(mid.as_str())
+                            || enabled_policies.contains(
+                                format_scoped_model_id(&m.tool_id, mid).as_str(),
+                            )
+                    })
+                    .map(|mid| {
+                        format_scoped_model_id(
+                            &m.tool_id,
+                            &normalize_canonical_model_id(&m.tool_id, split_scoped_model_id(mid).1),
+                        )
+                    })
+                    .collect();
+                let mut dedup_seen = HashSet::new();
+                let scoped_models: Vec<String> = scoped_models
+                    .into_iter()
+                    .filter(|s| dedup_seen.insert(s.clone()))
+                    .collect();
+                let mut cloned = m.clone();
+                cloned.id = format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]);
+                cloned.priority = built_members.len() + 1;
+                cloned.supported_models = scoped_models;
+                built_members.push(cloned);
+            }
+        }
+
+        // 补齐其他已授权可用账号，初始开放为空（待用户按工具勾选），确保同工具切主备无需先加池
+        for cand in &candidates {
+            if !seen_acc.insert(cand.account_id.clone()) {
+                continue;
+            }
+            if cand.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly) {
+                continue;
+            }
+            built_members.push(PoolMember {
+                id: format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]),
+                account_id: cand.account_id.clone(),
+                tool_id: cand.tool_id.clone(),
+                label: cand.label.clone(),
+                uid_masked: cand.uid_masked.clone(),
+                supported_models: Vec::new(),
+                tier: if cand.tool_id == "custom_api_key" {
+                    MemberTier::T3Fallback
+                } else {
+                    MemberTier::T1Primary
+                },
+                channel: cand.channel,
+                enabled: true,
+                priority: built_members.len() + 1,
+                quota_percent: cand.quota_percent,
+                quota_text: cand.quota_text.clone(),
+                cooldown_until_ms: None,
+                is_active_on_client: cand.is_active_on_client,
+                account_status: Some(cand.account_status.clone()),
+                code_arts_mode: cand.code_arts_mode,
+                last_latency_ms: Some(520),
+            });
+        }
+
+        let slug = agent_id.as_str().to_string();
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        let slug_in_use: bool = conn
+            .query_row(
+                "SELECT 1 FROM account_pools WHERE slug = ?1 AND id != ?2",
+                params![slug, dedicated_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        let final_slug = if slug_in_use {
+            format!("{slug}-{}", &Uuid::new_v4().simple().to_string()[..4])
+        } else {
+            slug
+        };
+
+        conn.execute(
+            "INSERT INTO account_pools (
+                id, slug, name, description, scene_tag, strategy, affinity_mode,
+                skip_active_client_account, cooldown_seconds, auto_refresh_on_401,
+                fallback_api_key_enabled, enabled, today_requests, today_failovers,
+                cache_hit_rate, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, 0, 0, 0, ?12, ?12)",
+            params![
+                dedicated_id,
+                final_slug,
+                format!("{agent_name} 专属路由"),
+                format!("直接为 {agent_name} 配置订阅工具、开放模型与同工具主备调度"),
+                "Agent 专属",
+                strategy_to_str(strategy),
+                affinity_to_str(affinity_mode),
+                skip_active as i64,
+                cooldown_seconds.max(10) as i64,
+                auto_401 as i64,
+                fallback_key as i64,
+                now
+            ],
+        )?;
+
+        for m in &built_members {
+            if !candidate_map.contains_key(&m.account_id) {
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled, last_latency_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    m.id,
+                    dedicated_id,
+                    m.account_id,
+                    serde_json::to_string(&m.supported_models)?,
+                    m.tier.as_str(),
+                    m.priority as i64,
+                    m.enabled as i64,
+                    m.last_latency_ms.map(|v| v as i64)
+                ],
+            )?;
+        }
+        Self::resync_pool_policies_locked(&conn, &dedicated_id)?;
+        drop(conn);
+
+        let mut next_default_key = stored_opt
+            .as_ref()
+            .and_then(|b| b.default_model_key.clone());
+        if let Some(dk) = next_default_key.as_deref() {
+            if let Some((_, raw_mid)) = dk.split_once("::") {
+                if let Some(src) = source_pool {
+                    let (_, bare) = split_scoped_model_id(raw_mid);
+                    if let Some(m) = src.members.iter().find(|mb| {
+                        mb.supported_models
+                            .iter()
+                            .any(|s| s == raw_mid || split_scoped_model_id(s).1 == bare)
+                    }) {
+                        next_default_key = Some(format!(
+                            "{dedicated_id}::{}",
+                            format_scoped_model_id(&m.tool_id, bare)
+                        ));
+                    }
+                }
+            }
+        }
+
+        let binding = StoredAgentBinding {
+            agent_id,
+            mounted_pool_ids: vec![dedicated_id.clone()],
+            default_model_key: next_default_key,
+            options: stored_opt.map(|b| b.options).unwrap_or_default(),
+            status: AgentBindingStatus::Bound,
+            last_hit_at: None,
+        };
+        self.upsert_agent_binding(&binding)?;
+        Ok((dedicated_id, binding))
+    }
+
+    pub fn set_pool_tool_models(
+        &self,
+        master_key: &[u8; 32],
+        pool_id: &str,
+        tool_id: &str,
+        model_ids: &[String],
+    ) -> Result<(), StorageError> {
+        let candidates = self.list_upstream_candidates(master_key)?;
+        let mut seen = HashSet::new();
+        let scoped_models: Vec<String> = model_ids
+            .iter()
+            .map(|m| {
+                let (_, bare) = split_scoped_model_id(m);
+                let canonical = normalize_canonical_model_id(tool_id, bare);
+                format_scoped_model_id(tool_id, &canonical)
+            })
+            .filter(|m| seen.insert(m.clone()))
+            .collect();
+        let models_json = serde_json::to_string(&scoped_models)?;
+
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        let max_prio: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(priority), 0) FROM pool_members WHERE pool_id = ?1",
+            params![pool_id],
+            |r| r.get(0),
+        )?;
+        let mut next_prio = max_prio + 1;
+
+        for cand in candidates
+            .iter()
+            .filter(|c| c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly))
+        {
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM pool_members WHERE pool_id = ?1 AND account_id = ?2",
+                    params![pool_id, cand.account_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(mid) = existing {
+                conn.execute(
+                    "UPDATE pool_members SET supported_models_json = ?1 WHERE id = ?2",
+                    params![models_json, mid],
+                )?;
+            } else {
+                let mid = format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]);
+                let tier = if tool_id == "custom_api_key" {
+                    MemberTier::T3Fallback
+                } else {
+                    MemberTier::T1Primary
+                };
+                conn.execute(
+                    "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+                    params![mid, pool_id, cand.account_id, models_json, tier.as_str(), next_prio],
+                )?;
+                next_prio += 1;
+            }
+        }
+
+        Self::resync_pool_policies_locked(&conn, pool_id)?;
+        for mid in &scoped_models {
+            conn.execute(
+                "UPDATE pool_model_policies SET enabled = 1 WHERE pool_id = ?1 AND model_id = ?2",
+                params![pool_id, mid],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn update_pool_tool_account_schedule(
+        &self,
+        master_key: &[u8; 32],
+        pool_id: &str,
+        tool_id: &str,
+        ordered_account_ids: &[String],
+        enabled_account_ids: &[String],
+        strategy: Option<PoolStrategy>,
+        skip_active_client_account: Option<bool>,
+        cooldown_seconds: Option<u64>,
+    ) -> Result<(), StorageError> {
+        let patch = UpdatePoolPatch {
+            strategy,
+            skip_active_client_account,
+            cooldown_seconds,
+            ..Default::default()
+        };
+        if strategy.is_some() || skip_active_client_account.is_some() || cooldown_seconds.is_some() {
+            self.update_pool(pool_id, &patch)?;
+        }
+
+        let candidates = self.list_upstream_candidates(master_key)?;
+        let enabled_set: HashSet<&str> = enabled_account_ids.iter().map(String::as_str).collect();
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT pm.id, pm.account_id, a.tool_id, pm.priority
+             FROM pool_members pm
+             JOIN accounts a ON a.id = pm.account_id
+             WHERE pm.pool_id = ?1
+             ORDER BY pm.priority ASC, pm.id ASC",
+        )?;
+        let all_rows: Vec<(String, String, String, i64)> = stmt
+            .query_map(params![pool_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut tool_member_by_acc: HashMap<String, String> = HashMap::new();
+        let mut tool_slots: Vec<i64> = Vec::new();
+        for (mid, acc_id, tid, prio) in &all_rows {
+            if tid == tool_id {
+                tool_member_by_acc.insert(acc_id.clone(), mid.clone());
+                tool_slots.push(*prio);
+            }
+        }
+        let mut next_prio = all_rows.iter().map(|r| r.3).max().unwrap_or(0) + 1;
+
+        for cand in candidates
+            .iter()
+            .filter(|c| c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly))
+        {
+            if !tool_member_by_acc.contains_key(&cand.account_id) {
+                let mid = format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]);
+                let tier = if tool_id == "custom_api_key" {
+                    MemberTier::T3Fallback
+                } else {
+                    MemberTier::T1Primary
+                };
+                conn.execute(
+                    "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled)
+                     VALUES (?1, ?2, ?3, '[]', ?4, ?5, 1)",
+                    params![mid, pool_id, cand.account_id, tier.as_str(), next_prio],
+                )?;
+                tool_member_by_acc.insert(cand.account_id.clone(), mid);
+                tool_slots.push(next_prio);
+                next_prio += 1;
+            }
+        }
+        tool_slots.sort_unstable();
+
+        let mut remaining_accs: Vec<String> = tool_member_by_acc.keys().cloned().collect();
+        remaining_accs.sort();
+        let mut final_acc_order: Vec<String> = Vec::new();
+        for aid in ordered_account_ids {
+            if tool_member_by_acc.contains_key(aid) && !final_acc_order.contains(aid) {
+                final_acc_order.push(aid.clone());
+            }
+        }
+        for aid in remaining_accs {
+            if !final_acc_order.contains(&aid) {
+                final_acc_order.push(aid);
+            }
+        }
+
+        for (idx, aid) in final_acc_order.iter().enumerate() {
+            if let Some(mid) = tool_member_by_acc.get(aid) {
+                let prio = tool_slots.get(idx).copied().unwrap_or((idx + 1) as i64);
+                let is_en = enabled_set.contains(aid.as_str()) as i64;
+                conn.execute(
+                    "UPDATE pool_members SET priority = ?1, enabled = ?2 WHERE id = ?3",
+                    params![prio, is_en, mid],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn add_members_to_pool(
         &self,
         master_key: &[u8; 32],
@@ -940,10 +1411,15 @@ impl QwitchDatabase {
                     cand.label
                 )));
             }
-            let incoming_models = if item.supported_models.is_empty() {
+            let incoming_models: Vec<String> = if item.supported_models.is_empty() {
                 cand.default_models.clone()
             } else {
-                item.supported_models.clone()
+                let mut seen = HashSet::new();
+                item.supported_models
+                    .iter()
+                    .map(|m| normalize_canonical_model_id(&cand.tool_id, m))
+                    .filter(|m| seen.insert(m.clone()))
+                    .collect()
             };
 
             let existing: Option<(String, String)> = conn
@@ -1372,7 +1848,7 @@ mod tests {
                 fallback_api_key_enabled: true,
                 members: vec![CreatePoolMemberInput {
                     account_id: ca_id.clone(),
-                    supported_models: vec!["pangu-coder-pro".into()],
+                    supported_models: vec!["openPangu-Coder-Pro".into()],
                     tier: MemberTier::T1Primary,
                 }],
                 enabled_model_ids: None,
@@ -1400,12 +1876,12 @@ mod tests {
                     members: vec![
                         CreatePoolMemberInput {
                             account_id: wb_id.clone(),
-                            supported_models: vec!["claude-sonnet-4.6".into()],
+                            supported_models: vec!["deepseek-v4-pro".into()],
                             tier: MemberTier::T1Primary,
                         },
                         CreatePoolMemberInput {
                             account_id: ak_id.clone(),
-                            supported_models: vec!["claude-sonnet-4.6".into()],
+                            supported_models: vec!["deepseek-v4-pro".into()],
                             tier: MemberTier::T1Primary, // 强锁 T3
                         },
                     ],
@@ -1423,12 +1899,12 @@ mod tests {
             &[
                 CreatePoolMemberInput {
                     account_id: wb_id.clone(),
-                    supported_models: vec!["claude-opus-4.6".into()],
+                    supported_models: vec!["glm-5.3".into()],
                     tier: MemberTier::T1Primary,
                 },
                 CreatePoolMemberInput {
                     account_id: ca_id,
-                    supported_models: vec!["pangu-coder-pro".into()],
+                    supported_models: vec!["openPangu-Coder-Pro".into()],
                     tier: MemberTier::T2Backup,
                 },
             ],
@@ -1441,7 +1917,12 @@ mod tests {
         let wb_member = pools[0].members.iter().find(|m| m.account_id == wb_id).unwrap();
         assert_eq!(
             wb_member.supported_models,
-            vec!["claude-sonnet-4.6".to_string(), "claude-opus-4.6".to_string()]
+            vec!["deepseek-v4-pro".to_string(), "glm-5.3".to_string()]
+        );
+        let ca_member = pools[0].members.iter().find(|m| m.tool_id == "codearts").unwrap();
+        assert_eq!(
+            ca_member.supported_models,
+            vec!["openpangu-coder-pro".to_string()]
         );
 
         let _ = std::fs::remove_dir_all(dir);
@@ -1477,6 +1958,71 @@ mod tests {
             restored[0].original_content.as_deref(),
             Some(b"DEEPSEEK_API_KEY=sk-orig\n".as_slice())
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn agent_dedicated_pool_supports_atomic_tool_models_clear_and_primary_promotion() {
+        let (db, key, dir) = temp_db("agent_atomic");
+        let wb1 = seed_account(&db, &key, "workbuddy", "wb_u1", "WB主号");
+        let wb2 = seed_account(&db, &key, "workbuddy", "wb_u2", "WB副号");
+        let qd1 = seed_account(&db, &key, "qoder_cn", "qd_u1", "Qoder主号");
+
+        let (pool_id, _) = db
+            .ensure_agent_dedicated_pool(&key, TargetAgentId::CodexDesktop)
+            .expect("ensure pool");
+        assert_eq!(pool_id, "pool-agent-codex_desktop");
+
+        db.set_pool_tool_models(
+            &key,
+            &pool_id,
+            "workbuddy",
+            &["deepseek-v4-pro".into(), "glm-5.3".into()],
+        )
+        .expect("set workbuddy models");
+        db.set_pool_tool_models(&key, &pool_id, "qoder_cn", &["qwen4-max".into()])
+            .expect("set qoder models");
+
+        db.update_pool_tool_account_schedule(
+            &key,
+            &pool_id,
+            "workbuddy",
+            &[wb2.clone(), wb1.clone()],
+            std::slice::from_ref(&wb2),
+            Some(PoolStrategy::Order),
+            Some(true),
+            Some(90),
+        )
+        .expect("promote wb2 to primary and disable wb1");
+
+        let pools = db.list_pools(&key, &HashMap::new()).expect("list");
+        let pool = pools.iter().find(|p| p.id == pool_id).unwrap();
+        assert_eq!(pool.strategy, PoolStrategy::Order);
+        assert_eq!(pool.cooldown_seconds, 90);
+        let wb_members: Vec<&PoolMember> = pool
+            .members
+            .iter()
+            .filter(|m| m.tool_id == "workbuddy")
+            .collect();
+        assert_eq!(wb_members[0].account_id, wb2);
+        assert!(wb_members[0].enabled);
+        assert_eq!(wb_members[1].account_id, wb1);
+        assert!(!wb_members[1].enabled);
+
+        // 清空 workbuddy 模型，不影响 qoder_cn 模型和 wb 账号队列顺序
+        db.set_pool_tool_models(&key, &pool_id, "workbuddy", &[])
+            .expect("clear workbuddy models");
+        let pools_after = db.list_pools(&key, &HashMap::new()).expect("list after clear");
+        let pool_after = pools_after.iter().find(|p| p.id == pool_id).unwrap();
+        let policy_ids: Vec<&str> = pool_after
+            .model_policies
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| p.model_id.as_str())
+            .collect();
+        assert_eq!(policy_ids, vec!["qoder_cn/qwen4-max"]);
+        assert!(pool_after.members.iter().any(|m| m.account_id == qd1));
 
         let _ = std::fs::remove_dir_all(dir);
     }

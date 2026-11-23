@@ -419,6 +419,7 @@ pub fn run() {
             commands::delete_action_logs,
             commands::export_action_logs,
             commands::get_pool_workspace_state,
+            commands::refresh_upstream_models_cmd,
             commands::toggle_gateway_server,
             commands::update_gateway_port_cmd,
             commands::cycle_bridge_runtime_cmd,
@@ -448,6 +449,8 @@ pub fn run() {
             commands::toggle_agent_option_cmd,
             commands::detect_agent_environment_cmd,
             commands::run_pool_simulation_cmd,
+            commands::set_agent_tool_models_cmd,
+            commands::update_agent_tool_schedule_cmd,
             update::check_app_update,
             update::download_and_install_update,
             update::open_update_url

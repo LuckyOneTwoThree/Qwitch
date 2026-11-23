@@ -119,53 +119,74 @@ fn resolve_agent_paths(
     let home = home_dir();
     match agent_id {
         TargetAgentId::ClaudeDesktop => {
-            let isolated = options.claude_isolated_twin.unwrap_or(true);
-            let dir = if let Some(base) = base_dir_override {
-                base.join(if isolated { "Claude-Qwitch-3p" } else { "Claude-3p" })
+            let isolated = options.claude_isolated_twin.unwrap_or(false);
+            let (base_support, active_dir, official_3p_dir) = if let Some(base) = base_dir_override
+            {
+                (
+                    base.to_path_buf(),
+                    base.join(if isolated { "Claude-Qwitch-3p" } else { "Claude-3p" }),
+                    base.join("Claude-3p"),
+                )
             } else {
                 #[cfg(target_os = "macos")]
                 {
-                    home.join("Library/Application Support").join(if isolated {
+                    let app_sup = home.join("Library/Application Support");
+                    let active = app_sup.join(if isolated {
                         "Claude-Qwitch-3p"
                     } else {
                         "Claude-3p"
-                    })
+                    });
+                    (app_sup.clone(), active, app_sup.join("Claude-3p"))
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    std::env::var_os("LOCALAPPDATA")
+                    let app_sup = std::env::var_os("LOCALAPPDATA")
                         .map(PathBuf::from)
-                        .unwrap_or_else(|| home.join("AppData/Local"))
-                        .join(if isolated { "Claude-Qwitch-3p" } else { "Claude-3p" })
+                        .unwrap_or_else(|| home.join("AppData/Local"));
+                    let active = app_sup.join(if isolated {
+                        "Claude-Qwitch-3p"
+                    } else {
+                        "Claude-3p"
+                    });
+                    (app_sup.clone(), active, app_sup.join("Claude-3p"))
                 }
             };
-            let main_cfg = if let Some(base) = base_dir_override {
-                base.join("Claude/claude_desktop_config.json")
+            let main_cfg = if base_dir_override.is_some() {
+                base_support.join("Claude/claude_desktop_config.json")
             } else {
                 #[cfg(target_os = "macos")]
                 {
-                    home.join("Library/Application Support/Claude/claude_desktop_config.json")
+                    base_support.join("Claude/claude_desktop_config.json")
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    dir.join("claude_desktop_config.json")
+                    active_dir.join("claude_desktop_config.json")
                 }
             };
-            let lib_dir = dir.join("configLibrary");
+            let lib_dir = active_dir.join("configLibrary");
+            let official_3p_lib = official_3p_dir.join("configLibrary");
             let installed = base_dir_override.is_some()
                 || main_cfg.parent().is_some_and(|p| p.exists())
-                || dir.exists();
+                || active_dir.exists()
+                || official_3p_dir.exists();
+            let mut files = vec![
+                main_cfg,
+                lib_dir.join(format!("{CLAUDE_CONFIG_UUID}.json")),
+                lib_dir.join("_meta.json"),
+                official_3p_dir.join("claude_desktop_config.json"),
+            ];
+            if official_3p_dir != active_dir {
+                files.push(official_3p_lib.join(format!("{CLAUDE_CONFIG_UUID}.json")));
+                files.push(official_3p_lib.join("_meta.json"));
+                files.push(active_dir.join("claude_desktop_config.json"));
+            }
             AgentPaths {
                 primary_display: if isolated {
-                    "~/Library/Application Support/Claude-Qwitch-3p/configLibrary/".into()
+                    "~/Library/Application Support/Claude-Qwitch-3p & Claude-3p/".into()
                 } else {
                     "~/Library/Application Support/Claude-3p/configLibrary/".into()
                 },
-                files: vec![
-                    main_cfg,
-                    lib_dir.join(format!("{CLAUDE_CONFIG_UUID}.json")),
-                    lib_dir.join("_meta.json"),
-                ],
+                files,
                 installed,
                 version: "2.x 3p".into(),
             }
@@ -264,11 +285,11 @@ pub fn build_agent_config_snippets(
         .find(|m| m.is_default)
         .or_else(|| exposed.first())
         .map(|m| m.wire_model_id.clone())
-        .unwrap_or_else(|| "coding-main/claude-sonnet-4.6".to_string());
+        .unwrap_or_else(|| "coding-main/deepseek-v4-pro".to_string());
 
     match agent_id {
         TargetAgentId::ClaudeDesktop => {
-            let dir = if options.claude_isolated_twin.unwrap_or(true) {
+            let dir = if options.claude_isolated_twin.unwrap_or(false) {
                 "~/Library/Application Support/Claude-Qwitch-3p"
             } else {
                 "~/Library/Application Support/Claude-3p"
@@ -311,7 +332,7 @@ pub fn build_agent_config_snippets(
             };
             let before = "# ~/.codex/config.toml\nmodel = \"gpt-5.4\"\n# 未写入 Qwitch provider".to_string();
             let after = format!(
-                "# ~/.codex/config.toml\n# qwitch:managed-start\nmodel_provider = \"qwitch\"\nmodel = \"{default_wire}\"\n# qwitch:managed-end\n\n[model_providers.qwitch]\nname = \"Qwitch Multi-Pool Gateway\"\nbase_url = \"{base_url}/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"{}\"\n# Catalog 模型清单:\n{catalog_lines}",
+                "# ~/.codex/config.toml\n# qwitch:managed-start\nmodel_provider = \"qwitch\"\nmodel = \"{default_wire}\"\nmodel_catalog_json = \"~/.codex/qwitch_models.json\"\n# qwitch:managed-end\n\n[model_providers.qwitch]\nname = \"Qwitch Multi-Pool Gateway\"\nbase_url = \"{base_url}/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"{}\"\nhttp_headers = {{ \"x-openai-actor-authorization\" = \"qwitch\" }}\nrequires_openai_auth = true\n# Catalog 模型清单:\n{catalog_lines}",
                 agent_token(agent_id)
             );
             (before, after)
@@ -323,11 +344,16 @@ pub fn build_agent_config_snippets(
                 "# ~/.dsh/.credentials.yaml\nrefs:\n  DEEPSEEK_API_KEY: \"sk-orig-***\""
             };
             let models_yaml = if exposed.is_empty() {
-                format!("          - id: \"{default_wire}\"\n            name: \"Qwitch Default\"")
+                format!("          - id: \"{default_wire}\"\n            name: \"Qwitch Default\"\n            contextWindow: 200000\n            maxTokens: 64000\n            input: [text, image]")
             } else {
                 exposed
                     .iter()
-                    .map(|m| format!("          - id: \"{}\"\n            name: \"{}\"", m.wire_model_id, m.display_name))
+                    .map(|m| {
+                        format!(
+                            "          - id: \"{}\"\n            name: \"{}\"\n            contextWindow: 200000\n            maxTokens: 64000\n            input: [text, image]",
+                            m.wire_model_id, m.display_name
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             };
@@ -335,7 +361,7 @@ pub fn build_agent_config_snippets(
                 "# ~/.dsh/profiles/desktop/cordis.patch.yml\n- id: llm-deepseek\n  config:\n    model: deepseek-chat\n\n{before_creds}"
             );
             let after = format!(
-                "# ~/.dsh/profiles/desktop/cordis.patch.yml\n- id: llm-pi-ai\n  config:\n    providers:\n      qwitch:\n        baseUrl: \"{base_url}/v1\"\n        apiKeyEnv: \"QWITCH_GATEWAY_KEY\"\n        models:\n{models_yaml}\n    agent-default-model: \"qwitch/{default_wire}\"\n\n# ~/.dsh/.env & ~/.dsh/.credentials.yaml\nrefs:\n  QWITCH_GATEWAY_KEY: \"{}\"",
+                "# ~/.dsh/profiles/desktop/cordis.patch.yml\n- id: llm-pi-ai\n  name: \"@deepseek-ai/dsh-llm-pi-ai\"\n  config:\n    providers:\n      qwitch:\n        displayName: Qwitch\n        apiKeyEnv: QWITCH_GATEWAY_KEY\n        api: openai-completions\n        baseURL: \"{base_url}/v1\"\n        models:\n{models_yaml}\n        streamIdleTimeoutMs: 600000\n\n# ~/.dsh/.env & ~/.dsh/.credentials.yaml\nversion: 1\nrefs:\n  QWITCH_GATEWAY_KEY: \"{}\"",
                 agent_token(agent_id)
             );
             (before, after)
@@ -346,7 +372,15 @@ pub fn build_agent_config_snippets(
             let after_json = if schema_v1 {
                 let mut map = serde_json::Map::new();
                 for m in &exposed {
-                    map.insert(m.wire_model_id.clone(), json!({ "name": m.display_name }));
+                    map.insert(
+                        m.wire_model_id.clone(),
+                        json!({
+                            "name": m.display_name,
+                            "limit": { "context": 200000, "output": 64000 },
+                            "modalities": { "input": ["text", "image"], "output": ["text"] },
+                            "tool_call": true
+                        }),
+                    );
                 }
                 json!({
                     "model": format!("qwitch/{default_wire}"),
@@ -363,10 +397,21 @@ pub fn build_agent_config_snippets(
                     }
                 })
             } else {
-                let arr: Vec<Value> = exposed
-                    .iter()
-                    .map(|m| json!({ "id": m.wire_model_id, "name": m.display_name }))
-                    .collect();
+                let mut map = serde_json::Map::new();
+                for m in &exposed {
+                    map.insert(
+                        m.wire_model_id.clone(),
+                        json!({
+                            "name": m.display_name,
+                            "capabilities": {
+                                "tools": true,
+                                "input": ["text", "image"],
+                                "output": ["text"]
+                            },
+                            "limit": { "context": 200000, "output": 64000 }
+                        }),
+                    );
+                }
                 json!({
                     "model": format!("qwitch/{default_wire}"),
                     "providers": {
@@ -377,7 +422,7 @@ pub fn build_agent_config_snippets(
                                 "baseURL": format!("{base_url}/v1"),
                                 "apiKey": agent_token(agent_id)
                             },
-                            "models": arr
+                            "models": map
                         }
                     }
                 })
@@ -404,20 +449,22 @@ fn check_disk_drift(
     let port_needle = format!(":{port}");
     match agent_id {
         TargetAgentId::Dsh => {
-            let patch_ok = std::fs::read_to_string(&paths.files[0])
-                .map(|c| c.contains("qwitch:") && c.contains(&port_needle))
-                .unwrap_or(false);
-            let creds_ok = std::fs::read_to_string(&paths.files[2])
-                .map(|c| c.contains("QWITCH_GATEWAY_KEY"))
-                .unwrap_or(false);
+            let patch_content = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
+            let patch_ok = patch_content.contains("qwitch:")
+                && patch_content.contains("baseURL:")
+                && patch_content.contains(&port_needle);
+            let creds_text = std::fs::read_to_string(&paths.files[2]).unwrap_or_default();
+            let creds_ok = creds_text.contains("QWITCH_GATEWAY_KEY")
+                && !creds_text.contains("refs: {}\n  QWITCH_GATEWAY_KEY")
+                && !creds_text.contains("refs:{}\n  QWITCH_GATEWAY_KEY");
             if !creds_ok {
                 return Some(
-                    "检测到 ~/.dsh/.credentials.yaml 缺失 QWITCH_GATEWAY_KEY（dsh 桌面版不读取 .env 会报鉴权缺失）"
+                    "检测到 ~/.dsh/.credentials.yaml 缺失 QWITCH_GATEWAY_KEY 或 YAML 缩进异常（将导致 dsh 桌面端启动失败）"
                         .into(),
                 );
             }
             if !patch_ok {
-                return Some("检测到 ~/.dsh/profiles/desktop/cordis.patch.yml 未同步最新 Qwitch 网关地址".into());
+                return Some("检测到 ~/.dsh/profiles/desktop/cordis.patch.yml 未同步最新 Qwitch 网关地址或 Schema".into());
             }
             None
         }
@@ -441,17 +488,32 @@ fn check_disk_drift(
             let lib_ok = std::fs::read_to_string(&paths.files[1])
                 .map(|c| c.contains(&port_needle))
                 .unwrap_or(false);
-            if !main_ok || !lib_ok {
-                return Some("检测到 Claude Desktop 3p 网关配置被修改或端口未同步".into());
+            let official_3p_cfg_ok = paths
+                .files
+                .get(3)
+                .is_none_or(|p| std::fs::read_to_string(p).map(|c| c.contains("\"3p\"")).unwrap_or(false));
+            let official_3p_lib_ok = paths
+                .files
+                .get(4)
+                .is_none_or(|p| std::fs::read_to_string(p).map(|c| c.contains(&port_needle)).unwrap_or(false));
+            if !main_ok || !lib_ok || !official_3p_cfg_ok || !official_3p_lib_ok {
+                return Some("检测到 Claude Desktop 3p 网关配置被修改、缺少 Claude-3p 镜像或端口未同步".into());
             }
             None
         }
         TargetAgentId::CodexDesktop => {
             let toml_ok = std::fs::read_to_string(&paths.files[0])
-                .map(|c| c.contains("[model_providers.qwitch]") && c.contains("model_provider = \"qwitch\"") && c.contains(&port_needle))
+                .map(|c| {
+                    c.contains("[model_providers.qwitch]")
+                        && c.contains("model_provider = \"qwitch\"")
+                        && c.contains("model_catalog_json")
+                        && c.contains("requires_openai_auth = true")
+                        && c.contains(&port_needle)
+                })
                 .unwrap_or(false);
-            if !toml_ok {
-                return Some("检测到 ~/.codex/config.toml 中 Qwitch provider 配置或端口已漂移".into());
+            let catalog_ok = paths.files[1].is_file();
+            if !toml_ok || !catalog_ok {
+                return Some("检测到 ~/.codex/config.toml 或 qwitch_models.json 目录配置已漂移".into());
             }
             None
         }
@@ -461,7 +523,7 @@ fn check_disk_drift(
 fn default_options_for_agent(agent_id: TargetAgentId) -> AgentBindingOptions {
     match agent_id {
         TargetAgentId::ClaudeDesktop => AgentBindingOptions {
-            claude_isolated_twin: Some(true),
+            claude_isolated_twin: Some(false),
             ..Default::default()
         },
         TargetAgentId::CodexDesktop => AgentBindingOptions {
@@ -741,6 +803,178 @@ fn strip_jsonc_comments(raw: &str) -> String {
     out
 }
 
+fn write_json_deployment_mode_3p(path: &Path) -> Result<(), String> {
+    let mut doc: Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("deploymentMode".into(), Value::String("3p".into()));
+    }
+    write_private_file_atomic(
+        path,
+        serde_json::to_string_pretty(&doc)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn upsert_dsh_credentials_yaml(existing: &str, key_name: &str, token: &str) -> String {
+    let key_prefix = format!("{key_name}:");
+    let mut replaced_existing = false;
+    let mut lines: Vec<String> = Vec::new();
+
+    for line in existing.lines() {
+        if line.trim_start().starts_with(&key_prefix) {
+            if !replaced_existing {
+                lines.push(format!("  {key_name}: \"{token}\""));
+                replaced_existing = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if replaced_existing {
+        let mut repaired: Vec<String> = Vec::with_capacity(lines.len());
+        for (idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if (trimmed == "refs: {}" || trimmed == "refs:{}")
+                && lines
+                    .get(idx + 1)
+                    .is_some_and(|next| next.starts_with(' ') || next.starts_with('\t'))
+            {
+                repaired.push("refs:".to_string());
+            } else {
+                repaired.push(line.clone());
+            }
+        }
+        let mut out = repaired.join("\n");
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        return out;
+    }
+
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut inserted_in_refs = false;
+    for line in &lines {
+        let trimmed = line.trim();
+        if !inserted_in_refs && (trimmed == "refs:" || trimmed == "refs: {}" || trimmed == "refs:{}")
+        {
+            out_lines.push("refs:".to_string());
+            out_lines.push(format!("  {key_name}: \"{token}\""));
+            inserted_in_refs = true;
+        } else {
+            out_lines.push(line.clone());
+        }
+    }
+
+    if !inserted_in_refs {
+        let has_version = out_lines
+            .iter()
+            .any(|l| l.trim_start().starts_with("version:"));
+        if !has_version {
+            out_lines.insert(0, "version: 1".to_string());
+        }
+        out_lines.push("refs:".to_string());
+        out_lines.push(format!("  {key_name}: \"{token}\""));
+    }
+
+    let mut out = out_lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn merge_dsh_cordis_patch(existing: &str, qwitch_entry: &str) -> String {
+    let mut preserved: Vec<String> = Vec::new();
+    let mut skipping_llm_pi_ai = false;
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        let is_top_list_item =
+            !line.starts_with(' ') && !line.starts_with('\t') && trimmed.starts_with("- ");
+        if is_top_list_item {
+            if trimmed == "- id: llm-pi-ai" || trimmed == "- id: \"llm-pi-ai\"" {
+                skipping_llm_pi_ai = true;
+                continue;
+            }
+            skipping_llm_pi_ai = false;
+        }
+        if !skipping_llm_pi_ai && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            preserved.push(line.to_string());
+        } else if !skipping_llm_pi_ai && trimmed.is_empty() && !preserved.is_empty() {
+            preserved.push(String::new());
+        }
+    }
+
+    let mut out = qwitch_entry.trim_end().to_string();
+    let preserved_body = preserved.join("\n").trim().to_string();
+    if !preserved_body.is_empty() {
+        out.push('\n');
+        out.push_str(&preserved_body);
+    }
+    out.push('\n');
+    out
+}
+
+fn load_codex_builtin_models(codex_dir: &Path) -> Vec<Value> {
+    for candidate in ["models_cache.json", "models_cache.codex_work_desktop.json"] {
+        let path = codex_dir.join(candidate);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if let Some(arr) = doc.get("models").and_then(Value::as_array) {
+            if !arr.is_empty() {
+                return arr.clone();
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn merge_codex_model_catalog(
+    builtin_models: Vec<Value>,
+    qwitch_entries: Vec<Value>,
+) -> Vec<Value> {
+    let mut seen_slugs = std::collections::HashSet::new();
+    let mut merged = Vec::with_capacity(builtin_models.len() + qwitch_entries.len());
+
+    for item in builtin_models {
+        if let Some(slug) = item.get("slug").and_then(Value::as_str) {
+            if !slug.trim().is_empty() {
+                seen_slugs.insert(slug.to_string());
+            }
+        }
+        merged.push(item);
+    }
+
+    let builtin_count = merged.len();
+    let mut appended_idx = 0usize;
+    for mut item in qwitch_entries {
+        let slug = item
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !slug.is_empty() && !seen_slugs.insert(slug) {
+            continue;
+        }
+        if let Some(obj) = item.as_object_mut() {
+            obj.insert("priority".into(), json!((builtin_count + appended_idx) as i64));
+        }
+        appended_idx += 1;
+        merged.push(item);
+    }
+
+    merged
+}
+
 pub fn apply_agent_wiring(
     db: &QwitchDatabase,
     master_key: &[u8; 32],
@@ -782,26 +1016,13 @@ pub fn apply_agent_wiring(
     let effective_default_key = default_item.map(|m| m.key.clone());
     let default_wire = default_item
         .map(|m| m.wire_model_id.clone())
-        .unwrap_or_else(|| "coding-main/claude-sonnet-4.6".into());
+        .unwrap_or_else(|| "coding-main/deepseek-v4-pro".into());
     let base_url = format!("http://{host}:{port}");
     let token = agent_token(agent_id);
 
     match agent_id {
         TargetAgentId::ClaudeDesktop => {
-            let mut main_json: Value = std::fs::read_to_string(&paths.files[0])
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(|| json!({}));
-            if let Some(obj) = main_json.as_object_mut() {
-                obj.insert("deploymentMode".into(), Value::String("3p".into()));
-            }
-            write_private_file_atomic(
-                &paths.files[0],
-                serde_json::to_string_pretty(&main_json)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
+            write_json_deployment_mode_3p(&paths.files[0])?;
 
             let lib_cfg = json!({
                 "inferenceProvider": "gateway",
@@ -812,22 +1033,30 @@ pub fn apply_agent_wiring(
                 "coworkEgressAllowedHosts": ["*"],
                 "toolSearchEnabled": true
             });
-            write_private_file_atomic(
-                &paths.files[1],
-                serde_json::to_string_pretty(&lib_cfg)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
+            let lib_bytes = serde_json::to_string_pretty(&lib_cfg).map_err(|e| e.to_string())?;
+            let meta_bytes =
+                serde_json::to_string_pretty(&json!({ "appliedId": CLAUDE_CONFIG_UUID }))
+                    .map_err(|e| e.to_string())?;
 
-            let meta_cfg = json!({ "appliedId": CLAUDE_CONFIG_UUID });
-            write_private_file_atomic(
-                &paths.files[2],
-                serde_json::to_string_pretty(&meta_cfg)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
+            write_private_file_atomic(&paths.files[1], lib_bytes.as_bytes())
+                .map_err(|e| e.to_string())?;
+            write_private_file_atomic(&paths.files[2], meta_bytes.as_bytes())
+                .map_err(|e| e.to_string())?;
+
+            if let Some(official_3p_cfg) = paths.files.get(3) {
+                write_json_deployment_mode_3p(official_3p_cfg)?;
+            }
+            if let Some(official_3p_lib) = paths.files.get(4) {
+                write_private_file_atomic(official_3p_lib, lib_bytes.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some(official_3p_meta) = paths.files.get(5) {
+                write_private_file_atomic(official_3p_meta, meta_bytes.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            if let Some(twin_cfg) = paths.files.get(6) {
+                write_json_deployment_mode_3p(twin_cfg)?;
+            }
         }
         TargetAgentId::Opencode => {
             let existing = std::fs::read_to_string(&paths.files[0]).unwrap_or_else(|_| "{}".into());
@@ -839,7 +1068,15 @@ pub fn apply_agent_wiring(
                 if is_v1 {
                     let mut models_map = serde_json::Map::new();
                     for m in &exposed {
-                        models_map.insert(m.wire_model_id.clone(), json!({ "name": m.display_name }));
+                        models_map.insert(
+                            m.wire_model_id.clone(),
+                            json!({
+                                "name": m.display_name,
+                                "limit": { "context": 200000, "output": 64000 },
+                                "modalities": { "input": ["text", "image"], "output": ["text"] },
+                                "tool_call": true
+                            }),
+                        );
                     }
                     let provider_map = obj
                         .entry("provider")
@@ -860,10 +1097,21 @@ pub fn apply_agent_wiring(
                         );
                     }
                 } else {
-                    let models_arr: Vec<Value> = exposed
-                        .iter()
-                        .map(|m| json!({ "id": m.wire_model_id, "name": m.display_name }))
-                        .collect();
+                    let mut models_map = serde_json::Map::new();
+                    for m in &exposed {
+                        models_map.insert(
+                            m.wire_model_id.clone(),
+                            json!({
+                                "name": m.display_name,
+                                "capabilities": {
+                                    "tools": true,
+                                    "input": ["text", "image"],
+                                    "output": ["text"]
+                                },
+                                "limit": { "context": 200000, "output": 64000 }
+                            }),
+                        );
+                    }
                     let providers_map = obj
                         .entry("providers")
                         .or_insert_with(|| json!({}))
@@ -878,7 +1126,7 @@ pub fn apply_agent_wiring(
                                     "baseURL": format!("{base_url}/v1"),
                                     "apiKey": token
                                 },
-                                "models": models_arr
+                                "models": models_map
                             }),
                         );
                     }
@@ -894,17 +1142,26 @@ pub fn apply_agent_wiring(
         }
         TargetAgentId::Dsh => {
             let models_yaml = if exposed.is_empty() {
-                format!("          - id: \"{default_wire}\"\n            name: \"Qwitch Default\"")
+                format!(
+                    "          - id: \"{default_wire}\"\n            name: \"Qwitch Default\"\n            contextWindow: 200000\n            maxTokens: 64000\n            input: [text, image]"
+                )
             } else {
                 exposed
                     .iter()
-                    .map(|m| format!("          - id: \"{}\"\n            name: \"{}\"", m.wire_model_id, m.display_name))
+                    .map(|m| {
+                        format!(
+                            "          - id: \"{}\"\n            name: \"{}\"\n            contextWindow: 200000\n            maxTokens: 64000\n            input: [text, image]",
+                            m.wire_model_id, m.display_name
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            let patch_content = format!(
-                "- id: llm-pi-ai\n  config:\n    providers:\n      qwitch:\n        baseUrl: \"{base_url}/v1\"\n        apiKeyEnv: \"QWITCH_GATEWAY_KEY\"\n        models:\n{models_yaml}\n    agent-default-model: \"qwitch/{default_wire}\"\n"
+            let existing_patch = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
+            let qwitch_entry = format!(
+                "- id: llm-pi-ai\n  name: \"@deepseek-ai/dsh-llm-pi-ai\"\n  config:\n    providers:\n      qwitch:\n        displayName: Qwitch\n        apiKeyEnv: QWITCH_GATEWAY_KEY\n        api: openai-completions\n        baseURL: \"{base_url}/v1\"\n        models:\n{models_yaml}\n        streamIdleTimeoutMs: 600000\n"
             );
+            let patch_content = merge_dsh_cordis_patch(&existing_patch, &qwitch_entry);
             write_private_file_atomic(&paths.files[0], patch_content.as_bytes())
                 .map_err(|e| e.to_string())?;
 
@@ -919,51 +1176,52 @@ pub fn apply_agent_wiring(
             write_private_file_atomic(&paths.files[1], env_text.as_bytes())
                 .map_err(|e| e.to_string())?;
 
-            let mut creds_text = std::fs::read_to_string(&paths.files[2]).unwrap_or_default();
-            if !creds_text.contains("QWITCH_GATEWAY_KEY") {
-                if !creds_text.contains("refs:") {
-                    if !creds_text.is_empty() && !creds_text.ends_with('\n') {
-                        creds_text.push('\n');
-                    }
-                    creds_text.push_str(&format!("refs:\n  QWITCH_GATEWAY_KEY: \"{token}\"\n"));
-                } else {
-                    if !creds_text.ends_with('\n') {
-                        creds_text.push('\n');
-                    }
-                    creds_text.push_str(&format!("  QWITCH_GATEWAY_KEY: \"{token}\"\n"));
-                }
-            }
-            write_private_file_atomic(&paths.files[2], creds_text.as_bytes())
+            let creds_text = std::fs::read_to_string(&paths.files[2]).unwrap_or_default();
+            let next_creds = upsert_dsh_credentials_yaml(&creds_text, "QWITCH_GATEWAY_KEY", token);
+            write_private_file_atomic(&paths.files[2], next_creds.as_bytes())
                 .map_err(|e| e.to_string())?;
             clean_opts.dsh_dual_creds_written = Some(true);
         }
         TargetAgentId::CodexDesktop => {
-            let existing = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
-            let stripped = strip_toml_section(&existing, "[model_providers.qwitch]");
-            let with_provider =
-                upsert_toml_key_line(&stripped, "model_provider", "model_provider = \"qwitch\"");
-            let mut with_model = upsert_toml_key_line(
-                &with_provider,
-                "model",
-                &format!("model = \"{default_wire}\""),
-            );
-            if !with_model.ends_with('\n') {
-                with_model.push('\n');
-            }
-            with_model.push_str(&format!(
-                "\n[model_providers.qwitch]\nname = \"Qwitch Multi-Pool Gateway\"\nbase_url = \"{base_url}/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"{token}\"\n"
-            ));
-            write_private_file_atomic(&paths.files[0], with_model.as_bytes())
-                .map_err(|e| e.to_string())?;
-
-            let catalog = json!({
-                "models": exposed.iter().map(|m| json!({
-                    "slug": m.wire_model_id,
-                    "display_name": m.display_name,
-                    "context_window": 200000,
-                    "auto_compact_token_limit": 160000
-                })).collect::<Vec<_>>()
-            });
+            let catalog_entries: Vec<Value> = exposed
+                .iter()
+                .enumerate()
+                .map(|(idx, m)| {
+                    json!({
+                        "slug": m.wire_model_id,
+                        "display_name": m.display_name,
+                        "description": format!("Qwitch {} ({})", m.pool_name, m.tier_summary),
+                        "context_window": 272000,
+                        "auto_compact_token_limit": 244800,
+                        "base_instructions": "You are a helpful coding assistant.",
+                        "default_reasoning_level": "medium",
+                        "supported_reasoning_levels": [
+                            { "effort": "low", "description": "Fast responses with light reasoning" },
+                            { "effort": "medium", "description": "Balances speed and reasoning depth" },
+                            { "effort": "high", "description": "Deep reasoning for complex coding tasks" }
+                        ],
+                        "shell_type": "shell_command",
+                        "visibility": "list",
+                        "supported_in_api": true,
+                        "priority": idx as i64,
+                        "upgrade": Value::Null,
+                        "supports_reasoning_summaries": false,
+                        "default_reasoning_summary": "auto",
+                        "support_verbosity": false,
+                        "default_verbosity": Value::Null,
+                        "apply_patch_tool_type": "freeform",
+                        "truncation_policy": { "mode": "tokens", "limit": 10000 },
+                        "supports_parallel_tool_calls": true,
+                        "experimental_supported_tools": [],
+                        "input_modalities": ["text", "image"],
+                        "prefer_websockets": false
+                    })
+                })
+                .collect();
+            let codex_dir = paths.files[0].parent().unwrap_or_else(|| Path::new("."));
+            let builtin_models = load_codex_builtin_models(codex_dir);
+            let merged_entries = merge_codex_model_catalog(builtin_models, catalog_entries);
+            let catalog = json!({ "models": merged_entries });
             write_private_file_atomic(
                 &paths.files[1],
                 serde_json::to_string_pretty(&catalog)
@@ -971,6 +1229,33 @@ pub fn apply_agent_wiring(
                     .as_bytes(),
             )
             .map_err(|e| e.to_string())?;
+
+            let catalog_path_escaped = paths.files[1]
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            let existing = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
+            let stripped = strip_toml_section(&existing, "[model_providers.qwitch]");
+            let with_provider =
+                upsert_toml_key_line(&stripped, "model_provider", "model_provider = \"qwitch\"");
+            let with_catalog = upsert_toml_key_line(
+                &with_provider,
+                "model_catalog_json",
+                &format!("model_catalog_json = \"{catalog_path_escaped}\""),
+            );
+            let mut with_model = upsert_toml_key_line(
+                &with_catalog,
+                "model",
+                &format!("model = \"{default_wire}\""),
+            );
+            if !with_model.ends_with('\n') {
+                with_model.push('\n');
+            }
+            with_model.push_str(&format!(
+                "\n[model_providers.qwitch]\nname = \"Qwitch Multi-Pool Gateway\"\nbase_url = \"{base_url}/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"{token}\"\nhttp_headers = {{ \"x-openai-actor-authorization\" = \"qwitch\" }}\nrequires_openai_auth = true\n"
+            ));
+            write_private_file_atomic(&paths.files[0], with_model.as_bytes())
+                .map_err(|e| e.to_string())?;
         }
     }
 
@@ -1031,7 +1316,10 @@ pub fn unbind_and_restore_agent(
                 } else {
                     for line in curr.lines() {
                         let t = line.trim();
-                        if !t.starts_with("model_provider = \"qwitch\"") {
+                        if !t.starts_with("model_provider = \"qwitch\"")
+                            && !t.starts_with("model_catalog_json =")
+                            && !t.starts_with("model_catalog_json=")
+                        {
                             restored.push_str(line);
                             restored.push('\n');
                         }
@@ -1098,15 +1386,6 @@ pub fn restart_agent_process(
     global_proxy: bool,
     base_dir_override: Option<&Path>,
 ) -> Result<AgentBinding, String> {
-    if agent_id == TargetAgentId::CodexDesktop {
-        #[cfg(unix)]
-        {
-            let _ = Command::new("pkill")
-                .args(["-f", "codex.*app-server"])
-                .output();
-        }
-    }
-
     let stored_list = db.get_stored_agent_bindings().map_err(|e| e.to_string())?;
     let mut stored = stored_list
         .into_iter()
@@ -1119,6 +1398,50 @@ pub fn restart_agent_process(
             status: AgentBindingStatus::Unbound,
             last_hit_at: None,
         });
+
+    if base_dir_override.is_none() {
+        #[cfg(target_os = "macos")]
+        match agent_id {
+            TargetAgentId::CodexDesktop => {
+                let _ = Command::new("pkill")
+                    .args(["-f", "codex.*app-server"])
+                    .output();
+            }
+            TargetAgentId::ClaudeDesktop => {
+                let isolated = stored.options.claude_isolated_twin.unwrap_or(false);
+                let _ = Command::new("pkill").args(["-x", "Claude"]).output();
+                std::thread::sleep(std::time::Duration::from_millis(350));
+                if isolated {
+                    let data_dir = home_dir().join("Library/Application Support/Claude-Qwitch-3p");
+                    let arg = format!("--user-data-dir={}", data_dir.display());
+                    let status = Command::new("open")
+                        .args(["-n", "-a", "/Applications/Claude.app", "--args", &arg])
+                        .status();
+                    if !matches!(status, Ok(s) if s.success()) {
+                        let _ = Command::new("open").args(["-a", "/Applications/Claude.app"]).spawn();
+                    }
+                } else {
+                    let _ = Command::new("open").args(["-a", "/Applications/Claude.app"]).spawn();
+                }
+            }
+            TargetAgentId::Dsh => {
+                let _ = Command::new("pkill").args(["-f", "DeepSeek Harness"]).output();
+                std::thread::sleep(std::time::Duration::from_millis(350));
+                let _ = Command::new("open")
+                    .args(["-a", "/Applications/DeepSeek Harness.app"])
+                    .spawn();
+            }
+            TargetAgentId::Opencode => {}
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if agent_id == TargetAgentId::CodexDesktop {
+            let _ = Command::new("pkill")
+                .args(["-f", "codex.*app-server"])
+                .output();
+        }
+    }
+
     stored.status = if stored.mounted_pool_ids.is_empty() {
         AgentBindingStatus::Unbound
     } else {
@@ -1201,7 +1524,7 @@ mod tests {
                     fallback_api_key_enabled: false,
                     members: vec![CreatePoolMemberInput {
                         account_id: acc.id,
-                        supported_models: vec!["claude-sonnet-4.6".into()],
+                        supported_models: vec!["deepseek-v4-pro".into()],
                         tier: MemberTier::T1Primary,
                     }],
                     enabled_model_ids: None,
@@ -1300,6 +1623,19 @@ mod tests {
         .expect("wire codex");
         assert_eq!(wired.status, AgentBindingStatus::NeedsRestart);
 
+        let wired_toml = std::fs::read_to_string(home_dir.join("codex/config.toml")).unwrap();
+        assert!(wired_toml.contains("model_catalog_json = "));
+        let catalog_json: Value = serde_json::from_str(
+            &std::fs::read_to_string(home_dir.join("codex/qwitch_models.json")).unwrap(),
+        )
+        .unwrap();
+        let first_model = &catalog_json["models"][0];
+        assert_eq!(first_model["shell_type"], "shell_command");
+        assert_eq!(first_model["visibility"], "list");
+        assert!(first_model["base_instructions"].as_str().is_some());
+        assert!(first_model["supported_reasoning_levels"].is_array());
+        assert!(first_model["truncation_policy"].is_object());
+
         unbind_and_restore_agent(
             &db,
             &key,
@@ -1315,7 +1651,258 @@ mod tests {
         let restored = std::fs::read_to_string(home_dir.join("codex/config.toml")).unwrap();
         assert!(restored.contains("model = \"gpt-5.4\""));
         assert!(!restored.contains("model_provider = \"qwitch\""));
+        assert!(!restored.contains("model_catalog_json ="));
         assert!(restored.contains("[model_providers.qwitch]"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opencode_v2_writes_models_as_keyed_object_map() {
+        let (db, key, root, home_dir, pools) = setup_wiring_env();
+        let pid = pools[0].id.clone();
+        std::fs::create_dir_all(home_dir.join("opencode")).unwrap();
+
+        let wired = apply_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::Opencode,
+            std::slice::from_ref(&pid),
+            None,
+            &AgentBindingOptions {
+                opencode_schema_version: Some("v2".into()),
+                ..Default::default()
+            },
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+        )
+        .expect("wire opencode");
+        assert_eq!(wired.status, AgentBindingStatus::Bound);
+
+        let cfg: Value = serde_json::from_str(
+            &std::fs::read_to_string(home_dir.join("opencode/opencode.jsonc")).unwrap(),
+        )
+        .unwrap();
+        let models = &cfg["providers"]["qwitch"]["models"];
+        assert!(models.is_object(), "OpenCode v2 models must be an object map, got: {models}");
+        let expected_key = format!("{}/deepseek-v4-pro", pools[0].slug);
+        let entry = models.get(&expected_key).expect("model key");
+        assert_eq!(entry["capabilities"]["tools"], true);
+        assert_eq!(entry["limit"]["context"], 200000);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dsh_wiring_repairs_inline_empty_refs_and_preserves_ui_patches() {
+        let repaired_existing = upsert_dsh_credentials_yaml(
+            "version: 1\nrefs: {}\n  QWITCH_GATEWAY_KEY: \"old-token\"\n",
+            "QWITCH_GATEWAY_KEY",
+            "qwitch-bind-dsh",
+        );
+        assert!(
+            !repaired_existing.contains("refs: {}"),
+            "expected refs: {{}} to be repaired, got:\n{repaired_existing}"
+        );
+        assert!(repaired_existing.contains("refs:\n  QWITCH_GATEWAY_KEY: \"qwitch-bind-dsh\""));
+
+        let (db, key, root, home_dir, pools) = setup_wiring_env();
+        let pid = pools[0].id.clone();
+        std::fs::create_dir_all(home_dir.join("dsh/profiles/desktop")).unwrap();
+        std::fs::write(
+            home_dir.join("dsh/.credentials.yaml"),
+            "version: 1\nrecords:\n  deepseek/default/apiKey:\n    enc: \"abc\"\nrefs: {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home_dir.join("dsh/profiles/desktop/cordis.patch.yml"),
+            "- id: llm-pi-ai\n  config:\n    baseUrl: \"http://old\"\n- id: ui-settings-account\n  enabled: false\n- id: ui-chat\n  config:\n    showWelcomeTips: false\n",
+        )
+        .unwrap();
+
+        let wired = apply_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::Dsh,
+            std::slice::from_ref(&pid),
+            None,
+            &AgentBindingOptions::default(),
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+        )
+        .expect("wire dsh");
+        assert_eq!(wired.status, AgentBindingStatus::Bound);
+
+        let creds = std::fs::read_to_string(home_dir.join("dsh/.credentials.yaml")).unwrap();
+        assert!(!creds.contains("refs: {}"));
+        assert!(creds.contains("refs:\n  QWITCH_GATEWAY_KEY: \"qwitch-bind-dsh\""));
+        assert!(creds.contains("deepseek/default/apiKey:"));
+
+        let patch =
+            std::fs::read_to_string(home_dir.join("dsh/profiles/desktop/cordis.patch.yml"))
+                .unwrap();
+        assert!(patch.contains("baseURL: \"http://127.0.0.1:18425/v1\""));
+        assert!(patch.contains("api: openai-completions"));
+        assert!(patch.contains("displayName: Qwitch"));
+        assert!(!patch.contains("baseUrl:"));
+        assert!(!patch.contains("agent-default-model:"));
+        assert!(patch.contains("- id: ui-settings-account"));
+        assert!(patch.contains("- id: ui-chat"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_wiring_writes_openai_auth_and_actor_header() {
+        let (db, key, root, home_dir, pools) = setup_wiring_env();
+        let pid = pools[0].id.clone();
+
+        let wired = apply_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::CodexDesktop,
+            std::slice::from_ref(&pid),
+            None,
+            &AgentBindingOptions::default(),
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+        )
+        .expect("wire codex");
+        assert_eq!(wired.status, AgentBindingStatus::NeedsRestart);
+
+        let toml = std::fs::read_to_string(home_dir.join("codex/config.toml")).unwrap();
+        assert!(toml.contains("requires_openai_auth = true"));
+        assert!(toml.contains("http_headers = { \"x-openai-actor-authorization\" = \"qwitch\" }"));
+        assert!(toml.contains("wire_api = \"responses\""));
+        assert!(toml.contains("base_url = \"http://127.0.0.1:18425/v1\""));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_desktop_isolated_wiring_syncs_both_3p_and_twin_directories() {
+        let (db, key, root, home_dir, pools) = setup_wiring_env();
+        let pid = pools[0].id.clone();
+
+        let wired = apply_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::ClaudeDesktop,
+            std::slice::from_ref(&pid),
+            None,
+            &AgentBindingOptions {
+                claude_isolated_twin: Some(true),
+                ..Default::default()
+            },
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+        )
+        .expect("wire claude");
+        assert_eq!(wired.status, AgentBindingStatus::NeedsRestart);
+        assert!(wired.drift_reason.is_none());
+
+        for dir_name in ["Claude-3p", "Claude-Qwitch-3p"] {
+            let desktop_cfg: Value = serde_json::from_str(
+                &std::fs::read_to_string(home_dir.join(dir_name).join("claude_desktop_config.json"))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(desktop_cfg["deploymentMode"], "3p");
+
+            let lib_dir = home_dir.join(dir_name).join("configLibrary");
+            assert!(lib_dir.join("_meta.json").exists());
+            let preset: Value = serde_json::from_str(
+                &std::fs::read_to_string(lib_dir.join(format!("{CLAUDE_CONFIG_UUID}.json")))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(preset["inferenceProvider"], "gateway");
+            assert_eq!(preset["inferenceGatewayBaseUrl"], "http://127.0.0.1:18425");
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_wiring_preserves_builtin_models_from_cache_and_claude_defaults_to_3p() {
+        assert_eq!(
+            default_options_for_agent(TargetAgentId::ClaudeDesktop).claude_isolated_twin,
+            Some(false)
+        );
+        let default_claude_paths = resolve_agent_paths(
+            TargetAgentId::ClaudeDesktop,
+            &default_options_for_agent(TargetAgentId::ClaudeDesktop),
+            Some(Path::new("/tmp/qwitch-check")),
+        );
+        assert_eq!(
+            default_claude_paths.primary_display,
+            "~/Library/Application Support/Claude-3p/configLibrary/"
+        );
+
+        let (db, key, root, home_dir, pools) = setup_wiring_env();
+        let pid = pools[0].id.clone();
+        std::fs::create_dir_all(home_dir.join("codex")).unwrap();
+        let builtin_cache = json!({
+            "models": [
+                {
+                    "slug": "gpt-6-luna",
+                    "display_name": "GPT-6-Luna",
+                    "visibility": "list",
+                    "priority": 2,
+                    "supported_in_api": true
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "visibility": "hide",
+                    "priority": 5,
+                    "supported_in_api": true
+                }
+            ]
+        });
+        std::fs::write(
+            home_dir.join("codex/models_cache.json"),
+            serde_json::to_string_pretty(&builtin_cache).unwrap(),
+        )
+        .unwrap();
+
+        let wired = apply_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::CodexDesktop,
+            std::slice::from_ref(&pid),
+            None,
+            &AgentBindingOptions::default(),
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+        )
+        .expect("wire codex with cache");
+        assert_eq!(wired.status, AgentBindingStatus::NeedsRestart);
+
+        let catalog_json: Value = serde_json::from_str(
+            &std::fs::read_to_string(home_dir.join("codex/qwitch_models.json")).unwrap(),
+        )
+        .unwrap();
+        let models = catalog_json["models"].as_array().unwrap();
+        assert!(models.len() >= 3);
+        assert_eq!(models[0]["slug"], "gpt-6-luna");
+        assert_eq!(models[1]["slug"], "codex-auto-review");
+        assert_eq!(models[2]["priority"], 2);
+        assert!(models[2]["slug"].as_str().unwrap().contains("deepseek-v4-pro"));
+
         let _ = std::fs::remove_dir_all(root);
     }
 }

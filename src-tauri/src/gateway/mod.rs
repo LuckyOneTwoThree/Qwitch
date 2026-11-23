@@ -3,6 +3,7 @@ pub mod scheduler;
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -13,10 +14,11 @@ use crate::adapter::common::shared_http_client;
 use crate::adapter::ToolAdapter;
 use crate::agent_wiring::{agent_id_from_token, detect_bridge_runtime, detect_global_proxy_active};
 use crate::domain::{
-    compute_agent_exposed_models, upstream_model_protocol, AccountPool, CredentialEnvelope,
-    CredentialPayload, GatewayRuntimeState, PoolMember, RoutingAttempt,
-    RoutingAttemptOutcome, RoutingTraceItem, RoutingTraceStatus, RunPoolSimulationInput,
-    RunPoolSimulationResult, SimulationFailureMode, TargetAgentId, WireProtocolKind,
+    compute_agent_exposed_models, resolve_vendor_wire_model_id, upstream_model_protocol,
+    AccountPool, CredentialEnvelope, CredentialPayload, GatewayRuntimeState, PoolMember,
+    RoutingAttempt, RoutingAttemptOutcome, RoutingTraceItem, RoutingTraceStatus,
+    RunPoolSimulationInput, RunPoolSimulationResult, SimulationFailureMode, TargetAgentId,
+    WireProtocolKind,
 };
 use crate::storage::QwitchDatabase;
 
@@ -235,7 +237,7 @@ impl GatewayRuntime {
                 .iter()
                 .find(|m| m.enabled)
                 .map(|m| m.model_id.clone())
-                .unwrap_or_else(|| "claude-sonnet-4.6".into())
+                .unwrap_or_else(|| "deepseek-v4-pro".into())
         } else {
             input.model_id.clone()
         };
@@ -526,38 +528,232 @@ fn resolve_target_pool_and_model(
     agent_id: Option<TargetAgentId>,
     raw_model: &str,
 ) -> Option<(AccountPool, String)> {
-    // 1. 尝试解包 `<pool_slug>/<model_id>`
-    if let Some((slug, model)) = raw_model.split_once('/') {
+    let trimmed_raw = raw_model.trim();
+    // 1. 优先精确匹配 `<tool_id>/<model_id>` 工具作用域策略
+    if let (Some(tid), bare) = crate::domain::split_scoped_model_id(trimmed_raw) {
+        for p in pools.iter().filter(|p| p.enabled) {
+            if p.model_policies
+                .iter()
+                .any(|pol| pol.enabled && pol.model_id == trimmed_raw)
+            {
+                return Some((p.clone(), trimmed_raw.to_string()));
+            }
+            let has_tool_member = p.members.iter().any(|m| {
+                m.enabled
+                    && m.tool_id == tid
+                    && m.supported_models
+                        .iter()
+                        .any(|s| s == trimmed_raw || crate::domain::split_scoped_model_id(s).1 == bare)
+            });
+            if has_tool_member
+                && p.model_policies
+                    .iter()
+                    .any(|pol| pol.enabled && (pol.model_id == trimmed_raw || pol.model_id == bare))
+            {
+                return Some((p.clone(), trimmed_raw.to_string()));
+            }
+        }
+    }
+    // 2. 尝试解包 `<pool_slug>/<model_or_scoped_id>`
+    if let Some((slug, model)) = trimmed_raw.split_once('/') {
         if let Some(p) = pools.iter().find(|p| p.slug == slug && p.enabled) {
             return Some((p.clone(), model.to_string()));
         }
     }
-    // 2. Claude Desktop 伪装 ID `mythos-qwitch-*` 反向映射回池与模型
+    // 3. Claude Desktop 伪装 ID `mythos-qwitch-*` 反向映射回池与模型
     if agent_id == Some(TargetAgentId::ClaudeDesktop) {
         for p in pools.iter().filter(|p| p.enabled) {
             for pol in &p.model_policies {
-                if pol.enabled && pol.claude_alias_id.as_deref() == Some(raw_model) {
+                if pol.enabled && pol.claude_alias_id.as_deref() == Some(trimmed_raw) {
                     return Some((p.clone(), pol.model_id.clone()));
                 }
             }
         }
     }
-    // 3. 按启用池顺序精确匹配 model_id
+    // 4. 按启用池顺序精确匹配 model_id
     for p in pools.iter().filter(|p| p.enabled) {
         if p.model_policies
             .iter()
-            .any(|pol| pol.enabled && pol.model_id == raw_model)
+            .any(|pol| pol.enabled && pol.model_id == trimmed_raw)
         {
-            return Some((p.clone(), raw_model.to_string()));
+            return Some((p.clone(), trimmed_raw.to_string()));
         }
     }
-    // 4. Codex 辅助内部请求（如 codex-auto-review）自动回落至首个启用的号池模型
-    pools.iter().find(|p| p.enabled).and_then(|p| {
-        p.model_policies
-            .iter()
-            .find(|m| m.enabled)
-            .map(|m| (p.clone(), m.model_id.clone()))
-    })
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexOwnAuth {
+    upstream_url: String,
+    bearer_token: String,
+    account_id: Option<String>,
+}
+
+fn resolve_codex_own_auth(
+    path: &str,
+    headers: &HashMap<String, String>,
+    auth_token: &str,
+    codex_home_override: Option<&Path>,
+) -> Option<CodexOwnAuth> {
+    let codex_home = codex_home_override
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".codex"))
+        });
+
+    let chatgpt_endpoint = || {
+        if path.ends_with("/compact") {
+            "https://chatgpt.com/backend-api/codex/responses/compact".to_string()
+        } else {
+            "https://chatgpt.com/backend-api/codex/responses".to_string()
+        }
+    };
+
+    if let Some(dir) = codex_home {
+        let auth_path = dir.join("auth.json");
+        if let Ok(raw) = std::fs::read_to_string(&auth_path) {
+            if let Ok(doc) = serde_json::from_str::<Value>(&raw) {
+                if let Some(access_token) = doc
+                    .get("tokens")
+                    .and_then(|t| t.get("access_token"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let account_id = headers
+                        .get("chatgpt-account-id")
+                        .cloned()
+                        .or_else(|| {
+                            doc.get("tokens")
+                                .and_then(|t| t.get("account_id"))
+                                .and_then(Value::as_str)
+                                .map(String::from)
+                        })
+                        .filter(|s| !s.trim().is_empty());
+                    return Some(CodexOwnAuth {
+                        upstream_url: chatgpt_endpoint(),
+                        bearer_token: access_token.to_string(),
+                        account_id,
+                    });
+                }
+                if let Some(api_key) = doc
+                    .get("OPENAI_API_KEY")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    return Some(CodexOwnAuth {
+                        upstream_url: format!("https://api.openai.com{path}"),
+                        bearer_token: api_key.to_string(),
+                        account_id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    let trimmed_auth = auth_token.trim();
+    if !trimmed_auth.is_empty()
+        && !trimmed_auth.starts_with("qwitch-bind-")
+        && !trimmed_auth.eq_ignore_ascii_case("qwitch")
+    {
+        let account_id = headers
+            .get("chatgpt-account-id")
+            .cloned()
+            .filter(|s| !s.trim().is_empty());
+        let upstream_url = if account_id.is_some() {
+            chatgpt_endpoint()
+        } else {
+            format!("https://api.openai.com{path}")
+        };
+        return Some(CodexOwnAuth {
+            upstream_url,
+            bearer_token: trimmed_auth.to_string(),
+            account_id,
+        });
+    }
+
+    None
+}
+
+async fn forward_codex_own_signin_request(
+    stream: &mut TcpStream,
+    auth: &CodexOwnAuth,
+    headers: &HashMap<String, String>,
+    body_bytes: &[u8],
+) -> Result<(u16, usize), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("构造 Codex 直通客户端失败: {e}"))?;
+
+    let mut req = client
+        .post(&auth.upstream_url)
+        .bearer_auth(&auth.bearer_token)
+        .body(body_bytes.to_vec());
+    if let Some(acc_id) = &auth.account_id {
+        req = req.header("ChatGPT-Account-Id", acc_id);
+    }
+    if !headers.contains_key("content-type") {
+        req = req.header("content-type", "application/json");
+    }
+    for (k, v) in headers {
+        if matches!(
+            k.as_str(),
+            "content-type"
+                | "accept"
+                | "user-agent"
+                | "originator"
+                | "openai-beta"
+                | "session_id"
+                | "conversation_id"
+        ) || k.starts_with("x-codex-")
+            || k.starts_with("x-oai-")
+        {
+            req = req.header(k.as_str(), v.as_str());
+        }
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Codex 自有账号直通上游失败: {e}"))?;
+    let status = resp.status();
+    let status_code = status.as_u16();
+    let status_line = format!(
+        "{status_code} {}",
+        status.canonical_reason().unwrap_or("OK")
+    );
+    let header_ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let resp_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取 Codex 上游响应失败: {e}"))?;
+    let content_type = header_ct.unwrap_or_else(|| {
+        if resp_bytes.starts_with(b"event:") || resp_bytes.starts_with(b"data:") {
+            "text/event-stream; charset=utf-8".to_string()
+        } else {
+            "application/json".to_string()
+        }
+    });
+    let resp_len = resp_bytes.len();
+    write_http_response(
+        stream,
+        &status_line,
+        &content_type,
+        &resp_bytes,
+        &[("Cache-Control", "no-cache")],
+    )
+    .await
+    .map_err(|e| format!("回写 Codex 客户端响应失败: {e}"))?;
+    Ok((status_code, resp_len))
 }
 
 fn extract_bearer_and_base_url(env: &CredentialEnvelope) -> (Option<String>, Option<String>, Vec<(&'static str, String)>) {
@@ -606,11 +802,14 @@ async fn call_upstream_member(
     let (token_opt, custom_base, extra_headers) = extract_bearer_and_base_url(cred);
     let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
 
-    let protocol = upstream_model_protocol(&member.tool_id, upstream_model);
+    let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
+    let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
+    let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
     let base_url = custom_base.unwrap_or_else(|| match member.tool_id.as_str() {
-        "minimax_code_cn" => "https://api.minimaxi.com/anthropic".into(),
+        "minimax_code_cn" => "https://agent.minimax.cn/mavis/api/v1/llm".into(),
         "workbuddy" => "https://copilot.tencent.com".into(),
-        "qoder_cn" => "https://openapi.qoder.com.cn".into(),
+        "qoder_cn" => "https://gateway.qoder.com.cn".into(),
+        "trae_cn" => "https://trae-api-cn.mchost.guru".into(),
         _ => "https://api.openai.com".into(),
     });
     let base = base_url.trim_end_matches('/');
@@ -618,12 +817,12 @@ async fn call_upstream_member(
     let (url, body, auth_is_x_api_key) = match protocol {
         WireProtocolKind::AnthropicMessages => (
             format!("{base}/v1/messages"),
-            to_upstream_anthropic_body(ir_req, upstream_model, false),
+            to_upstream_anthropic_body(ir_req, &wire_model, false),
             true,
         ),
         _ => (
             format!("{base}/v1/chat/completions"),
-            to_upstream_openai_chat_body(ir_req, upstream_model, false),
+            to_upstream_openai_chat_body(ir_req, &wire_model, false),
             false,
         ),
     };
@@ -665,7 +864,11 @@ async fn handle_http_connection(
         return write_http_response(&mut stream, "400 Bad Request", "text/plain", b"Bad Request", &[]).await;
     }
     let method = parts[0].to_string();
-    let path = parts[1].split('?').next().unwrap_or("/").to_string();
+    let full_target = parts[1];
+    let (path, query_str) = match full_target.split_once('?') {
+        Some((p, q)) => (p.to_string(), q),
+        None => (full_target.to_string(), ""),
+    };
 
     let mut headers: HashMap<String, String> = HashMap::new();
     let mut content_len: usize = 0;
@@ -727,7 +930,40 @@ async fn handle_http_connection(
         .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
         .or_else(|| headers.get("x-api-key").map(String::as_str))
         .unwrap_or("");
-    let caller_agent = agent_id_from_token(auth_token);
+    let query_agent = query_str
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| *k == "agent")
+        .and_then(|(_, v)| TargetAgentId::from_id(v));
+    let ua_agent = headers.get("user-agent").and_then(|ua| {
+        let lower = ua.to_ascii_lowercase();
+        if lower.contains("claude") {
+            Some(TargetAgentId::ClaudeDesktop)
+        } else if lower.contains("codex") {
+            Some(TargetAgentId::CodexDesktop)
+        } else if lower.contains("dsh") || lower.contains("deepseek") {
+            Some(TargetAgentId::Dsh)
+        } else if lower.contains("opencode") {
+            Some(TargetAgentId::Opencode)
+        } else {
+            None
+        }
+    });
+    let actor_agent = headers
+        .get("x-openai-actor-authorization")
+        .filter(|v| v.trim().eq_ignore_ascii_case("qwitch"))
+        .map(|_| TargetAgentId::CodexDesktop);
+    let caller_agent = agent_id_from_token(auth_token)
+        .or(query_agent)
+        .or(actor_agent)
+        .or(ua_agent)
+        .or_else(|| {
+            if path.starts_with("/v1/responses") {
+                Some(TargetAgentId::CodexDesktop)
+            } else {
+                None
+            }
+        });
 
     let cooldowns = runtime.cooldown_snapshot();
     let pools = db
@@ -749,18 +985,51 @@ async fn handle_http_connection(
             &pools,
             chrono::Utc::now().timestamp_millis(),
         );
+        let first_id = exposed.first().map(|m| m.wire_model_id.clone());
+        let last_id = exposed.last().map(|m| m.wire_model_id.clone());
         let data: Vec<Value> = exposed
             .into_iter()
             .map(|m| {
+                let (scoped_tid, bare_mid) = crate::domain::split_scoped_model_id(&m.model_id);
+                let tool_id = scoped_tid
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        pools
+                            .iter()
+                            .find(|p| p.id == m.pool_id)
+                            .and_then(|p| {
+                                p.members.iter().find(|mb| {
+                                    mb.supported_models.iter().any(|s| {
+                                        s == &m.model_id
+                                            || crate::domain::split_scoped_model_id(s).1 == bare_mid
+                                    })
+                                })
+                            })
+                            .map(|mb| mb.tool_id.clone())
+                    })
+                    .unwrap_or_else(|| "workbuddy".into());
+                let vendor_wire = resolve_vendor_wire_model_id(&tool_id, bare_mid);
                 json!({
                     "id": m.wire_model_id,
                     "object": "model",
+                    "type": "model",
+                    "name": m.display_name,
                     "display_name": m.display_name,
-                    "owned_by": format!("qwitch:{}", m.pool_id)
+                    "created": 1735689600,
+                    "created_at": "2025-01-01T00:00:00Z",
+                    "owned_by": format!("qwitch:{}", m.pool_id),
+                    "tool_id": tool_id,
+                    "vendor_wire_id": vendor_wire
                 })
             })
             .collect();
-        let out = json!({ "object": "list", "data": data });
+        let out = json!({
+            "object": "list",
+            "data": data,
+            "has_more": false,
+            "first_id": first_id,
+            "last_id": last_id
+        });
         return write_http_response(
             stream,
             "200 OK",
@@ -829,18 +1098,110 @@ async fn handle_http_connection(
         }
     };
 
-    let Some((pool, requested_model)) =
-        resolve_target_pool_and_model(&pools, caller_agent, &ir_req.model)
-    else {
-        return write_http_response(
-            stream,
-            "404 Not Found",
-            "application/json",
-            br#"{"error":"No active pool matches requested model"}"#,
-            &[],
-        )
-        .await;
-    };
+    let (pool, requested_model) =
+        match resolve_target_pool_and_model(&pools, caller_agent, &ir_req.model) {
+            Some(found) => found,
+            None => {
+                if matches!(path.as_str(), "/v1/responses" | "/v1/responses/compact")
+                    || caller_agent == Some(TargetAgentId::CodexDesktop)
+                {
+                    if let Some(own_auth) = resolve_codex_own_auth(&path, &headers, auth_token, None) {
+                        let t_start = std::time::Instant::now();
+                        match forward_codex_own_signin_request(
+                            stream,
+                            &own_auth,
+                            &headers,
+                            &body_bytes,
+                        )
+                        .await
+                        {
+                            Ok((code, resp_len)) => {
+                                let ok = (200..300).contains(&code);
+                                let latency_ms = t_start.elapsed().as_millis() as u64;
+                                let trace = RoutingTraceItem {
+                                    id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
+                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                    agent_id: TargetAgentId::CodexDesktop,
+                                    pool_id: "codex-native".into(),
+                                    pool_name: "Codex 自有账号直通".into(),
+                                    incoming_protocol: ir_req.incoming_protocol,
+                                    upstream_protocol: WireProtocolKind::OpenaiResponses,
+                                    requested_model: ir_req.model.clone(),
+                                    final_account_label: "Codex 自有登录态".into(),
+                                    final_tool_id: "codex".into(),
+                                    final_model: ir_req.model.clone(),
+                                    status: if ok {
+                                        RoutingTraceStatus::Success
+                                    } else {
+                                        RoutingTraceStatus::Failed
+                                    },
+                                    cache_affinity_hit: false,
+                                    ttft_ms: latency_ms,
+                                    total_tokens: (resp_len / 4) as u64,
+                                    attempts: vec![RoutingAttempt {
+                                        account_label: "Codex 自有登录态".into(),
+                                        tool_id: "codex".into(),
+                                        model: ir_req.model.clone(),
+                                        tier: None,
+                                        outcome: if ok {
+                                            RoutingAttemptOutcome::Ok
+                                        } else if code == 401 || code == 403 {
+                                            RoutingAttemptOutcome::Refreshed401
+                                        } else {
+                                            RoutingAttemptOutcome::Cooldown429
+                                        },
+                                        latency_ms,
+                                        detail: format!("HTTP {code} -> {}", own_auth.upstream_url),
+                                    }],
+                                };
+                                let _ = db.append_routing_trace(&trace);
+                                return Ok(());
+                            }
+                            Err(msg) => {
+                                let err = json!({ "error": { "message": msg } });
+                                return write_http_response(
+                                    stream,
+                                    "502 Bad Gateway",
+                                    "application/json",
+                                    err.to_string().as_bytes(),
+                                    &[],
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+
+                if caller_agent == Some(TargetAgentId::CodexDesktop) {
+                    if let Some(found) = pools.iter().find(|p| p.enabled).and_then(|p| {
+                        p.model_policies
+                            .iter()
+                            .find(|m| m.enabled)
+                            .map(|m| (p.clone(), m.model_id.clone()))
+                    }) {
+                        found
+                    } else {
+                        return write_http_response(
+                            stream,
+                            "404 Not Found",
+                            "application/json",
+                            br#"{"error":"No active pool matches requested model"}"#,
+                            &[],
+                        )
+                        .await;
+                    }
+                } else {
+                    return write_http_response(
+                        stream,
+                        "404 Not Found",
+                        "application/json",
+                        br#"{"error":"No active pool matches requested model"}"#,
+                        &[],
+                    )
+                    .await;
+                }
+            }
+        };
 
     let session_key = headers
         .get("x-conversation-id")
@@ -1151,7 +1512,7 @@ mod tests {
                     fallback_api_key_enabled: true,
                     members: vec![CreatePoolMemberInput {
                         account_id: acc.id,
-                        supported_models: vec!["deepseek-v4".into()],
+                        supported_models: vec!["deepseek-v4-pro".into()],
                         tier: MemberTier::T3Fallback,
                     }],
                     enabled_model_ids: None,
@@ -1169,6 +1530,24 @@ mod tests {
             .expect("start gateway");
 
         let client = reqwest::Client::new();
+
+        // 0. /v1/models 返回兼容 Anthropic / OpenAI / DSH 的完整字段并支持 User-Agent 识别 Claude
+        let models_resp = client
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .header("User-Agent", "ClaudeDesktop/2.7")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(models_resp.status().as_u16(), 200);
+        let models_json: Value = models_resp.json().await.unwrap();
+        assert_eq!(models_json["has_more"], false);
+        assert_eq!(models_json["data"][0]["type"], "model");
+        assert_eq!(models_json["data"][0]["name"], "deepseek-v4-pro");
+        assert_eq!(models_json["data"][0]["display_name"], "deepseek-v4-pro");
+        assert!(models_json["data"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("mythos-qwitch-"));
 
         // 1. 浏览器 Origin 请求必须被 403 拦截
         let evil = client
@@ -1193,7 +1572,7 @@ mod tests {
             .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
             .bearer_auth("qwitch-bind-opencode")
             .json(&json!({
-                "model": "gateway-pool/deepseek-v4",
+                "model": "gateway-pool/deepseek-v4-pro",
                 "messages": [{ "role": "user", "content": "ping" }]
             }))
             .send()
@@ -1205,9 +1584,121 @@ mod tests {
 
         let traces = db.list_routing_traces(10).unwrap();
         assert_eq!(traces.len(), 1);
-        assert_eq!(traces[0].final_model, "deepseek-v4");
+        assert_eq!(traces[0].final_model, "deepseek-v4-pro");
 
         rt.stop_server();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn codex_unmatched_model_resolves_own_signin_and_forwards_upstream() {
+        assert!(resolve_target_pool_and_model(&[], Some(TargetAgentId::CodexDesktop), "gpt-6-luna").is_none());
+
+        let tmp = std::env::temp_dir().join(format!("qwitch-codex-own-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("auth.json"),
+            serde_json::to_string_pretty(&json!({
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": null,
+                "tokens": {
+                    "access_token": "oauth-jwt-sample",
+                    "account_id": "acc-uuid-123"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let headers = HashMap::new();
+        let resolved = resolve_codex_own_auth(
+            "/v1/responses",
+            &headers,
+            "qwitch-bind-codex-desktop",
+            Some(&tmp),
+        )
+        .expect("should resolve ChatGPT OAuth from auth.json");
+        assert_eq!(
+            resolved.upstream_url,
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(resolved.bearer_token, "oauth-jwt-sample");
+        assert_eq!(resolved.account_id.as_deref(), Some("acc-uuid-123"));
+
+        let compact = resolve_codex_own_auth(
+            "/v1/responses/compact",
+            &headers,
+            "qwitch-bind-codex-desktop",
+            Some(&tmp),
+        )
+        .expect("compact endpoint");
+        assert_eq!(
+            compact.upstream_url,
+            "https://chatgpt.com/backend-api/codex/responses/compact"
+        );
+
+        let mock_chatgpt = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/backend-api/codex/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"),
+            )
+            .mount(&mock_chatgpt)
+            .await;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let auth_override = CodexOwnAuth {
+            upstream_url: format!("{}/backend-api/codex/responses", mock_chatgpt.uri()),
+            bearer_token: resolved.bearer_token.clone(),
+            account_id: resolved.account_id.clone(),
+        };
+        let mut req_headers = HashMap::new();
+        req_headers.insert("content-type".into(), "application/json".into());
+        req_headers.insert("x-codex-turn-metadata".into(), "turn-1".into());
+        req_headers.insert("x-openai-actor-authorization".into(), "qwitch".into());
+
+        let srv = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let res = forward_codex_own_signin_request(
+                &mut s,
+                &auth_override,
+                &req_headers,
+                br#"{"model":"gpt-6-luna","input":[]}"#,
+            )
+            .await
+            .expect("forward");
+            assert_eq!(res.0, 200);
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert!(resp.text().await.unwrap().contains("response.completed"));
+        srv.await.unwrap();
+
+        let received = mock_chatgpt.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0].headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer oauth-jwt-sample"
+        );
+        assert_eq!(
+            received[0].headers.get("chatgpt-account-id").unwrap().to_str().unwrap(),
+            "acc-uuid-123"
+        );
+        assert_eq!(
+            received[0].headers.get("x-codex-turn-metadata").unwrap().to_str().unwrap(),
+            "turn-1"
+        );
+        assert!(received[0].headers.get("x-openai-actor-authorization").is_none());
+
+        let _ = std::fs::remove_dir_all(tmp);
     }
 }

@@ -62,15 +62,11 @@ import type {
 } from "./dashboard/types";
 import { LogsPanel, LogsToolbar } from "./dashboard/LogsView";
 import { SettingsView } from "./dashboard/SettingsView";
-import { PoolsView } from "./dashboard/PoolsView";
 import { AgentBindingsView } from "./dashboard/AgentBindingsView";
 import { RoutingTraceView } from "./dashboard/RoutingTraceView";
-import { CreatePoolModal } from "../components/pool/CreatePoolModal";
-import { ConfigDiffModal } from "../components/pool/ConfigDiffModal";
 import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
-import { buildAgentConfigSnippets, computeAgentExposedModels } from "../data/mockPoolData";
-import type { AccountPool, AgentBinding, TargetAgentId } from "../types/pool";
+import type { TargetAgentId } from "../types/pool";
 
 function SecondAccountGhostCard({
   toolName,
@@ -134,26 +130,20 @@ export function Dashboard() {
 
   const {
     gateway,
-    pools,
     agentBindings,
     traces,
     setSelectedPoolId,
     toggleGateway,
     detectAgentEnvironment,
-    mountPoolToAgents,
   } = usePoolPrototype();
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const [nav, setNav] = useState<NavSection>("all");
   const prevNavRef = useRef<NavSection>(nav);
-  const [createPoolOpen, setCreatePoolOpen] = useState(false);
   const [simModalOpen, setSimModalOpen] = useState(false);
   const [simDefaultPoolId, setSimDefaultPoolId] = useState<string | undefined>(undefined);
   const [simDefaultModelId, setSimDefaultModelId] = useState<string | undefined>(undefined);
   const [highlightAgentId, setHighlightAgentId] = useState<TargetAgentId | null>(null);
-  const [pendingMountDiffs, setPendingMountDiffs] = useState<
-    { pool: AccountPool; agentId: TargetAgentId }[]
-  >([]);
   const [importOpen, setImportOpen] = useState(false);
   const [importDefaultMethod, setImportDefaultMethod] = useState<AuthMethod | undefined>(undefined);
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
@@ -428,59 +418,8 @@ export function Dashboard() {
     [agentBindings]
   );
 
-  const activeCreationDiff = useMemo<{
-    pool: AccountPool;
-    binding: AgentBinding;
-    nextPoolIds: string[];
-    mountedPoolNames: string[];
-    defaultModelDisplay: string | null;
-    beforeText: string;
-    afterText: string;
-  } | null>(() => {
-    const head = pendingMountDiffs[0];
-    if (!head) return null;
-    const binding = agentBindings.find((b) => b.agentId === head.agentId);
-    if (!binding) return null;
-    const nextPoolIds = binding.mountedPoolIds.includes(head.pool.id)
-      ? binding.mountedPoolIds
-      : [...binding.mountedPoolIds, head.pool.id];
-    const allPoolsWithNew = pools.some((p) => p.id === head.pool.id)
-      ? pools
-      : [head.pool, ...pools];
-    const snippets = buildAgentConfigSnippets(
-      binding.agentId,
-      nextPoolIds,
-      binding.defaultModelKey,
-      allPoolsWithNew,
-      gateway,
-      binding.options,
-      false
-    );
-    const exposed = computeAgentExposedModels(
-      {
-        agentId: binding.agentId,
-        mountedPoolIds: nextPoolIds,
-        defaultModelKey: binding.defaultModelKey,
-      },
-      allPoolsWithNew
-    );
-    const defaultItem = exposed.find((e) => e.isDefault) ?? exposed[0] ?? null;
-    return {
-      pool: head.pool,
-      binding,
-      nextPoolIds,
-      mountedPoolNames: nextPoolIds
-        .map((id) => allPoolsWithNew.find((p) => p.id === id)?.name)
-        .filter((n): n is string => Boolean(n)),
-      defaultModelDisplay: defaultItem?.displayName ?? null,
-      beforeText: snippets.beforeSnippet,
-      afterText: snippets.afterSnippet,
-    };
-  }, [pendingMountDiffs, agentBindings, pools, gateway]);
-
   const headerTitle = useMemo(() => {
-    if (nav === "pools") return "号池编排与调度策略";
-    if (nav === "agents") return "Agent 指向与配置挂载";
+    if (nav === "pools" || nav === "agents") return "Agent 接入与号池调度";
     if (nav === "routing") return "网关路由观测与决策链路";
     if (nav === "logs") return "操作审计日志";
     if (nav === "settings") return "系统设置与客户端环境";
@@ -491,13 +430,9 @@ export function Dashboard() {
   }, [nav, activeToolMeta]);
 
   const headerSubtitle = useMemo(() => {
-    if (nav === "pools") {
-      const activePools = pools.filter((p) => p.enabled).length;
-      return `已建 ${pools.length} 个号池（${activePools} 个启用）· 优先在号池内完成跨工具混编，再定向指向 Agent`;
-    }
-    if (nav === "agents") {
-      return `已挂载 ${boundAgentCount}/${agentBindings.length} 个目标 Agent${
-        driftedAgentCount > 0 ? ` · ${driftedAgentCount} 个存在配置漂移待修复` : " · Stash 原值保护就绪"
+    if (nav === "pools" || nav === "agents") {
+      return `已接入 ${boundAgentCount}/${agentBindings.length} 个目标 Agent · 在每个 Agent 下直接挑选订阅工具模型并编排同工具主备顺位${
+        driftedAgentCount > 0 ? ` · ${driftedAgentCount} 个存在配置漂移待修复` : ""
       }`;
     }
     if (nav === "routing") {
@@ -519,7 +454,6 @@ export function Dashboard() {
     return `共 ${scopedStats.total} 个纳管账号 · 今日已签 ${scopedStats.claimedCount} 个 · ${scopedStats.claimBadgeText}`;
   }, [
     nav,
-    pools,
     boundAgentCount,
     agentBindings.length,
     driftedAgentCount,
@@ -586,44 +520,20 @@ export function Dashboard() {
                   type="button"
                   onClick={() => {
                     setHighlightAgentId(null);
-                    setNav("pools");
-                  }}
-                  aria-current={nav === "pools" ? "page" : undefined}
-                  className={`nav-item ${nav === "pools" ? "nav-item-active" : ""}`}
-                >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <Layers className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span className="truncate">号池编排</span>
-                  </span>
-                  <span
-                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
-                      nav === "pools"
-                        ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
-                        : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                    }`}
-                  >
-                    {pools.length}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setHighlightAgentId(null);
                     setNav("agents");
                   }}
-                  aria-current={nav === "agents" ? "page" : undefined}
-                  className={`nav-item ${nav === "agents" ? "nav-item-active" : ""}`}
+                  aria-current={nav === "agents" || nav === "pools" ? "page" : undefined}
+                  className={`nav-item ${nav === "agents" || nav === "pools" ? "nav-item-active" : ""}`}
                 >
                   <span className="flex min-w-0 items-center gap-2">
                     <Link2 className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span className="truncate">Agent 指向</span>
+                    <span className="truncate">Agent 接入与调度</span>
                   </span>
                   <span
                     className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
                       driftedAgentCount > 0
                         ? "bg-amber-500/15 text-amber-800 dark:text-amber-300"
-                        : nav === "agents"
+                        : nav === "agents" || nav === "pools"
                           ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
                           : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                     }`}
@@ -874,7 +784,7 @@ export function Dashboard() {
               </>
             )}
 
-            {nav === "pools" && (
+            {(nav === "agents" || nav === "pools") && (
               <>
                 <button
                   type="button"
@@ -888,19 +798,6 @@ export function Dashboard() {
                   <Play className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   模拟打流
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setCreatePoolOpen(true)}
-                  className="btn btn-sm btn-primary gap-1.5 whitespace-nowrap"
-                >
-                  <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  新建号池
-                </button>
-              </>
-            )}
-
-            {nav === "agents" && (
-              <>
                 <button
                   type="button"
                   onClick={detectAgentEnvironment}
@@ -1507,27 +1404,11 @@ export function Dashboard() {
             </>
           )}
 
-          {nav === "pools" && (
-            <PoolsView
-              onOpenCreatePool={() => setCreatePoolOpen(true)}
-              onOpenSimulation={(poolId, modelId) => {
-                setSimDefaultPoolId(poolId);
-                setSimDefaultModelId(modelId);
-                setSimModalOpen(true);
-              }}
-              onNavigateAgents={(agentId) => {
-                setHighlightAgentId(agentId ?? null);
-                setNav("agents");
-              }}
-            />
-          )}
-
-          {nav === "agents" && (
+          {(nav === "agents" || nav === "pools") && (
             <AgentBindingsView
               highlightAgentId={highlightAgentId}
               onNavigatePools={(poolId) => {
                 if (poolId) setSelectedPoolId(poolId);
-                setNav("pools");
               }}
             />
           )}
@@ -1570,32 +1451,6 @@ export function Dashboard() {
       </div>
 
       <ColdSwitchModal />
-      <CreatePoolModal
-        open={createPoolOpen}
-        onClose={() => setCreatePoolOpen(false)}
-        onCreatedWithAgents={(pool, agentIds) => {
-          setPendingMountDiffs(agentIds.map((agentId) => ({ pool, agentId })));
-        }}
-      />
-      {activeCreationDiff && (
-        <ConfigDiffModal
-          open={Boolean(activeCreationDiff)}
-          binding={activeCreationDiff.binding}
-          actionKind="update_mounts"
-          targetSummary={{
-            mountedPoolNames: activeCreationDiff.mountedPoolNames,
-            defaultModelDisplay: activeCreationDiff.defaultModelDisplay,
-          }}
-          beforeText={activeCreationDiff.beforeText}
-          afterText={activeCreationDiff.afterText}
-          onClose={() => setPendingMountDiffs((prev) => prev.slice(1))}
-          onConfirm={() => {
-            mountPoolToAgents(activeCreationDiff.pool.id, [
-              activeCreationDiff.binding.agentId,
-            ]);
-          }}
-        />
-      )}
       <PoolSimulationModal
         open={simModalOpen}
         defaultPoolId={simDefaultPoolId}

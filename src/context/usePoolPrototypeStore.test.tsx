@@ -42,12 +42,12 @@ describe("usePoolPrototypeStore v2", () => {
         members: [
           {
             candidate: candidateWb,
-            supportedModels: ["claude-sonnet-4.6", "claude-opus-4.6"],
+            supportedModels: ["deepseek-v4-pro", "kimi-k3.1-pro"],
             tier: "t1_primary",
           },
           {
             candidate: candidateApiKey,
-            supportedModels: ["claude-sonnet-4.6", "deepseek-v4"],
+            supportedModels: ["deepseek-v4-pro", "glm-5.3"],
             tier: "t1_primary", // 应被强制锁回 t3_fallback
           },
         ],
@@ -58,7 +58,7 @@ describe("usePoolPrototypeStore v2", () => {
     const createdPool = result.current.pools.find((p) => p.id === createdId)!;
     expect(result.current.pools.length).toBe(initialLen + 1);
     expect(createdPool.modelPolicies.map((m) => m.modelId)).toEqual(
-      expect.arrayContaining(["claude-sonnet-4.6", "claude-opus-4.6", "deepseek-v4"])
+      expect.arrayContaining(["deepseek-v4-pro", "kimi-k3.1-pro", "glm-5.3"])
     );
     expect(
       createdPool.members.find((m) => m.accountId === "acc-apikey-deepseek")?.tier
@@ -67,13 +67,13 @@ describe("usePoolPrototypeStore v2", () => {
     // 给已有成员切换支持模型（保留至少 1 个模型）
     const wbMemberId = createdPool.members[0].id;
     act(() => {
-      result.current.togglePoolMemberModel(createdId, wbMemberId, "deepseek-v4");
+      result.current.togglePoolMemberModel(createdId, wbMemberId, "glm-5.3");
     });
     expect(
       result.current.pools
         .find((p) => p.id === createdId)!
         .members.find((m) => m.id === wbMemberId)?.supportedModels
-    ).toContain("deepseek-v4");
+    ).toContain("glm-5.3");
 
     // 多号池同时挂载至 Claude（保留原有挂载池）
     const claudeBeforeCount = result.current.agentBindings.find(
@@ -90,7 +90,7 @@ describe("usePoolPrototypeStore v2", () => {
     expect(claudeAfter.mountedPoolIds).toContain(createdId);
 
     // 切换 Claude 默认模型
-    const nextDefault = makeDefaultModelKey(createdId, "claude-opus-4.6");
+    const nextDefault = makeDefaultModelKey(createdId, "kimi-k3.1-pro");
     act(() => {
       result.current.setAgentDefaultModel("claude_desktop", nextDefault);
     });
@@ -134,22 +134,22 @@ describe("usePoolPrototypeStore v2", () => {
     // 尝试加入 client_readonly 应被拦截
     act(() => {
       result.current.addMembersToPool(poolId, [
-        { candidate: readonlyCodeArts, supportedModels: ["pangu-coder-pro"], tier: "t2_backup" },
+        { candidate: readonlyCodeArts, supportedModels: ["openpangu-coder-pro"], tier: "t2_backup" },
       ]);
     });
     expect(result.current.pools[0].members.length).toBe(beforeLen);
 
-    // 为已在池的 WorkBuddy 主号追加 glm-5.3 模型（合并槽位而不是重复行）
+    // 为已在池的 WorkBuddy 主号追加 kimi-k3 模型（合并槽位而不是重复行）
     act(() => {
       result.current.addMembersToPool(poolId, [
-        { candidate: wbPrimary, supportedModels: ["glm-5.3"], tier: "t1_primary" },
+        { candidate: wbPrimary, supportedModels: ["kimi-k3"], tier: "t1_primary" },
       ]);
     });
     expect(result.current.pools[0].members.length).toBe(beforeLen);
     expect(
       result.current.pools[0].members.find((m) => m.accountId === "acc-wb-1")
         ?.supportedModels
-    ).toContain("glm-5.3");
+    ).toContain("kimi-k3");
 
     // 签发独立 OAuth 后 CodeArts 可安全入池
     act(() => {
@@ -160,7 +160,7 @@ describe("usePoolPrototypeStore v2", () => {
     )!;
     act(() => {
       result.current.addMembersToPool(poolId, [
-        { candidate: unlocked, supportedModels: ["pangu-coder-pro"], tier: "t2_backup" },
+        { candidate: unlocked, supportedModels: ["openpangu-coder-pro"], tier: "t2_backup" },
       ]);
     });
     expect(result.current.pools[0].members.length).toBe(beforeLen + 1);
@@ -171,21 +171,21 @@ describe("usePoolPrototypeStore v2", () => {
       wrapper: createWrapper(),
     });
 
-    // 请求主力池的 claude-opus-4.6（仅 T1 WorkBuddy×2 支持；WorkBuddy 主号 73% 优先于 副号 62%）
+    // 请求主力池的 kimi-k3.1-pro（仅 T1 WorkBuddy×2 支持；WorkBuddy 主号 73% 优先于 副号 62%）
     let cooledId = "";
     act(() => {
       const sim1 = result.current.runPoolSimulation({
         agentId: "claude_desktop",
         poolId: "pool-coding-main",
-        modelId: "claude-opus-4.6",
+        modelId: "kimi-k3.1-pro",
         prompt: "测试严格锁模 + 429 Failover",
         failureMode: "429_first",
         sessionKey: "session-alpha",
       });
       cooledId = sim1.cooledMemberId ?? "";
       expect(sim1.trace.status).toBe("failover_success");
-      expect(sim1.trace.requestedModel).toBe("claude-opus-4.6");
-      expect(sim1.trace.finalModel).toBe("claude-opus-4.6");
+      expect(sim1.trace.requestedModel).toBe("kimi-k3.1-pro");
+      expect(sim1.trace.finalModel).toBe("kimi-k3.1-pro");
       expect(sim1.trace.attempts[0].accountLabel).toContain("WorkBuddy · 主号");
       expect(sim1.trace.attempts[1].accountLabel).toContain("WorkBuddy · 副号");
     });
@@ -195,7 +195,7 @@ describe("usePoolPrototypeStore v2", () => {
       const sim2 = result.current.runPoolSimulation({
         agentId: "claude_desktop",
         poolId: "pool-coding-main",
-        modelId: "claude-opus-4.6",
+        modelId: "kimi-k3.1-pro",
         prompt: "继续追问同一上下文",
         failureMode: "none",
         sessionKey: "session-alpha",
@@ -210,8 +210,8 @@ describe("usePoolPrototypeStore v2", () => {
       const sim3 = result.current.runPoolSimulation({
         agentId: "claude_desktop",
         poolId: "pool-coding-main",
-        modelId: "claude-opus-4.6",
-        prompt: "最后一个 opus 账号也限流",
+        modelId: "kimi-k3.1-pro",
+        prompt: "最后一个 kimi-k3.1-pro 账号也限流",
         failureMode: "429_first",
         sessionKey: "session-alpha",
       });
@@ -233,37 +233,111 @@ describe("usePoolPrototypeStore v2", () => {
       wrapper: createWrapper(),
     });
 
-    // 给 claude-opus-4.6 显式配置降级目标 claude-sonnet-4.6
+    // 给 kimi-k3.1-pro 显式配置降级目标 deepseek-v4-pro
     act(() => {
       result.current.setPoolModelFallback(
         "pool-coding-main",
-        "claude-opus-4.6",
-        "claude-sonnet-4.6"
+        "kimi-k3.1-pro",
+        "deepseek-v4-pro"
       );
     });
 
-    // 先对所有 opus 账号注入 429
-    const opusMembers = result.current.pools[0].members.filter((m) =>
-      m.supportedModels.includes("claude-opus-4.6")
+    // 先对所有 kimi-k3.1-pro 账号注入 429
+    const targetMembers = result.current.pools[0].members.filter((m) =>
+      m.supportedModels.includes("kimi-k3.1-pro")
     );
     act(() => {
-      for (const m of opusMembers) {
+      for (const m of targetMembers) {
         result.current.injectMemberCooldown("pool-coding-main", m.id);
       }
     });
 
-    // 再发请求，因显式配置了 fallbackModelId，允许安全降级到 claude-sonnet-4.6
+    // 再发请求，因显式配置了 fallbackModelId，允许安全降级到 deepseek-v4-pro
     act(() => {
       const res = result.current.runPoolSimulation({
         agentId: "claude_desktop",
         poolId: "pool-coding-main",
-        modelId: "claude-opus-4.6",
+        modelId: "kimi-k3.1-pro",
         prompt: "验证显式降级",
         failureMode: "none",
       });
       expect(res.trace.status).toBe("failover_success");
-      expect(res.trace.requestedModel).toBe("claude-opus-4.6");
-      expect(res.trace.finalModel).toBe("claude-sonnet-4.6");
+      expect(res.trace.requestedModel).toBe("kimi-k3.1-pro");
+      expect(res.trace.finalModel).toBe("deepseek-v4-pro");
     });
+  });
+
+  it("supports agent-centric batch model selection, primary account promotion, quota sorting, and scoped simulation", () => {
+    const { result } = renderHook(() => usePoolPrototype(), {
+      wrapper: createWrapper(),
+    });
+
+    // 为 Codex 桌面版一键全选 WorkBuddy 模型并清空后仅选推荐主力
+    act(() => {
+      result.current.selectAllAgentToolModels("codex_desktop", "workbuddy");
+    });
+    expect(
+      result.current.getAgentToolEnabledModelIds("codex_desktop", "workbuddy").length
+    ).toBeGreaterThanOrEqual(10);
+
+    act(() => {
+      result.current.clearAgentToolModels("codex_desktop", "workbuddy");
+    });
+    expect(
+      result.current.getAgentToolEnabledModelIds("codex_desktop", "workbuddy")
+    ).toEqual([]);
+
+    act(() => {
+      result.current.selectRecommendedAgentToolModels("codex_desktop", "workbuddy");
+    });
+    const recModels = result.current.getAgentToolEnabledModelIds("codex_desktop", "workbuddy");
+    expect(recModels).toContain("deepseek-v4-pro");
+
+    // 调整同工具主备顺位：禁用跳过活跃号护栏，把低额度副号提为主号，并按额度重新排顺位
+    act(() => {
+      result.current.updateAgentToolRoutingOptions("codex_desktop", "workbuddy", {
+        strategy: "order",
+        skipActiveClientAccount: false,
+      });
+    });
+    const beforeAccounts = result.current.getAgentToolAccounts("codex_desktop", "workbuddy");
+    expect(beforeAccounts.length).toBeGreaterThanOrEqual(2);
+    const secondAcc = beforeAccounts[1];
+
+    act(() => {
+      result.current.promoteAgentToolPrimaryAccount(
+        "codex_desktop",
+        "workbuddy",
+        secondAcc.accountId
+      );
+    });
+    const promotedAccounts = result.current.getAgentToolAccounts("codex_desktop", "workbuddy");
+    expect(promotedAccounts[0].accountId).toBe(secondAcc.accountId);
+
+    // 运行 scoped 请求 workbuddy/deepseek-v4-pro：必须仅在 WorkBuddy 内先打新主号、429 后切备用号
+    const dedicatedPoolId = result.current.getAgentPrimaryPool("codex_desktop")!.id;
+    act(() => {
+      const sim = result.current.runPoolSimulation({
+        agentId: "codex_desktop",
+        poolId: dedicatedPoolId,
+        modelId: "workbuddy/deepseek-v4-pro",
+        prompt: "测试同工具主备切备",
+        failureMode: "429_first",
+      });
+      expect(sim.trace.status).toBe("failover_success");
+      expect(sim.trace.attempts[0].toolId).toBe("workbuddy");
+      expect(sim.trace.attempts[1].toolId).toBe("workbuddy");
+      expect(sim.trace.attempts[0].accountLabel).toBe(secondAcc.label);
+    });
+
+    // 按额度自动重排并仅启用主号
+    act(() => {
+      result.current.sortAgentToolAccountsByQuota("codex_desktop", "workbuddy");
+      result.current.setAllAgentToolAccountsEnabled("codex_desktop", "workbuddy", true);
+    });
+    const finalAccs = result.current.getAgentToolAccounts("codex_desktop", "workbuddy");
+    expect(finalAccs[0].quotaPercent).toBeGreaterThanOrEqual(finalAccs[1].quotaPercent);
+    expect(finalAccs[0].enabled).toBe(true);
+    expect(finalAccs[1].enabled).toBe(false);
   });
 });

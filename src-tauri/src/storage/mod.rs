@@ -1,5 +1,6 @@
 pub mod crypto;
 mod logs;
+pub mod model_discovery;
 pub mod pools;
 mod settings;
 
@@ -291,6 +292,13 @@ impl QwitchDatabase {
                 total_tokens INTEGER NOT NULL DEFAULT 0,
                 attempts_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS account_discovered_models (
+                account_id   TEXT PRIMARY KEY,
+                tool_id      TEXT NOT NULL,
+                models_json  TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_pool_members_pool ON pool_members(pool_id, priority ASC);

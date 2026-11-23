@@ -7,7 +7,7 @@ use crate::agent_wiring::{
 };
 use crate::commands::AppState;
 use crate::domain::{
-    AccountPool, AgentBinding, CreatePoolInput, MemberTier, PoolWorkspaceState,
+    AccountPool, AgentBinding, CreatePoolInput, MemberTier, PoolStrategy, PoolWorkspaceState,
     RunPoolSimulationInput, RunPoolSimulationResult, TargetAgentId, UpdatePoolPatch,
 };
 use crate::gateway::GatewayRuntime;
@@ -51,6 +51,48 @@ fn emit_workspace_updated(app: &AppHandle) {
 
 #[tauri::command]
 pub fn get_pool_workspace_state(state: State<'_, AppState>) -> Result<PoolWorkspaceState, String> {
+    build_workspace_state(&state.db, &state.master_key, &state.gateway)
+}
+
+#[tauri::command]
+pub async fn refresh_upstream_models_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<PoolWorkspaceState, String> {
+    let target_accounts = state
+        .db
+        .list_accounts(None)
+        .map_err(|e| e.to_string())?;
+    let filter_id = account_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    let mut handles = Vec::new();
+    for acc in target_accounts {
+        if let Some(fid) = filter_id {
+            if acc.id != fid {
+                continue;
+            }
+        }
+        let Ok((_, cred)) = state.db.get_account_credential(&state.master_key, &acc.id) else {
+            continue;
+        };
+        let aid = acc.id.clone();
+        let tid = acc.tool_id.clone();
+        handles.push(tokio::spawn(async move {
+            let discovered = crate::storage::model_discovery::probe_models_for_account(&cred).await;
+            (aid, tid, discovered)
+        }));
+    }
+
+    for h in handles {
+        if let Ok((aid, tid, discovered)) = h.await {
+            if !discovered.is_empty() {
+                let _ = state.db.save_cached_account_models(&aid, &tid, &discovered);
+            }
+        }
+    }
+
+    emit_workspace_updated(&app);
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }
 
@@ -743,4 +785,98 @@ pub fn run_pool_simulation_cmd(
         .run_simulation(&state.db, &state.master_key, &input)?;
     emit_workspace_updated(&app);
     Ok(res)
+}
+
+#[tauri::command]
+pub fn set_agent_tool_models_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent_id: TargetAgentId,
+    tool_id: String,
+    model_ids: Vec<String>,
+    default_model_key: Option<String>,
+) -> Result<PoolWorkspaceState, String> {
+    let gw = state.gateway.runtime_state();
+    let (pool_id, binding) = state
+        .db
+        .ensure_agent_dedicated_pool(&state.master_key, agent_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_pool_tool_models(&state.master_key, &pool_id, &tool_id, &model_ids)
+        .map_err(|e| e.to_string())?;
+    let pools = state
+        .db
+        .list_pools(&state.master_key, &state.gateway.cooldown_snapshot())
+        .map_err(|e| e.to_string())?;
+    let effective_default = default_model_key.or(binding.default_model_key);
+    let _ = apply_agent_wiring(
+        &state.db,
+        &state.master_key,
+        agent_id,
+        &[pool_id],
+        effective_default.as_deref(),
+        &binding.options,
+        &pools,
+        &gw.host,
+        gw.port,
+        gw.global_proxy_detected,
+        None,
+    )?;
+    emit_workspace_updated(&app);
+    build_workspace_state(&state.db, &state.master_key, &state.gateway)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn update_agent_tool_schedule_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent_id: TargetAgentId,
+    tool_id: String,
+    ordered_account_ids: Vec<String>,
+    enabled_account_ids: Vec<String>,
+    strategy: Option<PoolStrategy>,
+    skip_active_client_account: Option<bool>,
+    cooldown_seconds: Option<u64>,
+) -> Result<PoolWorkspaceState, String> {
+    let gw = state.gateway.runtime_state();
+    let (pool_id, binding) = state
+        .db
+        .ensure_agent_dedicated_pool(&state.master_key, agent_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .update_pool_tool_account_schedule(
+            &state.master_key,
+            &pool_id,
+            &tool_id,
+            &ordered_account_ids,
+            &enabled_account_ids,
+            strategy,
+            skip_active_client_account,
+            cooldown_seconds,
+        )
+        .map_err(|e| e.to_string())?;
+    let pools = state
+        .db
+        .list_pools(&state.master_key, &state.gateway.cooldown_snapshot())
+        .map_err(|e| e.to_string())?;
+    if !binding.mounted_pool_ids.is_empty() {
+        let _ = apply_agent_wiring(
+            &state.db,
+            &state.master_key,
+            agent_id,
+            &[pool_id],
+            binding.default_model_key.as_deref(),
+            &binding.options,
+            &pools,
+            &gw.host,
+            gw.port,
+            gw.global_proxy_detected,
+            None,
+        )?;
+    }
+    emit_workspace_updated(&app);
+    build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }

@@ -10,6 +10,7 @@ describe("toolRegistry", () => {
       "minimax_code_cn",
       "lobsterai",
       "doubaowork",
+      "codearts",
     ]);
   });
   it("returns brand meta for every built-in tool", () => {

@@ -271,6 +271,12 @@ pub fn client_spec(tool_id: &str) -> Option<ClientSpec> {
             win_exe_names: &["DoubaoWork.exe"],
             win_folder_names: &["DoubaoWork"],
         }),
+        "codearts" => Some(ClientSpec {
+            mac_app_names: &["CodeArts.app"],
+            mac_process_names: &["CodeArts"],
+            win_exe_names: &["CodeArts.exe"],
+            win_folder_names: &["CodeArts"],
+        }),
         _ => None,
     }
 }
@@ -1130,6 +1136,8 @@ impl PlatformHost for NativePlatformHost {
                 "minimax_code_cn" => app_support.join("MiniMax"),
                 "lobsterai" => app_support.join("LobsterAI"),
                 "doubaowork" => app_support.join("DoubaoWork"),
+                // CodeArts 的 Electron userData 目录为小写 `codearts`
+                "codearts" => app_support.join("codearts"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)
@@ -1157,6 +1165,7 @@ impl PlatformHost for NativePlatformHost {
                 "minimax_code_cn" => roaming.join("MiniMax"),
                 "lobsterai" => roaming.join("LobsterAI"),
                 "doubaowork" => local.join("DoubaoWork").join("User Data"),
+                "codearts" => roaming.join("codearts"),
                 _ => self.qwitch_data_dir()?.join("clients").join(tool_id),
             };
             Ok(path)

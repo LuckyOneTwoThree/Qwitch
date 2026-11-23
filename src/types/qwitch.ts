@@ -6,7 +6,8 @@ export type BuiltinToolId =
   | "qoder_cn"
   | "minimax_code_cn"
   | "lobsterai"
-  | "doubaowork";
+  | "doubaowork"
+  | "codearts";
 export type ToolId = BuiltinToolId | (string & {});
 
 export type AuthMethod = "webview_oauth" | "local_import" | "token_paste";

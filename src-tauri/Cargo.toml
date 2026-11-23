@@ -25,8 +25,11 @@ thiserror = "2"
 rusqlite = { version = "0.43", features = ["bundled", "backup"] }
 aes = "0.8"
 aes-gcm = "0.10"
+# CodeArts 适配器：解密 Electron safeStorage（Chromium v10 = AES-128-CBC + PBKDF2-HMAC-SHA1）
+cbc = { version = "0.1", features = ["alloc"] }
 rand = "0.8"
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }

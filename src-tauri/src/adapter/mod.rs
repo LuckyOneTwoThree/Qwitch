@@ -1,3 +1,4 @@
+pub mod codearts;
 pub mod common;
 pub mod doubaowork;
 pub mod external;
@@ -301,7 +302,9 @@ pub fn create_all_adapters(
         Arc::new(qoder::QoderAdapter::with_host(Arc::clone(&host))),
         Arc::new(minimax::MiniMaxAdapter::new()),
         Arc::new(lobsterai::LobsterAiAdapter::new()),
-        Arc::new(doubaowork::DoubaoWorkAdapter::new()),
+        Arc::new(doubaowork::DoubaoWorkAdapter::with_host(Arc::clone(&host))),
+        // CodeArts 为额度监控型适配器（无每日签到），见 adapter/codearts.rs 模块文档
+        Arc::new(codearts::CodeArtsAdapter::with_host(Arc::clone(&host))),
     ];
     for adapter in builtins {
         map.insert(adapter.manifest().id.clone(), adapter);

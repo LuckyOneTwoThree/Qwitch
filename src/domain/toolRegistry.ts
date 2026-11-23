@@ -80,9 +80,9 @@ export const TOOL_BRAND_META: Record<string, ToolBrandMeta> = {
   },
   lobsterai: {
     id: "lobsterai",
-    name: "有道龙虾",
+    name: "LobsterAI",
     shortTagline: "网易 AI 助手",
-    tagline: "网易有道龙虾桌面 Agent (LobsterAI)",
+    tagline: "网易有道桌面 AI Agent",
     icon: "/icons/lobsterai.png",
     accentDot: "bg-rose-500",
     badgeClass:
@@ -100,6 +100,17 @@ export const TOOL_BRAND_META: Record<string, ToolBrandMeta> = {
       "border-indigo-500/20 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300",
     softBgClass: "bg-indigo-500/8",
   },
+  codearts: {
+    id: "codearts",
+    name: "码道 CodeArts",
+    shortTagline: "华为云 AI IDE",
+    tagline: "华为云 CodeArts 桌面 AI IDE（仅额度监控，无每日签到）",
+    icon: "/icons/codearts.svg",
+    accentDot: "bg-red-500",
+    badgeClass:
+      "border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-300",
+    softBgClass: "bg-red-500/8",
+  },
 };
 
 export const BUILTIN_TOOL_ORDER: ToolId[] = [
@@ -109,6 +120,7 @@ export const BUILTIN_TOOL_ORDER: ToolId[] = [
   "minimax_code_cn",
   "lobsterai",
   "doubaowork",
+  "codearts",
 ];
 
 export function getToolBrandMeta(

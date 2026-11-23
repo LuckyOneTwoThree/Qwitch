@@ -75,7 +75,7 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
   },
   {
     id: "lobsterai",
-    name: "有道龙虾",
+    name: "LobsterAI",
     version: "0.1.0",
     isBuiltin: true,
     capabilities: {
@@ -96,6 +96,20 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
       supportsQuotaQuery: true,
       supportsDailyClaim: true,
       supportsClientSwitch: true,
+      supportsMultiInstance: false,
+    },
+  },
+  {
+    id: "codearts",
+    name: "码道 CodeArts",
+    version: "0.1.0",
+    isBuiltin: true,
+    capabilities: {
+      // 额度监控型：无每日签到机制
+      authMethods: ["local_import", "token_paste"],
+      supportsQuotaQuery: true,
+      supportsDailyClaim: false,
+      supportsClientSwitch: false,
       supportsMultiInstance: false,
     },
   },
@@ -341,7 +355,7 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
   {
     id: "acc-lobster-1",
     toolId: "lobsterai",
-    label: "有道龙虾 · 主号",
+    label: "LobsterAI · 主号",
     uidMasked: "17****38",
     status: "active",
     isActiveOnClient: true,
@@ -391,6 +405,49 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
       ],
     },
     updatedAt: cstTimestamp(0, 9, 55),
+  },
+  {
+    id: "acc-codearts-1",
+    toolId: "codearts",
+    label: "码道 CodeArts · 主号",
+    uidMasked: "ca_c02b****8f7",
+    status: "active",
+    isActiveOnClient: true,
+    hasLocalSnapshot: true,
+    hasApiToken: true,
+    latestQuota: {
+      planName: "基础套餐",
+      // 无签到机制，恒为 unsupported
+      claimStatus: "unsupported",
+      fetchedAt: cstTimestamp(0, 9, 50),
+      buckets: [
+        {
+          key: "total",
+          label: "总积分",
+          used: 0,
+          total: 4500,
+          remaining: 4500,
+          unit: "积分",
+        },
+        {
+          key: "basic",
+          label: "基础套餐积分",
+          used: 0,
+          total: 500,
+          remaining: 500,
+          unit: "积分",
+        },
+        {
+          key: "bonus",
+          label: "赠送积分",
+          used: 0,
+          total: 4000,
+          remaining: 4000,
+          unit: "积分",
+        },
+      ],
+    },
+    updatedAt: cstTimestamp(0, 9, 50),
   },
 ];
 

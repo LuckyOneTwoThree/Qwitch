@@ -50,7 +50,7 @@ struct LobsterTokens {
     extra: HashMap<String, String>,
 }
 
-/// 网易有道龙虾（LobsterAI）内置适配器。
+/// LobsterAI（网易有道桌面 AI Agent）内置适配器。
 pub struct LobsterAiAdapter {
     manifest: AdapterManifest,
     http: reqwest::Client,
@@ -71,7 +71,7 @@ impl LobsterAiAdapter {
         Self {
             manifest: AdapterManifest {
                 id: "lobsterai".to_string(),
-                name: "有道龙虾".to_string(),
+                name: "LobsterAI".to_string(),
                 version: "0.1.0".to_string(),
                 is_builtin: true,
                 capabilities: AdapterCapabilities {
@@ -117,20 +117,20 @@ impl LobsterAiAdapter {
         if clean.is_empty() {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "有道龙虾授权回调缺少 authCode".into(),
+                message: "LobsterAI 授权回调缺少 authCode".into(),
             });
         }
         let body = Self::keyfrom_body(serde_json::json!({ "authCode": clean }));
         let resp = self
-            .post_json("/api/auth/exchange", None, &body, "交换有道龙虾登录令牌")
+            .post_json("/api/auth/exchange", None, &body, "交换 LobsterAI 登录令牌")
             .await?;
-        let data = Self::check_api_envelope(&resp, "交换有道龙虾登录令牌")?;
+        let data = Self::check_api_envelope(&resp, "交换 LobsterAI 登录令牌")?;
         let access_token = data
             .get("accessToken")
             .and_then(non_empty_str)
             .ok_or_else(|| AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "有道龙虾授权响应缺少 accessToken".into(),
+                message: "LobsterAI 授权响应缺少 accessToken".into(),
             })?;
         let refresh_token = data.get("refreshToken").and_then(non_empty_str);
         let user_from_exchange = data.get("user").filter(|v| v.is_object()).cloned();
@@ -167,7 +167,7 @@ impl LobsterAiAdapter {
         )
         .map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
-            message: format!("打开有道龙虾数据库失败: {e}"),
+            message: format!("打开 LobsterAI 数据库失败: {e}"),
         })?;
         let _ = conn.busy_timeout(Duration::from_millis(2000));
         conn.query_row("SELECT value FROM kv WHERE key = ?1", [key], |row| {
@@ -176,7 +176,7 @@ impl LobsterAiAdapter {
         .optional()
         .map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
-            message: format!("读取有道龙虾配置项 {key} 失败: {e}"),
+            message: format!("读取 LobsterAI 配置项 {key} 失败: {e}"),
         })
     }
 
@@ -207,7 +207,7 @@ impl LobsterAiAdapter {
                 if at.is_empty() {
                     return Err(AdapterError::Unified {
                         code: UnifiedErrorCode::InvalidCredential,
-                        message: "该账号缺少有效的有道龙虾 accessToken，请重新登录或导入".into(),
+                        message: "该账号缺少有效的 LobsterAI accessToken，请重新登录或导入".into(),
                     });
                 }
                 Ok(LobsterTokens {
@@ -230,7 +230,7 @@ impl LobsterAiAdapter {
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| AdapterError::Unified {
                         code: UnifiedErrorCode::InvalidCredential,
-                        message: "该账号快照缺少有道龙虾访问令牌，请重新登录或导入".into(),
+                        message: "该账号快照缺少 LobsterAI 访问令牌，请重新登录或导入".into(),
                     })?;
                 let rt = files
                     .get(SNAPSHOT_REFRESH_FILE)
@@ -247,7 +247,7 @@ impl LobsterAiAdapter {
             }
             CredentialPayload::Cookies { .. } => Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "有道龙虾不使用 Cookie 凭据，请通过本机导入、内置授权或粘贴 Token 添加"
+                message: "LobsterAI 不使用 Cookie 凭据，请通过本机导入、内置授权或粘贴 Token 添加"
                     .into(),
             }),
         }
@@ -335,7 +335,7 @@ impl LobsterAiAdapter {
         if clean_access.is_empty() {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "有道龙虾 accessToken 不能为空".into(),
+                message: "LobsterAI accessToken 不能为空".into(),
             });
         }
         let clean_refresh = refresh_token
@@ -482,9 +482,9 @@ impl LobsterAiAdapter {
 
     async fn fetch_user_profile(&self, token: &str) -> Result<Value, AdapterError> {
         let raw = self
-            .authed_get("/api/user/profile", token, "查询有道龙虾用户信息")
+            .authed_get("/api/user/profile", token, "查询 LobsterAI 用户信息")
             .await?;
-        let data = Self::check_api_envelope(&raw, "查询有道龙虾用户信息")?;
+        let data = Self::check_api_envelope(&raw, "查询 LobsterAI 用户信息")?;
         Ok(data.clone())
     }
 
@@ -494,15 +494,15 @@ impl LobsterAiAdapter {
     ) -> Result<(String, Option<String>), AdapterError> {
         let body = Self::keyfrom_body(serde_json::json!({ "refreshToken": refresh_token }));
         let resp = self
-            .post_json("/api/auth/refresh", None, &body, "刷新有道龙虾令牌")
+            .post_json("/api/auth/refresh", None, &body, "刷新 LobsterAI 令牌")
             .await?;
-        let data = Self::check_api_envelope(&resp, "刷新有道龙虾令牌")?;
+        let data = Self::check_api_envelope(&resp, "刷新 LobsterAI 令牌")?;
         let next_access = data
             .get("accessToken")
             .and_then(non_empty_str)
             .ok_or_else(|| AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: "刷新有道龙虾令牌响应缺少 accessToken".into(),
+                message: "刷新 LobsterAI 令牌响应缺少 accessToken".into(),
             })?;
         let next_refresh = data.get("refreshToken").and_then(non_empty_str);
         Ok((next_access, next_refresh))
@@ -510,9 +510,9 @@ impl LobsterAiAdapter {
 
     async fn fetch_quota_data(&self, token: &str) -> Result<Value, AdapterError> {
         let raw = self
-            .authed_get("/api/user/quota", token, "查询有道龙虾额度")
+            .authed_get("/api/user/quota", token, "查询 LobsterAI 额度")
             .await?;
-        Ok(Self::check_api_envelope(&raw, "查询有道龙虾额度")?.clone())
+        Ok(Self::check_api_envelope(&raw, "查询 LobsterAI 额度")?.clone())
     }
 
     async fn fetch_daily_checkin_slot(
@@ -538,9 +538,9 @@ impl LobsterAiAdapter {
             None => query_url.path().to_string(),
         };
         let raw = self
-            .authed_get(&path_q, token, "查询有道龙虾签到活动")
+            .authed_get(&path_q, token, "查询 LobsterAI 签到活动")
             .await?;
-        let data = Self::check_api_envelope(&raw, "查询有道龙虾签到活动")?;
+        let data = Self::check_api_envelope(&raw, "查询 LobsterAI 签到活动")?;
         if data.get("slotState").and_then(|v| v.as_str()) != Some("available") {
             return Ok(None);
         }
@@ -556,7 +556,7 @@ impl LobsterAiAdapter {
         if !is_valid_path_segment(&code) {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: "有道龙虾返回了非法的活动标识，已中止请求".into(),
+                message: "LobsterAI 返回了非法的活动标识，已中止请求".into(),
             });
         }
         let Some(revision) = activity
@@ -579,9 +579,9 @@ impl LobsterAiAdapter {
             "/api/client-activities/{activity_code}/context?configRevision={config_revision}"
         );
         let raw = self
-            .authed_get(&path, token, "查询有道龙虾签到上下文")
+            .authed_get(&path, token, "查询 LobsterAI 签到上下文")
             .await?;
-        Ok(Self::check_api_envelope(&raw, "查询有道龙虾签到上下文")?.clone())
+        Ok(Self::check_api_envelope(&raw, "查询 LobsterAI 签到上下文")?.clone())
     }
 
     async fn probe_daily_checkin_status(&self, token: &str) -> Result<ClaimStatus, AdapterError> {
@@ -725,7 +725,7 @@ impl LobsterAiAdapter {
             "payload": {}
         });
         let raw = self
-            .post_json(&path, Some(token), &body, "领取有道龙虾每日签到积分")
+            .post_json(&path, Some(token), &body, "领取 LobsterAI 每日签到积分")
             .await?;
         Ok(raw)
     }
@@ -836,7 +836,7 @@ fn finalize_claimed_quota(
 ) -> Option<QuotaSnapshot> {
     let mut quota = merge_post_claim_quota(inspected, precheck, true);
     if let Some(ref mut q) = quota {
-        // 有道龙虾每日签到每人每天仅一次：确认领取或已签后即使后端活动上下文缓存延迟，也强制收口为 Claimed
+        // LobsterAI 每日签到每人每天仅一次：确认领取或已签后即使后端活动上下文缓存延迟，也强制收口为 Claimed
         q.claim_status = ClaimStatus::Claimed;
     }
     quota
@@ -894,26 +894,26 @@ impl ToolAdapter for LobsterAiAdapter {
         if !db_path.is_file() {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::ClientNotFound,
-                message: "未检测到网易有道龙虾本地数据库，请先安装并登录一次客户端".into(),
+                message: "未检测到 LobsterAI 本地数据库，请先安装并登录一次客户端".into(),
             });
         }
 
         let raw_tokens =
             Self::read_kv_ro(&db_path, KV_AUTH_TOKENS)?.ok_or_else(|| AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "网易有道龙虾客户端尚未登录，请先在客户端登录后再导入".into(),
+                message: "LobsterAI 客户端尚未登录，请先在客户端登录后再导入".into(),
             })?;
         let tokens_val: Value =
             serde_json::from_str(&raw_tokens).map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: format!("网易有道龙虾本机凭据格式无效: {e}"),
+                message: format!("LobsterAI 本机凭据格式无效: {e}"),
             })?;
         let access_token = tokens_val
             .get("accessToken")
             .and_then(non_empty_str)
             .ok_or_else(|| AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "网易有道龙虾本机凭据缺少 accessToken，请先在客户端重新登录".into(),
+                message: "LobsterAI 本机凭据缺少 accessToken，请先在客户端重新登录".into(),
             })?;
         let refresh_token = tokens_val.get("refreshToken").and_then(non_empty_str);
 
@@ -937,7 +937,7 @@ impl ToolAdapter for LobsterAiAdapter {
         if trimmed.is_empty() {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "有道龙虾 Token 或 JSON 不能为空".into(),
+                message: "LobsterAI Token 或 JSON 不能为空".into(),
             });
         }
 
@@ -975,7 +975,7 @@ impl ToolAdapter for LobsterAiAdapter {
             if clean.is_empty() {
                 return Err(AdapterError::Unified {
                     code: UnifiedErrorCode::InvalidCredential,
-                    message: "有道龙虾 Token 不能为空".into(),
+                    message: "LobsterAI Token 不能为空".into(),
                 });
             }
             let is_refresh_jwt = Self::decode_jwt_claims(clean)
@@ -1009,7 +1009,7 @@ impl ToolAdapter for LobsterAiAdapter {
                                 ..
                             } => AdapterError::Unified {
                                 code: UnifiedErrorCode::InvalidCredential,
-                                message: "有道龙虾 Token 无效或已过期，请检查后重试".into(),
+                                message: "LobsterAI Token 无效或已过期，请检查后重试".into(),
                             },
                             other => other,
                         })?;
@@ -1024,7 +1024,7 @@ impl ToolAdapter for LobsterAiAdapter {
                                     ..
                                 } => AdapterError::Unified {
                                     code: UnifiedErrorCode::InvalidCredential,
-                                    message: "有道龙虾 Token 无效或已过期，请检查后重试".into(),
+                                    message: "LobsterAI Token 无效或已过期，请检查后重试".into(),
                                 },
                                 other => other,
                             })?,
@@ -1032,7 +1032,7 @@ impl ToolAdapter for LobsterAiAdapter {
                 } else {
                     return Err(AdapterError::Unified {
                         code: UnifiedErrorCode::InvalidCredential,
-                        message: "有道龙虾 Token 无效或已过期，请检查后重试".into(),
+                        message: "LobsterAI Token 无效或已过期，请检查后重试".into(),
                     });
                 }
             }
@@ -1194,11 +1194,11 @@ impl ToolAdapter for LobsterAiAdapter {
             Some(c) => Err(Self::map_lobster_error_code(
                 c,
                 &raw_claim,
-                "领取有道龙虾每日签到积分",
+                "领取 LobsterAI 每日签到积分",
             )),
             None => Err(AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
-                message: "领取有道龙虾每日签到响应缺少业务状态码".into(),
+                message: "领取 LobsterAI 每日签到响应缺少业务状态码".into(),
             }),
         }
     }
@@ -1256,7 +1256,7 @@ impl ToolAdapter for LobsterAiAdapter {
         if !db_path.is_file() {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::ClientNotFound,
-                message: "未检测到网易有道龙虾本地数据库，请先启动一次客户端".into(),
+                message: "未检测到 LobsterAI 本地数据库，请先启动一次客户端".into(),
             });
         }
 
@@ -1297,14 +1297,14 @@ impl ToolAdapter for LobsterAiAdapter {
 
         let mut conn = Connection::open(&db_path).map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
-            message: format!("打开有道龙虾数据库失败: {e}"),
+            message: format!("打开 LobsterAI 数据库失败: {e}"),
         })?;
         let _ = conn.busy_timeout(Duration::from_millis(3000));
 
         let now_ms = Utc::now().timestamp_millis();
         let tx = conn.transaction().map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
-            message: format!("开启有道龙虾数据库事务失败: {e}"),
+            message: format!("开启 LobsterAI 数据库事务失败: {e}"),
         })?;
         for (key, value) in [
             (KV_AUTH_TOKENS, auth_tokens_json),
@@ -1320,17 +1320,17 @@ impl ToolAdapter for LobsterAiAdapter {
             )
             .map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
-                message: format!("写入有道龙虾会话项 {key} 失败: {e}"),
+                message: format!("写入 LobsterAI 会话项 {key} 失败: {e}"),
             })?;
         }
         tx.execute("DELETE FROM kv WHERE key = ?1", [KV_ENTERPRISE_CONTEXT])
             .map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
-                message: format!("清理有道龙虾企业上下文失败: {e}"),
+                message: format!("清理 LobsterAI 企业上下文失败: {e}"),
             })?;
         tx.commit().map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
-            message: format!("提交有道龙虾会话事务失败: {e}"),
+            message: format!("提交 LobsterAI 会话事务失败: {e}"),
         })?;
 
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
@@ -1365,7 +1365,7 @@ fn set_url_query_params(url: &mut reqwest::Url, params: &[(&str, &str)]) {
 fn append_login_params(base_url: &str, params: &[(&str, &str)]) -> Result<String, AdapterError> {
     let mut parsed = reqwest::Url::parse(base_url).map_err(|e| AdapterError::Unified {
         code: UnifiedErrorCode::InternalError,
-        message: format!("构造有道龙虾授权链接失败: {e}"),
+        message: format!("构造 LobsterAI 授权链接失败: {e}"),
     })?;
     if let Some(frag) = parsed
         .fragment()
@@ -1376,7 +1376,7 @@ fn append_login_params(base_url: &str, params: &[(&str, &str)]) -> Result<String
         let mut dummy = reqwest::Url::parse("https://placeholder.local/").map_err(|e| {
             AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
-                message: format!("构造有道龙虾授权链接参数失败: {e}"),
+                message: format!("构造 LobsterAI 授权链接参数失败: {e}"),
             }
         })?;
         if !hash_query.is_empty() {

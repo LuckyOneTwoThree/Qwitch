@@ -260,7 +260,7 @@ describe("sortAccountsForFlatView", () => {
     // 全部为 normal 层，验证工具顺序为 trae → workbuddy → qoder → minimax → lobsterai → doubaowork
     const accounts = [
       makeAcc({ id: "dw", toolId: "doubaowork", label: "豆包工作" }),
-      makeAcc({ id: "lb", toolId: "lobsterai", label: "有道龙虾" }),
+      makeAcc({ id: "lb", toolId: "lobsterai", label: "LobsterAI" }),
       makeAcc({ id: "mm", toolId: "minimax_code_cn", label: "MiniMax" }),
       makeAcc({ id: "qd", toolId: "qoder_cn", label: "Qoder" }),
       makeAcc({ id: "tr", toolId: "trae_cn", label: "Trae" }),

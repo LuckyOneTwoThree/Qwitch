@@ -576,7 +576,7 @@ const LOBSTER_CALLBACK_PORT: u16 = 47821;
 const LOBSTER_CALLBACK_PATH: &str = "/auth/callback";
 const LOBSTER_CALLBACK_URI: &str = "http://127.0.0.1:47821/auth/callback";
 
-/// 识别并校验有道龙虾内置授权回调地址（本地回环回调与 `lobsterai://auth/callback`）。
+/// 识别并校验 LobsterAI 内置授权回调地址（本地回环回调与 `lobsterai://auth/callback`）。
 /// 返回 `None` 表示非回调导航，继续按官方 HTTPS 白名单放行。
 pub(crate) fn parse_lobster_callback_url(
     nav_url: &tauri::Url,
@@ -604,13 +604,13 @@ pub(crate) fn parse_lobster_callback_url(
 
     if find_param("state").as_deref() != Some(expected_nonce) {
         return Some(Err(
-            "有道龙虾内置授权回调校验失败（状态参数不匹配），已拒绝该请求",
+            "LobsterAI 内置授权回调校验失败（状态参数不匹配），已拒绝该请求",
         ));
     }
 
     match find_param("code") {
         Some(code) => Some(Ok(code)),
-        None => Some(Err("有道龙虾授权回调缺少 authCode，请重试")),
+        None => Some(Err("LobsterAI 授权回调缺少 authCode，请重试")),
     }
 }
 
@@ -959,7 +959,7 @@ pub async fn start_webview_oauth(
                                     let _ = app_clone.emit(
                                         "qwitch://oauth-error",
                                         crate::storage::crypto::sanitize_log_message(&format!(
-                                            "交换有道龙虾授权令牌失败: {e}"
+                                            "交换 LobsterAI 授权令牌失败: {e}"
                                         )),
                                     );
                                     if flow_seq_clone.load(Ordering::SeqCst) == flow_id {

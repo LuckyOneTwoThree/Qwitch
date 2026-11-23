@@ -1,6 +1,8 @@
 pub mod adapter;
+pub mod agent_wiring;
 pub mod commands;
 pub mod domain;
+pub mod gateway;
 pub mod platform;
 pub mod scheduler;
 pub mod storage;
@@ -16,6 +18,7 @@ use tauri::{
 
 use adapter::create_all_adapters;
 use commands::AppState;
+use gateway::GatewayRuntime;
 use platform::{NativePlatformHost, PlatformHost};
 use scheduler::AntiRiskScheduler;
 use storage::QwitchDatabase;
@@ -148,6 +151,7 @@ pub fn run() {
                 host,
                 adapters,
                 scheduler: Arc::new(AntiRiskScheduler::new()),
+                gateway: Arc::new(GatewayRuntime::new()),
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
                 consumed_oauth_nonces: Arc::new(std::sync::Mutex::new(
                     std::collections::HashSet::new(),
@@ -394,6 +398,7 @@ pub fn run() {
             commands::import_local_account,
             commands::preview_local_account,
             commands::launch_tool_profile,
+            commands::launch_tool_client,
             commands::inspect_profile_dir,
             commands::pick_folder,
             commands::pick_file,
@@ -413,6 +418,36 @@ pub fn run() {
             commands::unarchive_action_logs,
             commands::delete_action_logs,
             commands::export_action_logs,
+            commands::get_pool_workspace_state,
+            commands::toggle_gateway_server,
+            commands::update_gateway_port_cmd,
+            commands::cycle_bridge_runtime_cmd,
+            commands::toggle_proxy_simulation_cmd,
+            commands::create_account_pool,
+            commands::update_account_pool,
+            commands::delete_account_pool,
+            commands::toggle_account_pool_enabled,
+            commands::reorder_account_pool_member,
+            commands::toggle_account_pool_member,
+            commands::toggle_account_pool_member_model,
+            commands::update_account_pool_member_tier,
+            commands::toggle_account_pool_model_enabled,
+            commands::set_account_pool_model_fallback,
+            commands::add_account_pool_members,
+            commands::remove_account_pool_member,
+            commands::inject_pool_member_cooldown,
+            commands::clear_pool_member_cooldown,
+            commands::authorize_codearts_isolated_cmd,
+            commands::update_agent_mounted_pools_cmd,
+            commands::set_agent_default_model_cmd,
+            commands::mount_pool_to_agents_cmd,
+            commands::unmount_pool_from_agent_cmd,
+            commands::unbind_agent_cmd,
+            commands::repair_agent_drift_cmd,
+            commands::restart_agent_client_cmd,
+            commands::toggle_agent_option_cmd,
+            commands::detect_agent_environment_cmd,
+            commands::run_pool_simulation_cmd,
             update::check_app_update,
             update::download_and_install_update,
             update::open_update_url

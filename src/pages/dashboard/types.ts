@@ -1,6 +1,13 @@
 import type { ActionLogItem, ToolId } from "../../types/qwitch";
 
-export type NavSection = "all" | "logs" | "settings" | ToolId;
+export type NavSection =
+  | "all"
+  | "pools"
+  | "agents"
+  | "routing"
+  | "logs"
+  | "settings"
+  | ToolId;
 export type AllViewMode = "grouped" | "flat";
 export type LogActionFilter = "all" | ActionLogItem["actionType"];
 export type LogResultFilter = "all" | ActionLogItem["resultStatus"];

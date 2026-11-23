@@ -179,9 +179,26 @@
   * **不支持本地切号**：`apply_session` 返回 `UnsupportedCapability`。
     原因是回写凭据需要生成合法的 `safeStorage` 密文（依赖 Electron 运行时），
     本进程无法产出；仅提供 `backup_session` 备份原文件。
-  * AK/SK 为**临时凭据**，`tokenRefreshInterval` 1 小时。刷新需要
-    `refreshToken` + `codeVerifier` + `dpopKeyPair` 并签发 DPoP JWE，
-    当前版本未实现自动刷新；凭据过期后需重新「本机导入」。
+  * **凭据过期：Qwitch 只检测，不代刷。**
+    AK/SK 为华为云 STS 临时凭据，`tokenRefreshInterval` 为 1 小时，
+    且 **refresh token 是一次性轮换的**（消费后必须立刻持有新 token，
+    否则原 token 立即作废）。若 Qwitch 与客户端都尝试刷新，必然有一方
+    把对方的 token 废掉，结果是用户被迫重新登录。
+
+    官方客户端在**剩余 1 小时**时就会自行刷新（`startRefreshTimer` 里
+    `expiresAt - TOKEN_REFRESH_INTERVAL` 加随机抖动），因此 Qwitch 采取
+    「只读监控 + 引导用户」策略：
+
+    - `ensure_not_expired` 仅比对凭据自带的 `expiresAt`，**不发任何网络请求**
+    - 剩余 ≤ 5 分钟（`EXPIRY_SKEW_MS`）即判 `AuthExpired`
+    - 错误文案直接给出行动指引：打开客户端 → 客户端自动刷新 → 回来重新导入
+    - UI 在 `expired` 状态下为 `codearts` 提供「打开客户端」按钮
+      （`launch_tool_client` 命令，可执行文件经与切号同一套白名单校验）
+    - `claim_daily` **不**做过期检查：它是 no-op，若在此报 `AuthExpired`
+      会让账号被误标为过期、连带打断额度监控
+
+    恢复流程（用户视角两次点击）：
+    凭据过期 → 点「打开客户端」→ 客户端自动刷新 → 回 Qwitch 重新导入。
   * 实测账号在 `benefit/claim` 上返回
     `error_code=4000 invalid channel, group not found`（不在任何权益组），
     与额度查询无关，不影响本适配器。

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Monitor, PanelTop, Moon, Sun } from "lucide-react";
 import { QwitchProvider, useQwitch } from "./context/QwitchContext";
+import { PoolPrototypeProvider } from "./context/usePoolPrototypeStore";
 import { Dashboard } from "./pages/Dashboard";
 import { TrayPopover } from "./pages/TrayPopover";
 import { ToastViewport } from "./components/ui/ToastViewport";
@@ -39,7 +40,7 @@ function PrototypeShell() {
       {!isTauriRuntime && (
         <div className="z-40 flex shrink-0 items-center justify-between border-b border-zinc-200 bg-zinc-100/80 px-4 py-1.5 text-xs backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/80">
           <span className="font-medium text-zinc-500 dark:text-zinc-400">
-            Qwitch 交互原型预览（Mock 数据模式）
+            Qwitch 交互原型预览（含号池编排与 Agent 指向 Mock 模式）
           </span>
           <div className="flex items-center gap-2">
             <div className="inline-flex rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-800">
@@ -102,10 +103,17 @@ function PrototypeShell() {
   );
 }
 
+function AppPoolBridge({ children }: { children: React.ReactNode }) {
+  const { showToast } = useQwitch();
+  return <PoolPrototypeProvider onToast={showToast}>{children}</PoolPrototypeProvider>;
+}
+
 export default function App() {
   return (
     <QwitchProvider>
-      <PrototypeShell />
+      <AppPoolBridge>
+        <PrototypeShell />
+      </AppPoolBridge>
     </QwitchProvider>
   );
 }

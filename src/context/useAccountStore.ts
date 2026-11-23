@@ -1201,6 +1201,16 @@ export function useAccountStore({
    *
    * 后端会校验本机登录 uid 与目标账号一致，不一致直接拒绝。
    */
+  /// 启动指定工具的官方客户端（不注入多开参数）。
+  ///
+  /// 用途：CodeArts 这类由客户端自行托管并轮换凭据的工具，凭据过期时
+  /// 由用户一键拉起客户端完成刷新，Qwitch 不代刷（refresh token 一次性轮换，
+  /// 双端刷新会互相作废）。
+  const launchToolClient = useCallback(async (toolId: string) => {
+    if (!isTauriRuntime) return;
+    await invoke<string>("launch_tool_client", { toolId });
+  }, [isTauriRuntime]);
+
   const captureLocalSession = useCallback(
     async (accountId: string): Promise<boolean> => {
       const target = accounts.find((a) => a.id === accountId);
@@ -1464,6 +1474,7 @@ export function useAccountStore({
     renameAccount,
     toggleAccountDisabled,
     recoverAccount,
+    launchToolClient,
     captureLocalSession,
     deleteAccount,
     quitApp,

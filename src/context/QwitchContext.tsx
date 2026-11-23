@@ -74,6 +74,8 @@ interface QwitchContextValue {
   renameAccount: (accountId: string, label: string) => Promise<void>;
   toggleAccountDisabled: (accountId: string) => Promise<void>;
   recoverAccount: (accountId: string) => Promise<void>;
+  /// 启动工具官方客户端（用于让客户端自行刷新托管凭据）
+  launchToolClient: (toolId: string) => Promise<void>;
   captureLocalSession: (accountId: string) => Promise<boolean>;
   deleteAccount: (accountId: string) => Promise<void>;
   archiveLogs: (
@@ -216,6 +218,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     renameAccount,
     toggleAccountDisabled,
     recoverAccount,
+    launchToolClient,
     captureLocalSession,
     deleteAccount,
     quitApp,
@@ -264,6 +267,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       renameAccount,
       toggleAccountDisabled,
       recoverAccount,
+      launchToolClient,
       captureLocalSession,
       deleteAccount,
       archiveLogs,
@@ -322,6 +326,7 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       renameAccount,
       toggleAccountDisabled,
       recoverAccount,
+      launchToolClient,
       captureLocalSession,
       deleteAccount,
       archiveLogs,

@@ -268,6 +268,8 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 | [综合优化路线图](docs/OPTIMIZATION_ROADMAP.md) | 四阶段 Sprint 排期、完成度与接口变更总表 |
 | [项目理解报告](docs/PROJECT_UNDERSTANDING_REPORT.md) | 全项目深度认知基线：目标、模块、流程、实测质量基线、问题分级与待确认事项 |
 | [优化执行计划](docs/OPTIMIZATION_EXECUTION_PLAN.md) | A/B/C/D 四阶段落地记录：实现要点、回归测试与延后项依据 |
+| [号池网关架构设计](docs/POOL_GATEWAY_DESIGN.md) | 号池优先→指向 Agent 总体架构、IR 转换、7 上游凭据桥接与 4 Agent 挂载规范 |
+| [号池产品形态与 UX 规范](docs/POOL_GATEWAY_PRD_UX.md) | 产品心智链路、信息架构、号池编排/Agent 指向/路由观测及托盘交互规范 |
 
 ## 路线图
 

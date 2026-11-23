@@ -75,6 +75,18 @@ const EXTRA_SECURITY_TOKEN: &str = "security_token";
 const EXTRA_REGION: &str = "region";
 const EXTRA_DOMAIN_ID: &str = "domain_id";
 
+/// 凭据剩余有效期低于该阈值即视为「需要刷新」，提前拦截避免发出注定 401 的请求。
+///
+/// 客户端在剩余 1 小时时就会自行刷新（`startRefreshTimer` 里
+/// `expiresAt - TOKEN_REFRESH_INTERVAL`），因此这里只留 5 分钟余量：
+/// 真正的刷新责任交给客户端，Qwitch 只做只读监控。
+const EXPIRY_SKEW_MS: i64 = 5 * 60 * 1000;
+
+/// 凭据过期时给用户的行动指引。
+const EXPIRED_HINT: &str =
+    "CodeArts 凭据已过期。请打开「码道 CodeArts」客户端，它会自动刷新登录态；\
+     刷新完成后回到 Qwitch 重新导入该账号即可";
+
 /// 华为云临时凭据（AK/SK/STS）。
 #[derive(Debug, Clone)]
 struct HuaweiCreds {
@@ -591,6 +603,31 @@ impl CodeArtsAdapter {
         )
         .await
     }
+
+    /// 只读式过期检查：不发任何网络请求，仅比对凭据自带的 `expiresAt`。
+    ///
+    /// **为什么 Qwitch 不主动刷新**：华为云 STS 的 refresh token 是一次性轮换的，
+    /// 谁消费谁必须立刻持有新的 token。若 Qwitch 与客户端都尝试刷新，必然有一方
+    /// 把对方的 token 作废，结果是用户被迫重新登录——代价远大于「点一下打开客户端」。
+    /// 官方客户端在剩余 1 小时时就会自行刷新，因此这里只做检测与引导。
+    fn ensure_not_expired(cred: &CredentialEnvelope) -> Result<(), AdapterError> {
+        let CredentialPayload::Token { expires_at, .. } = &cred.payload else {
+            // 非 Token 形态不在此处拦截，交给后续流程处理
+            return Ok(());
+        };
+        let Some(expires_at) = expires_at else {
+            // 未记录有效期（如手工粘贴的 AK/SK）→ 不拦截，让服务端判定
+            return Ok(());
+        };
+        let now = Utc::now().timestamp_millis();
+        if *expires_at - now <= EXPIRY_SKEW_MS {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: EXPIRED_HINT.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Default for CodeArtsAdapter {
@@ -671,7 +708,9 @@ impl ToolAdapter for CodeArtsAdapter {
     ) -> Result<CredentialEnvelope, AdapterError> {
         let session = Self::load_session(host)?;
         let envelope = Self::envelope_from_session(&session)?;
-        // 导入时立刻验一次签名凭据，避免存入已失效的 AK/SK
+        // 导入时立刻验一次签名凭据，避免存入已失效的 AK/SK。
+        // 若本地 session 已过期，先给出可执行的指引而不是让请求打空。
+        Self::ensure_not_expired(&envelope)?;
         let creds = HuaweiCreds::from_envelope(&envelope)?;
         self.verify_identity(&creds).await?;
         Ok(envelope)
@@ -774,6 +813,8 @@ impl ToolAdapter for CodeArtsAdapter {
         &self,
         cred: &CredentialEnvelope,
     ) -> Result<QuotaSnapshot, AdapterError> {
+        // 过期即拦截，避免发出注定 401 的请求并污染日志
+        Self::ensure_not_expired(cred)?;
         let creds = HuaweiCreds::from_envelope(cred)?;
         let overview = self.fetch_package_overview(&creds).await?;
         let buckets = Self::parse_overview(&overview);
@@ -797,6 +838,8 @@ impl ToolAdapter for CodeArtsAdapter {
         _precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
         // CodeArts 没有每日签到机制，不做任何网络请求。
+        // 注意：这里**不**做过期检查——调度器对无签到能力的工具本就不该调它，
+        // 若在此报 AuthExpired 会让账号状态被误标为过期，干扰额度监控。
         Ok(ClaimResult {
             claimed: false,
             reward_summary: "码道 CodeArts 无每日签到机制，仅监控额度".into(),
@@ -1119,6 +1162,82 @@ mod tests {
             }
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn cred_with_expiry(expires_at: Option<i64>) -> CredentialEnvelope {
+        let mut c = cred_with("AK", "SK", "STS");
+        if let CredentialPayload::Token { expires_at: e, .. } = &mut c.payload {
+            *e = expires_at;
+        }
+        c
+    }
+
+    #[test]
+    fn expiry_check_blocks_expired_and_near_expiry() {
+        let now = chrono::Utc::now().timestamp_millis();
+
+        // 已过期
+        let err =
+            CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(Some(now - 1000))).unwrap_err();
+        match err {
+            AdapterError::Unified { code, message } => {
+                assert_eq!(code, UnifiedErrorCode::AuthExpired);
+                assert!(message.contains("码道 CodeArts"), "{message}");
+                assert!(message.contains("重新导入"), "{message}");
+            }
+        }
+
+        // 剩余 2 分钟 < 5 分钟余量 → 视为需要刷新
+        let err = CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(Some(now + 2 * 60 * 1000)))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
+
+        // 剩余 30 分钟 → 放行
+        assert!(
+            CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(Some(now + 30 * 60 * 1000)))
+                .is_ok()
+        );
+
+        // 未记录有效期（手工粘贴 AK/SK）→ 放行，交服务端判定
+        assert!(CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(None)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn inspect_quota_short_circuits_on_expired_credential() {
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        // 不挂 mock：若发请求就会 404
+        let expired = cred_with_expiry(Some(chrono::Utc::now().timestamp_millis() - 60_000));
+        let err = adapter.inspect_quota(&expired).await.unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "过期凭据不应发出任何网络请求"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_daily_ignores_expiry_to_avoid_mislabeling_account() {
+        // claim 是 no-op，即使凭据过期也不应报 AuthExpired，
+        // 否则会把账号状态误标为过期、打断额度监控。
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        let expired = cred_with_expiry(Some(chrono::Utc::now().timestamp_millis() - 60_000));
+        let res = adapter.claim_daily(&expired, None).await.expect("noop");
+        assert!(!res.claimed);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]

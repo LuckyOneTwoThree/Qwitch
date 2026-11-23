@@ -6,6 +6,7 @@ import {
   ClipboardPaste,
   Clock,
   Cpu,
+  ExternalLink,
   Globe,
   Link2,
   PauseCircle,
@@ -50,6 +51,7 @@ export const AccountCard = React.memo(function AccountCard({
     claimDailyBatch,
     requestColdSwitch,
     recoverAccount,
+    launchToolClient,
     captureLocalSession,
     deleteAccount,
     importAccount,
@@ -64,6 +66,7 @@ export const AccountCard = React.memo(function AccountCard({
 
   const [refreshing, setRefreshing] = useState(false);
   const [recovering, setRecovering] = useState(false);
+  const [launchingClient, setLaunchingClient] = useState(false);
   const [associating, setAssociating] = useState(false);
   const [oauthLaunching, setOauthLaunching] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -86,6 +89,9 @@ export const AccountCard = React.memo(function AccountCard({
   const supportsWebviewOAuth =
     adapter?.capabilities.authMethods.includes("webview_oauth") ?? false;
   const needsRecovery = account.status === "expired" || account.status === "risk_paused";
+  /// 凭据由官方客户端托管并自行轮换的工具（如码道 CodeArts 的一次性
+  /// refresh token）。这类工具过期时应引导用户拉起客户端，而非由 Qwitch 代刷。
+  const clientManagedCredential = account.toolId === "codearts";
   const missingApiToken = account.hasApiToken === false;
   const missingLocalSnapshot = account.hasLocalSnapshot === false;
   const isBatchRunning = Boolean(batchProgress?.running);
@@ -112,6 +118,18 @@ export const AccountCard = React.memo(function AccountCard({
       await recoverAccount(account.id);
     } finally {
       setRecovering(false);
+    }
+  };
+
+  /// CodeArts 凭据由客户端托管并一次性轮换，Qwitch 不代刷。
+  /// 过期时引导用户拉起客户端完成刷新，再回来重新导入。
+  const handleLaunchClient = async () => {
+    if (launchingClient) return;
+    setLaunchingClient(true);
+    try {
+      await launchToolClient(account.toolId);
+    } finally {
+      setLaunchingClient(false);
     }
   };
 
@@ -523,6 +541,18 @@ export const AccountCard = React.memo(function AccountCard({
           <div className="flex flex-wrap items-center gap-1.5">
             {needsRecovery ? (
               <>
+                {clientManagedCredential && (
+                  <button
+                    type="button"
+                    disabled={launchingClient}
+                    onClick={() => void handleLaunchClient()}
+                    title="该工具凭据由客户端自行刷新，打开客户端后会自动更新登录态"
+                    className="btn btn-sm gap-1 whitespace-nowrap border border-amber-500/25 bg-amber-500/15 text-amber-800 transition hover:bg-amber-500/25 disabled:opacity-50 dark:text-amber-300"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    {launchingClient ? "启动中..." : "打开客户端"}
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={oauthLaunching}

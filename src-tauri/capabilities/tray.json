@@ -20,6 +20,13 @@
     "allow-switch-desktop-account",
     "allow-get-action-logs",
     "allow-get-action-log-stats",
+    "allow-get-pool-workspace-state",
+    "allow-toggle-gateway-server",
+    "allow-update-agent-mounted-pools-cmd",
+    "allow-set-agent-default-model-cmd",
+    "allow-unbind-agent-cmd",
+    "allow-repair-agent-drift-cmd",
+    "allow-restart-agent-client-cmd",
     "allow-check-app-update",
     "allow-download-and-install-update",
     "allow-open-update-url"

@@ -8,12 +8,15 @@ import {
   Layers,
   LayoutGrid,
   LayoutList,
+  Link2,
   Loader2,
   Lock,
   MonitorCheck,
   Moon,
+  Play,
   Plus,
   Power,
+  Radio,
   RefreshCw,
   ScrollText,
   Search,
@@ -59,6 +62,15 @@ import type {
 } from "./dashboard/types";
 import { LogsPanel, LogsToolbar } from "./dashboard/LogsView";
 import { SettingsView } from "./dashboard/SettingsView";
+import { PoolsView } from "./dashboard/PoolsView";
+import { AgentBindingsView } from "./dashboard/AgentBindingsView";
+import { RoutingTraceView } from "./dashboard/RoutingTraceView";
+import { CreatePoolModal } from "../components/pool/CreatePoolModal";
+import { ConfigDiffModal } from "../components/pool/ConfigDiffModal";
+import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
+import { usePoolPrototype } from "../context/usePoolPrototypeStore";
+import { buildAgentConfigSnippets, computeAgentExposedModels } from "../data/mockPoolData";
+import type { AccountPool, AgentBinding, TargetAgentId } from "../types/pool";
 
 function SecondAccountGhostCard({
   toolName,
@@ -120,9 +132,28 @@ export function Dashboard() {
   } = useUpdateActions();
   const hasUpdate = Boolean(updateInfo?.updateAvailable);
 
+  const {
+    gateway,
+    pools,
+    agentBindings,
+    traces,
+    setSelectedPoolId,
+    toggleGateway,
+    detectAgentEnvironment,
+    mountPoolToAgents,
+  } = usePoolPrototype();
+
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const [nav, setNav] = useState<NavSection>("all");
   const prevNavRef = useRef<NavSection>(nav);
+  const [createPoolOpen, setCreatePoolOpen] = useState(false);
+  const [simModalOpen, setSimModalOpen] = useState(false);
+  const [simDefaultPoolId, setSimDefaultPoolId] = useState<string | undefined>(undefined);
+  const [simDefaultModelId, setSimDefaultModelId] = useState<string | undefined>(undefined);
+  const [highlightAgentId, setHighlightAgentId] = useState<TargetAgentId | null>(null);
+  const [pendingMountDiffs, setPendingMountDiffs] = useState<
+    { pool: AccountPool; agentId: TargetAgentId }[]
+  >([]);
   const [importOpen, setImportOpen] = useState(false);
   const [importDefaultMethod, setImportDefaultMethod] = useState<AuthMethod | undefined>(undefined);
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
@@ -176,7 +207,14 @@ export function Dashboard() {
   }, [accounts]);
 
   const activeToolFilter: ToolId | undefined =
-    nav !== "all" && nav !== "logs" && nav !== "settings" ? nav : undefined;
+    nav !== "all" &&
+    nav !== "pools" &&
+    nav !== "agents" &&
+    nav !== "routing" &&
+    nav !== "logs" &&
+    nav !== "settings"
+      ? nav
+      : undefined;
 
   useEffect(() => {
     // 用户正在编辑时，后台同步不得覆盖未保存的路径草稿
@@ -201,12 +239,16 @@ export function Dashboard() {
     }
   }, [nav, refreshClientStatuses]);
 
+  const isAccountSection =
+    nav !== "pools" &&
+    nav !== "agents" &&
+    nav !== "routing" &&
+    nav !== "logs" &&
+    nav !== "settings";
+
   const scopeAccounts = useMemo(
-    () =>
-      nav === "logs" || nav === "settings"
-        ? []
-        : selectScopeAccounts(accounts, activeToolFilter),
-    [accounts, activeToolFilter, nav]
+    () => (isAccountSection ? selectScopeAccounts(accounts, activeToolFilter) : []),
+    [accounts, activeToolFilter, isAccountSection]
   );
 
   const scopedStats = useMemo(() => {
@@ -375,10 +417,71 @@ export function Dashboard() {
   const activeToolSupportsClaim = activeToolFilter
     ? (adapters.find((a) => a.id === activeToolFilter)?.capabilities.supportsDailyClaim ?? false)
     : true;
-  const isAccountSection = nav !== "logs" && nav !== "settings";
   const isBatchBusy = Boolean(batchProgress?.running);
 
+  const boundAgentCount = useMemo(
+    () => agentBindings.filter((b) => b.mountedPoolIds.length > 0).length,
+    [agentBindings]
+  );
+  const driftedAgentCount = useMemo(
+    () => agentBindings.filter((b) => b.status === "drifted").length,
+    [agentBindings]
+  );
+
+  const activeCreationDiff = useMemo<{
+    pool: AccountPool;
+    binding: AgentBinding;
+    nextPoolIds: string[];
+    mountedPoolNames: string[];
+    defaultModelDisplay: string | null;
+    beforeText: string;
+    afterText: string;
+  } | null>(() => {
+    const head = pendingMountDiffs[0];
+    if (!head) return null;
+    const binding = agentBindings.find((b) => b.agentId === head.agentId);
+    if (!binding) return null;
+    const nextPoolIds = binding.mountedPoolIds.includes(head.pool.id)
+      ? binding.mountedPoolIds
+      : [...binding.mountedPoolIds, head.pool.id];
+    const allPoolsWithNew = pools.some((p) => p.id === head.pool.id)
+      ? pools
+      : [head.pool, ...pools];
+    const snippets = buildAgentConfigSnippets(
+      binding.agentId,
+      nextPoolIds,
+      binding.defaultModelKey,
+      allPoolsWithNew,
+      gateway,
+      binding.options,
+      false
+    );
+    const exposed = computeAgentExposedModels(
+      {
+        agentId: binding.agentId,
+        mountedPoolIds: nextPoolIds,
+        defaultModelKey: binding.defaultModelKey,
+      },
+      allPoolsWithNew
+    );
+    const defaultItem = exposed.find((e) => e.isDefault) ?? exposed[0] ?? null;
+    return {
+      pool: head.pool,
+      binding,
+      nextPoolIds,
+      mountedPoolNames: nextPoolIds
+        .map((id) => allPoolsWithNew.find((p) => p.id === id)?.name)
+        .filter((n): n is string => Boolean(n)),
+      defaultModelDisplay: defaultItem?.displayName ?? null,
+      beforeText: snippets.beforeSnippet,
+      afterText: snippets.afterSnippet,
+    };
+  }, [pendingMountDiffs, agentBindings, pools, gateway]);
+
   const headerTitle = useMemo(() => {
+    if (nav === "pools") return "号池编排与调度策略";
+    if (nav === "agents") return "Agent 指向与配置挂载";
+    if (nav === "routing") return "网关路由观测与决策链路";
     if (nav === "logs") return "操作审计日志";
     if (nav === "settings") return "系统设置与客户端环境";
     if (activeToolMeta) {
@@ -388,6 +491,18 @@ export function Dashboard() {
   }, [nav, activeToolMeta]);
 
   const headerSubtitle = useMemo(() => {
+    if (nav === "pools") {
+      const activePools = pools.filter((p) => p.enabled).length;
+      return `已建 ${pools.length} 个号池（${activePools} 个启用）· 优先在号池内完成跨工具混编，再定向指向 Agent`;
+    }
+    if (nav === "agents") {
+      return `已挂载 ${boundAgentCount}/${agentBindings.length} 个目标 Agent${
+        driftedAgentCount > 0 ? ` · ${driftedAgentCount} 个存在配置漂移待修复` : " · Stash 原值保护就绪"
+      }`;
+    }
+    if (nav === "routing") {
+      return `本地网关 ${gateway.running ? `${gateway.host}:${gateway.port} 运行中` : "已停止"} · 共记录 ${traces.length} 条调度决策采样`;
+    }
     if (nav === "logs") {
       return `活跃 ${logStats.activeCount} 条 · 已归档 ${logStats.archivedCount} 条${
         logStats.noiseActiveCount > 0
@@ -402,7 +517,19 @@ export function Dashboard() {
       return `${activeToolMeta.tagline} · 当前纳管 ${scopedStats.total} 个账号 · ${scopedStats.claimBadgeText}`;
     }
     return `共 ${scopedStats.total} 个纳管账号 · 今日已签 ${scopedStats.claimedCount} 个 · ${scopedStats.claimBadgeText}`;
-  }, [nav, logStats, adapters.length, scopedStats, activeToolMeta]);
+  }, [
+    nav,
+    pools,
+    boundAgentCount,
+    agentBindings.length,
+    driftedAgentCount,
+    gateway,
+    traces.length,
+    logStats,
+    adapters.length,
+    scopedStats,
+    activeToolMeta,
+  ]);
 
   const isFiltered = Boolean(searchQuery.trim()) || statusFilter !== "all";
   const showFilterToolbar =
@@ -413,14 +540,14 @@ export function Dashboard() {
 
   return (
     <div className="flex h-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <aside className="flex h-full w-56 shrink-0 flex-col justify-between border-r border-zinc-200 bg-white/85 p-3.5 dark:border-zinc-800 dark:bg-zinc-900/65">
+      <aside className="flex h-full w-52 shrink-0 flex-col justify-between border-r border-zinc-200 bg-white/85 p-3 dark:border-zinc-800 dark:bg-zinc-900/65">
         <div className="overflow-y-auto pr-0.5">
           <div className="mb-5 flex items-center gap-2.5 px-1.5">
             <QwitchLogo size="md" />
             <div className="min-w-0">
               <div className="text-sm font-semibold tracking-tight">Qwitch</div>
               <div className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                AI 账号与额度工作台
+                号池与多模型网关
               </div>
             </div>
           </div>
@@ -428,22 +555,25 @@ export function Dashboard() {
           <div className="space-y-4">
             <div>
               <div className="mb-1.5 px-2.5 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase dark:text-zinc-400">
-                工作台视图
+                工作台与路由
               </div>
-              <nav aria-label="账号视图导航" className="space-y-1">
+              <nav aria-label="主功能导航" className="space-y-1">
                 <button
                   type="button"
-                  onClick={() => setNav("all")}
-                  aria-current={nav === "all" ? "page" : undefined}
-                  className={`nav-item ${nav === "all" ? "nav-item-active" : ""}`}
+                  onClick={() => {
+                    setHighlightAgentId(null);
+                    if (!isAccountSection) setNav("all");
+                  }}
+                  aria-current={isAccountSection ? "page" : undefined}
+                  className={`nav-item ${isAccountSection ? "nav-item-active" : ""}`}
                 >
                   <span className="flex min-w-0 items-center gap-2">
-                    <Layers className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span className="truncate">全部账号</span>
+                    <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">账号资产</span>
                   </span>
                   <span
                     className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
-                      nav === "all"
+                      isAccountSection
                         ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
                         : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                     }`}
@@ -452,40 +582,79 @@ export function Dashboard() {
                   </span>
                 </button>
 
-                {visibleTools.map((tool) => {
-                  const active = nav === tool.id;
-                  const count = (accountCountByTool.get(tool.id) ?? 0);
-                  const isRunning = clientStatuses[tool.id]?.isRunning;
-                  return (
-                    <button
-                      key={tool.id}
-                      type="button"
-                      onClick={() => setNav(tool.id)}
-                      aria-current={active ? "page" : undefined}
-                      className={`nav-item ${active ? "nav-item-active" : ""}`}
-                    >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <ToolBrandIcon toolId={tool.id} size="xs" decorative />
-                        <span className="truncate">{tool.name}</span>
-                        {isRunning && count > 0 && (
-                          <span
-                            title="本机客户端运行中"
-                            className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
-                          />
-                        )}
-                      </span>
-                      <span
-                        className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
-                          active
-                            ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
-                            : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                        }`}
-                      >
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHighlightAgentId(null);
+                    setNav("pools");
+                  }}
+                  aria-current={nav === "pools" ? "page" : undefined}
+                  className={`nav-item ${nav === "pools" ? "nav-item-active" : ""}`}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Layers className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">号池编排</span>
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                      nav === "pools"
+                        ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
+                        : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                  >
+                    {pools.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHighlightAgentId(null);
+                    setNav("agents");
+                  }}
+                  aria-current={nav === "agents" ? "page" : undefined}
+                  className={`nav-item ${nav === "agents" ? "nav-item-active" : ""}`}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Link2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">Agent 指向</span>
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                      driftedAgentCount > 0
+                        ? "bg-amber-500/15 text-amber-800 dark:text-amber-300"
+                        : nav === "agents"
+                          ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
+                          : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                  >
+                    {boundAgentCount}/{agentBindings.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHighlightAgentId(null);
+                    setNav("routing");
+                  }}
+                  aria-current={nav === "routing" ? "page" : undefined}
+                  className={`nav-item ${nav === "routing" ? "nav-item-active" : ""}`}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Radio className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">路由观测</span>
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                      nav === "routing"
+                        ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
+                        : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                  >
+                    {traces.length}
+                  </span>
+                </button>
               </nav>
             </div>
 
@@ -525,7 +694,6 @@ export function Dashboard() {
                     <Settings className="h-4 w-4 shrink-0" aria-hidden="true" />
                     <span className="truncate">设置与环境</span>
                   </span>
-                  {/* 有新版本时在设置项上给出提示点：更新详情页在此入口内 */}
                   {updateInfo?.updateAvailable && (
                     <span
                       className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500"
@@ -539,78 +707,87 @@ export function Dashboard() {
           </div>
         </div>
 
-        <div className="space-y-2">
-          {/* 版本卡：把「我在什么版本」与「是否有新版」合并到同一个视觉锚点。
-              有新版本时整卡切换为可操作态（靛蓝描边 + 下载按钮），
-              无新版本时保持原有的静态信息卡外观 —— 不额外占用空间，
-              也让版本号的语义从「只读信息」变为「更新入口」。 */}
-          <div
-            className={`rounded-xl border p-2.5 text-[11px] transition ${
-              hasUpdate
-                ? "border-indigo-500/35 bg-indigo-500/[0.06] dark:border-indigo-400/30 dark:bg-indigo-400/[0.08]"
-                : "border-zinc-200/80 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-900/70"
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 font-semibold text-zinc-800 dark:text-zinc-100">
-                <span className="flex h-4 w-4 items-center justify-center rounded-[5px] bg-emerald-500/12 text-emerald-600 dark:text-emerald-400">
-                  <Lock className="h-2.5 w-2.5" aria-hidden="true" />
-                </span>
-                Local-First 加密库
+        <div className="space-y-2 border-t border-zinc-200/70 pt-3 dark:border-zinc-800/80">
+          {/* 本地网关紧凑状态胶囊 */}
+          <div className="flex items-center justify-between gap-1.5 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-1.5 text-[11px] dark:border-zinc-800 dark:bg-zinc-900/70">
+            <button
+              type="button"
+              onClick={() => setNav("agents")}
+              className="flex min-w-0 items-center gap-1.5 text-left font-medium text-zinc-700 hover:text-zinc-950 dark:text-zinc-200 dark:hover:text-white"
+            >
+              <span
+                className={`h-2 w-2 shrink-0 rounded-full ${
+                  gateway.running ? "bg-emerald-500" : "bg-zinc-400"
+                }`}
+              />
+              <span className="truncate font-mono tabular-nums">
+                :{gateway.port}
               </span>
-              {hasUpdate ? (
+            </button>
+            <button
+              type="button"
+              onClick={toggleGateway}
+              className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition ${
+                gateway.running
+                  ? "bg-emerald-500/12 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
+                  : "bg-zinc-200/80 text-zinc-600 hover:bg-zinc-300/70 dark:bg-zinc-800 dark:text-zinc-300"
+              }`}
+            >
+              {gateway.running ? "网关运行" : "已停止"}
+            </button>
+          </div>
+
+          {/* 精简版本与加密库底栏 */}
+          {hasUpdate ? (
+            <div className="rounded-xl border border-indigo-500/35 bg-indigo-500/[0.06] p-2 text-[11px] dark:border-indigo-400/30 dark:bg-indigo-400/[0.08]">
+              <div className="flex items-center justify-between gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setNav("settings")}
+                  className="truncate font-medium text-indigo-800 hover:underline dark:text-indigo-200"
+                >
+                  新版本可升级
+                </button>
                 <button
                   type="button"
                   onClick={() => void runUpdatePrimaryAction()}
                   disabled={updateInstalling}
                   title={updatePrimaryLabel}
                   aria-label={updatePrimaryLabel}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500"
                 >
                   {updateInstalling ? (
-                    <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" aria-hidden="true" />
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" aria-hidden="true" />
                   ) : (
-                    <Download className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
+                    <Download className="h-2.5 w-2.5" aria-hidden="true" />
                   )}
                   v{updateInfo?.latestVersion}
                 </button>
-              ) : (
-                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                  v{__APP_VERSION__}
-                </span>
-              )}
+              </div>
             </div>
-            <p className="mt-1.5 leading-snug">
-              {hasUpdate ? (
-                <>
-                  当前 v{__APP_VERSION__}，可升级至 v{updateInfo?.latestVersion}。
-                  <button
-                    type="button"
-                    onClick={() => setNav("settings")}
-                    className="ml-1 font-medium text-indigo-700 underline-offset-2 hover:underline dark:text-indigo-300"
-                  >
-                    查看更新说明
-                  </button>
-                </>
-              ) : (
-                <>
-                  凭据经系统钥匙串与 AES-256-GCM 加密落盘；
-                  {appSettings.closeToTray !== false
-                    ? "关闭主窗将隐藏窗口并仅留菜单栏常驻。"
-                    : "关闭主窗将直接退出程序。"}
-                </>
-              )}
-            </p>
-          </div>
+          ) : null}
 
-          <button
-            type="button"
-            onClick={() => void quitApp()}
-            className="btn btn-sm btn-secondary w-full gap-1.5"
-          >
-            <Power className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            退出 Qwitch
-          </button>
+          <div className="flex items-center justify-between gap-2 px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+            <span
+              className="flex items-center gap-1"
+              title={`Local-First 加密库：凭据经系统钥匙串与 AES-256-GCM 加密落盘；${
+                appSettings.closeToTray !== false
+                  ? "关闭主窗将隐藏至菜单栏。"
+                  : "关闭主窗将直接退出。"
+              }`}
+            >
+              <Lock className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+              <span className="font-mono">v{__APP_VERSION__}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => void quitApp()}
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            >
+              <Power className="h-3 w-3 shrink-0" aria-hidden="true" />
+              退出 Qwitch
+            </button>
+          </div>
         </div>
       </aside>
 
@@ -697,6 +874,69 @@ export function Dashboard() {
               </>
             )}
 
+            {nav === "pools" && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSimDefaultPoolId(undefined);
+                    setSimDefaultModelId(undefined);
+                    setSimModalOpen(true);
+                  }}
+                  className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                >
+                  <Play className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  模拟打流
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCreatePoolOpen(true)}
+                  className="btn btn-sm btn-primary gap-1.5 whitespace-nowrap"
+                >
+                  <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  新建号池
+                </button>
+              </>
+            )}
+
+            {nav === "agents" && (
+              <>
+                <button
+                  type="button"
+                  onClick={detectAgentEnvironment}
+                  className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                >
+                  <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  重新探测
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleGateway}
+                  className={`btn btn-sm gap-1.5 whitespace-nowrap ${
+                    gateway.running ? "btn-secondary" : "btn-primary"
+                  }`}
+                >
+                  <Power className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  {gateway.running ? "停止网关" : "启动网关"}
+                </button>
+              </>
+            )}
+
+            {nav === "routing" && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSimDefaultPoolId(undefined);
+                  setSimDefaultModelId(undefined);
+                  setSimModalOpen(true);
+                }}
+                className="btn btn-sm btn-primary gap-1.5 whitespace-nowrap"
+              >
+                <Play className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                发起模拟打流
+              </button>
+            )}
+
             <button
               type="button"
               onClick={toggleTheme}
@@ -715,6 +955,50 @@ export function Dashboard() {
 
         {isAccountSection && (
           <div className="shrink-0 space-y-2.5 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
+            {/* 方案 A：7 家内置工具筛选器收纳至账号工作区顶部横向胶囊条 */}
+            <nav
+              aria-label="账号视图导航"
+              className="mask-fade-r scrollbar-none flex items-center gap-1.5 overflow-x-auto pb-0.5 pr-4"
+            >
+              <button
+                type="button"
+                onClick={() => setNav("all")}
+                aria-current={nav === "all" ? "page" : undefined}
+                className={`chip shrink-0 whitespace-nowrap ${
+                  nav === "all" ? "chip-active" : ""
+                }`}
+              >
+                <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <span>全部账号</span>
+                <span className="tabular-nums opacity-80">{accounts.length}</span>
+              </button>
+
+              {visibleTools.map((tool) => {
+                const active = nav === tool.id;
+                const count = accountCountByTool.get(tool.id) ?? 0;
+                const isRunning = clientStatuses[tool.id]?.isRunning;
+                return (
+                  <button
+                    key={tool.id}
+                    type="button"
+                    onClick={() => setNav(tool.id)}
+                    aria-current={active ? "page" : undefined}
+                    className={`chip shrink-0 whitespace-nowrap ${active ? "chip-active" : ""}`}
+                  >
+                    <ToolBrandIcon toolId={tool.id} size="xs" decorative />
+                    <span>{tool.name}</span>
+                    {isRunning && count > 0 && (
+                      <span
+                        title="本机客户端运行中"
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
+                      />
+                    )}
+                    <span className="tabular-nums opacity-80">{count}</span>
+                  </button>
+                );
+              })}
+            </nav>
+
             <BatchClaimBanner />
 
             <section
@@ -1039,7 +1323,14 @@ export function Dashboard() {
           </div>
         )}
 
-        <main ref={mainScrollRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-3.5">
+        <main
+          ref={mainScrollRef}
+          className={`min-h-0 flex-1 px-5 py-3.5 ${
+            nav === "pools"
+              ? "overflow-y-auto @3xl:overflow-hidden"
+              : "overflow-y-auto"
+          }`}
+        >
           {/* 更新提示：放在账号区顶部，日常使用路径（账号池 / 工具页）即可见，
               无需进入设置页才能发现新版本 */}
           {isAccountSection && (
@@ -1216,6 +1507,41 @@ export function Dashboard() {
             </>
           )}
 
+          {nav === "pools" && (
+            <PoolsView
+              onOpenCreatePool={() => setCreatePoolOpen(true)}
+              onOpenSimulation={(poolId, modelId) => {
+                setSimDefaultPoolId(poolId);
+                setSimDefaultModelId(modelId);
+                setSimModalOpen(true);
+              }}
+              onNavigateAgents={(agentId) => {
+                setHighlightAgentId(agentId ?? null);
+                setNav("agents");
+              }}
+            />
+          )}
+
+          {nav === "agents" && (
+            <AgentBindingsView
+              highlightAgentId={highlightAgentId}
+              onNavigatePools={(poolId) => {
+                if (poolId) setSelectedPoolId(poolId);
+                setNav("pools");
+              }}
+            />
+          )}
+
+          {nav === "routing" && (
+            <RoutingTraceView
+              onOpenSimulation={(poolId) => {
+                setSimDefaultPoolId(poolId);
+                setSimDefaultModelId(undefined);
+                setSimModalOpen(true);
+              }}
+            />
+          )}
+
           {nav === "logs" && (
             <LogsPanel
               currentLogTotal={currentLogTotal}
@@ -1244,6 +1570,39 @@ export function Dashboard() {
       </div>
 
       <ColdSwitchModal />
+      <CreatePoolModal
+        open={createPoolOpen}
+        onClose={() => setCreatePoolOpen(false)}
+        onCreatedWithAgents={(pool, agentIds) => {
+          setPendingMountDiffs(agentIds.map((agentId) => ({ pool, agentId })));
+        }}
+      />
+      {activeCreationDiff && (
+        <ConfigDiffModal
+          open={Boolean(activeCreationDiff)}
+          binding={activeCreationDiff.binding}
+          actionKind="update_mounts"
+          targetSummary={{
+            mountedPoolNames: activeCreationDiff.mountedPoolNames,
+            defaultModelDisplay: activeCreationDiff.defaultModelDisplay,
+          }}
+          beforeText={activeCreationDiff.beforeText}
+          afterText={activeCreationDiff.afterText}
+          onClose={() => setPendingMountDiffs((prev) => prev.slice(1))}
+          onConfirm={() => {
+            mountPoolToAgents(activeCreationDiff.pool.id, [
+              activeCreationDiff.binding.agentId,
+            ]);
+          }}
+        />
+      )}
+      <PoolSimulationModal
+        open={simModalOpen}
+        defaultPoolId={simDefaultPoolId}
+        defaultModelId={simDefaultModelId}
+        onClose={() => setSimModalOpen(false)}
+        onOpenRoutingView={() => setNav("routing")}
+      />
       <ImportAccountModal
         open={importOpen || Boolean(bindTargetAccount)}
         defaultToolId={bindTargetAccount?.toolId ?? importPresetTool ?? activeToolFilter}

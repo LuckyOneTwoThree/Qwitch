@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   ArrowLeftRight,
   CheckCircle2,
   Download,
   ExternalLink,
+  Layers,
   Loader2,
   Moon,
   Power,
@@ -13,13 +15,16 @@ import {
   Sun,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
+import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import { getEffectiveClaimStatus, selectScopedStats } from "../domain/selectors";
+import { computeAgentExposedModels, computePoolAggregateQuota, makeDefaultModelKey } from "../data/mockPoolData";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
 import { ColdSwitchModal } from "../components/ColdSwitchModal";
 import { AccountStatusBadge, ClaimStatusBadge } from "../components/StatusBadge";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
+import { AgentBrandIcon } from "../components/AgentBrandIcon";
 import type { ToolId } from "../types/qwitch";
 
 function formatCompactQuota(value: number): string {
@@ -48,7 +53,19 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     isTauriRuntime,
   } = useQwitch();
 
+  const [trayTab, setTrayTab] = useState<"accounts" | "pools">("accounts");
   const [toolFilter, setToolFilter] = useState<"all" | ToolId>("all");
+  const {
+    gateway,
+    pools,
+    agentBindings,
+    toggleGateway,
+    updateAgentMountedPools,
+    setAgentDefaultModel,
+    unbindAgent,
+    repairAgentDrift,
+    restartAgentClient,
+  } = usePoolPrototype();
   const {
     installing: updateInstalling,
     runPrimaryAction: runUpdatePrimaryAction,
@@ -308,8 +325,47 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           </div>
         </div>
 
+        {/* 托盘双态切换：账号与签到 | 号池与指向 */}
+        <div
+          role="tablist"
+          aria-label="托盘视图模式"
+          className="mt-2 grid grid-cols-2 gap-1 rounded-xl bg-zinc-100 p-0.5 dark:bg-zinc-800/80"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={trayTab === "accounts"}
+            onClick={() => setTrayTab("accounts")}
+            className={`rounded-lg px-2 py-1 text-[11px] font-medium transition ${
+              trayTab === "accounts"
+                ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
+                : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            }`}
+          >
+            账号与签到
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={trayTab === "pools"}
+            onClick={() => setTrayTab("pools")}
+            className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1 text-[11px] font-medium transition ${
+              trayTab === "pools"
+                ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
+                : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            }`}
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                gateway.running ? "bg-emerald-500" : "bg-zinc-400"
+              }`}
+            />
+            号池与指向
+          </button>
+        </div>
+
         {/* 快捷工具筛选条 */}
-        {populatedGroups.length > 1 && (
+        {trayTab === "accounts" && populatedGroups.length > 1 && (
           <div
             role="tablist"
             aria-label="快捷工具筛选"
@@ -346,9 +402,161 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
         )}
       </header>
 
-      {/* 账号列表滚动画布 */}
+      {/* 账号 / 号池滚动画布 */}
       <div className="mask-fade-b min-h-0 flex-1 space-y-2.5 overflow-y-auto scroll-smooth p-3 pb-5">
-        <BatchClaimBanner compact />
+        {trayTab === "pools" ? (
+          <div className="space-y-2.5">
+            {/* 本地网关控制条 */}
+            <div className="surface-card flex items-center justify-between gap-2 px-3 py-2">
+              <div className="flex min-w-0 items-center gap-2 text-xs">
+                <span
+                  className={`h-2 w-2 shrink-0 rounded-full ${
+                    gateway.running ? "bg-emerald-500" : "bg-zinc-400"
+                  }`}
+                />
+                <span className="font-semibold text-zinc-900 dark:text-zinc-100">本地网关</span>
+                <code className="truncate font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
+                  {gateway.host}:{gateway.port}
+                </code>
+              </div>
+              <button
+                type="button"
+                onClick={toggleGateway}
+                className={`btn btn-xs shrink-0 ${
+                  gateway.running ? "btn-secondary" : "btn-primary"
+                }`}
+              >
+                {gateway.running ? "停止" : "启动"}
+              </button>
+            </div>
+
+            {/* 4 个目标 Agent 快速默认模型热切换 */}
+            <section className="space-y-1.5">
+              <div className="flex items-center justify-between px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                <span>Agent 指向与 ★ 默认模型热切</span>
+                <span>多号池可在主面板配置</span>
+              </div>
+              {agentBindings.map((b) => {
+                const exposed = computeAgentExposedModels(b, pools);
+                const selectedVal = b.defaultModelKey ?? "";
+                const poolOptions = pools.flatMap((p) =>
+                  p.modelPolicies
+                    .filter((mp) => mp.enabled)
+                    .map((mp) => ({
+                      key: makeDefaultModelKey(p.id, mp.modelId),
+                      label: `${mp.modelId} · ${p.name}`,
+                      mounted: b.mountedPoolIds.includes(p.id),
+                    }))
+                );
+
+                return (
+                  <div key={b.agentId} className="surface-card space-y-1.5 p-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <AgentBrandIcon agentId={b.agentId} size="xs" />
+                        <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                          {b.name}
+                        </span>
+                        {b.mountedPoolIds.length > 0 && (
+                          <span className="badge badge-neutral">
+                            已挂 {b.mountedPoolIds.length} 池 · {exposed.length} 模
+                          </span>
+                        )}
+                        {b.status === "drifted" && (
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-300">
+                            <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+                            漂移
+                          </span>
+                        )}
+                        {b.status === "needs_restart" && (
+                          <span className="text-[10px] font-medium text-sky-600 dark:text-sky-300">
+                            待重启
+                          </span>
+                        )}
+                      </div>
+
+                      {b.status === "drifted" ? (
+                        <button
+                          type="button"
+                          onClick={() => repairAgentDrift(b.agentId)}
+                          className="btn btn-xs btn-primary shrink-0"
+                        >
+                          修复
+                        </button>
+                      ) : b.status === "needs_restart" ? (
+                        <button
+                          type="button"
+                          onClick={() => restartAgentClient(b.agentId)}
+                          className="btn btn-xs btn-sky-soft shrink-0"
+                        >
+                          重启
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <select
+                      value={selectedVal}
+                      aria-label={`切换 ${b.name} 默认模型或号池`}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (!val) {
+                          unbindAgent(b.agentId);
+                          return;
+                        }
+                        const [pid] = val.split("::");
+                        if (b.mountedPoolIds.includes(pid)) {
+                          setAgentDefaultModel(b.agentId, val);
+                        } else {
+                          updateAgentMountedPools(
+                            b.agentId,
+                            [...b.mountedPoolIds, pid],
+                            val
+                          );
+                        }
+                      }}
+                      className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-800 focus:border-brand-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                    >
+                      <option value="">-- 未指向（使用原厂配置） --</option>
+                      {poolOptions.map((opt) => (
+                        <option key={opt.key} value={opt.key}>
+                          {opt.mounted ? "★ " : "+ 挂载并设为默认: "}
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
+            </section>
+
+            {/* 号池水位速览 */}
+            <section className="space-y-1.5">
+              <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                号池聚合水位
+              </div>
+              {pools.map((pool) => {
+                const agg = computePoolAggregateQuota(pool.members);
+                return (
+                  <div key={pool.id} className="surface-card px-2.5 py-2">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="truncate font-semibold text-zinc-900 dark:text-zinc-100">
+                        {pool.name}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-zinc-600 dark:text-zinc-300">
+                        均余 {agg}% · {pool.members.length} 成员
+                      </span>
+                    </div>
+                    <div className="meter mt-1.5">
+                      <div className="meter-fill" style={{ width: `${agg}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </section>
+          </div>
+        ) : (
+          <>
+            <BatchClaimBanner compact />
 
         {isInitializing ? (
           <div className="space-y-2.5" aria-label="正在加载账号" role="status">
@@ -618,11 +826,24 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
             )}
           </>
         )}
+          </>
+        )}
       </div>
 
       {/* 底部智能操作栏 */}
       <footer className="flex shrink-0 items-center gap-2 border-t border-zinc-200/80 bg-white/90 px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
-        {renderFooterClaimButton()}
+        {trayTab === "pools" ? (
+          <button
+            type="button"
+            onClick={onOpenMain}
+            className="btn btn-md btn-primary min-w-0 flex-1 gap-1.5 whitespace-nowrap"
+          >
+            <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            打开主面板编排号池
+          </button>
+        ) : (
+          renderFooterClaimButton()
+        )}
 
         <button
           type="button"

@@ -1,5 +1,6 @@
 pub mod crypto;
 mod logs;
+pub mod pools;
 mod settings;
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, Utc};
@@ -24,6 +25,8 @@ pub enum StorageError {
     Serde(#[from] serde_json::Error),
     #[error("Record not found: {0}")]
     NotFound(String),
+    #[error("{0}")]
+    Validation(String),
     #[error("Internal lock poisoned")]
     LockPoisoned,
 }
@@ -201,6 +204,99 @@ impl QwitchDatabase {
             "CREATE INDEX IF NOT EXISTS idx_logs_archived_status ON action_logs(archived_at, result_status)",
             [],
         );
+
+        // v0.6 号池网关与 Agent 指向表（增量扩展，不影响已有 4 张核心表）
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS account_pools (
+                id TEXT PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                scene_tag TEXT NOT NULL DEFAULT '自定义',
+                strategy TEXT NOT NULL DEFAULT 'quota_first',
+                affinity_mode TEXT NOT NULL DEFAULT 'auto_cache',
+                skip_active_client_account INTEGER NOT NULL DEFAULT 1,
+                cooldown_seconds INTEGER NOT NULL DEFAULT 60,
+                auto_refresh_on_401 INTEGER NOT NULL DEFAULT 1,
+                fallback_api_key_enabled INTEGER NOT NULL DEFAULT 1,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                today_requests INTEGER NOT NULL DEFAULT 0,
+                today_failovers INTEGER NOT NULL DEFAULT 0,
+                cache_hit_rate INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pool_model_policies (
+                pool_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                fallback_model_id TEXT,
+                claude_alias_id TEXT,
+                PRIMARY KEY (pool_id, model_id),
+                FOREIGN KEY (pool_id) REFERENCES account_pools(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS pool_members (
+                id TEXT PRIMARY KEY,
+                pool_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                supported_models_json TEXT NOT NULL,
+                tier TEXT NOT NULL DEFAULT 't1_primary',
+                priority INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_latency_ms INTEGER,
+                FOREIGN KEY (pool_id) REFERENCES account_pools(id) ON DELETE CASCADE,
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+                UNIQUE(pool_id, account_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_bindings (
+                agent_id TEXT PRIMARY KEY,
+                mounted_pool_ids_json TEXT NOT NULL DEFAULT '[]',
+                default_model_key TEXT,
+                binding_token_hash TEXT NOT NULL DEFAULT '',
+                options_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'unbound',
+                last_hit_at TEXT,
+                last_checked_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_config_stashes (
+                agent_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                original_existed INTEGER NOT NULL,
+                original_content_encrypted BLOB,
+                captured_at TEXT NOT NULL,
+                PRIMARY KEY (agent_id, file_path)
+            );
+
+            CREATE TABLE IF NOT EXISTS gateway_request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                pool_id TEXT NOT NULL,
+                pool_name TEXT NOT NULL,
+                incoming_protocol TEXT NOT NULL,
+                upstream_protocol TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                final_account_label TEXT NOT NULL,
+                final_tool_id TEXT NOT NULL,
+                final_model TEXT NOT NULL,
+                status TEXT NOT NULL,
+                cache_affinity_hit INTEGER NOT NULL DEFAULT 0,
+                ttft_ms INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                attempts_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_pool_members_pool ON pool_members(pool_id, priority ASC);
+            CREATE INDEX IF NOT EXISTS idx_gateway_logs_id ON gateway_request_logs(id DESC);
+            ",
+        )?;
         Ok(())
     }
 

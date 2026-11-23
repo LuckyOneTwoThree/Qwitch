@@ -121,6 +121,59 @@ pub fn is_aad_sealed(blob: &[u8]) -> bool {
     blob.len() >= AAD_MAGIC.len() && &blob[..AAD_MAGIC.len()] == AAD_MAGIC
 }
 
+/// 使用 AES-256-GCM + `QWA1` + AAD 加密任意字节载荷（用于 Agent 原始配置 Stash 等）。
+pub fn encrypt_bytes_with_aad(
+    master_key: &[u8; 32],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    let cipher =
+        Aes256Gcm::new_from_slice(master_key).map_err(|e| StorageError::Crypto(e.to_string()))?;
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| StorageError::Crypto(format!("Encryption failed: {e}")))?;
+
+    let mut out = Vec::with_capacity(AAD_MAGIC.len() + NONCE_LEN + ciphertext.len());
+    out.extend_from_slice(AAD_MAGIC);
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// 解密由 `encrypt_bytes_with_aad` 生成的密文。
+pub fn decrypt_bytes_with_aad(
+    master_key: &[u8; 32],
+    aad: &[u8],
+    blob: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    if blob.len() < AAD_MAGIC.len() + NONCE_LEN || &blob[..AAD_MAGIC.len()] != AAD_MAGIC {
+        return Err(StorageError::Crypto("Invalid encrypted stash format".into()));
+    }
+    let cipher =
+        Aes256Gcm::new_from_slice(master_key).map_err(|e| StorageError::Crypto(e.to_string()))?;
+    let rest = &blob[AAD_MAGIC.len()..];
+    let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|e| StorageError::Crypto(format!("Decryption failed: {e}")))
+}
+
 pub fn key_fingerprint(master_key: &[u8; 32]) -> String {
     hex::encode(&Sha256::digest(master_key)[..16])
 }

@@ -500,3 +500,24 @@ mod profile_resolve_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+/// 启动指定工具的官方客户端（不注入多开参数）。
+///
+/// 用途：某些工具的凭据由客户端自行托管与刷新（如码道 CodeArts 的
+/// AK/SK 走一次性 refresh token 轮换，Qwitch 不应代刷）。当凭据过期时，
+/// UI 上给用户一个「打开客户端」按钮，由客户端完成刷新，比让用户自己去
+/// 找安装路径更省事。
+///
+/// **安全**：可执行文件经 `resolve_client_executable` → `validate_client_executable`
+/// 双重校验（名称白名单 + bundle 结构 + 受信任安装目录），与切号路径同一套约束。
+#[tauri::command]
+pub fn launch_tool_client(state: State<'_, AppState>, tool_id: String) -> Result<String, String> {
+    let settings = load_app_settings(&state.db);
+    let exe = resolve_client_executable(state.host.as_ref(), &settings, &tool_id)
+        .ok_or_else(|| format!("未检测到 {tool_id} 客户端安装路径，请先在设置中配置客户端路径"))?;
+    state
+        .host
+        .launch_client(&exe, &[])
+        .map_err(|e| format!("启动 {tool_id} 客户端失败: {e}"))?;
+    Ok(exe.to_string_lossy().to_string())
+}

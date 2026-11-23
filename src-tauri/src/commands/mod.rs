@@ -1,6 +1,7 @@
 mod accounts;
 mod logs;
 mod oauth;
+mod pools;
 mod profile;
 mod settings;
 mod switch;
@@ -8,6 +9,7 @@ mod switch;
 pub use accounts::*;
 pub use logs::*;
 pub use oauth::*;
+pub use pools::*;
 pub use profile::*;
 pub use settings::*;
 pub use switch::*;
@@ -21,6 +23,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::adapter::{AdapterError, ToolAdapter};
 use crate::domain::{AccountStatus, AccountSummary, AppSettingsDto, UnifiedErrorCode};
+use crate::gateway::GatewayRuntime;
 use crate::platform::PlatformHost;
 use crate::scheduler::AntiRiskScheduler;
 use crate::storage::QwitchDatabase;
@@ -116,6 +119,7 @@ pub struct AppState {
     pub host: Arc<dyn PlatformHost>,
     pub adapters: Arc<HashMap<String, Arc<dyn ToolAdapter>>>,
     pub scheduler: Arc<AntiRiskScheduler>,
+    pub gateway: Arc<GatewayRuntime>,
     pub oauth_flow_seq: Arc<AtomicU64>,
     /// 已被消费的 OAuth 回调 nonce 集合。
     ///

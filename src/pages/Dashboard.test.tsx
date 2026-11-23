@@ -74,9 +74,17 @@ const navButton = (name: RegExp) =>
 describe("Dashboard navigation", () => {
   it("starts on the all-accounts view with aria-current and a total count", () => {
     render(<Dashboard />);
-    const all = within(screen.getByRole("navigation", { name: "账号视图导航" })).getAllByRole("button")[0];
-    expect(all.getAttribute("aria-current")).toBe("page");
-    expect(all.textContent).toContain(String(INITIAL_ACCOUNTS.length));
+    const mainAll = within(screen.getByRole("navigation", { name: "主功能导航" })).getAllByRole(
+      "button"
+    )[0];
+    expect(mainAll.textContent).toContain("账号资产");
+    expect(mainAll.getAttribute("aria-current")).toBe("page");
+
+    const toolAll = within(screen.getByRole("navigation", { name: "账号视图导航" })).getAllByRole(
+      "button"
+    )[0];
+    expect(toolAll.getAttribute("aria-current")).toBe("page");
+    expect(toolAll.textContent).toContain(String(INITIAL_ACCOUNTS.length));
     expect(screen.queryByTestId("settings-view")).toBeNull();
     expect(screen.queryByTestId("logs-panel")).toBeNull();
   });
@@ -100,7 +108,7 @@ describe("Dashboard navigation", () => {
     render(<Dashboard />);
     fireEvent.click(navButton(/设置与环境/));
     expect(navButton(/设置与环境/).getAttribute("aria-current")).toBe("page");
-    expect(navButton(/全部账号/).getAttribute("aria-current")).toBeNull();
+    expect(navButton(/账号资产/).getAttribute("aria-current")).toBeNull();
     expect(screen.getByTestId("settings-view")).toBeTruthy();
   });
 
@@ -118,7 +126,7 @@ describe("Dashboard navigation", () => {
     expect(resetSettingsDrafts).not.toHaveBeenCalled();
     fireEvent.click(navButton(/设置与环境/));
     expect(resetSettingsDrafts).not.toHaveBeenCalled();
-    fireEvent.click(navButton(/全部账号/));
+    fireEvent.click(navButton(/账号资产/));
     expect(resetSettingsDrafts).toHaveBeenCalledTimes(1);
   });
 
@@ -141,7 +149,8 @@ describe("Dashboard navigation", () => {
     };
 
     render(<Dashboard />);
-    fireEvent.click(navButton(/豆包工作/));
+    const toolNav = within(screen.getByRole("navigation", { name: "账号视图导航" }));
+    fireEvent.click(toolNav.getByRole("button", { name: /豆包工作/ }));
 
     expect(screen.queryByLabelText("搜索账号")).toBeNull();
     expect(screen.getByText("添加第 2 个 豆包工作 账号")).toBeTruthy();
@@ -155,11 +164,23 @@ describe("Dashboard navigation", () => {
     fireEvent.change(searchInput, { target: { value: "Trae" } });
     expect(searchInput.value).toBe("Trae");
 
-    fireEvent.click(navButton(/豆包工作/));
+    const toolNav = within(screen.getByRole("navigation", { name: "账号视图导航" }));
+    fireEvent.click(toolNav.getByRole("button", { name: /豆包工作/ }));
     expect(screen.queryByText("当前筛选条件下暂无匹配账号")).toBeNull();
 
-    fireEvent.click(navButton(/全部账号/));
+    fireEvent.click(toolNav.getByRole("button", { name: /全部账号/ }));
     const resetInput = screen.getByLabelText("搜索账号") as HTMLInputElement;
     expect(resetInput.value).toBe("");
+  });
+
+  it("switches to pools and agents workspaces from the consolidated sidebar", () => {
+    render(<Dashboard />);
+    const mainNav = within(screen.getByRole("navigation", { name: "主功能导航" }));
+
+    fireEvent.click(mainNav.getByRole("button", { name: /号池编排/ }));
+    expect(screen.getByRole("heading", { name: "号池编排与调度策略" })).toBeTruthy();
+
+    fireEvent.click(mainNav.getByRole("button", { name: /Agent 指向/ }));
+    expect(screen.getByRole("heading", { name: "Agent 指向与配置挂载" })).toBeTruthy();
   });
 });

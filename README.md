@@ -89,7 +89,7 @@
 
 ### ✅ 工程质量
 
-- 134 个 Rust 单元 / 回归测试 + 122 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、ESLint、构建、测试、`cargo fmt` / `clippy -D warnings` / `cargo audit`。
+- 190 个 Rust 单元 / 回归测试 + 130 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、ESLint、构建、测试、`cargo fmt` / `clippy -D warnings` / `cargo audit`。
 - 标签触发 Release 流水线，自动构建并发布 macOS Apple Silicon（arm64）、macOS Intel（x64）与 Windows x64 三个独立安装包。
 
 ## 支持的工具
@@ -167,7 +167,7 @@ npm run tauri build    # 构建本地安装包
 - **严格 CSP**：`script-src 'self'`，禁用内联脚本与外部加载，`object-src 'none'` / `base-uri 'self'` / `frame-ancestors 'none'`。
 - **授权隔离**：内置 OAuth 窗口校验一次性 nonce + 精确回调路径 + 流程序号，导航限定官方域名白名单；nonce **一次性消费**，同一回调重复投递会被拒绝。
 - **插件零信任**：外部适配器默认不加载、不接收凭据；信任需经**系统原生确认对话框**签发与内容哈希绑定的一次性票据（120 秒有效、用后即焚），启动与每次 RPC 执行前均重校验目录内容哈希与入口命令/参数约束（仅放行插件目录内脚本与白名单解释器）。
-- **IPC 最小权限**：36 个应用命令经 `build.rs` 声明并按 `main` / `tray` 窗口拆分 capability（`tray` 仅开放只读、刷新、领取与切号所需最小命令集），渲染进程无法调用未授权能力。
+- **IPC 最小权限**：70 个应用命令经 `build.rs` 声明并按 `main` / `tray` 窗口拆分 capability（`tray` 仅开放只读、刷新、领取与切号所需最小命令集），渲染进程无法调用未授权能力。
 - **可执行文件白名单**：自定义客户端路径在保存与启动两个环节校验名称、bundle 结构与受信任安装目录，避免「写入任意路径 → 启动执行」链路。
 - **更新防降级**：安装前重新拉取最新版本，校验版本单调性与资产 / 校验和地址逐字一致，阻断降级安装与跨版本替换。
 - **失败熔断**：401 → 凭据过期、403/429 → 风控暂停并熔断该工具；5xx / 网络错误连续 3 次同样熔断，避免平台整体不可用时逐个账号硬打。
@@ -241,8 +241,8 @@ npm run dev                  # 仅前端（浏览器 Mock 预览）
 npm run tauri dev            # 桌面应用开发模式
 npm run build                # 前端类型检查 + 生产构建
 npm run lint                 # ESLint（含 react-hooks/exhaustive-deps 作为 error）
-npm test                     # 前端测试（Vitest，122 例）
-cd src-tauri && cargo test   # 后端测试（134 例）
+npm test                     # 前端测试（Vitest，130 例）
+cd src-tauri && cargo test   # 后端测试（190 例）
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
@@ -280,7 +280,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 - [x] 归档日志自动清底（归档超保留窗口自动清除 + 5000 上限）
 - [x] Context 按更新频次拆分（Account/Log/Settings/Feedback 四 store）+ 单账号增量同步
 - [x] 组件级测试与 Tauri bundle CI 构建校验
-- [x] IPC 命令级 ACL（36 命令按 `main` / `tray` 窗口最小授权）、插件信任原生确认票据（哈希绑定）、客户端可执行文件白名单
+- [x] IPC 命令级 ACL（70 命令按 `main` / `tray` 窗口最小授权）、插件信任原生确认票据（哈希绑定）、客户端可执行文件白名单
 - [x] 更新防降级（版本单调性 + 资产一致性校验）、OAuth nonce 一次性消费、5xx 连续熔断
 - [x] WAL 增长治理、日志统计覆盖索引与命令异步化、mock 数据隔离出生产包
 - [x] ESLint 接入 CI、wiremock HTTP 测试基建、核心 store 与 Modal 组件测试

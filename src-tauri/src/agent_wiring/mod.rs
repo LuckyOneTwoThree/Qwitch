@@ -136,12 +136,13 @@ pub fn detect_global_proxy_active() -> bool {
         .or_else(|_| std::env::var("no_proxy"))
         .unwrap_or_default();
     let loopback_bypassed = no_proxy.contains("127.0.0.1") && no_proxy.contains("localhost");
-    if has_env_proxy && !loopback_bypassed {
-        return true;
-    }
+    let env_proxy_active = has_env_proxy && !loopback_bypassed;
 
     #[cfg(target_os = "macos")]
     {
+        if env_proxy_active {
+            return true;
+        }
         if let Ok(out) = Command::new("scutil").arg("--proxy").output() {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -151,8 +152,12 @@ pub fn detect_global_proxy_active() -> bool {
                 }
             }
         }
+        false
     }
-    false
+    #[cfg(not(target_os = "macos"))]
+    {
+        env_proxy_active
+    }
 }
 
 fn home_dir() -> PathBuf {

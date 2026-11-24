@@ -1581,6 +1581,22 @@ pub fn restart_agent_process(
                 let _ = Command::new("pkill")
                     .args(["-f", "codex.*app-server"])
                     .output();
+                // ChatGPT/Codex 桌面端通常会自行拉起被杀掉的 app-server；若未拉起，
+                // 主动打开桌面应用，避免桌面停留在「重新连接」。
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let alive = Command::new("pgrep")
+                    .args(["-f", "codex.*app-server"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !alive {
+                    for app in ["/Applications/Codex.app", "/Applications/ChatGPT.app"] {
+                        if std::path::Path::new(app).exists() {
+                            let _ = Command::new("open").arg("-a").arg(app).spawn();
+                            break;
+                        }
+                    }
+                }
             }
             TargetAgentId::ClaudeDesktop => {
                 let isolated = stored.options.claude_isolated_twin.unwrap_or(false);

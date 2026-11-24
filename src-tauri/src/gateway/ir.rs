@@ -135,11 +135,11 @@ pub fn parse_openai_chat_request(body: &Value) -> Result<IrRequest, String> {
                     }
                 }
                 "tool" => {
-                    let call_id = msg
-                        .get("tool_call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("call_0")
-                        .to_string();
+                    let call_id = normalize_tool_call_id(
+                        msg.get("tool_call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("call_0"),
+                    );
                     messages.push(IrMessage {
                         role: IrRole::Tool,
                         parts: vec![IrPart::ToolResult {
@@ -279,11 +279,11 @@ pub fn parse_anthropic_messages_request(body: &Value) -> Result<IrRequest, Strin
                                 });
                             }
                             "tool_result" => {
-                                let call_id = b
-                                    .get("tool_use_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("call_0")
-                                    .to_string();
+                                let call_id = normalize_tool_call_id(
+                                    b.get("tool_use_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("call_0"),
+                                );
                                 let content = extract_text_from_value(b.get("content"));
                                 let is_error =
                                     b.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -382,11 +382,11 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
                         });
                     }
                     "function_call_output" => {
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("call_0")
-                            .to_string();
+                        let call_id = normalize_tool_call_id(
+                            item.get("call_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("call_0"),
+                        );
                         let content = extract_text_from_value(item.get("output"));
                         messages.push(IrMessage {
                             role: IrRole::Tool,
@@ -1391,6 +1391,49 @@ mod tests {
             to_openai_chat_response(&resp)["choices"][0]["finish_reason"],
             "length"
         );
+    }
+
+    #[test]
+    fn tool_call_and_result_ids_stay_consistent_for_long_ids() {
+        let long_id = format!("call_{}", "x".repeat(80));
+        // Responses: function_call 与 function_call_output 的 call_id 必须归一化一致
+        let req = parse_openai_responses_request(&json!({
+            "model": "m",
+            "input": [
+                {"type": "function_call", "call_id": long_id, "name": "read_file", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": long_id, "output": "body"}
+            ]
+        }))
+        .unwrap();
+        let tc_id = match &req.messages[0].parts[0] {
+            IrPart::ToolCall { id, .. } => id.clone(),
+            _ => panic!("expect tool call"),
+        };
+        let tr_id = match &req.messages[1].parts[0] {
+            IrPart::ToolResult { call_id, .. } => call_id.clone(),
+            _ => panic!("expect tool result"),
+        };
+        assert_eq!(tc_id, tr_id);
+        assert_eq!(tc_id, normalize_tool_call_id(&long_id));
+
+        // Anthropic: tool_use 与 tool_result 的 id 必须归一化一致
+        let req2 = parse_anthropic_messages_request(&json!({
+            "model": "m",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": long_id, "name": "read_file", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": long_id, "content": "body"}]}
+            ]
+        }))
+        .unwrap();
+        let a = match &req2.messages[0].parts[0] {
+            IrPart::ToolCall { id, .. } => id.clone(),
+            _ => panic!("expect tool use"),
+        };
+        let b = match &req2.messages[1].parts[0] {
+            IrPart::ToolResult { call_id, .. } => call_id.clone(),
+            _ => panic!("expect tool result"),
+        };
+        assert_eq!(a, b);
     }
 
     #[test]

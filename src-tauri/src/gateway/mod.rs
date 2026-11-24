@@ -153,7 +153,7 @@ impl GatewayRuntime {
     }
 
     pub fn refresh_lock_for(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self.refresh_locks.lock().expect("refresh locks");
+        let mut map = self.refresh_locks.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(account_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -1455,6 +1455,17 @@ async fn call_upstream_member(
 
         let resp = req.send().await.map_err(|e| format!("上游请求失败: {e}"))?;
         let code = resp.status().as_u16();
+        // 防内存耗尽：声明体积过大的上游响应直接拒绝（流式为逐块转发，不受此限）
+        const MAX_UPSTREAM_BODY: u64 = 64 * 1024 * 1024;
+        if resp
+            .content_length()
+            .is_some_and(|len| len > MAX_UPSTREAM_BODY)
+        {
+            return Err(format!(
+                "上游响应体过大（>{} MB）已拒绝",
+                MAX_UPSTREAM_BODY / (1024 * 1024)
+            ));
+        }
         let text = resp.text().await.unwrap_or_default();
         if attempt == 0
             && is_workbuddy_chat

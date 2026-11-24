@@ -1552,6 +1552,51 @@ pub fn unbind_and_restore_agent(
     ))
 }
 
+#[cfg(target_os = "macos")]
+fn restart_codex_desktop_app() {
+    // 真正退出并重新打开 GPT/Codex 桌面应用，确保它加载最新的 ~/.codex/config.toml
+    // （仅 pkill app-server 会被桌面 supervisor 立即重新拉起，且 open -a 对已运行应用只是
+    // 激活、不会重载配置，故必须“退出应用→重新打开”。）
+    for name in ["ChatGPT", "Codex"] {
+        let running = Command::new("pgrep")
+            .args(["-x", name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !running {
+            continue;
+        }
+        let _ = Command::new("osascript")
+            .args(["-e", &format!("tell application \"{name}\" to quit")])
+            .output();
+        for _ in 0..24 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let still = Command::new("pgrep")
+                .args(["-x", name])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !still {
+                break;
+            }
+        }
+        let still = Command::new("pgrep")
+            .args(["-x", name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if still {
+            let _ = Command::new("pkill").args(["-x", name]).output();
+        }
+    }
+    for app in ["/Applications/ChatGPT.app", "/Applications/Codex.app"] {
+        if std::path::Path::new(app).exists() {
+            let _ = Command::new("open").arg("-a").arg(app).spawn();
+            break;
+        }
+    }
+}
+
 pub fn restart_agent_process(
     db: &QwitchDatabase,
     agent_id: TargetAgentId,
@@ -1578,25 +1623,11 @@ pub fn restart_agent_process(
         #[cfg(target_os = "macos")]
         match agent_id {
             TargetAgentId::CodexDesktop => {
+                // 先杀掉后台 app-server，再真正重启 GPT/Codex 桌面应用（退出→重开）
                 let _ = Command::new("pkill")
                     .args(["-f", "codex.*app-server"])
                     .output();
-                // ChatGPT/Codex 桌面端通常会自行拉起被杀掉的 app-server；若未拉起，
-                // 主动打开桌面应用，避免桌面停留在「重新连接」。
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let alive = Command::new("pgrep")
-                    .args(["-f", "codex.*app-server"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if !alive {
-                    for app in ["/Applications/Codex.app", "/Applications/ChatGPT.app"] {
-                        if std::path::Path::new(app).exists() {
-                            let _ = Command::new("open").arg("-a").arg(app).spawn();
-                            break;
-                        }
-                    }
-                }
+                restart_codex_desktop_app();
             }
             TargetAgentId::ClaudeDesktop => {
                 let isolated = stored.options.claude_isolated_twin.unwrap_or(false);

@@ -738,7 +738,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     className="btn btn-xs btn-sky-soft gap-1"
                   >
                     <RotateCcw className="h-3 w-3" aria-hidden="true" />
-                    {activeBinding.agentId === "codex_desktop" ? "重启 app-server" : "立即重启生效"}
+                    {activeBinding.agentId === "codex_desktop" ? "重启 ChatGPT 桌面版" : "立即重启生效"}
                   </button>
                 ) : null}
 

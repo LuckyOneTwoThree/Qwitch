@@ -1550,7 +1550,7 @@ export function PoolPrototypeProvider({
         })
       );
       if (agentId === "codex_desktop") {
-        notify("已精准重启 Codex app-server 后台进程（桌面窗口保持打开未中断）", "success");
+        notify("已重启 ChatGPT/Codex 桌面应用以加载最新配置", "success");
       } else {
         const agentName = rawBindings.find((b) => b.agentId === agentId)?.name ?? agentId;
         notify(`已重启 ${agentName}，最新 Qwitch 网关配置已生效`, "success");

@@ -39,6 +39,8 @@ struct GatewayInner {
     sim_proxy_override: Option<bool>,
     sim_bridge_override: Option<(String, String)>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// 每号池进程内轮询游标（避免并发请求读到同一 today_requests 快照而全部命中同一账号）
+    rr_counters: HashMap<String, u64>,
 }
 
 pub struct GatewayRuntime {
@@ -65,6 +67,7 @@ impl GatewayRuntime {
                 sim_proxy_override: None,
                 sim_bridge_override: None,
                 shutdown_tx: None,
+                rr_counters: HashMap::new(),
             }),
             refresh_locks: Mutex::new(HashMap::new()),
         }
@@ -138,6 +141,15 @@ impl GatewayRuntime {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.sim_bridge_override = Some(next.clone());
         next
+    }
+
+    /// 返回该号池下一个轮询序号（进程内单调递增，避免并发同序）。
+    pub fn next_round_robin(&self, pool_id: &str) -> u64 {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let c = g.rr_counters.entry(pool_id.to_string()).or_insert(0);
+        let v = *c;
+        *c = c.wrapping_add(1);
+        v
     }
 
     pub fn refresh_lock_for(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -2283,6 +2295,12 @@ async fn handle_http_connection(
                 }
             }
         };
+
+    // P2-9：RoundRobin 用进程内原子游标替代 today_requests 快照，避免并发请求同序惊群
+    let mut pool = pool;
+    if matches!(pool.strategy, crate::domain::PoolStrategy::RoundRobin) {
+        pool.today_requests = runtime.next_round_robin(&pool.id);
+    }
 
     let session_key = headers
         .get("x-conversation-id")

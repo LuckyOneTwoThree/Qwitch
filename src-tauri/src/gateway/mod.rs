@@ -1275,13 +1275,30 @@ async fn call_upstream_member(
     let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
     let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
     let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
-    let base_url = custom_base.unwrap_or_else(|| match member.tool_id.as_str() {
-        "minimax_code_cn" => "https://agent.minimax.cn/mavis/api/v1/llm".into(),
-        "workbuddy" => "https://copilot.tencent.com".into(),
-        "qoder_cn" => "https://gateway.qoder.com.cn".into(),
-        "trae_cn" => "https://trae-api-cn.mchost.guru".into(),
-        _ => "https://api.openai.com".into(),
-    });
+    let default_base = match member.tool_id.as_str() {
+        "minimax_code_cn" => "https://agent.minimax.cn/mavis/api/v1/llm".to_string(),
+        "workbuddy" => "https://copilot.tencent.com".to_string(),
+        "qoder_cn" => "https://gateway.qoder.com.cn".to_string(),
+        "trae_cn" => "https://trae-api-cn.mchost.guru".to_string(),
+        _ => "https://api.openai.com".to_string(),
+    };
+    // base_url 校验：允许 https，或明确指向本机的 http（本地模型/测试）。
+    // 拒绝任意明文 http 远程主机，降低凭据内被篡改 endpoint 造成的外发/SSRF 风险。
+    let base_url = match custom_base {
+        Some(b) => {
+            let is_loopback_http = b.starts_with("http://127.0.0.1")
+                || b.starts_with("http://localhost")
+                || b.starts_with("http://[::1]");
+            if !(b.starts_with("https://") || is_loopback_http) {
+                return Err(format!(
+                    "账号 {} 的 base_url 非法（仅支持 https 或本机 http）",
+                    member.label
+                ));
+            }
+            b
+        }
+        None => default_base,
+    };
     let base = base_url.trim_end_matches('/');
 
     let (url, mut body, auth_is_x_api_key) = match protocol {
@@ -1659,6 +1676,54 @@ fn parse_upstream_response_body(body_txt: &str, model: &str) -> IrResponse {
     }
 }
 
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const CONN_READ_TIMEOUT_SECS: u64 = 30;
+
+fn conn_read_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(CONN_READ_TIMEOUT_SECS)
+}
+
+fn conn_timeout_err() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "connection read timeout")
+}
+
+/// 读取 `Transfer-Encoding: chunked` 请求体，带总大小上限与逐块读超时。
+async fn read_chunked_body(reader: &mut BufReader<&mut TcpStream>) -> std::io::Result<Vec<u8>> {
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        let mut size_line = String::new();
+        let n = tokio::time::timeout(conn_read_timeout(), reader.read_line(&mut size_line))
+            .await
+            .map_err(|_| conn_timeout_err())??;
+        if n == 0 {
+            break;
+        }
+        let size_str = size_line.trim().split(';').next().unwrap_or("0").trim();
+        let size = usize::from_str_radix(size_str, 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        if body.len().saturating_add(size) > MAX_BODY_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunked body exceeds limit",
+            ));
+        }
+        let mut chunk = vec![0u8; size];
+        tokio::time::timeout(conn_read_timeout(), reader.read_exact(&mut chunk))
+            .await
+            .map_err(|_| conn_timeout_err())??;
+        body.extend_from_slice(&chunk);
+        let mut crlf = [0u8; 2];
+        let _ = tokio::time::timeout(conn_read_timeout(), reader.read_exact(&mut crlf))
+            .await
+            .map_err(|_| conn_timeout_err())?;
+    }
+    Ok(body)
+}
+
 async fn handle_http_connection(
     mut stream: TcpStream,
     runtime: Arc<GatewayRuntime>,
@@ -1668,8 +1733,21 @@ async fn handle_http_connection(
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(&mut stream);
     let mut request_line = String::new();
-    if reader.read_line(&mut request_line).await? == 0 {
+    let n = tokio::time::timeout(conn_read_timeout(), reader.read_line(&mut request_line))
+        .await
+        .map_err(|_| conn_timeout_err())??;
+    if n == 0 {
         return Ok(());
+    }
+    if request_line.len() > MAX_REQUEST_LINE_BYTES {
+        return write_http_response(
+            stream_from_reader(reader),
+            "414 URI Too Long",
+            "application/json",
+            br#"{"error":"Request line too long"}"#,
+            &[],
+        )
+        .await;
     }
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -1691,10 +1769,25 @@ async fn handle_http_connection(
 
     let mut headers: HashMap<String, String> = HashMap::new();
     let mut content_len: usize = 0;
+    let mut header_bytes = request_line.len();
     loop {
         let mut line = String::new();
-        if reader.read_line(&mut line).await? == 0 {
+        let n = tokio::time::timeout(conn_read_timeout(), reader.read_line(&mut line))
+            .await
+            .map_err(|_| conn_timeout_err())??;
+        if n == 0 {
             break;
+        }
+        header_bytes += n;
+        if header_bytes > MAX_HEADER_BYTES {
+            return write_http_response(
+                stream_from_reader(reader),
+                "431 Request Header Fields Too Large",
+                "application/json",
+                br#"{"error":"Headers too large"}"#,
+                &[],
+            )
+            .await;
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1737,10 +1830,43 @@ async fn handle_http_connection(
         .await;
     }
 
-    let mut body_bytes = vec![0u8; content_len.min(16 * 1024 * 1024)];
-    if !body_bytes.is_empty() {
-        reader.read_exact(&mut body_bytes).await?;
-    }
+    let is_chunked = headers
+        .get("transfer-encoding")
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    let body_bytes: Vec<u8> = if is_chunked {
+        match read_chunked_body(&mut reader).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return write_http_response(
+                    stream_from_reader(reader),
+                    "413 Payload Too Large",
+                    "application/json",
+                    br#"{"error":"Request body too large"}"#,
+                    &[],
+                )
+                .await;
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        if content_len > MAX_BODY_BYTES {
+            return write_http_response(
+                stream_from_reader(reader),
+                "413 Payload Too Large",
+                "application/json",
+                br#"{"error":"Request body too large"}"#,
+                &[],
+            )
+            .await;
+        }
+        let mut buf = vec![0u8; content_len];
+        if !buf.is_empty() {
+            tokio::time::timeout(conn_read_timeout(), reader.read_exact(&mut buf))
+                .await
+                .map_err(|_| conn_timeout_err())??;
+        }
+        buf
+    };
     let stream = stream_from_reader(reader);
 
     // WebSocket Upgrade 426 降级（Codex Desktop Responses 自动降级 HTTP SSE）

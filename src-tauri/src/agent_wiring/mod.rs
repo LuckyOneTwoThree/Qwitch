@@ -893,7 +893,7 @@ pub fn inspect_all_agent_bindings(
     base_dir_override: Option<&Path>,
 ) -> Result<Vec<AgentBinding>, String> {
     let stored_list = db.get_stored_agent_bindings().map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(6);
+    let mut out = Vec::with_capacity(TargetAgentId::all().len());
     for agent_id in TargetAgentId::all() {
         let stored = stored_list
             .iter()

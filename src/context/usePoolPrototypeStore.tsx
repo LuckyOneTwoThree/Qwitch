@@ -79,7 +79,11 @@ export interface PoolPrototypeContextValue {
   refreshUpstreamModels: (accountId?: string) => Promise<void>;
   toggleGateway: () => Promise<void>;
   gatewayBusy: boolean;
-  updateGatewayPort: (port: number) => Promise<{ ok: boolean; message?: string }>;
+  updateGatewayPort: (port: number) => Promise<{
+    ok: boolean;
+    message?: string;
+    runningDesktopAgentNames?: string[];
+  }>;
   checkGatewayPort: (port: number) => Promise<{
     available: boolean;
     inUseBySelf: boolean;
@@ -810,11 +814,20 @@ export function PoolPrototypeProvider({
         const { invoke } = await import("@tauri-apps/api/core");
         const ws = await invoke<PoolWorkspaceState>("update_gateway_port_cmd", { port });
         applyWorkspaceState(ws);
+        const desktopIds: TargetAgentId[] = [
+          "claude_desktop",
+          "codex_desktop",
+          "mimo",
+          "zcode",
+        ];
+        const runningDesktopAgentNames = ws.agentBindings
+          .filter((b) => desktopIds.includes(b.agentId) && b.running)
+          .map((b) => b.name);
         notify(
           `网关端口已更新为 127.0.0.1:${port}，已同步所有已挂载 Agent 配置（桌面客户端需重启生效）`,
           "success"
         );
-        return { ok: true };
+        return { ok: true, runningDesktopAgentNames };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         notify(`端口更新失败：${message}`, "error");

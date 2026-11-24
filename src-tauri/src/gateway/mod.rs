@@ -1429,6 +1429,59 @@ fn map_stop_anthropic_to_openai(stop: &str) -> &'static str {
     }
 }
 
+/// 跨 TCP 分块保持 UTF-8 多字节字符与 `\r\n` 换行符完整性的流式解码器。
+#[derive(Default)]
+struct Utf8SseDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8SseDecoder {
+    fn push_chunk(&mut self, bytes: &[u8], out: &mut String) {
+        self.pending.extend_from_slice(bytes);
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(valid) => {
+                    if let Some(prefix) = valid.strip_suffix('\r') {
+                        if !prefix.is_empty() {
+                            out.push_str(&prefix.replace("\r\n", "\n"));
+                        }
+                        self.pending.clear();
+                        self.pending.push(b'\r');
+                    } else {
+                        if !valid.is_empty() {
+                            out.push_str(&valid.replace("\r\n", "\n"));
+                        }
+                        self.pending.clear();
+                    }
+                    break;
+                }
+                Err(err) => {
+                    let valid_up_to = err.valid_up_to();
+                    if valid_up_to > 0 {
+                        if let Ok(prefix) = std::str::from_utf8(&self.pending[..valid_up_to]) {
+                            out.push_str(&prefix.replace("\r\n", "\n"));
+                        }
+                    }
+                    if let Some(bad_len) = err.error_len() {
+                        out.push('\u{FFFD}');
+                        self.pending.drain(..valid_up_to + bad_len);
+                    } else {
+                        self.pending.drain(..valid_up_to);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self, out: &mut String) {
+        if !self.pending.is_empty() {
+            out.push_str(&String::from_utf8_lossy(&self.pending).replace("\r\n", "\n"));
+            self.pending.clear();
+        }
+    }
+}
+
 #[derive(Default)]
 struct OpenAiToAnthropicState {
     next_block: usize,
@@ -1550,14 +1603,16 @@ async fn relay_openai_chat_to_anthropic(
     )
     .await?;
     let mut buf = String::new();
+    let mut decoder = Utf8SseDecoder::default();
     let mut st = OpenAiToAnthropicState {
         stop_reason: "end_turn".into(),
         ..Default::default()
     };
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+        decoder.push_chunk(&bytes, &mut buf);
         drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
     }
+    decoder.finish(&mut buf);
     drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
     if let Some(ti) = st.text_idx {
         write_sse_frame(
@@ -1707,14 +1762,16 @@ async fn relay_anthropic_to_openai_chat(
     let id = format!("chatcmpl-{}", &Uuid::new_v4().simple().to_string()[..12]);
     write_sse_frame(stream, None, &json!({"id":id,"object":"chat.completion.chunk","created":chrono::Utc::now().timestamp(),"model":model,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}).to_string()).await?;
     let mut buf = String::new();
+    let mut decoder = Utf8SseDecoder::default();
     let mut st = AnthropicToOpenAiState {
         stop_reason: "stop".into(),
         ..Default::default()
     };
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+        decoder.push_chunk(&bytes, &mut buf);
         drain_anthropic_events_to_openai(&mut buf, stream, &id, model, &mut st).await?;
     }
+    decoder.finish(&mut buf);
     drain_anthropic_events_to_openai(&mut buf, stream, &id, model, &mut st).await?;
     let _ = st.in_tokens;
     let tools = st.tools.clone();
@@ -2068,10 +2125,12 @@ async fn relay_openai_chat_to_responses(
     let mut st = new_responses_accum();
     responses_emit_created(&st, model, stream).await?;
     let mut buf = String::new();
+    let mut decoder = Utf8SseDecoder::default();
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+        decoder.push_chunk(&bytes, &mut buf);
         drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
     }
+    decoder.finish(&mut buf);
     drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
     responses_finish(&mut st, model, stream).await
 }
@@ -2086,10 +2145,12 @@ async fn relay_anthropic_to_responses(
     let mut st = new_responses_accum();
     responses_emit_created(&st, model, stream).await?;
     let mut buf = String::new();
+    let mut decoder = Utf8SseDecoder::default();
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+        decoder.push_chunk(&bytes, &mut buf);
         drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
     }
+    decoder.finish(&mut buf);
     drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
     responses_finish(&mut st, model, stream).await
 }
@@ -4562,5 +4623,31 @@ mod tests {
             req2["messages"][1]["content"],
             "<instructions>\nCustom Agent Prompt\n</instructions>\n\nping"
         );
+    }
+
+    #[test]
+    fn utf8_sse_decoder_preserves_split_multibyte_chars_and_crlf() {
+        let sample = "data: {\"text\":\"你好世界🚀\"}\r\n\r\ndata: [DONE]\r\n\r\n";
+        let raw = sample.as_bytes();
+
+        // 1-byte chunks split every 3-byte CJK char, 4-byte emoji, and \r\n pair.
+        let mut decoder1 = Utf8SseDecoder::default();
+        let mut out1 = String::new();
+        for b in raw.chunks(1) {
+            decoder1.push_chunk(b, &mut out1);
+        }
+        decoder1.finish(&mut out1);
+        assert!(!out1.contains('\u{FFFD}'));
+        assert_eq!(out1, sample.replace("\r\n", "\n"));
+
+        // 2-byte chunks also split across UTF-8 & CRLF boundaries.
+        let mut decoder2 = Utf8SseDecoder::default();
+        let mut out2 = String::new();
+        for b in raw.chunks(2) {
+            decoder2.push_chunk(b, &mut out2);
+        }
+        decoder2.finish(&mut out2);
+        assert!(!out2.contains('\u{FFFD}'));
+        assert_eq!(out2, sample.replace("\r\n", "\n"));
     }
 }

@@ -260,7 +260,7 @@ pub async fn update_gateway_port_cmd(
     emit_workspace_updated(&app);
     if !sync_errors.is_empty() {
         return Err(format!(
-            "网关端口已更新为 {port}，但部分 Agent 配置同步失败：{}",
+            "网关端口已切换为 {port}，但部分 Agent 配置同步失败（请前往「Agent 接入与调度」修复）：{}",
             sync_errors.join("；")
         ));
     }
@@ -854,7 +854,7 @@ pub fn repair_agent_drift_cmd(
 }
 
 #[tauri::command]
-pub fn restart_agent_client_cmd(
+pub async fn restart_agent_client_cmd(
     app: AppHandle,
     state: State<'_, AppState>,
     agent_id: TargetAgentId,
@@ -864,15 +864,15 @@ pub fn restart_agent_client_cmd(
         .db
         .list_pools(&state.master_key, &state.gateway.cooldown_snapshot())
         .map_err(|e| e.to_string())?;
-    restart_agent_process(
-        &state.db,
-        agent_id,
-        &pools,
-        &gw.host,
-        gw.port,
-        gw.global_proxy_detected,
-        None,
-    )?;
+    let db = Arc::clone(&state.db);
+    let host = gw.host.clone();
+    let port = gw.port;
+    let global_proxy = gw.global_proxy_detected;
+    tokio::task::spawn_blocking(move || {
+        restart_agent_process(&db, agent_id, &pools, &host, port, global_proxy, None)
+    })
+    .await
+    .map_err(|e| format!("重启客户端任务异常中断：{e}"))??;
     emit_workspace_updated(&app);
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }

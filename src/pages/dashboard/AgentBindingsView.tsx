@@ -43,6 +43,23 @@ import { ToolBrandIcon } from "../../components/ToolBrandIcon";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
 
+type ModelLike = { id: string; isFree?: boolean; creditMultiplier?: number };
+
+function isLowRateModel(opt: ModelLike) {
+  return (
+    Boolean(opt.isFree) ||
+    (typeof opt.creditMultiplier === "number" && opt.creditMultiplier <= 0.25) ||
+    /flash|turbo|mini|fast/i.test(opt.id)
+  );
+}
+
+function isFlagshipModel(opt: ModelLike) {
+  return (
+    (typeof opt.creditMultiplier === "number" && opt.creditMultiplier >= 0.45) ||
+    /pro|max|k3|seed-2\.1|pangu|claude/i.test(opt.id)
+  );
+}
+
 /** 去掉展示名里的「工具短名 · 」前缀，配合左侧品牌图标，避免模型名过长 */
 function shortModelLabel(name: string): string {
   const parts = name.split(" · ");
@@ -285,21 +302,10 @@ export function AgentBindingsView({
       if (modelQuickFilter === "checked" && !enabledModelSet.has(opt.id)) {
         return false;
       }
-      if (
-        modelQuickFilter === "low_rate" &&
-        !opt.isFree &&
-        !(typeof opt.creditMultiplier === "number" && opt.creditMultiplier <= 0.25) &&
-        !/flash|turbo|mini|fast/i.test(opt.id)
-      ) {
+      if (modelQuickFilter === "low_rate" && !isLowRateModel(opt)) {
         return false;
       }
-      if (
-        modelQuickFilter === "flagship" &&
-        !(
-          typeof opt.creditMultiplier === "number" && opt.creditMultiplier >= 0.45
-        ) &&
-        !/pro|max|k3|seed-2\.1|pangu|claude/i.test(opt.id)
-      ) {
+      if (modelQuickFilter === "flagship" && !isFlagshipModel(opt)) {
         return false;
       }
       if (!q) return true;
@@ -313,17 +319,10 @@ export function AgentBindingsView({
     let lowRate = 0;
     let flagship = 0;
     for (const opt of toolModelOptions) {
-      if (
-        opt.isFree ||
-        (typeof opt.creditMultiplier === "number" && opt.creditMultiplier <= 0.25) ||
-        /flash|turbo|mini|fast/i.test(opt.id)
-      ) {
+      if (isLowRateModel(opt)) {
         lowRate += 1;
       }
-      if (
-        (typeof opt.creditMultiplier === "number" && opt.creditMultiplier >= 0.45) ||
-        !/flash|turbo|mini|fast/i.test(opt.id)
-      ) {
+      if (isFlagshipModel(opt)) {
         flagship += 1;
       }
     }
@@ -706,7 +705,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
 
       {/* 当前选中 Agent 的分标签工作区 */}
       {activeBinding && (
-        <main
+        <section
           aria-label={`${activeBinding.name} 专属配置工作室`}
           className="min-w-0 space-y-3.5"
         >
@@ -1631,6 +1630,46 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       </button>
                     </div>
                   )}
+
+                  {activeBinding.agentId === "mimo" && (
+                    <div className="flex w-full flex-wrap items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5">
+                        <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+                        已写入 <code>mimocode.jsonc</code>（仅托管 <code>provider.qwitch</code> 节点），桌面端重启后生效
+                      </span>
+                      {activeBinding.mountedPoolIds.length > 0 && activeBinding.installed && (
+                        <button
+                          type="button"
+                          onClick={() => void restartAgentClient("mimo")}
+                          disabled={restartingAgentId === "mimo"}
+                          aria-busy={restartingAgentId === "mimo"}
+                          className="btn btn-xs btn-secondary disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {restartingAgentId === "mimo" ? "处理中…" : "重启"}
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {activeBinding.agentId === "zcode" && (
+                    <div className="flex w-full flex-wrap items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5">
+                        <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+                        已写入 <code>config.json</code>（仅托管 <code>provider.qwitch</code> 节点），桌面端重启后生效
+                      </span>
+                      {activeBinding.mountedPoolIds.length > 0 && activeBinding.installed && (
+                        <button
+                          type="button"
+                          onClick={() => void restartAgentClient("zcode")}
+                          disabled={restartingAgentId === "zcode"}
+                          aria-busy={restartingAgentId === "zcode"}
+                          className="btn btn-xs btn-secondary disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {restartingAgentId === "zcode" ? "处理中…" : "重启"}
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </section>
 
@@ -1683,7 +1722,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
               </section>
             </div>
           )}
-        </main>
+        </section>
       )}
 
       {diffModal && (

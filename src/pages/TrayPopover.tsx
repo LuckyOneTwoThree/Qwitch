@@ -66,6 +66,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     unbindAgent,
     repairAgentDrift,
     restartAgentClient,
+    restartingAgentId,
   } = usePoolPrototype();
   const {
     installing: updateInstalling,
@@ -425,10 +426,13 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                 onClick={() => void toggleGateway()}
                 disabled={gatewayBusy}
                 aria-busy={gatewayBusy}
-                className={`btn btn-xs shrink-0 disabled:cursor-not-allowed disabled:opacity-60 ${
+                className={`btn btn-xs shrink-0 gap-1 disabled:cursor-not-allowed disabled:opacity-60 ${
                   gateway.running ? "btn-secondary" : "btn-primary"
                 }`}
               >
+                {gatewayBusy ? (
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                ) : null}
                 {gatewayBusy ? "处理中" : gateway.running ? "停止" : "启动"}
               </button>
             </div>
@@ -489,10 +493,15 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                       ) : b.status === "needs_restart" ? (
                         <button
                           type="button"
-                          onClick={() => restartAgentClient(b.agentId)}
-                          className="btn btn-xs btn-sky-soft shrink-0"
+                          onClick={() => void restartAgentClient(b.agentId)}
+                          disabled={restartingAgentId === b.agentId}
+                          aria-busy={restartingAgentId === b.agentId}
+                          className="btn btn-xs btn-sky-soft shrink-0 gap-1 disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          重启
+                          {restartingAgentId === b.agentId ? (
+                            <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" aria-hidden="true" />
+                          ) : null}
+                          {restartingAgentId === b.agentId ? "处理中…" : "重启"}
                         </button>
                       ) : null}
                     </div>

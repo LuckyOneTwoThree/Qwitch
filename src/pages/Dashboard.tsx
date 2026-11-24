@@ -805,7 +805,7 @@ export function Dashboard() {
 
       <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
-          <div onMouseDown={onTitleBarMouseDown} className="flex min-w-0 flex-1 items-center gap-2.5">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>
@@ -1553,7 +1553,7 @@ export function Dashboard() {
             </>
           )}
 
-          {nav === "agents" && (
+          {(nav === "agents" || nav === "pools") && (
             <AgentBindingsView highlightAgentId={highlightAgentId} />
           )}
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowRight,
@@ -28,7 +28,14 @@ export function RoutingTraceView({
     "all" | "failover_success" | "failed" | "success"
   >("all");
   const [search, setSearch] = useState("");
+  const userToggledRef = useRef(false);
   const [expandedId, setExpandedId] = useState<string | null>(traces[0]?.id ?? null);
+
+  useEffect(() => {
+    if (traces.length > 0 && expandedId === null && !userToggledRef.current) {
+      setExpandedId(traces[0].id);
+    }
+  }, [traces, expandedId]);
 
   const stats = useMemo(() => {
     const total = traces.length;
@@ -249,13 +256,6 @@ export function RoutingTraceView({
 
       {/* 可展开的决策链路流水 */}
       <div className="space-y-2">
-        {filteredTraces.length === 0 && (
-          <div className="surface-card px-4 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
-            {traces.length === 0
-              ? "暂无路由决策记录：启动网关并让 Agent 发起请求后，这里会实时展示调度链路。"
-              : "当前筛选条件下没有匹配记录，试试清除搜索或切换筛选。"}
-          </div>
-        )}
         {filteredTraces.map((trace) => {
           const isOpen = expandedId === trace.id;
           const agentMeta = agentBindings.find((b) => b.agentId === trace.agentId);
@@ -264,7 +264,11 @@ export function RoutingTraceView({
             <div key={trace.id} className="surface-card overflow-hidden">
               <button
                 type="button"
-                onClick={() => setExpandedId(isOpen ? null : trace.id)}
+                aria-expanded={isOpen}
+                onClick={() => {
+                  userToggledRef.current = true;
+                  setExpandedId(isOpen ? null : trace.id);
+                }}
                 className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-zinc-50/80 dark:hover:bg-zinc-800/40"
               >
                 <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
@@ -402,9 +406,41 @@ export function RoutingTraceView({
         {filteredTraces.length === 0 && (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-300/80 bg-white/50 py-12 text-center dark:border-zinc-700/70 dark:bg-zinc-900/30">
             <Zap className="h-6 w-6 text-zinc-400" aria-hidden="true" />
-            <p className="mt-2 text-xs font-medium text-zinc-700 dark:text-zinc-300">
-              当前筛选条件下暂无路由流水
-            </p>
+            {search.trim() || agentFilter !== "all" || statusFilter !== "all" ? (
+              <>
+                <p className="mt-2 text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  当前筛选条件下暂无路由流水
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearch("");
+                    setAgentFilter("all");
+                    setStatusFilter("all");
+                  }}
+                  className="btn btn-sm btn-secondary mt-3"
+                >
+                  清除筛选条件
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="mt-2 text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                  暂无路由决策采样
+                </p>
+                <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  当接入的 Agent 通过本地网关发起请求，或运行模拟测试时，将在此展示完整调度链路。
+                </p>
+                <button
+                  type="button"
+                  onClick={() => onOpenSimulation()}
+                  className="btn btn-sm btn-primary mt-3 gap-1"
+                >
+                  <Play className="h-3 w-3" aria-hidden="true" />
+                  立即测试路由
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

@@ -15,6 +15,15 @@ import {
 } from "lucide-react";
 
 type SettingsTabId = "general" | "automation" | "clients" | "plugins";
+type SavingSectionKey = "jitter" | "logs" | "paths" | "plugins" | null;
+
+function parsePortInput(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed < 1024 || parsed > 65535) return null;
+  return parsed;
+}
 
 const SETTINGS_TABS: ReadonlyArray<{
   id: SettingsTabId;
@@ -134,7 +143,9 @@ export function SettingsView({
     message: string;
   } | null>(null);
   const [clientRefreshing, setClientRefreshing] = useState(false);
+  const [savingKey, setSavingKey] = useState<SavingSectionKey>(null);
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const [pendingRestartAgents, setPendingRestartAgents] = useState<string[]>([]);
   const runningDesktopAgents = useMemo(
     () =>
       agentBindings.filter(
@@ -144,6 +155,59 @@ export function SettingsView({
       ),
     [agentBindings]
   );
+  const portBusy = portChecking || portApplying;
+  const runPortCheck = async () => {
+    if (portBusy) return;
+    const p = parsePortInput(portInput);
+    if (p === null) {
+      setPortCheck({
+        available: false,
+        inUseBySelf: false,
+        message: "端口必须在 1024–65535 之间",
+      });
+      return;
+    }
+    setPortChecking(true);
+    try {
+      setPortCheck(await checkGatewayPort(p));
+    } finally {
+      setPortChecking(false);
+    }
+  };
+  const runPortApply = async () => {
+    if (portBusy) return;
+    const p = parsePortInput(portInput);
+    if (p === null) {
+      setPortCheck({
+        available: false,
+        inUseBySelf: false,
+        message: "端口必须在 1024–65535 之间",
+      });
+      return;
+    }
+    setPortApplying(true);
+    try {
+      const res = await updateGatewayPort(p);
+      if (res.ok) {
+        const names =
+          res.runningDesktopAgentNames ?? runningDesktopAgents.map((b) => b.name);
+        if (names.length > 0) {
+          setPendingRestartAgents(names);
+          setRestartConfirmOpen(true);
+        } else {
+          showToast("端口已更新；当前没有运行中的桌面 Agent", "info");
+        }
+      } else {
+        setPortCheck({
+          available: false,
+          inUseBySelf: false,
+          message: res.message ?? "更新失败",
+        });
+      }
+    } finally {
+      setPortApplying(false);
+    }
+  };
   useEffect(() => {
     setPortInput(String(gateway.port));
   }, [gateway.port]);
@@ -365,16 +429,27 @@ export function SettingsView({
               </div>
               <button
                 type="button"
-                onClick={() =>
-                  void saveAppSettings({
-                    jitterMinMs: jitterRangeMs[0],
-                    jitterMaxMs: jitterRangeMs[1],
-                  })
-                }
-                className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap"
+                disabled={savingKey === "jitter"}
+                aria-busy={savingKey === "jitter"}
+                onClick={async () => {
+                  setSavingKey("jitter");
+                  try {
+                    await saveAppSettings({
+                      jitterMinMs: jitterRangeMs[0],
+                      jitterMaxMs: jitterRangeMs[1],
+                    });
+                  } finally {
+                    setSavingKey(null);
+                  }
+                }}
+                className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
-                保存配置
+                {savingKey === "jitter" ? (
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
+                )}
+                {savingKey === "jitter" ? "保存中…" : "保存配置"}
               </button>
             </div>
             <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
@@ -391,7 +466,7 @@ export function SettingsView({
                 <input
                   id="qwitch-jitter-min"
                   type="number"
-                  min={0}
+                  min={500}
                   max={60000}
                   value={jitterRangeMs[0]}
                   onChange={(e) => {
@@ -414,7 +489,7 @@ export function SettingsView({
                 <input
                   id="qwitch-jitter-max"
                   type="number"
-                  min={0}
+                  min={500}
                   max={60000}
                   value={jitterRangeMs[1]}
                   onChange={(e) => {
@@ -428,6 +503,11 @@ export function SettingsView({
                 />
               </div>
             </div>
+            {(jitterRangeMs[0] < 500 || jitterRangeMs[0] > jitterRangeMs[1]) && (
+              <p className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+                为防止风控，保存时将自动钳制最小间隔 ≥ 500ms 且最大间隔 ≥ 最小间隔。
+              </p>
+            )}
           </div>
 
           <div className="surface-card p-5">
@@ -438,22 +518,33 @@ export function SettingsView({
               </div>
               <button
                 type="button"
-                onClick={() =>
-                  void saveAppSettings({
-                    logArchiveAfterDays: Math.min(
-                      3650,
-                      Math.max(0, Math.floor(logRetention.archiveAfterDays))
-                    ),
-                    logMaxActiveCount: Math.min(
-                      100000,
-                      Math.max(0, Math.floor(logRetention.maxActiveCount))
-                    ),
-                  })
-                }
-                className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap"
+                disabled={savingKey === "logs"}
+                aria-busy={savingKey === "logs"}
+                onClick={async () => {
+                  setSavingKey("logs");
+                  try {
+                    await saveAppSettings({
+                      logArchiveAfterDays: Math.min(
+                        3650,
+                        Math.max(0, Math.floor(logRetention.archiveAfterDays))
+                      ),
+                      logMaxActiveCount: Math.min(
+                        100000,
+                        Math.max(0, Math.floor(logRetention.maxActiveCount))
+                      ),
+                    });
+                  } finally {
+                    setSavingKey(null);
+                  }
+                }}
+                className="btn btn-xs btn-primary shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
-                保存并执行
+                {savingKey === "logs" ? (
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
+                )}
+                {savingKey === "logs" ? "保存中…" : "保存并执行"}
               </button>
             </div>
             <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
@@ -551,17 +642,28 @@ export function SettingsView({
               </button>
               <button
                 type="button"
+                disabled={savingKey === "paths"}
+                aria-busy={savingKey === "paths"}
                 onClick={async () => {
-                  const ok = await saveAppSettings({ customClientPaths: pathDrafts });
-                  if (ok) {
-                    setPathDraftsDirty(false);
-                    await refreshClientStatuses();
+                  setSavingKey("paths");
+                  try {
+                    const ok = await saveAppSettings({ customClientPaths: pathDrafts });
+                    if (ok) {
+                      setPathDraftsDirty(false);
+                      await refreshClientStatuses();
+                    }
+                  } finally {
+                    setSavingKey(null);
                   }
                 }}
-                className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
+                className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
-                保存路径覆盖
+                {savingKey === "paths" ? (
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
+                )}
+                {savingKey === "paths" ? "保存中…" : "保存路径覆盖"}
               </button>
             </div>
           </div>
@@ -585,76 +687,40 @@ export function SettingsView({
                 type="number"
                 min={1024}
                 max={65535}
+                disabled={portBusy}
                 value={portInput}
                 onChange={(e) => {
                   setPortInput(e.target.value);
                   setPortCheck(null);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void runPortApply();
+                  }
+                }}
                 aria-label="网关监听端口"
-                className="w-40 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-900 focus:border-brand-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                className="w-40 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-900 focus:border-brand-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
               />
               <button
                 type="button"
-                disabled={portChecking}
-                onClick={async () => {
-                  const p = Number.parseInt(portInput, 10);
-                  if (!Number.isFinite(p) || p < 1024 || p > 65535) {
-                    setPortCheck({
-                      available: false,
-                      inUseBySelf: false,
-                      message: "端口必须在 1024–65535 之间",
-                    });
-                    return;
-                  }
-                  setPortChecking(true);
-                  try {
-                    setPortCheck(await checkGatewayPort(p));
-                  } finally {
-                    setPortChecking(false);
-                  }
-                }}
-                className="btn btn-sm btn-secondary gap-1"
+                disabled={portBusy}
+                aria-busy={portChecking}
+                onClick={() => void runPortCheck()}
+                className="btn btn-sm btn-secondary gap-1 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {portChecking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                检测占用
+                {portChecking ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
+                {portChecking ? "检测中…" : "检测占用"}
               </button>
               <button
                 type="button"
-                disabled={portApplying}
-                onClick={async () => {
-                  const p = Number.parseInt(portInput, 10);
-                  if (!Number.isFinite(p) || p < 1024 || p > 65535) {
-                    setPortCheck({
-                      available: false,
-                      inUseBySelf: false,
-                      message: "端口必须在 1024–65535 之间",
-                    });
-                    return;
-                  }
-                  setPortApplying(true);
-                  try {
-                    const res = await updateGatewayPort(p);
-                    if (res.ok) {
-                      if (runningDesktopAgents.length > 0) {
-                        setRestartConfirmOpen(true);
-                      } else {
-                        showToast("端口已更新；当前没有运行中的桌面 Agent", "info");
-                      }
-                    } else {
-                      setPortCheck({
-                        available: false,
-                        inUseBySelf: false,
-                        message: res.message ?? "更新失败",
-                      });
-                    }
-                  } finally {
-                    setPortApplying(false);
-                  }
-                }}
-                className="btn btn-sm btn-primary gap-1"
+                disabled={portBusy}
+                aria-busy={portApplying}
+                onClick={() => void runPortApply()}
+                className="btn btn-sm btn-primary gap-1 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {portApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                应用端口
+                {portApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
+                {portApplying ? "应用中…" : "应用端口"}
               </button>
             </div>
             {portCheck && (
@@ -796,30 +862,41 @@ export function SettingsView({
                 </div>
                 <button
                   type="button"
+                  disabled={savingKey === "plugins"}
+                  aria-busy={savingKey === "plugins"}
                   onClick={async () => {
-                    const hashesDraft: Record<string, string> = {};
-                    for (const id of trustedDraft) {
-                      const plugin = externalPlugins.find((p) => p.id === id);
-                      if (plugin?.contentHash) {
-                        hashesDraft[id] = plugin.contentHash;
+                    setSavingKey("plugins");
+                    try {
+                      const hashesDraft: Record<string, string> = {};
+                      for (const id of trustedDraft) {
+                        const plugin = externalPlugins.find((p) => p.id === id);
+                        if (plugin?.contentHash) {
+                          hashesDraft[id] = plugin.contentHash;
+                        }
                       }
-                    }
-                    const ok = await saveAppSettings(
-                      {
-                        trustedAdapters: trustedDraft,
-                        trustedAdapterHashes: hashesDraft,
-                      },
-                      true
-                    );
-                    if (ok) {
-                      await reloadExternalPlugins();
-                      showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
+                      const ok = await saveAppSettings(
+                        {
+                          trustedAdapters: trustedDraft,
+                          trustedAdapterHashes: hashesDraft,
+                        },
+                        true
+                      );
+                      if (ok) {
+                        await reloadExternalPlugins();
+                        showToast("插件信任设置已保存，重启 Qwitch 后生效", "success");
+                      }
+                    } finally {
+                      setSavingKey(null);
                     }
                   }}
-                  className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
+                  className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
-                  保存信任设置
+                  {savingKey === "plugins" ? (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Save className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  )}
+                  {savingKey === "plugins" ? "保存中…" : "保存信任设置"}
                 </button>
               </div>
               {externalPlugins.length === 0 ? (
@@ -889,9 +966,7 @@ export function SettingsView({
       <ConfirmDialog
         open={restartConfirmOpen}
         title="重启运行中的桌面 Agent？"
-        description={`网关端口已更新，是否立即重启以下 ${runningDesktopAgents.length} 个运行中的桌面 Agent 以加载新地址：${runningDesktopAgents
-          .map((b) => b.name)
-          .join("、")}。重启会关闭并重新打开对应应用。`}
+        description={`网关端口已更新，是否立即重启以下 ${pendingRestartAgents.length} 个运行中的桌面 Agent 以加载新地址：${pendingRestartAgents.join("、")}。重启会关闭并重新打开对应应用。`}
         confirmLabel="立即重启"
         onCancel={() => setRestartConfirmOpen(false)}
         onConfirm={async () => {

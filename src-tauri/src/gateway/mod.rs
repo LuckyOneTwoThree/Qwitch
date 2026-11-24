@@ -1366,6 +1366,270 @@ async fn send_upstream_stream(
     req.send().await.map_err(|e| format!("上游请求失败: {e}"))
 }
 
+async fn write_sse_head(stream: &mut TcpStream) -> std::io::Result<()> {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n";
+    stream.write_all(head.as_bytes()).await?;
+    stream.flush().await
+}
+
+async fn write_sse_frame(
+    stream: &mut TcpStream,
+    event: Option<&str>,
+    data: &str,
+) -> std::io::Result<()> {
+    let mut out = String::new();
+    if let Some(ev) = event {
+        out.push_str("event: ");
+        out.push_str(ev);
+        out.push('\n');
+    }
+    out.push_str("data: ");
+    out.push_str(data);
+    out.push_str("\n\n");
+    stream.write_all(out.as_bytes()).await?;
+    stream.flush().await
+}
+
+fn map_finish_openai_to_anthropic(fr: &str) -> &'static str {
+    match fr {
+        "length" => "max_tokens",
+        "tool_calls" => "tool_use",
+        _ => "end_turn",
+    }
+}
+
+fn map_stop_anthropic_to_openai(stop: &str) -> &'static str {
+    match stop {
+        "max_tokens" => "length",
+        "tool_use" => "tool_calls",
+        _ => "stop",
+    }
+}
+
+/// 处理已完整的 OpenAI Chat SSE 事件，翻译为 Anthropic 文本增量并写出。
+async fn drain_openai_events_to_anthropic(
+    buf: &mut String,
+    stream: &mut TcpStream,
+    stop_reason: &mut String,
+    out_tokens: &mut u64,
+) -> std::io::Result<()> {
+    while let Some(idx) = buf.find("\n\n") {
+        let block = buf[..idx].to_string();
+        *buf = buf[idx + 2..].to_string();
+        for line in block.lines() {
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if let Some(t) = v
+                .pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+            {
+                if !t.is_empty() {
+                    write_sse_frame(
+                        stream,
+                        Some("content_block_delta"),
+                        &json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":t}})
+                            .to_string(),
+                    )
+                    .await?;
+                }
+            }
+            if let Some(fr) = v
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str)
+            {
+                *stop_reason = map_finish_openai_to_anthropic(fr).to_string();
+            }
+            if let Some(o) = v
+                .pointer("/usage/completion_tokens")
+                .and_then(Value::as_u64)
+            {
+                *out_tokens = o;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// OpenAI Chat 客户端 ← Anthropic Messages 上游：增量翻译为 Anthropic SSE。
+#[allow(clippy::while_let_loop)]
+async fn relay_openai_chat_to_anthropic(
+    mut resp: reqwest::Response,
+    model: &str,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    write_sse_head(stream).await?;
+    let msg_id = format!("msg_{}", &Uuid::new_v4().simple().to_string()[..12]);
+    write_sse_frame(
+        stream,
+        Some("message_start"),
+        &json!({"type":"message_start","message":{"id":msg_id,"type":"message","role":"assistant","model":model,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}})
+            .to_string(),
+    )
+    .await?;
+    write_sse_frame(
+        stream,
+        Some("content_block_start"),
+        &json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})
+            .to_string(),
+    )
+    .await?;
+    let mut buf = String::new();
+    let mut stop_reason = "end_turn".to_string();
+    let mut out_tokens: u64 = 0;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                drain_openai_events_to_anthropic(
+                    &mut buf,
+                    stream,
+                    &mut stop_reason,
+                    &mut out_tokens,
+                )
+                .await?;
+            }
+            _ => break,
+        }
+    }
+    drain_openai_events_to_anthropic(&mut buf, stream, &mut stop_reason, &mut out_tokens).await?;
+    write_sse_frame(
+        stream,
+        Some("content_block_stop"),
+        &json!({"type":"content_block_stop","index":0}).to_string(),
+    )
+    .await?;
+    write_sse_frame(
+        stream,
+        Some("message_delta"),
+        &json!({"type":"message_delta","delta":{"stop_reason":stop_reason,"stop_sequence":null},"usage":{"output_tokens":out_tokens}})
+            .to_string(),
+    )
+    .await?;
+    write_sse_frame(
+        stream,
+        Some("message_stop"),
+        &json!({"type":"message_stop"}).to_string(),
+    )
+    .await
+}
+
+/// 处理已完整的 Anthropic SSE 事件，翻译为 OpenAI Chat chunk 增量并写出。
+async fn drain_anthropic_events_to_openai(
+    buf: &mut String,
+    stream: &mut TcpStream,
+    id: &str,
+    model: &str,
+    stop_reason: &mut String,
+    out_tokens: &mut u64,
+    in_tokens: &mut u64,
+) -> std::io::Result<()> {
+    while let Some(idx) = buf.find("\n\n") {
+        let block = buf[..idx].to_string();
+        *buf = buf[idx + 2..].to_string();
+        for line in block.lines() {
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            match v.get("type").and_then(Value::as_str).unwrap_or("") {
+                "content_block_delta" => {
+                    if let Some(t) = v.pointer("/delta/text").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            let chunk = json!({"id":id,"object":"chat.completion.chunk","created":chrono::Utc::now().timestamp(),"model":model,"choices":[{"index":0,"delta":{"content":t},"finish_reason":null}]});
+                            write_sse_frame(stream, None, &chunk.to_string()).await?;
+                        }
+                    }
+                }
+                "message_delta" => {
+                    if let Some(sr) = v.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                        *stop_reason = map_stop_anthropic_to_openai(sr).to_string();
+                    }
+                    if let Some(o) = v.pointer("/usage/output_tokens").and_then(Value::as_u64) {
+                        *out_tokens = o;
+                    }
+                }
+                "message_start" => {
+                    if let Some(i) = v
+                        .pointer("/message/usage/input_tokens")
+                        .and_then(Value::as_u64)
+                    {
+                        *in_tokens = i;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Anthropic 客户端 ← OpenAI Chat 上游：增量翻译为 OpenAI Chat SSE。
+#[allow(clippy::while_let_loop)]
+async fn relay_anthropic_to_openai_chat(
+    mut resp: reqwest::Response,
+    model: &str,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    write_sse_head(stream).await?;
+    let id = format!("chatcmpl-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    write_sse_frame(
+        stream,
+        None,
+        &json!({"id":id,"object":"chat.completion.chunk","created":chrono::Utc::now().timestamp(),"model":model,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}).to_string(),
+    )
+    .await?;
+    let mut buf = String::new();
+    let mut stop_reason = "stop".to_string();
+    let mut out_tokens: u64 = 0;
+    let mut in_tokens: u64 = 0;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                drain_anthropic_events_to_openai(
+                    &mut buf,
+                    stream,
+                    &id,
+                    model,
+                    &mut stop_reason,
+                    &mut out_tokens,
+                    &mut in_tokens,
+                )
+                .await?;
+            }
+            _ => break,
+        }
+    }
+    drain_anthropic_events_to_openai(
+        &mut buf,
+        stream,
+        &id,
+        model,
+        &mut stop_reason,
+        &mut out_tokens,
+        &mut in_tokens,
+    )
+    .await?;
+    let _ = in_tokens;
+    let final_chunk = json!({"id":id,"object":"chat.completion.chunk","created":chrono::Utc::now().timestamp(),"model":model,"choices":[{"index":0,"delta":{},"finish_reason":stop_reason}]});
+    write_sse_frame(stream, None, &final_chunk.to_string()).await?;
+    write_sse_frame(stream, None, "[DONE]").await
+}
+
 /// 将上游 SSE 响应逐块原样透传给客户端（无 Content-Length，Connection: close）。
 async fn forward_sse_passthrough(
     mut resp: reqwest::Response,
@@ -2368,12 +2632,44 @@ async fn handle_http_connection(
         };
         let t_hop = std::time::Instant::now();
         let upstream_proto = upstream_model_protocol(&cand.tool_id, &plan.effective_model);
-        let raw_stream = ir_req.stream
-            && ir_req.incoming_protocol == upstream_proto
-            && cand.tool_id != "workbuddy";
-        if raw_stream {
+        // 流式策略：同协议直接透传；跨协议仅当无 tools（纯文本）时做增量翻译，
+        // 携带工具（编码 Agent 常态）仍走缓冲，保证 tool_calls/thinking 语义正确。
+        enum StreamKind {
+            Passthrough,
+            OpenAiClientAnthropicUpstream,
+            AnthropicClientOpenAiUpstream,
+        }
+        let stream_kind = if ir_req.stream && cand.tool_id != "workbuddy" {
+            if ir_req.incoming_protocol == upstream_proto {
+                Some(StreamKind::Passthrough)
+            } else if ir_req.tools.is_empty()
+                && ir_req.incoming_protocol == WireProtocolKind::OpenaiChat
+                && upstream_proto == WireProtocolKind::AnthropicMessages
+            {
+                Some(StreamKind::OpenAiClientAnthropicUpstream)
+            } else if ir_req.tools.is_empty()
+                && ir_req.incoming_protocol == WireProtocolKind::AnthropicMessages
+                && upstream_proto == WireProtocolKind::OpenaiChat
+            {
+                Some(StreamKind::AnthropicClientOpenAiUpstream)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(kind) = stream_kind {
             match send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model).await {
                 Ok(resp) if resp.status().is_success() => {
+                    let detail = match kind {
+                        StreamKind::Passthrough => "网关实时流式透传成功（首字节后锁定上游）",
+                        StreamKind::OpenAiClientAnthropicUpstream => {
+                            "跨协议增量流式（Anthropic 上游 → OpenAI 客户端）"
+                        }
+                        StreamKind::AnthropicClientOpenAiUpstream => {
+                            "跨协议增量流式（OpenAI 上游 → Anthropic 客户端）"
+                        }
+                    };
                     attempts.push(RoutingAttempt {
                         account_label: cand.label.clone(),
                         tool_id: cand.tool_id.clone(),
@@ -2381,7 +2677,7 @@ async fn handle_http_connection(
                         tier: Some(cand.tier),
                         outcome: RoutingAttemptOutcome::Ok,
                         latency_ms: t_hop.elapsed().as_millis() as u64,
-                        detail: "网关实时流式透传成功（首字节后锁定上游）".into(),
+                        detail: detail.into(),
                     });
                     let trace = RoutingTraceItem {
                         id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
@@ -2411,7 +2707,15 @@ async fn handle_http_connection(
                         trace.status == RoutingTraceStatus::FailoverSuccess,
                         plan.cache_affinity_hit,
                     );
-                    return forward_sse_passthrough(resp, stream).await;
+                    return match kind {
+                        StreamKind::Passthrough => forward_sse_passthrough(resp, stream).await,
+                        StreamKind::OpenAiClientAnthropicUpstream => {
+                            relay_anthropic_to_openai_chat(resp, &ir_req.model, stream).await
+                        }
+                        StreamKind::AnthropicClientOpenAiUpstream => {
+                            relay_openai_chat_to_anthropic(resp, &ir_req.model, stream).await
+                        }
+                    };
                 }
                 Ok(resp) => {
                     let code = resp.status().as_u16();
@@ -2937,6 +3241,150 @@ mod tests {
             "chunked body should be parsed (est > 16), resp: {text}"
         );
 
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn spawn_gateway_with_custom_account(
+        tool_id: &str,
+        model_id: &str,
+        base_url: String,
+        tag: &str,
+    ) -> (
+        Arc<QwitchDatabase>,
+        Arc<GatewayRuntime>,
+        u16,
+        std::path::PathBuf,
+        String,
+    ) {
+        let root = std::env::temp_dir().join(format!("qwitch-cross-{tag}-{}", Uuid::new_v4()));
+        let db = Arc::new(QwitchDatabase::open(&root.join("qwitch.db")).unwrap());
+        let key = [21u8; 32];
+        let mut extra = HashMap::new();
+        extra.insert("base_url".into(), base_url);
+        let acc = db
+            .upsert_account(
+                &key,
+                Some("跨协议账号"),
+                &CredentialEnvelope {
+                    tool_id: tool_id.into(),
+                    uid: format!("uid-{tag}"),
+                    display_name: Some("跨协议账号".into()),
+                    display_email: None,
+                    payload: CredentialPayload::Token {
+                        access_token: "tok-cross".into(),
+                        refresh_token: None,
+                        expires_at: None,
+                        extra,
+                    },
+                },
+            )
+            .unwrap();
+        db.create_pool(
+            &key,
+            &CreatePoolInput {
+                id: None,
+                name: format!("Cross {tag}"),
+                description: String::new(),
+                scene_tag: "Coding".into(),
+                strategy: PoolStrategy::Order,
+                affinity_mode: AffinityMode::Off,
+                skip_active_client_account: false,
+                cooldown_seconds: 60,
+                auto_refresh_on_401: false,
+                fallback_api_key_enabled: true,
+                members: vec![CreatePoolMemberInput {
+                    account_id: acc.id,
+                    supported_models: vec![model_id.into()],
+                    tier: MemberTier::T1Primary,
+                }],
+                enabled_model_ids: None,
+            },
+        )
+        .unwrap();
+        let rt = Arc::new(GatewayRuntime::new());
+        {
+            rt.inner.lock().unwrap().port = 0;
+        }
+        let port = rt
+            .start_server(Arc::clone(&db), key, Arc::new(HashMap::new()))
+            .await
+            .expect("start gateway");
+        let actual_model = db
+            .list_pools(&key, &HashMap::new())
+            .unwrap()
+            .into_iter()
+            .flat_map(|p| p.model_policies)
+            .map(|p| p.model_id)
+            .next()
+            .unwrap_or_else(|| model_id.to_string());
+        (db, rt, port, root, actual_model)
+    }
+
+    #[tokio::test]
+    async fn cross_protocol_openai_client_from_anthropic_upstream_streams() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                        "text/event-stream",
+                    ),
+            )
+            .mount(&mock)
+            .await;
+        let (_db, rt, port, root, model_id) =
+            spawn_gateway_with_custom_account("minimax_code_cn", "MiniMax-M2.5", mock.uri(), "a")
+                .await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth("qwitch-bind-opencode")
+            .json(&json!({"model": model_id, "stream": true, "messages": [{"role": "user", "content": "hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("chat.completion.chunk"), "body: {body}");
+        assert!(body.contains("Hello"), "body: {body}");
+        assert!(body.contains("[DONE]"), "body: {body}");
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cross_protocol_anthropic_client_from_openai_upstream_streams() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                        "text/event-stream",
+                    ),
+            )
+            .mount(&mock)
+            .await;
+        let (_db, rt, port, root, model_id) =
+            spawn_gateway_with_custom_account("custom_api_key", "deepseek-v4-pro", mock.uri(), "b")
+                .await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/messages"))
+            .bearer_auth("qwitch-bind-claude-desktop")
+            .json(&json!({"model": model_id, "stream": true, "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("content_block_delta"), "body: {body}");
+        assert!(body.contains("Hi"), "body: {body}");
+        assert!(body.contains("message_stop"), "body: {body}");
         rt.stop_server();
         let _ = std::fs::remove_dir_all(root);
     }

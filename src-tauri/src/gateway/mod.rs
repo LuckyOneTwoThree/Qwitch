@@ -41,6 +41,8 @@ struct GatewayInner {
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// 每号池进程内轮询游标（避免并发请求读到同一 today_requests 快照而全部命中同一账号）
     rr_counters: HashMap<String, u64>,
+    /// OpenAI Responses 协议跨协议增量流式开关（默认关闭，关闭时走缓冲+合成，保证 codex 稳定）
+    responses_streaming: bool,
 }
 
 pub struct GatewayRuntime {
@@ -68,6 +70,9 @@ impl GatewayRuntime {
                 sim_bridge_override: None,
                 shutdown_tx: None,
                 rr_counters: HashMap::new(),
+                responses_streaming: std::env::var("QWITCH_GATEWAY_RESPONSES_STREAMING")
+                    .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+                    .unwrap_or(false),
             }),
             refresh_locks: Mutex::new(HashMap::new()),
         }
@@ -150,6 +155,18 @@ impl GatewayRuntime {
         let v = *c;
         *c = c.wrapping_add(1);
         v
+    }
+
+    pub fn set_responses_streaming(&self, enabled: bool) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.responses_streaming = enabled;
+    }
+
+    pub fn responses_streaming(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .responses_streaming
     }
 
     pub fn refresh_lock_for(&self, account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -1716,6 +1733,364 @@ async fn relay_anthropic_to_openai_chat(
     write_sse_frame(stream, None, "[DONE]").await
 }
 
+#[derive(Default)]
+struct ResponsesAccum {
+    resp_id: String,
+    text: String,
+    /// (上游工具序号/块序号, call_id, name, arguments)
+    tools: Vec<(i64, String, String, String)>,
+    message_started: bool,
+    in_tokens: u64,
+    out_tokens: u64,
+}
+
+fn new_responses_accum() -> ResponsesAccum {
+    ResponsesAccum {
+        resp_id: Uuid::new_v4().simple().to_string()[..12].to_string(),
+        ..Default::default()
+    }
+}
+
+fn resp_tool_slot(st: &mut ResponsesAccum, idx: i64) -> &mut (i64, String, String, String) {
+    if let Some(pos) = st.tools.iter().position(|e| e.0 == idx) {
+        &mut st.tools[pos]
+    } else {
+        st.tools
+            .push((idx, String::new(), String::new(), String::new()));
+        let last = st.tools.len() - 1;
+        &mut st.tools[last]
+    }
+}
+
+async fn responses_emit_created(
+    st: &ResponsesAccum,
+    model: &str,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    let in_progress = json!({"id":format!("resp_{}", st.resp_id),"object":"response","status":"in_progress","model":model,"output":[]});
+    write_sse_frame(
+        stream,
+        Some("response.created"),
+        &json!({"type":"response.created","response":in_progress}).to_string(),
+    )
+    .await?;
+    write_sse_frame(
+        stream,
+        Some("response.in_progress"),
+        &json!({"type":"response.in_progress","response":in_progress}).to_string(),
+    )
+    .await
+}
+
+async fn responses_ensure_message(
+    st: &mut ResponsesAccum,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    if st.message_started {
+        return Ok(());
+    }
+    st.message_started = true;
+    let msg_id = format!("msg_{}", st.resp_id);
+    write_sse_frame(
+        stream,
+        Some("response.output_item.added"),
+        &json!({"type":"response.output_item.added","output_index":0,"item":{"id":msg_id,"type":"message","status":"in_progress","role":"assistant","content":[]}}).to_string(),
+    )
+    .await?;
+    write_sse_frame(
+        stream,
+        Some("response.content_part.added"),
+        &json!({"type":"response.content_part.added","item_id":msg_id,"output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}).to_string(),
+    )
+    .await
+}
+
+async fn responses_text_delta(
+    st: &mut ResponsesAccum,
+    model: &str,
+    delta: &str,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    if delta.is_empty() {
+        return Ok(());
+    }
+    let _ = model;
+    responses_ensure_message(st, stream).await?;
+    let msg_id = format!("msg_{}", st.resp_id);
+    write_sse_frame(
+        stream,
+        Some("response.output_text.delta"),
+        &json!({"type":"response.output_text.delta","item_id":msg_id,"output_index":0,"content_index":0,"delta":delta}).to_string(),
+    )
+    .await?;
+    st.text.push_str(delta);
+    Ok(())
+}
+
+async fn responses_finish(
+    st: &mut ResponsesAccum,
+    model: &str,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    let msg_id = format!("msg_{}", st.resp_id);
+    let mut output_index = 0usize;
+    if st.message_started {
+        write_sse_frame(
+            stream,
+            Some("response.output_text.done"),
+            &json!({"type":"response.output_text.done","item_id":msg_id,"output_index":0,"content_index":0,"text":st.text}).to_string(),
+        )
+        .await?;
+        write_sse_frame(
+            stream,
+            Some("response.content_part.done"),
+            &json!({"type":"response.content_part.done","item_id":msg_id,"output_index":0,"content_index":0,"part":{"type":"output_text","text":st.text,"annotations":[]}}).to_string(),
+        )
+        .await?;
+        write_sse_frame(
+            stream,
+            Some("response.output_item.done"),
+            &json!({"type":"response.output_item.done","output_index":0,"item":{"id":msg_id,"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":st.text,"annotations":[]}]}}).to_string(),
+        )
+        .await?;
+        output_index = 1;
+    }
+    st.tools.sort_by_key(|e| e.0);
+    for (i, (_idx, call_id, name, args)) in st.tools.iter().enumerate() {
+        let fc_id = format!("fc_{i}_{}", st.resp_id);
+        write_sse_frame(
+            stream,
+            Some("response.output_item.added"),
+            &json!({"type":"response.output_item.added","output_index":output_index,"item":{"id":fc_id,"type":"function_call","status":"in_progress","call_id":call_id,"name":name,"arguments":""}}).to_string(),
+        )
+        .await?;
+        if !args.is_empty() {
+            write_sse_frame(
+                stream,
+                Some("response.function_call_arguments.delta"),
+                &json!({"type":"response.function_call_arguments.delta","item_id":fc_id,"output_index":output_index,"delta":args}).to_string(),
+            )
+            .await?;
+        }
+        write_sse_frame(
+            stream,
+            Some("response.function_call_arguments.done"),
+            &json!({"type":"response.function_call_arguments.done","item_id":fc_id,"output_index":output_index,"arguments":args}).to_string(),
+        )
+        .await?;
+        write_sse_frame(
+            stream,
+            Some("response.output_item.done"),
+            &json!({"type":"response.output_item.done","output_index":output_index,"item":{"id":fc_id,"type":"function_call","status":"completed","call_id":call_id,"name":name,"arguments":args}}).to_string(),
+        )
+        .await?;
+        output_index += 1;
+    }
+    let ir = IrResponse {
+        id: st.resp_id.clone(),
+        model: model.to_string(),
+        text: st.text.clone(),
+        thinking: None,
+        tool_calls: st
+            .tools
+            .iter()
+            .map(|(_i, c, n, a)| (c.clone(), n.clone(), a.clone()))
+            .collect(),
+        finish_reason: if st.tools.is_empty() {
+            "stop".into()
+        } else {
+            "tool_calls".into()
+        },
+        usage: IrUsage {
+            input_tokens: st.in_tokens,
+            output_tokens: st.out_tokens,
+        },
+    };
+    let full = to_openai_responses_response(&ir);
+    write_sse_frame(
+        stream,
+        Some("response.completed"),
+        &json!({"type":"response.completed","response":full}).to_string(),
+    )
+    .await
+}
+
+async fn drain_openai_events_to_responses(
+    buf: &mut String,
+    model: &str,
+    stream: &mut TcpStream,
+    st: &mut ResponsesAccum,
+) -> std::io::Result<()> {
+    while let Some(idx) = buf.find("\n\n") {
+        let block = buf[..idx].to_string();
+        *buf = buf[idx + 2..].to_string();
+        for line in block.lines() {
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if let Some(t) = v
+                .pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+            {
+                responses_text_delta(st, model, t, stream).await?;
+            }
+            if let Some(arr) = v
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(Value::as_array)
+            {
+                for tc in arr {
+                    let oi = tc.get("index").and_then(Value::as_i64).unwrap_or(0);
+                    let id = tc
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let name = tc
+                        .pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let args = tc
+                        .pointer("/function/arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let slot = resp_tool_slot(st, oi);
+                    if !id.is_empty() {
+                        slot.1 = id;
+                    }
+                    if !name.is_empty() {
+                        slot.2 = name;
+                    }
+                    slot.3.push_str(&args);
+                }
+            }
+            if let Some(o) = v
+                .pointer("/usage/completion_tokens")
+                .and_then(Value::as_u64)
+            {
+                st.out_tokens = o;
+            }
+            if let Some(i) = v.pointer("/usage/prompt_tokens").and_then(Value::as_u64) {
+                st.in_tokens = i;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn drain_anthropic_events_to_responses(
+    buf: &mut String,
+    model: &str,
+    stream: &mut TcpStream,
+    st: &mut ResponsesAccum,
+) -> std::io::Result<()> {
+    while let Some(idx) = buf.find("\n\n") {
+        let block = buf[..idx].to_string();
+        *buf = buf[idx + 2..].to_string();
+        for line in block.lines() {
+            let Some(data) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            match v.get("type").and_then(Value::as_str).unwrap_or("") {
+                "content_block_start" => {
+                    if v.pointer("/content_block/type").and_then(Value::as_str) == Some("tool_use")
+                    {
+                        let bi = v.get("index").and_then(Value::as_i64).unwrap_or(0);
+                        let idv = v
+                            .pointer("/content_block/id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let name = v
+                            .pointer("/content_block/name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let slot = resp_tool_slot(st, bi);
+                        slot.1 = idv;
+                        slot.2 = name;
+                    }
+                }
+                "content_block_delta" => {
+                    if let Some(t) = v.pointer("/delta/text").and_then(Value::as_str) {
+                        responses_text_delta(st, model, t, stream).await?;
+                    }
+                    if let Some(pj) = v.pointer("/delta/partial_json").and_then(Value::as_str) {
+                        let bi = v.get("index").and_then(Value::as_i64).unwrap_or(0);
+                        resp_tool_slot(st, bi).3.push_str(pj);
+                    }
+                }
+                "message_start" => {
+                    if let Some(i) = v
+                        .pointer("/message/usage/input_tokens")
+                        .and_then(Value::as_u64)
+                    {
+                        st.in_tokens = i;
+                    }
+                }
+                "message_delta" => {
+                    if let Some(o) = v.pointer("/usage/output_tokens").and_then(Value::as_u64) {
+                        st.out_tokens = o;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// OpenAI Chat 上游 → OpenAI Responses 客户端（文本实时增量，工具末尾整块）。
+async fn relay_openai_chat_to_responses(
+    mut resp: reqwest::Response,
+    model: &str,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    write_sse_head(stream).await?;
+    let mut st = new_responses_accum();
+    responses_emit_created(&st, model, stream).await?;
+    let mut buf = String::new();
+    while let Ok(Some(bytes)) = resp.chunk().await {
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    }
+    drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    responses_finish(&mut st, model, stream).await
+}
+
+/// Anthropic 上游 → OpenAI Responses 客户端（文本实时增量，工具末尾整块）。
+async fn relay_anthropic_to_responses(
+    mut resp: reqwest::Response,
+    model: &str,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    write_sse_head(stream).await?;
+    let mut st = new_responses_accum();
+    responses_emit_created(&st, model, stream).await?;
+    let mut buf = String::new();
+    while let Ok(Some(bytes)) = resp.chunk().await {
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    }
+    drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    responses_finish(&mut st, model, stream).await
+}
+
 /// 将上游 SSE 响应逐块原样透传给客户端（无 Content-Length，Connection: close）。
 async fn forward_sse_passthrough(
     mut resp: reqwest::Response,
@@ -2724,6 +3099,8 @@ async fn handle_http_connection(
             Passthrough,
             OpenAiClientAnthropicUpstream,
             AnthropicClientOpenAiUpstream,
+            ResponsesFromOpenAi,
+            ResponsesFromAnthropic,
         }
         let stream_kind = if ir_req.stream && cand.tool_id != "workbuddy" {
             if ir_req.incoming_protocol == upstream_proto {
@@ -2736,6 +3113,14 @@ async fn handle_http_connection(
                 && upstream_proto == WireProtocolKind::OpenaiChat
             {
                 Some(StreamKind::AnthropicClientOpenAiUpstream)
+            } else if runtime.responses_streaming()
+                && ir_req.incoming_protocol == WireProtocolKind::OpenaiResponses
+            {
+                match upstream_proto {
+                    WireProtocolKind::OpenaiChat => Some(StreamKind::ResponsesFromOpenAi),
+                    WireProtocolKind::AnthropicMessages => Some(StreamKind::ResponsesFromAnthropic),
+                    _ => None,
+                }
             } else {
                 None
             }
@@ -2752,6 +3137,12 @@ async fn handle_http_connection(
                         }
                         StreamKind::AnthropicClientOpenAiUpstream => {
                             "跨协议增量流式（OpenAI 上游 → Anthropic 客户端）"
+                        }
+                        StreamKind::ResponsesFromOpenAi => {
+                            "跨协议增量流式（OpenAI 上游 → Responses 客户端）"
+                        }
+                        StreamKind::ResponsesFromAnthropic => {
+                            "跨协议增量流式（Anthropic 上游 → Responses 客户端）"
                         }
                     };
                     attempts.push(RoutingAttempt {
@@ -2801,6 +3192,12 @@ async fn handle_http_connection(
                         }
                         StreamKind::AnthropicClientOpenAiUpstream => {
                             relay_openai_chat_to_anthropic(resp, &ir_req.model, stream).await
+                        }
+                        StreamKind::ResponsesFromOpenAi => {
+                            relay_openai_chat_to_responses(resp, &ir_req.model, stream).await
+                        }
+                        StreamKind::ResponsesFromAnthropic => {
+                            relay_anthropic_to_responses(resp, &ir_req.model, stream).await
                         }
                     };
                 }
@@ -3558,6 +3955,95 @@ mod tests {
         assert!(body.contains("tool_use"), "body: {body}");
         assert!(body.contains("read_file"), "body: {body}");
         assert!(body.contains("a.txt"), "body: {body}");
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn responses_client_streams_from_anthropic_upstream_with_tools() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_9\",\"name\":\"read_file\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"b.txt\\\"}\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":4}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                        "text/event-stream",
+                    ),
+            )
+            .mount(&mock)
+            .await;
+        let (_db, rt, port, root, model_id) =
+            spawn_gateway_with_custom_account("minimax_code_cn", "MiniMax-M2.5", mock.uri(), "rsa")
+                .await;
+        rt.set_responses_streaming(true);
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .bearer_auth("qwitch-bind-codex-desktop")
+            .json(&json!({
+                "model": model_id,
+                "stream": true,
+                "input": "read b.txt",
+                "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object", "properties": {}}}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("response.created"), "body: {body}");
+        assert!(body.contains("response.output_text.delta"), "body: {body}");
+        assert!(body.contains("Hi"), "body: {body}");
+        assert!(body.contains("function_call"), "body: {body}");
+        assert!(body.contains("read_file"), "body: {body}");
+        assert!(body.contains("response.completed"), "body: {body}");
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn responses_client_streams_from_openai_upstream_with_tools() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hey\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_7\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"c.txt\\\"}\"}}]}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n",
+                        "text/event-stream",
+                    ),
+            )
+            .mount(&mock)
+            .await;
+        let (_db, rt, port, root, model_id) = spawn_gateway_with_custom_account(
+            "custom_api_key",
+            "deepseek-v4-pro",
+            mock.uri(),
+            "rsb",
+        )
+        .await;
+        rt.set_responses_streaming(true);
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .bearer_auth("qwitch-bind-codex-desktop")
+            .json(&json!({
+                "model": model_id,
+                "stream": true,
+                "input": "read c.txt",
+                "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object", "properties": {}}}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("response.output_text.delta"), "body: {body}");
+        assert!(body.contains("Hey"), "body: {body}");
+        assert!(body.contains("function_call"), "body: {body}");
+        assert!(body.contains("read_file"), "body: {body}");
+        assert!(body.contains("response.completed"), "body: {body}");
         rt.stop_server();
         let _ = std::fs::remove_dir_all(root);
     }

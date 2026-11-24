@@ -297,4 +297,4 @@ cargo audit --file Cargo.lock            # 本机先 cargo install cargo-audit
 | `11dd96b` | mock 号池 fixture 用 `import.meta.env.DEV` 守卫，生产构建 DCE 剔除（index 351→334KB，dist 不再含假数据） |
 | `efc4dde` | 跨协议增量真流式（OpenAI Chat ↔ Anthropic Messages，纯文本无工具场景）+ 双向回归测试 |
 
-**跨协议流式范围说明**：同协议（OpenAI Chat、Anthropic Messages）零拷贝透传；跨协议（OpenAI Chat ↔ Anthropic Messages）对**文本实时增量、工具调用末尾整块给出**（tool_use/tool_calls 双向映射，已含纯文本与带工具共 4 个集成测试）；仅 **OpenAI Responses 协议**跨协议仍走缓冲+合成（codex 常带工具，增量事件序列复杂，暂以正确性优先）。
+**跨协议流式范围说明**：同协议（OpenAI Chat、Anthropic Messages）零拷贝透传；跨协议（OpenAI Chat ↔ Anthropic Messages）对**文本实时增量、工具调用末尾整块给出**（tool_use/tool_calls 双向映射，已含纯文本与带工具共 4 个集成测试）；**OpenAI Responses 协议**跨协议增量流式已实现（文本实时增量 + 工具末尾整块，openai/anthropic 两种上游均有测试），但**默认关闭**：设置环境变量 `QWITCH_GATEWAY_RESPONSES_STREAMING=1` 才启用，关闭时走缓冲+合成以保证 codex 稳定，待真机 codex 冒烟后再考虑默认开启。

@@ -384,10 +384,13 @@
     position: relative;
     display: flex;
     width: 100%;
+    min-height: 2.125rem;
     align-items: center;
+    justify-content: space-between;
     gap: 0.5rem;
     border-radius: var(--radius-control);
-    padding: 0.5rem 0.625rem;
+    /* 与品牌区 / 分组标题统一 8px 内槽：aside px-3(12) + 8 = 20px 左基准线 */
+    padding: 0.5rem;
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--color-zinc-600);

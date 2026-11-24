@@ -568,7 +568,7 @@ export function Dashboard() {
         <div onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="h-8 shrink-0 -mx-3" />
         <div className="flex min-h-0 flex-1 flex-col justify-between">
         <div className="overflow-y-auto pr-0.5">
-          <div className="mb-5 flex items-center gap-2.5 px-1.5">
+          <div className="mb-4 flex items-center gap-2.5 px-2">
             <QwitchLogo size="md" />
             <div className="min-w-0">
               <div className="text-sm font-semibold tracking-tight">Qwitch</div>
@@ -578,9 +578,9 @@ export function Dashboard() {
             </div>
           </div>
 
-          <div className="space-y-4">
+          <div className="space-y-5">
             <div>
-              <div className="mb-1.5 px-2.5 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase dark:text-zinc-400">
+              <div className="mb-1.5 px-2 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase dark:text-zinc-400">
                 工作台与路由
               </div>
               <nav aria-label="主功能导航" className="space-y-1">
@@ -661,7 +661,7 @@ export function Dashboard() {
             </div>
 
             <div>
-              <div className="mb-1.5 px-2.5 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase dark:text-zinc-400">
+              <div className="mb-1.5 px-2 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase dark:text-zinc-400">
                 系统与审计
               </div>
               <nav aria-label="系统管理导航" className="space-y-1">
@@ -711,7 +711,7 @@ export function Dashboard() {
 
         <div className="space-y-2 border-t border-zinc-200/70 pt-3 dark:border-zinc-800/80">
           {/* 本地网关快捷启停控制（以启动/关闭为主交互，隐藏原始端口号） */}
-          <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-900/70">
+          <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-2 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-900/70">
             <button
               type="button"
               onClick={() => setNav("agents")}
@@ -778,7 +778,7 @@ export function Dashboard() {
             </div>
           ) : null}
 
-          <div className="flex items-center justify-between gap-2 px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <div className="flex items-center justify-between gap-2 px-2 text-[11px] text-zinc-500 dark:text-zinc-400">
             <span
               className="flex items-center gap-1"
               title={`Local-First 加密库：凭据经系统钥匙串与 AES-256-GCM 加密落盘；${

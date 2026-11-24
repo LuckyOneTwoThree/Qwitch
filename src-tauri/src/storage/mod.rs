@@ -323,6 +323,10 @@ impl QwitchDatabase {
             CREATE INDEX IF NOT EXISTS idx_gateway_logs_id ON gateway_request_logs(id DESC);
             ",
         )?;
+        exec_add_column(
+            &conn,
+            "ALTER TABLE account_pools ADD COLUMN stats_date TEXT",
+        )?;
         Ok(())
     }
 

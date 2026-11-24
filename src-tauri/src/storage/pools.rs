@@ -979,13 +979,23 @@ impl QwitchDatabase {
                 |r| r.get(0),
             )
             .optional()?;
-        let Some(curr) = current else {
-            return Err(StorageError::NotFound(model_id.to_string()));
-        };
-        conn.execute(
-            "UPDATE pool_model_policies SET enabled = ?1 WHERE pool_id = ?2 AND model_id = ?3",
-            params![(curr == 0) as i64, pool_id, model_id],
-        )?;
+        match current {
+            Some(curr) => {
+                conn.execute(
+                    "UPDATE pool_model_policies SET enabled = ?1 WHERE pool_id = ?2 AND model_id = ?3",
+                    params![(curr == 0) as i64, pool_id, model_id],
+                )?;
+            }
+            None => {
+                // 该模型来自成员 supported_models 但尚无显式 policy 行（list_pools 内存合成、
+                // 默认视为开启）。首次切换时补一条 disabled 行落库，避免「可见不可切」。
+                conn.execute(
+                    "INSERT INTO pool_model_policies (pool_id, model_id, enabled, fallback_model_id, claude_alias_id)
+                     VALUES (?1, ?2, 0, NULL, NULL)",
+                    params![pool_id, model_id],
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -1001,7 +1011,12 @@ impl QwitchDatabase {
             params![fallback_model_id, pool_id, model_id],
         )?;
         if affected == 0 {
-            return Err(StorageError::NotFound(model_id.to_string()));
+            // 影子 policy 尚未落库：插入一行（enabled=1）并写入 fallback，避免 NotFound
+            conn.execute(
+                "INSERT INTO pool_model_policies (pool_id, model_id, enabled, fallback_model_id, claude_alias_id)
+                 VALUES (?1, ?2, 1, ?3, NULL)",
+                params![pool_id, model_id, fallback_model_id],
+            )?;
         }
         Ok(())
     }
@@ -1546,26 +1561,38 @@ impl QwitchDatabase {
         cache_hit: bool,
     ) -> Result<(), StorageError> {
         let now = Utc::now().to_rfc3339();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let row: Option<(i64, i64, i64)> = conn
+        let row: Option<(i64, i64, i64, Option<String>)> = conn
             .query_row(
-                "SELECT today_requests, today_failovers, cache_hit_rate FROM account_pools WHERE id = ?1",
+                "SELECT today_requests, today_failovers, cache_hit_rate, stats_date FROM account_pools WHERE id = ?1",
                 params![pool_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        if let Some((reqs, fails, old_rate)) = row {
-            let new_reqs = reqs + 1;
-            let new_fails = if failover_occurred { fails + 1 } else { fails };
+        if let Some((reqs, fails, old_rate, stats_date)) = row {
+            // 跨日重置「today」统计，避免永久累计失真
+            let same_day = stats_date.as_deref() == Some(today.as_str());
+            let (base_reqs, base_fails, base_rate) = if same_day {
+                (reqs, fails, old_rate)
+            } else {
+                (0, 0, 0)
+            };
+            let new_reqs = base_reqs + 1;
+            let new_fails = if failover_occurred {
+                base_fails + 1
+            } else {
+                base_fails
+            };
             let hit_sample = if cache_hit { 100 } else { 0 };
-            let new_rate = if reqs == 0 {
+            let new_rate = if base_reqs == 0 {
                 hit_sample
             } else {
-                ((old_rate * 4 + hit_sample) / 5).clamp(0, 100)
+                ((base_rate * 4 + hit_sample) / 5).clamp(0, 100)
             };
             conn.execute(
-                "UPDATE account_pools SET today_requests = ?1, today_failovers = ?2, cache_hit_rate = ?3, updated_at = ?4 WHERE id = ?5",
-                params![new_reqs, new_fails, new_rate, now, pool_id],
+                "UPDATE account_pools SET today_requests = ?1, today_failovers = ?2, cache_hit_rate = ?3, stats_date = ?4, updated_at = ?5 WHERE id = ?6",
+                params![new_reqs, new_fails, new_rate, today, now, pool_id],
             )?;
         }
         Ok(())

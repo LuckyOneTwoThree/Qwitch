@@ -297,4 +297,4 @@ cargo audit --file Cargo.lock            # 本机先 cargo install cargo-audit
 | `11dd96b` | mock 号池 fixture 用 `import.meta.env.DEV` 守卫，生产构建 DCE 剔除（index 351→334KB，dist 不再含假数据） |
 | `efc4dde` | 跨协议增量真流式（OpenAI Chat ↔ Anthropic Messages，纯文本无工具场景）+ 双向回归测试 |
 
-**跨协议流式范围说明**：同协议（OpenAI Chat、Anthropic Messages）走零拷贝透传；跨协议在「无 tools 的纯文本请求」下做 SSE 事件增量翻译（已含双向测试）；**携带 tools 的请求（编码 Agent 常态）以及 OpenAI Responses 协议跨协议**仍走缓冲+合成，以保证 tool_calls/thinking/加密推理块语义正确——这是有意的正确性取舍，非缺陷。
+**跨协议流式范围说明**：同协议（OpenAI Chat、Anthropic Messages）零拷贝透传；跨协议（OpenAI Chat ↔ Anthropic Messages）对**文本实时增量、工具调用末尾整块给出**（tool_use/tool_calls 双向映射，已含纯文本与带工具共 4 个集成测试）；仅 **OpenAI Responses 协议**跨协议仍走缓冲+合成（codex 常带工具，增量事件序列复杂，暂以正确性优先）。

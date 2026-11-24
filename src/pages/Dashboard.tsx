@@ -136,7 +136,9 @@ export function Dashboard() {
     agentBindings,
     traces,
     toggleGateway,
+    gatewayBusy,
     detectAgentEnvironment,
+    detectingAgents,
   } = usePoolPrototype();
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
@@ -727,16 +729,22 @@ export function Dashboard() {
             </button>
             <button
               type="button"
-              onClick={toggleGateway}
+              onClick={() => void toggleGateway()}
+              disabled={gatewayBusy}
+              aria-busy={gatewayBusy}
               aria-label={gateway.running ? "关闭本地网关" : "启动本地网关"}
-              className={`inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition ${
+              className={`inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${
                 gateway.running
                   ? "bg-zinc-200/80 text-zinc-700 hover:bg-rose-500/15 hover:text-rose-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-rose-500/20 dark:hover:text-rose-300"
                   : "bg-brand-600 text-white shadow-2xs hover:bg-brand-700 dark:bg-brand-500 dark:text-zinc-950 dark:hover:bg-brand-400"
               }`}
             >
-              <Power className="h-3 w-3 shrink-0" aria-hidden="true" />
-              {gateway.running ? "关闭" : "启动"}
+              {gatewayBusy ? (
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+              ) : (
+                <Power className="h-3 w-3 shrink-0" aria-hidden="true" />
+              )}
+              {gatewayBusy ? "处理中" : gateway.running ? "关闭" : "启动"}
             </button>
           </div>
 
@@ -901,21 +909,32 @@ export function Dashboard() {
                 </button>
                 <button
                   type="button"
-                  onClick={detectAgentEnvironment}
-                  className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                  onClick={() => void detectAgentEnvironment()}
+                  disabled={detectingAgents}
+                  aria-busy={detectingAgents}
+                  className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  重新探测
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 shrink-0 ${detectingAgents ? "animate-spin" : ""}`}
+                    aria-hidden="true"
+                  />
+                  {detectingAgents ? "探测中…" : "重新探测"}
                 </button>
                 <button
                   type="button"
-                  onClick={toggleGateway}
+                  onClick={() => void toggleGateway()}
+                  disabled={gatewayBusy}
+                  aria-busy={gatewayBusy}
                   className={`btn btn-sm gap-1.5 whitespace-nowrap ${
                     gateway.running ? "btn-secondary" : "btn-primary"
-                  }`}
+                  } disabled:cursor-not-allowed disabled:opacity-60`}
                 >
-                  <Power className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  {gateway.running ? "停止网关" : "启动网关"}
+                  {gatewayBusy ? (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Power className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                  {gatewayBusy ? "处理中…" : gateway.running ? "停止网关" : "启动网关"}
                 </button>
               </>
             )}

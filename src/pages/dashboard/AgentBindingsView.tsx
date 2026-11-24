@@ -142,6 +142,7 @@ export function AgentBindingsView({
     clearAllAgentWiring,
     repairAgentDrift,
     restartAgentClient,
+    restartingAgentId,
     refreshAgentRunning,
     toggleAgentOption,
     injectMemberCooldown,
@@ -781,16 +782,32 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   >
                     下次启动生效
                   </span>
+                ) : !activeBinding.installed ? (
+                  <span
+                    className="text-[11px] text-zinc-400"
+                    title="未检测到该客户端安装，请先在系统设置配置客户端路径"
+                  >
+                    未安装
+                  </span>
                 ) : (
                   <button
                     type="button"
-                    onClick={() => restartAgentClient(activeBinding.agentId)}
+                    onClick={() => void restartAgentClient(activeBinding.agentId)}
+                    disabled={restartingAgentId === activeBinding.agentId}
+                    aria-busy={restartingAgentId === activeBinding.agentId}
                     title={`${activeBinding.running ? "重启" : "启动"} ${activeBinding.name} 以加载最新 Qwitch 配置`}
                     aria-label={`${activeBinding.running ? "重启" : "启动"} ${activeBinding.name}`}
-                    className="btn btn-xs btn-sky-soft gap-1"
+                    className="btn btn-xs btn-sky-soft gap-1 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <RotateCcw className="h-3 w-3" aria-hidden="true" />
-                    {activeBinding.running ? "重启" : "启动"}
+                    <RotateCcw
+                      className={`h-3 w-3 ${restartingAgentId === activeBinding.agentId ? "animate-spin" : ""}`}
+                      aria-hidden="true"
+                    />
+                    {restartingAgentId === activeBinding.agentId
+                      ? "处理中…"
+                      : activeBinding.running
+                        ? "重启"
+                        : "启动"}
                   </button>
                 )}
 
@@ -1569,10 +1586,12 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       {activeBinding.mountedPoolIds.length > 0 && (
                         <button
                           type="button"
-                          onClick={() => restartAgentClient("codex_desktop")}
-                          className="btn btn-xs btn-secondary"
+                          onClick={() => void restartAgentClient("codex_desktop")}
+                          disabled={restartingAgentId === "codex_desktop"}
+                          aria-busy={restartingAgentId === "codex_desktop"}
+                          className="btn btn-xs btn-secondary disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          重启
+                          {restartingAgentId === "codex_desktop" ? "处理中…" : "重启"}
                         </button>
                       )}
                     </div>
@@ -1707,7 +1726,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
         description={
           clearConfirm?.agentId
             ? "将仅删除该 Agent 配置中 Qwitch 写入的 provider / 路由 / 令牌键，保留其它配置。此操作可用「全部解绑并还原」前先备份，但强制清除不依赖备份。"
-            : "将对 6 个目标 Agent 执行清除：有备份的还原原始文件，无备份的强制删除 Qwitch 写入。不会删除账号、号池或停止网关。"
+            : `将对 ${agentBindings.length} 个目标 Agent 执行清除：有备份的还原原始文件，无备份的强制删除 Qwitch 写入。不会删除账号、号池或停止网关。`
         }
         confirmLabel="确认清除"
         onCancel={() => setClearConfirm(null)}

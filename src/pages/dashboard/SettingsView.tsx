@@ -133,6 +133,7 @@ export function SettingsView({
     inUseBySelf: boolean;
     message: string;
   } | null>(null);
+  const [clientRefreshing, setClientRefreshing] = useState(false);
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const runningDesktopAgents = useMemo(
     () =>
@@ -531,11 +532,22 @@ export function SettingsView({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => void refreshClientStatuses()}
+                disabled={clientRefreshing}
+                onClick={async () => {
+                  setClientRefreshing(true);
+                  try {
+                    await refreshClientStatuses();
+                  } finally {
+                    setClientRefreshing(false);
+                  }
+                }}
                 className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
               >
-                <RefreshCw className="h-3 w-3 shrink-0" aria-hidden="true" />
-                重新探测
+                <RefreshCw
+                  className={`h-3 w-3 shrink-0 ${clientRefreshing ? "animate-spin" : ""}`}
+                  aria-hidden="true"
+                />
+                {clientRefreshing ? "探测中…" : "重新探测"}
               </button>
               <button
                 type="button"
@@ -585,9 +597,18 @@ export function SettingsView({
                 type="button"
                 disabled={portChecking}
                 onClick={async () => {
+                  const p = Number.parseInt(portInput, 10);
+                  if (!Number.isFinite(p) || p < 1024 || p > 65535) {
+                    setPortCheck({
+                      available: false,
+                      inUseBySelf: false,
+                      message: "端口必须在 1024–65535 之间",
+                    });
+                    return;
+                  }
                   setPortChecking(true);
                   try {
-                    setPortCheck(await checkGatewayPort(Number.parseInt(portInput, 10)));
+                    setPortCheck(await checkGatewayPort(p));
                   } finally {
                     setPortChecking(false);
                   }
@@ -601,9 +622,18 @@ export function SettingsView({
                 type="button"
                 disabled={portApplying}
                 onClick={async () => {
+                  const p = Number.parseInt(portInput, 10);
+                  if (!Number.isFinite(p) || p < 1024 || p > 65535) {
+                    setPortCheck({
+                      available: false,
+                      inUseBySelf: false,
+                      message: "端口必须在 1024–65535 之间",
+                    });
+                    return;
+                  }
                   setPortApplying(true);
                   try {
-                    const res = await updateGatewayPort(Number.parseInt(portInput, 10));
+                    const res = await updateGatewayPort(p);
                     if (res.ok) {
                       if (runningDesktopAgents.length > 0) {
                         setRestartConfirmOpen(true);

@@ -157,7 +157,46 @@ pub fn run() {
                 Arc::clone(&host),
             ));
             let gateway_runtime = GatewayRuntime::new();
-            let _ = gateway_runtime.set_port(startup_settings.gateway_port);
+            let effective_gateway_port = startup_settings.gateway_port.max(1024);
+            let _ = gateway_runtime.set_port(effective_gateway_port);
+
+            // 升级迁移：旧版本设置里没有 gateway_port（当时默认 18425）。
+            // 新默认 8187，需把已挂载 Agent 的配置一并重写到新端口，避免升级后全线漂移。
+            let legacy_settings_without_port = db
+                .get_setting(commands::SETTINGS_KEY)
+                .ok()
+                .flatten()
+                .is_some_and(|json| !json.contains("\"gateway_port\""));
+            if legacy_settings_without_port {
+                if let Ok(pools) = db.list_pools(&master_key, &gateway_runtime.cooldown_snapshot())
+                {
+                    if let Ok(list) = db.get_stored_agent_bindings() {
+                        let global_proxy = gateway_runtime.runtime_state().global_proxy_detected;
+                        for b in list {
+                            if b.mounted_pool_ids.is_empty() {
+                                continue;
+                            }
+                            let _ = crate::agent_wiring::apply_agent_wiring(
+                                &db,
+                                &master_key,
+                                b.agent_id,
+                                &b.mounted_pool_ids,
+                                b.default_model_key.as_deref(),
+                                &b.options,
+                                &pools,
+                                "127.0.0.1",
+                                effective_gateway_port,
+                                global_proxy,
+                                None,
+                            );
+                        }
+                    }
+                }
+                if let Ok(json) = serde_json::to_string(&startup_settings) {
+                    let _ = db.set_setting(commands::SETTINGS_KEY, &json);
+                }
+            }
+
             let state = AppState {
                 db,
                 master_key,

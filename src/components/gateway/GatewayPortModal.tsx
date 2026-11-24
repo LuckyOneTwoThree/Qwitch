@@ -22,6 +22,10 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
 
   const runCheck = async () => {
     const p = Number.parseInt(port, 10);
+    if (!Number.isFinite(p) || p < 1024 || p > 65535) {
+      setResult({ available: false, inUseBySelf: false, message: "端口必须在 1024–65535 之间" });
+      return;
+    }
     setChecking(true);
     try {
       setResult(await checkGatewayPort(p));
@@ -32,6 +36,10 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
 
   const apply = async () => {
     const p = Number.parseInt(port, 10);
+    if (!Number.isFinite(p) || p < 1024 || p > 65535) {
+      setResult({ available: false, inUseBySelf: false, message: "端口必须在 1024–65535 之间" });
+      return;
+    }
     setApplying(true);
     try {
       const res = await updateGatewayPort(p);

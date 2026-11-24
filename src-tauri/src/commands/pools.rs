@@ -198,20 +198,34 @@ pub async fn update_gateway_port_cmd(
             Err(e) => return Err(format!("端口 {port} 不可用：{e}")),
         }
     }
+    let old_port = state.gateway.runtime_state().port;
     let was_running = state.gateway.runtime_state().running;
     if was_running {
         state.gateway.stop_server();
     }
     state.gateway.set_port(port)?;
     if was_running {
-        state
+        if let Err(e) = state
             .gateway
             .start_server(
                 Arc::clone(&state.db),
                 state.master_key,
                 Arc::clone(&state.adapters),
             )
-            .await?;
+            .await
+        {
+            // 启动失败则回滚到旧端口并尽量恢复服务，避免“改端口把网关搞停”
+            let _ = state.gateway.set_port(old_port);
+            let _ = state
+                .gateway
+                .start_server(
+                    Arc::clone(&state.db),
+                    state.master_key,
+                    Arc::clone(&state.adapters),
+                )
+                .await;
+            return Err(format!("端口 {port} 启动失败，已回滚到 {old_port}：{e}"));
+        }
     }
     // 重新同步已挂载 Agent 配置端口
     let ws = build_workspace_state(&state.db, &state.master_key, &state.gateway)?;

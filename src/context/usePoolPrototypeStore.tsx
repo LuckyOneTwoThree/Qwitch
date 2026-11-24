@@ -77,7 +77,8 @@ export interface PoolPrototypeContextValue {
   nowMs: number;
   isRefreshingModels: boolean;
   refreshUpstreamModels: (accountId?: string) => Promise<void>;
-  toggleGateway: () => void;
+  toggleGateway: () => Promise<void>;
+  gatewayBusy: boolean;
   updateGatewayPort: (port: number) => Promise<{ ok: boolean; message?: string }>;
   checkGatewayPort: (port: number) => Promise<{
     available: boolean;
@@ -118,9 +119,11 @@ export interface PoolPrototypeContextValue {
   clearAgentWiring: (agentId: TargetAgentId, mode: "restore" | "force") => void;
   clearAllAgentWiring: (mode: "restore" | "force", stopGateway: boolean) => void;
   repairAgentDrift: (agentId: TargetAgentId) => void;
-  restartAgentClient: (agentId: TargetAgentId) => void;
+  restartAgentClient: (agentId: TargetAgentId) => Promise<void>;
+  restartingAgentId: TargetAgentId | null;
   toggleAgentOption: (agentId: TargetAgentId, key: keyof AgentBindingOptions) => void;
-  detectAgentEnvironment: () => void;
+  detectAgentEnvironment: () => Promise<void>;
+  detectingAgents: boolean;
   refreshAgentRunning: () => void;
   runPoolSimulation: (input: RunPoolSimulationInput) => RunPoolSimulationResult;
   getAgentToolModelOptions: (toolId: string) => CatalogModelEntry[];
@@ -198,7 +201,8 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   nowMs: Date.now(),
   isRefreshingModels: false,
   refreshUpstreamModels: async () => {},
-  toggleGateway: () => {},
+  toggleGateway: async () => {},
+  gatewayBusy: false,
   updateGatewayPort: async () => ({ ok: false, message: "浏览器预览不支持" }),
   checkGatewayPort: async () => ({
     available: true,
@@ -231,9 +235,11 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   clearAgentWiring: () => {},
   clearAllAgentWiring: () => {},
   repairAgentDrift: () => {},
-  restartAgentClient: () => {},
+  restartAgentClient: async () => {},
+  restartingAgentId: null,
   toggleAgentOption: () => {},
-  detectAgentEnvironment: () => {},
+  detectAgentEnvironment: async () => {},
+  detectingAgents: false,
   refreshAgentRunning: () => {},
   runPoolSimulation: () => ({
     trace: INITIAL_ROUTING_TRACES[0],
@@ -568,6 +574,10 @@ export function PoolPrototypeProvider({
   rawBindingsRef.current = rawBindings;
   // 命令响应乱序保护：仅应用「不小于已应用序号」的快照，避免旧响应覆盖新状态。
   const opSeqRef = useRef(0);
+  const gatewayBusyRef = useRef(false);
+  const [gatewayBusy, setGatewayBusy] = useState(false);
+  const [detectingAgents, setDetectingAgents] = useState(false);
+  const [restartingAgentId, setRestartingAgentId] = useState<TargetAgentId | null>(null);
   const appliedSeqRef = useRef(0);
 
   const hasActiveCooldown = useMemo(
@@ -752,19 +762,38 @@ export function PoolPrototypeProvider({
     });
   }, [rawBindings, pools, gateway, isTauriRuntime]);
 
-  const toggleGateway = useCallback(() => {
-    setGateway((prev) => {
-      const next = !prev.running;
-      notify(
-        next
-          ? `本地多协议网关已启动 (${prev.host}:${prev.port})`
-          : "本地多协议网关已停止，已指向 Agent 将暂停接收流量",
-        next ? "success" : "warning"
-      );
-      return { ...prev, running: next };
-    });
-    void syncWorkspaceCommand("toggle_gateway_server");
-  }, [notify, syncWorkspaceCommand]);
+  const toggleGateway = useCallback(async () => {
+    if (gatewayBusyRef.current) return;
+    gatewayBusyRef.current = true;
+    setGatewayBusy(true);
+    const wasRunning = gateway.running;
+    try {
+      if (!isTauriRuntime) {
+        setGateway((prev) => ({ ...prev, running: !prev.running }));
+        notify(
+          wasRunning ? "原型预览：网关已切换为停止态" : "原型预览：网关已切换为运行态",
+          "info"
+        );
+        return;
+      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      const ws = await invoke<PoolWorkspaceState>("toggle_gateway_server");
+      applyWorkspaceState(ws);
+      if (ws.gateway.running) {
+        notify(`本地多协议网关已启动 (${ws.gateway.host}:${ws.gateway.port})`, "success");
+      } else {
+        notify("本地多协议网关已停止，已指向 Agent 将暂停接收流量", "warning");
+      }
+    } catch (err) {
+      // 启动失败（如端口被占用）必须如实反馈，并回读真实运行态
+      const message = err instanceof Error ? err.message : String(err);
+      notify(`网关${wasRunning ? "停止" : "启动"}失败：${message}`, "error");
+      void refreshWorkspace();
+    } finally {
+      gatewayBusyRef.current = false;
+      setGatewayBusy(false);
+    }
+  }, [applyWorkspaceState, gateway.running, isTauriRuntime, notify, refreshWorkspace]);
 
   const updateGatewayPort = useCallback(
     async (port: number) => {
@@ -828,17 +857,26 @@ export function PoolPrototypeProvider({
       "mimo",
       "zcode",
     ];
-    const targets = rawBindingsRef.current.filter(
-      (b) => desktopIds.includes(b.agentId) && b.running
-    );
-    if (targets.length === 0) {
-      notify("当前没有运行中的桌面 Agent，无需重启", "info");
-      return { restarted: [], failed: [], count: 0 };
-    }
     const restarted: string[] = [];
     const failed: string[] = [];
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      // 先刷新一次运行态，避免在设置页（无 6s 轮询）按陈旧 running 误判
+      let bindings = rawBindingsRef.current;
+      try {
+        const ws = await invoke<PoolWorkspaceState>("get_pool_workspace_state");
+        applyWorkspaceState(ws);
+        bindings = ws.agentBindings;
+      } catch {
+        /* 刷新失败则沿用本地状态 */
+      }
+      const targets = bindings.filter(
+        (b) => desktopIds.includes(b.agentId) && b.running
+      );
+      if (targets.length === 0) {
+        notify("当前没有运行中的桌面 Agent，无需重启", "info");
+        return { restarted: [], failed: [], count: 0 };
+      }
       for (const b of targets) {
         try {
           await invoke("restart_agent_client_cmd", { agentId: b.agentId });
@@ -847,20 +885,20 @@ export function PoolPrototypeProvider({
           failed.push(`${b.name}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      if (failed.length > 0) {
+        notify(
+          `已重启 ${restarted.length} 个桌面 Agent，失败 ${failed.length} 个：${failed.join("；")}`,
+          "error"
+        );
+      } else {
+        notify(`已重启 ${restarted.length} 个运行中的桌面 Agent`, "success");
+      }
+      return { restarted, failed, count: targets.length };
     } catch (err) {
       notify(`批量重启失败：${err instanceof Error ? err.message : String(err)}`, "error");
-      return { restarted, failed, count: targets.length };
+      return { restarted, failed, count: 0 };
     }
-    if (failed.length > 0) {
-      notify(
-        `已重启 ${restarted.length} 个桌面 Agent，失败 ${failed.length} 个：${failed.join("；")}`,
-        "error"
-      );
-    } else {
-      notify(`已重启 ${restarted.length} 个运行中的桌面 Agent`, "success");
-    }
-    return { restarted, failed, count: targets.length };
-  }, [isTauriRuntime, notify]);
+  }, [applyWorkspaceState, isTauriRuntime, notify]);
 
   const cycleBridgeRuntime = useCallback(() => {
     setGateway((prev) => {
@@ -1691,7 +1729,13 @@ export function PoolPrototypeProvider({
   );
 
   const restartAgentClient = useCallback(
-    (agentId: TargetAgentId) => {
+    async (agentId: TargetAgentId) => {
+      if (restartingAgentId) return;
+      const binding = rawBindingsRef.current.find((b) => b.agentId === agentId);
+      const wasRunning = binding?.running ?? false;
+      const agentName = binding?.name ?? agentId;
+      setRestartingAgentId(agentId);
+      // 乐观清掉重启提示；真实成功与否以后端返回为准
       setRawBindings((prev) =>
         prev.map((b) => {
           if (b.agentId !== agentId) return b;
@@ -1702,19 +1746,46 @@ export function PoolPrototypeProvider({
           };
         })
       );
-      const wasRunning = rawBindings.find((b) => b.agentId === agentId)?.running ?? false;
-      const verb = wasRunning ? "已重启" : "已启动";
-      if (agentId === "codex_desktop") {
-        notify(`${verb} ChatGPT/Codex 桌面应用以加载最新配置`, "success");
-      } else if (agentId === "opencode") {
-        notify("OpenCode 为终端客户端：配置将在下次启动/新会话生效（无需重启桌面进程）", "info");
-      } else {
-        const agentName = rawBindings.find((b) => b.agentId === agentId)?.name ?? agentId;
-        notify(`${verb} ${agentName}，最新 Qwitch 网关配置已生效`, "success");
+      try {
+        if (!isTauriRuntime) {
+          notify(
+            agentId === "opencode"
+              ? "OpenCode 为终端客户端：配置将在下次启动/新会话生效"
+              : `${wasRunning ? "已重启" : "已启动"} ${agentName}（原型预览）`,
+            "info"
+          );
+          return;
+        }
+        const { invoke } = await import("@tauri-apps/api/core");
+        const ws = await invoke<PoolWorkspaceState>("restart_agent_client_cmd", { agentId });
+        applyWorkspaceState(ws);
+        if (agentId === "opencode") {
+          notify(
+            "OpenCode 为终端客户端：配置将在下次启动/新会话生效（无需重启桌面进程）",
+            "info"
+          );
+        } else if (agentId === "codex_desktop") {
+          notify(
+            `${wasRunning ? "已重启" : "已启动"} ChatGPT/Codex 桌面应用以加载最新配置`,
+            "success"
+          );
+        } else {
+          notify(
+            `${wasRunning ? "已重启" : "已启动"} ${agentName}，最新 Qwitch 网关配置已生效`,
+            "success"
+          );
+        }
+      } catch (err) {
+        notify(
+          `重启 ${agentName} 失败：${err instanceof Error ? err.message : String(err)}`,
+          "error"
+        );
+        void refreshWorkspace();
+      } finally {
+        setRestartingAgentId(null);
       }
-      void syncWorkspaceCommand("restart_agent_client_cmd", { agentId });
     },
-    [notify, rawBindings, syncWorkspaceCommand]
+    [applyWorkspaceState, isTauriRuntime, notify, refreshWorkspace, restartingAgentId]
   );
 
   const toggleAgentOption = useCallback(
@@ -1749,13 +1820,31 @@ export function PoolPrototypeProvider({
     [notify, syncWorkspaceCommand]
   );
 
-  const detectAgentEnvironment = useCallback(() => {
-    notify(
-      `已完成 ${rawBindingsRef.current.length} 个目标 Agent 安装路径、Schema 版本与本机代理状态重新探测`,
-      "success"
-    );
-    void syncWorkspaceCommand("detect_agent_environment_cmd");
-  }, [notify, syncWorkspaceCommand]);
+  const detectAgentEnvironment = useCallback(async () => {
+    if (detectingAgents) return;
+    setDetectingAgents(true);
+    try {
+      if (!isTauriRuntime) {
+        notify("原型预览：已重新对齐 Agent 安装路径与代理状态", "info");
+        return;
+      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      // 必须等待后端探测完成再提示，避免「还没探测就说已完成」
+      const ws = await invoke<PoolWorkspaceState>("detect_agent_environment_cmd");
+      applyWorkspaceState(ws);
+      notify(
+        `已完成 ${ws.agentBindings.length} 个目标 Agent 安装路径、Schema 版本与本机代理状态重新探测`,
+        "success"
+      );
+    } catch (err) {
+      notify(
+        `重新探测失败：${err instanceof Error ? err.message : String(err)}`,
+        "error"
+      );
+    } finally {
+      setDetectingAgents(false);
+    }
+  }, [applyWorkspaceState, detectingAgents, isTauriRuntime, notify]);
 
   // 轻量刷新各目标应用「运行中/未运行」状态（仅合并 running 字段，不整包覆盖，避免打断交互）
   const refreshAgentRunning = useCallback(() => {
@@ -2719,6 +2808,7 @@ export function PoolPrototypeProvider({
       isRefreshingModels,
       refreshUpstreamModels,
       toggleGateway,
+      gatewayBusy,
       updateGatewayPort,
       checkGatewayPort,
       restartRunningDesktopAgents,
@@ -2748,8 +2838,10 @@ export function PoolPrototypeProvider({
       clearAllAgentWiring,
       repairAgentDrift,
       restartAgentClient,
+      restartingAgentId,
       toggleAgentOption,
       detectAgentEnvironment,
+      detectingAgents,
       refreshAgentRunning,
       runPoolSimulation,
       getAgentToolModelOptions,
@@ -2782,6 +2874,7 @@ export function PoolPrototypeProvider({
       isRefreshingModels,
       refreshUpstreamModels,
       toggleGateway,
+      gatewayBusy,
       updateGatewayPort,
       checkGatewayPort,
       restartRunningDesktopAgents,
@@ -2811,8 +2904,10 @@ export function PoolPrototypeProvider({
       clearAllAgentWiring,
       repairAgentDrift,
       restartAgentClient,
+      restartingAgentId,
       toggleAgentOption,
       detectAgentEnvironment,
+      detectingAgents,
       refreshAgentRunning,
       runPoolSimulation,
       getAgentToolModelOptions,

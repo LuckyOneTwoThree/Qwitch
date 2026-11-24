@@ -60,6 +60,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     pools,
     agentBindings,
     toggleGateway,
+    gatewayBusy,
     updateAgentMountedPools,
     setAgentDefaultModel,
     unbindAgent,
@@ -421,12 +422,14 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
               </div>
               <button
                 type="button"
-                onClick={toggleGateway}
-                className={`btn btn-xs shrink-0 ${
+                onClick={() => void toggleGateway()}
+                disabled={gatewayBusy}
+                aria-busy={gatewayBusy}
+                className={`btn btn-xs shrink-0 disabled:cursor-not-allowed disabled:opacity-60 ${
                   gateway.running ? "btn-secondary" : "btn-primary"
                 }`}
               >
-                {gateway.running ? "停止" : "启动"}
+                {gatewayBusy ? "处理中" : gateway.running ? "停止" : "启动"}
               </button>
             </div>
 

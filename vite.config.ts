@@ -29,6 +29,23 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("react") || id.includes("scheduler")) {
+              return "react-vendor";
+            }
+            if (id.includes("lucide")) {
+              return "lucide-vendor";
+            }
+            return "vendor";
+          }
+        },
+      },
+    },
+  },
   test: {
     // 显式限定测试范围：不依赖默认 glob（默认会扫描整个工作目录，
     // 曾导致未跟踪的同名副本 qwitch/src 被一并执行，测试数虚高约一倍）

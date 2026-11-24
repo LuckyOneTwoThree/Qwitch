@@ -23,7 +23,11 @@
         "fullscreen": false,
         "visible": false,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 19
+        }
       },
       {
         "label": "tray",

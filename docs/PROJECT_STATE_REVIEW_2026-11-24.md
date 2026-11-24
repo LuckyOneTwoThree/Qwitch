@@ -297,4 +297,15 @@ cargo audit --file Cargo.lock            # 本机先 cargo install cargo-audit
 | `11dd96b` | mock 号池 fixture 用 `import.meta.env.DEV` 守卫，生产构建 DCE 剔除（index 351→334KB，dist 不再含假数据） |
 | `efc4dde` | 跨协议增量真流式（OpenAI Chat ↔ Anthropic Messages，纯文本无工具场景）+ 双向回归测试 |
 
+### 发布前体验与稳定性收敛（第三轮，2026-11-24）
+
+| 提交 | 内容 |
+| --- | --- |
+| `975c79a` / `525907e` / `a583567` | 新增本地网关端口配置与占用检测（设置页完整批量重启入口 + Agent 页快捷弹窗并存），动态 Agent 数量同步为 6 |
+| `ca65882` | 修复 Claude / DSH 重启无效：改为 `osascript` 优雅退出 → 轮询等待至进程彻底退出 → 兜底强杀 → `open -n` 重启（含 isolated twin） |
+| `50c548e` / `6058422` | 默认端口改为低冲突且易记的 `8187` 并持久化至应用设置，启动自动读取 |
+| `08f8454` | 修复端口持久化被普通设置覆盖、改端口启动失败自动回滚旧端口、网关启停/重新探测/单 Agent 重启改为等待后端结果并补齐忙碌态与失败提示；未安装客户端隐藏重启按钮 |
+| `5e76986` / `ffb1c60` | 网关状态条窄屏防挤压、Agent 空态提示；路由观测新增搜索框一键清空、「仅看失败（带计数）」筛选与空态引导 |
+| `ee0017b` | 修复跨协议 SSE 流式 UTF-8 截断乱码，补齐端口设置严格校验/忙碌态与 MiMo / ZCode 接入设置卡片 |
+
 **跨协议流式范围说明**：同协议（OpenAI Chat、Anthropic Messages）零拷贝透传；跨协议（OpenAI Chat ↔ Anthropic Messages）对**文本实时增量、工具调用末尾整块给出**（tool_use/tool_calls 双向映射，已含纯文本与带工具共 4 个集成测试）；**OpenAI Responses 协议**跨协议增量流式已实现（文本实时增量 + 工具末尾整块，openai/anthropic 两种上游均有测试），但**默认关闭**：设置环境变量 `QWITCH_GATEWAY_RESPONSES_STREAMING=1` 才启用，关闭时走缓冲+合成以保证 codex 稳定，待真机 codex 冒烟后再考虑默认开启。

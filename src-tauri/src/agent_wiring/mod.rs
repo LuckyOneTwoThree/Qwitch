@@ -715,6 +715,7 @@ fn default_options_for_agent(agent_id: TargetAgentId) -> AgentBindingOptions {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn proc_matches(pattern: &str) -> bool {
     Command::new("pgrep")
         .args(["-f", pattern])

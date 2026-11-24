@@ -35,14 +35,16 @@
 ```text
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  1. 目标 Agent 挂载层（纯 Rust: src-tauri/src/agent_wiring/）              │
-│     Codex 桌面版 · Claude 桌面版 · DeepSeek Harness · OpenCode · 标准端点  │
+│     Codex 桌面版 · Claude 桌面版 · DeepSeek Harness · OpenCode ·           │
+│     MiMo Code · ZCode · 通用标准端点（6 大客户端 + 环境变量导出）          │
 │     职责：配置探测 · Stash 原值备份 · 最小键注入 · Drift 漂移检测 · 还原   │
 └───────────────────────────────────▲────────────────────────────────────────┘
-                                    │ HTTP 127.0.0.1:8187 (Loopback + Token)
+                                    │ HTTP 127.0.0.1:8187 (Loopback + 随机 Token)
 ┌───────────────────────────────────▼────────────────────────────────────────┐
-│  2. 本地多协议网关与号池引擎（纯 Rust / axum: src-tauri/src/gateway/）     │
+│  2. 本地多协议网关与号池引擎（纯 Rust / tokio TcpListener: gateway/）      │
 │     ├─ 协议解析 & IR 互转：OpenAI Chat ↔ Anthropic Messages ↔ OpenAI Resp. │
-│     ├─ 号池调度器：消费 quota_snapshots（水位优先 / 耗尽 / 顺序 / 轮询）   │
+│     ├─ 流式与工具：同协议 SSE 透传 · 跨协议增量文本+工具 · tools 完整透传  │
+│     ├─ 号池调度器：消费 quota_snapshots（水位优先 / 耗尽 / 顺序 / 原子轮询）│
 │     ├─ 稳定性护栏：会话亲和（保 Prompt Cache）+ 首字节前 Failover + 冷却   │
 │     └─ 凭据锁隔离：按 account_id 的 RefreshSingleFlight（独立于签到锁）   │
 └─────────────────────────┬───────────────────────────────┬──────────────────┘
@@ -53,7 +55,7 @@
 │ • 通用 OpenAI / Anthropic API Key  │   │ • 精简 host.mjs（~400 行）        │
 │   （作为稳定基线与末位兜底账号）   │   │ • 仅支持 config + auth.loader     │
 │ • 协议干净的原生内置订阅           │   │   + 流式 chunk / abort / 背压     │
-│   （如 MiniMax Code CN 可选原生）  │   │ • 复用 Qwitch 零信任哈希锁定      │
+│   （MiniMax / WorkBuddy 等直连）   │   │ • 复用 Qwitch 零信任哈希锁定      │
 └────────────────────────────────────┘   └───────────────────────────────────┘
 ```
 
@@ -159,7 +161,7 @@ pub enum IrPart {
 
 ---
 
-## 5. 4 大消费端 Agent 挂载规范（Stash + Drift + 无损还原）
+## 5. 6 大消费端 Agent 挂载规范（Stash + Drift + 无损还原）
 
 所有 Agent 挂载均遵循**四步事务**：`探测 (Detect) → 备份原值 (Stash) → 最小键写入 (Wire) → 漂移校验 (Drift Check)`。解绑时根据 Stash 精确还原。
 
@@ -209,7 +211,17 @@ pub enum IrPart {
   3. **WebSocket 升级 `426` 降级**：Codex 对 `/responses` 优先尝试 WebSocket；第一期网关收到 `Upgrade: websocket` 直接返回 `426 Upgrade Required`，Codex 自动平滑降级至 HTTP SSE POST。
   4. **`app-server` 精准热重启**：macOS 上关闭 Codex 窗口时后台 `app-server` 进程不退出导致新配置不生效，Qwitch 提供「仅重启 app-server（不关闭桌面窗口）」动作。
   5. **本机代理 502 诊断**：Codex 底层 `reqwest` 在开启系统全局代理 / `HTTP_PROXY` 时可能把 `127.0.0.1` 发给代理导致 502。挂载与自检流程必须检测本机代理并提示配置 `NO_PROXY=127.0.0.1,localhost`。
-  6. **内部辅助任务兜底**：Codex 后台自动发出的 `codex-auto-review`、标题/摘要生成等未知模型名请求，由网关自动回落到该绑定号池的首选模型，避免 404 打断主会话。
+  6. **内部辅助任务兜底**：Codex 后台自动发出的 `codex-auto-review`、标题/摘要生成等未知模型名请求，由网关自动回落到该绑定号池的首选模型，避免 404 打断主会话；若为 Codex 自有登录模型且未匹配号池，则透传直连 Codex 自有凭据。
+
+### 5.5 MiMo Code (`mimo`)
+- **配置文件**：`~/.mimocode/settings.json`。
+- **接入协议**：OpenAI Chat Completions（`http://127.0.0.1:<port>/v1`）。
+- **核心规范**：注入 Qwitch 网关端点与绑定令牌；修改模型清单或网关端口后支持从 Qwitch 优雅重启桌面客户端生效。
+
+### 5.6 ZCode (`zcode`)
+- **配置文件**：`~/.zcode/settings.json`。
+- **接入协议**：Anthropic Messages（`http://127.0.0.1:<port>`）。
+- **核心规范**：注入 Anthropic 兼容网关地址与绑定令牌；修改模型清单或网关端口后支持从 Qwitch 优雅重启桌面客户端生效。
 
 ---
 

@@ -505,10 +505,13 @@ impl GatewayRuntime {
         };
 
         log_db_result("append_routing_trace", db.append_routing_trace(&trace));
-        let _ = db.increment_pool_stats(
-            &pool.id,
-            status == RoutingTraceStatus::FailoverSuccess,
-            cache_affinity_hit,
+        log_db_result(
+            "increment_pool_stats",
+            db.increment_pool_stats(
+                &pool.id,
+                status == RoutingTraceStatus::FailoverSuccess,
+                cache_affinity_hit,
+            ),
         );
 
         Ok(RunPoolSimulationResult {
@@ -2783,10 +2786,13 @@ async fn handle_http_connection(
                         attempts,
                     };
                     log_db_result("append_routing_trace", db.append_routing_trace(&trace));
-                    let _ = db.increment_pool_stats(
-                        &pool.id,
-                        trace.status == RoutingTraceStatus::FailoverSuccess,
-                        plan.cache_affinity_hit,
+                    log_db_result(
+                        "increment_pool_stats",
+                        db.increment_pool_stats(
+                            &pool.id,
+                            trace.status == RoutingTraceStatus::FailoverSuccess,
+                            plan.cache_affinity_hit,
+                        ),
                     );
                     return match kind {
                         StreamKind::Passthrough => forward_sse_passthrough(resp, stream).await,
@@ -2993,10 +2999,13 @@ async fn handle_http_connection(
         attempts,
     };
     log_db_result("append_routing_trace", db.append_routing_trace(&trace));
-    let _ = db.increment_pool_stats(
-        &pool.id,
-        trace.status == RoutingTraceStatus::FailoverSuccess,
-        plan.cache_affinity_hit,
+    log_db_result(
+        "increment_pool_stats",
+        db.increment_pool_stats(
+            &pool.id,
+            trace.status == RoutingTraceStatus::FailoverSuccess,
+            plan.cache_affinity_hit,
+        ),
     );
 
     if ir_req.stream {

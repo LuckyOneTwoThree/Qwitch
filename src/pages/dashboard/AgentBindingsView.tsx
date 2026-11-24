@@ -515,8 +515,8 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
   return (
     <div className="space-y-3.5">
       {/* 顶部精简网关状态条（顶栏已提供启停/重探/测试路由主操作，此处仅作状态自检） */}
-      <section className="surface-card flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2">
-        <div className="flex flex-wrap items-center gap-2 text-xs">
+      <section className="surface-card flex flex-nowrap items-center justify-between gap-2.5 px-3.5 py-2">
+        <div className="flex min-w-0 shrink-0 items-center gap-2 text-xs">
           <div className="flex items-center gap-1.5">
             <span
               className={`h-2 w-2 rounded-full ${
@@ -549,7 +549,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                 }`}
               >
-                {gateway.globalProxyDetected ? "⚠️ 检测到全局代理" : "✓ 本机回环直连正常"}
+                {gateway.globalProxyDetected ? "⚠️ 全局代理" : "✓ 回环正常"}
               </span>
             </>
           ) : (
@@ -582,9 +582,9 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-            先选 Agent → 配置模型 → 按需在「账号调度」调整主备顺位
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+          <span className="min-w-0 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+            选 Agent → 配模型 → 调主备顺位
           </span>
           <button
             type="button"

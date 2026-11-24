@@ -134,7 +134,6 @@ export function Dashboard() {
     gateway,
     agentBindings,
     traces,
-    setSelectedPoolId,
     toggleGateway,
     detectAgentEnvironment,
   } = usePoolPrototype();
@@ -1474,13 +1473,8 @@ export function Dashboard() {
             </>
           )}
 
-          {(nav === "agents" || nav === "pools") && (
-            <AgentBindingsView
-              highlightAgentId={highlightAgentId}
-              onNavigatePools={(poolId) => {
-                if (poolId) setSelectedPoolId(poolId);
-              }}
-            />
+          {nav === "agents" && (
+            <AgentBindingsView highlightAgentId={highlightAgentId} />
           )}
 
           {nav === "routing" && (

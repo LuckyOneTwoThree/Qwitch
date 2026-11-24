@@ -117,7 +117,6 @@ export function AgentBindingsView({
   highlightAgentId,
 }: {
   highlightAgentId?: TargetAgentId | null;
-  onNavigatePools?: (poolId?: string) => void;
 }) {
   const {
     gateway,

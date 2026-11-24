@@ -26,7 +26,6 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
     const modelSection = screen.getByRole("region", { name: "WorkBuddy 订阅模型选择" });
     fireEvent.click(within(modelSection).getByRole("button", { name: "全选当前" }));
     expect(within(modelSection).getByText(/\/ 15 个模型/)).toBeTruthy();
-    expect(within(modelSection).getByText("客户端下拉菜单实时预览", { exact: false })).toBeTruthy();
 
     // 切换到 Qoder CN 订阅工具并批量选中低倍率模型、设第一个为默认
     const toolTabs = screen.getByRole("tablist", { name: "订阅工具切换栏" });

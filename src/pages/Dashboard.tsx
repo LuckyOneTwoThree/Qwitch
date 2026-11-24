@@ -649,32 +649,35 @@ export function Dashboard() {
         </div>
 
         <div className="space-y-2 border-t border-zinc-200/70 pt-3 dark:border-zinc-800/80">
-          {/* 本地网关紧凑状态胶囊 */}
-          <div className="flex items-center justify-between gap-1.5 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-1.5 text-[11px] dark:border-zinc-800 dark:bg-zinc-900/70">
+          {/* 本地网关快捷启停控制（以启动/关闭为主交互，隐藏原始端口号） */}
+          <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-900/70">
             <button
               type="button"
               onClick={() => setNav("agents")}
-              className="flex min-w-0 items-center gap-1.5 text-left font-medium text-zinc-700 hover:text-zinc-950 dark:text-zinc-200 dark:hover:text-white"
+              title={`本地网关（${gateway.host}:${gateway.port}），点击进入接入与调度`}
+              className="flex min-w-0 items-center gap-2 text-left font-medium text-zinc-700 hover:text-zinc-950 dark:text-zinc-200 dark:hover:text-white"
             >
               <span
                 className={`h-2 w-2 shrink-0 rounded-full ${
                   gateway.running ? "bg-emerald-500" : "bg-zinc-400"
                 }`}
               />
-              <span className="truncate font-mono tabular-nums">
-                :{gateway.port}
+              <span className="truncate">
+                {gateway.running ? "网关运行中" : "网关已关闭"}
               </span>
             </button>
             <button
               type="button"
               onClick={toggleGateway}
-              className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition ${
+              aria-label={gateway.running ? "关闭本地网关" : "启动本地网关"}
+              className={`inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition ${
                 gateway.running
-                  ? "bg-emerald-500/12 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
-                  : "bg-zinc-200/80 text-zinc-600 hover:bg-zinc-300/70 dark:bg-zinc-800 dark:text-zinc-300"
+                  ? "bg-zinc-200/80 text-zinc-700 hover:bg-rose-500/15 hover:text-rose-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-rose-500/20 dark:hover:text-rose-300"
+                  : "bg-brand-600 text-white shadow-2xs hover:bg-brand-700 dark:bg-brand-500 dark:text-zinc-950 dark:hover:bg-brand-400"
               }`}
             >
-              {gateway.running ? "网关运行" : "已停止"}
+              <Power className="h-3 w-3 shrink-0" aria-hidden="true" />
+              {gateway.running ? "关闭" : "启动"}
             </button>
           </div>
 

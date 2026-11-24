@@ -130,7 +130,6 @@ export function AgentBindingsView({
     cycleBridgeRuntime,
     toggleProxySimulation,
     updateAgentMountedPools,
-    setAgentDefaultModel,
     unbindAgent,
     repairAgentDrift,
     restartAgentClient,
@@ -742,7 +741,18 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     <RotateCcw className="h-3 w-3" aria-hidden="true" />
                     {activeBinding.agentId === "codex_desktop" ? "重启 app-server" : "立即重启生效"}
                   </button>
-                ) : activeBinding.mountedPoolIds.length === 0 ? (
+                ) : null}
+
+                {activeBinding.mountedPoolIds.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => openDiffForMountChange(activeBinding, [])}
+                    className="btn btn-xs btn-danger gap-1"
+                  >
+                    <Unlink className="h-3 w-3" aria-hidden="true" />
+                    全部解绑并还原
+                  </button>
+                ) : (
                   <button
                     type="button"
                     disabled={toolModelOptions.length === 0}
@@ -754,7 +764,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     <Zap className="h-3 w-3" aria-hidden="true" />
                     一键接入推荐模型
                   </button>
-                ) : null}
+                )}
               </div>
             </div>
 
@@ -1127,80 +1137,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     )}
                   </div>
                 </div>
-
-                {/* 底部跨工具已暴露清单汇总 */}
-                <div className="space-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                      客户端下拉菜单实时预览（共 {activeExposedModels.length} 项）
-                    </span>
-                    <span className="text-zinc-400">跨工具汇总 · 点击切换 ★ 默认</span>
-                  </div>
-
-                  {activeExposedModels.length === 0 ? (
-                    <div className="text-[11px] text-zinc-400">
-                      尚未开放模型；请在上方使用「全选当前」或逐项勾选。
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap gap-1.5">
-                      {activeExposedModels.map((item) => {
-                        const { toolId: itemToolId, modelId: itemBareId } =
-                          splitScopedModelId(item.modelId);
-                        return (
-                          <div
-                            key={item.key}
-                            className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] transition ${
-                              item.isDefault
-                                ? "border-amber-500/50 bg-amber-500/12 text-amber-900 dark:text-amber-200"
-                                : "border-zinc-200 bg-white text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => setAgentDefaultModel(activeBinding.agentId, item.key)}
-                              title={
-                                activeBinding.agentId === "claude_desktop" && item.isClaudeDisguised
-                                  ? `点击设为默认 · Claude 伪装 ID: ${item.wireModelId}`
-                                  : `点击设为默认 (${item.wireModelId})`
-                              }
-                              className="flex items-center gap-1 font-mono font-medium"
-                            >
-                              {item.isDefault && (
-                                <Star className="h-3 w-3 fill-current text-amber-500" aria-hidden="true" />
-                              )}
-                              <span>{item.displayName}</span>
-                              {activeBinding.agentId === "claude_desktop" && item.isClaudeDisguised && (
-                                <span className="text-[10px] text-[#B8502C] dark:text-[#F29C7D]">
-                                  ({item.wireModelId})
-                                </span>
-                              )}
-                            </button>
-                            {itemToolId && (
-                              <button
-                                type="button"
-                                aria-label={`移除 ${item.displayName}`}
-                                onClick={() => {
-                                  const curr = getAgentToolEnabledModelIds(
-                                    activeBinding.agentId,
-                                    itemToolId
-                                  );
-                                  setAgentToolModels(
-                                    activeBinding.agentId,
-                                    itemToolId,
-                                    curr.filter((id) => id !== itemBareId)
-                                  );
-                                }}
-                                className="rounded p-0.5 text-zinc-400 hover:bg-zinc-200/70 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                              >
-                                <X className="h-2.5 w-2.5" aria-hidden="true" />
-                              </button>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
               </section>
             </div>
           )}
@@ -1556,46 +1492,13 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
           {subTab === "connection" && (
             <div className="space-y-3.5">
               <section className="surface-card space-y-3 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                      {activeBinding.name} 兼容选项与配置文件控制
-                    </h3>
-                    <p className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                      {activeBinding.configPath}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDiffModal({
-                          binding: activeBinding,
-                          actionKind: "preview",
-                          mountedPoolNames: activeBinding.mountedPoolIds
-                            .map((id) => pools.find((p) => p.id === id)?.name)
-                            .filter((n): n is string => Boolean(n)),
-                          defaultModelDisplay: defaultExposedItem?.displayName ?? null,
-                          beforeText: activeBinding.beforeSnippet,
-                          afterText: activeBinding.afterSnippet,
-                        })
-                      }
-                      className="btn btn-xs btn-secondary gap-1"
-                    >
-                      <FileCode2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      预览配置 Diff
-                    </button>
-                    {activeBinding.mountedPoolIds.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => openDiffForMountChange(activeBinding, [])}
-                        className="btn btn-xs btn-danger gap-1"
-                      >
-                        <Unlink className="h-3 w-3" aria-hidden="true" />
-                        全部解绑并还原
-                      </button>
-                    )}
-                  </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    {activeBinding.name} 兼容选项与配置文件
+                  </h3>
+                  <p className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {activeBinding.configPath}
+                  </p>
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-zinc-50 px-3 py-2.5 text-xs text-zinc-600 dark:bg-zinc-950/55 dark:text-zinc-400">

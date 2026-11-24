@@ -250,3 +250,36 @@ cargo audit --file Cargo.lock            # 本机先 cargo install cargo-audit
 ---
 
 > **总体判断**：上一轮审计的**安全基座依然稳固**（更新白名单、插件零信任、加密 AAD/HMAC、权限位均未回归），但本轮「号池 + 网关」大版本在**功能正确性（tools 丢失、伪流式/超时）、访问控制（网关无鉴权）、数据完整性（无事务、配置覆盖）与发布门禁（fmt/clippy 双红）**四个维度存在阻断级问题，且带入了约 2.6k 行生产不可达的死代码与虚假测试覆盖。建议按批次 A 止血后再对外发布。
+
+---
+
+## 11. 修复进度追踪（持续更新）
+
+> 本节记录按批次落地的修复提交与剩余项，作为报告的最新状态口径（截至 2026-11-24 round 3）。
+
+### 已修复并推送（main）
+
+| 提交 | 类别 | 内容 |
+| --- | --- | --- |
+| `042109f` | A-1 | 网关透传 `tools`/`tool_choice`（工具调用恢复）、Agent 配置解析失败即中止、`create_pool` 事务化、fmt/clippy 恢复 CI |
+| `6f98807` | A-2 | 网关每装机随机绑定令牌 + 全路由鉴权（无/错令牌 401）、wiring 失败不再静默 |
+| `e11d781` | A-3 | Agent 多文件写入失败按 stash 回滚 |
+| `6305563` | B-1 | 结束原因与 usage 跨协议归一，Anthropic 流式捕获 output_tokens |
+| `d1d4f77` | P1-5 | 删除生产不可达的 `PoolsView` 及三个号池弹窗死代码 |
+| `73bb5a3` | P1-2 | 网关推理改用 600s 长超时专用 client，消除 20s 截断 |
+| `f716087` | P2 | 健康计数与调度口径一致、cooldown 钳制、跨池路由按挂载隔离 |
+| `d3a6835` | P2-6/7/8 | 网关 HTTP 解析加固（chunked/头体上限/读超时/413）+ 上游 base_url 白名单 |
+| `2ca39b1` | P2-16/17/19 | 前端 Mock 生产门禁、命令响应乱序保护、UUID ID |
+| `a2a17d9` | Docs | README 测试/命令数口径 |
+| `620a0b1` | P3 | 迁移 ALTER 幂等、pool_members 索引、字节切片防 panic、锁 poison 自愈、session_affinity 上限 |
+| `75b657d` | P1-2b | OpenAI Chat 同协议真流式透传 + 流式回归测试 |
+| `cb5a7d2` | P2-12/15 | 调度重排保留优先级、空池自动禁用 |
+| `f16e4ab` | P2-11/14 | 影子 policy upsert（可见可切）、today 统计跨日重置 |
+| `8e9e20d` | P3 | bundle 按 vendor/react 拆包消除 500KB 告警、设计文档版本口径 |
+
+### 已知剩余项（非阻断，后续可继续）
+
+- **P1-2 跨协议流式**：当前仅 OpenAI Chat 同协议走真流式；OpenAI↔Anthropic/Responses 跨协议仍「缓冲后合成 SSE」（功能正确，仅 TTFT 非增量）。
+- **P2-10**：`set_pool_tool_models` 按工具统一覆盖成员模型集——与 Agent 中心「按工具选模型」语义一致，保留。
+- **P2-18**：路由演练在 Tauri 下仍本地先算 + 后端持久化（最终以 refresh 的 DB 结果为准）。
+- **P3**：`-wal/-shm` 打开后新建 sidecar 权限、部分 `let _` 吞错、Linux 平台能力等纵深项。

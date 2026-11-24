@@ -1296,9 +1296,9 @@ fn resolve_upstream_auth(
     Ok((base_url, token, extra_headers))
 }
 
-/// 以流式（SSE）方式向上游发起 OpenAI Chat 请求，返回未读取 body 的响应，
+/// 以流式（SSE）方式向上游发起「与客户端同协议」的请求，返回未读取 body 的响应，
 /// 供调用方在首字节前完成状态判定后直接透传给客户端。
-async fn send_openai_chat_stream(
+async fn send_upstream_stream(
     member: &PoolMember,
     cred: &CredentialEnvelope,
     ir_req: &IrRequest,
@@ -1309,13 +1309,34 @@ async fn send_openai_chat_stream(
     let base = base_url.trim_end_matches('/');
     let (_, bare) = crate::domain::split_scoped_model_id(upstream_model);
     let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare);
-    let url = format!("{base}/v1/chat/completions");
-    let body = to_upstream_openai_chat_body(ir_req, &wire_model, true);
+    let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
+    let (url, body, auth_x_api_key) = match protocol {
+        WireProtocolKind::AnthropicMessages => (
+            format!("{base}/v1/messages"),
+            to_upstream_anthropic_body(ir_req, &wire_model, true),
+            true,
+        ),
+        _ => (
+            format!("{base}/v1/chat/completions"),
+            to_upstream_openai_chat_body(ir_req, &wire_model, true),
+            false,
+        ),
+    };
     let mut req = client
         .post(&url)
         .json(&body)
         .header("Accept", "text/event-stream");
-    if member.tool_id == "trae_cn" {
+    if member.tool_id == "minimax_code_cn" {
+        req = req
+            .bearer_auth(&token)
+            .header("x-api-key", "minimax-agent")
+            .header("anthropic-version", "2023-06-01")
+            .header("X-Mavis-Session-Id", Uuid::new_v4().to_string());
+    } else if auth_x_api_key {
+        req = req
+            .header("x-api-key", &token)
+            .header("anthropic-version", "2023-06-01");
+    } else if member.tool_id == "trae_cn" {
         req = req.header("Authorization", format!("Cloud-IDE-JWT {token}"));
     } else {
         req = req.bearer_auth(&token);
@@ -2309,11 +2330,10 @@ async fn handle_http_connection(
         let t_hop = std::time::Instant::now();
         let upstream_proto = upstream_model_protocol(&cand.tool_id, &plan.effective_model);
         let raw_stream = ir_req.stream
-            && ir_req.incoming_protocol == WireProtocolKind::OpenaiChat
-            && upstream_proto == WireProtocolKind::OpenaiChat
+            && ir_req.incoming_protocol == upstream_proto
             && cand.tool_id != "workbuddy";
         if raw_stream {
-            match send_openai_chat_stream(cand, &cred, &ir_req, &plan.effective_model).await {
+            match send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model).await {
                 Ok(resp) if resp.status().is_success() => {
                     attempts.push(RoutingAttempt {
                         account_label: cand.label.clone(),

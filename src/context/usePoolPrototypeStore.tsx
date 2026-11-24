@@ -1877,28 +1877,33 @@ export function PoolPrototypeProvider({
         attempts,
       };
 
-      setTraces((prev) => [newTrace, ...prev]);
-      setPools((prev) =>
-        prev.map((p) => {
-          if (p.id !== pool.id) return p;
-          return {
-            ...p,
-            todayRequests: p.todayRequests + 1,
-            todayFailovers:
-              status === "failover_success" ? p.todayFailovers + 1 : p.todayFailovers,
-            members: p.members.map((m) =>
-              cooledMemberId && m.id === cooledMemberId
-                ? { ...m, cooldownUntilMs: now + p.cooldownSeconds * 1000 }
-                : m
-            ),
-          };
-        })
-      );
-      setRawBindings((prev) =>
-        prev.map((b) =>
-          b.agentId === input.agentId ? { ...b, lastHitAt: "刚刚" } : b
-        )
-      );
+      // 真机（Tauri）下以 run_pool_simulation_cmd 落库后的 workspace 刷新为唯一真源，
+      // 不再做乐观本地写入，避免「本地 TS 结果」与「后端 Rust 结果」双写抖动；
+      // 浏览器 Mock 模式（非 Tauri）仍本地推演。
+      if (!isTauriRuntime) {
+        setTraces((prev) => [newTrace, ...prev]);
+        setPools((prev) =>
+          prev.map((p) => {
+            if (p.id !== pool.id) return p;
+            return {
+              ...p,
+              todayRequests: p.todayRequests + 1,
+              todayFailovers:
+                status === "failover_success" ? p.todayFailovers + 1 : p.todayFailovers,
+              members: p.members.map((m) =>
+                cooledMemberId && m.id === cooledMemberId
+                  ? { ...m, cooldownUntilMs: now + p.cooldownSeconds * 1000 }
+                  : m
+              ),
+            };
+          })
+        );
+        setRawBindings((prev) =>
+          prev.map((b) =>
+            b.agentId === input.agentId ? { ...b, lastHitAt: "刚刚" } : b
+          )
+        );
+      }
 
       notify(
         status === "failover_success"

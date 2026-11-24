@@ -227,11 +227,20 @@ pub async fn update_gateway_port_cmd(
             return Err(format!("端口 {port} 启动失败，已回滚到 {old_port}：{e}"));
         }
     }
-    // 重新同步已挂载 Agent 配置端口
+    // 先持久化已生效的端口，避免后续单个 Agent 写入失败导致运行时端口与持久化配置失步
+    {
+        let mut settings = load_app_settings(&state.db);
+        settings.gateway_port = port;
+        if let Ok(json) = serde_json::to_string(&settings) {
+            let _ = state.db.set_setting(SETTINGS_KEY, &json);
+        }
+    }
+    // 重新同步已挂载 Agent 配置端口（单个失败不中断其余 Agent，并汇总回报）
     let ws = build_workspace_state(&state.db, &state.master_key, &state.gateway)?;
+    let mut sync_errors: Vec<String> = Vec::new();
     for b in &ws.agent_bindings {
         if !b.mounted_pool_ids.is_empty() {
-            apply_agent_wiring(
+            if let Err(err) = apply_agent_wiring(
                 &state.db,
                 &state.master_key,
                 b.agent_id,
@@ -243,18 +252,18 @@ pub async fn update_gateway_port_cmd(
                 port,
                 ws.gateway.global_proxy_detected,
                 None,
-            )?;
-        }
-    }
-    // 持久化端口，避免下次启动回落到默认值
-    {
-        let mut settings = load_app_settings(&state.db);
-        settings.gateway_port = port;
-        if let Ok(json) = serde_json::to_string(&settings) {
-            let _ = state.db.set_setting(SETTINGS_KEY, &json);
+            ) {
+                sync_errors.push(format!("{}：{}", b.name, err));
+            }
         }
     }
     emit_workspace_updated(&app);
+    if !sync_errors.is_empty() {
+        return Err(format!(
+            "网关端口已更新为 {port}，但部分 Agent 配置同步失败：{}",
+            sync_errors.join("；")
+        ));
+    }
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }
 

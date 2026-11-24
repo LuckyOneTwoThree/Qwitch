@@ -582,14 +582,14 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                 }`}
               >
-                {gateway.globalProxyDetected ? "⚠️ 检测到全局代理" : "✓ 本机回环直连正常"}
+                {gateway.globalProxyDetected ? "⚠️ 全局代理" : "✓ 回环正常"}
               </button>
             </>
           )}
         </div>
 
         <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-          <span className="min-w-0 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+          <span className="hidden min-w-0 truncate text-[11px] text-zinc-500 @2xl:inline dark:text-zinc-400">
             选 Agent → 配模型 → 调主备顺位
           </span>
           <button
@@ -604,11 +604,16 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
         </div>
       </section>
 
-      {/* 顶部 4 格紧凑目标 Agent 切换栏 */}
+      {/* 目标 Agent 切换栏（列数随容器宽度自适应） */}
       <aside
         aria-label="目标 Agent 客户端列表"
         className="grid grid-cols-1 gap-2 @lg:grid-cols-2 @3xl:grid-cols-3 @6xl:grid-cols-4"
       >
+        {agentBindings.length === 0 && (
+          <div className="surface-card col-span-full p-4 text-center text-xs text-zinc-500 dark:text-zinc-400">
+            尚未加载到目标 Agent，请点击顶部「重新探测」或检查客户端安装状态
+          </div>
+        )}
         {agentBindings.map((binding) => {
           const isSelected = activeBinding?.agentId === binding.agentId;
           const exposed = computeAgentExposedModels(binding, pools, nowMs);

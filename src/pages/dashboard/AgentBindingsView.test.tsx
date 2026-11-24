@@ -18,7 +18,14 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
     const cardOrder = within(agentList)
       .getAllByRole("heading", { level: 2 })
       .map((h) => h.textContent);
-    expect(cardOrder).toEqual(["DeepSeek Harness", "OpenCode", "Codex 桌面版", "Claude 桌面版"]);
+    expect(cardOrder).toEqual([
+      "DeepSeek Harness",
+      "OpenCode",
+      "MiMo Code",
+      "ZCode",
+      "Codex 桌面版",
+      "Claude 桌面版",
+    ]);
 
     // 切换到 Claude 桌面版测试「全选当前」「清空本工具」「仅选推荐主力」与「设为默认」
     const claudeCard = screen.getByRole("region", { name: "Claude 桌面版 挂载卡片" });

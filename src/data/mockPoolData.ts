@@ -1353,12 +1353,54 @@ export function buildAgentConfigSnippets(
         )}`,
       };
     }
+    case "mimo": {
+      return {
+        beforeSnippet: `// ~/.config/mimocode/mimocode.jsonc`,
+        afterSnippet: `// ~/.config/mimocode/mimocode.jsonc\n${JSON.stringify(
+          {
+            model: `qwitch/${fallbackWireModel}`,
+            provider: {
+              qwitch: {
+                npm: "@ai-sdk/openai-compatible",
+                name: "Qwitch 号池网关",
+                options: { baseURL: `${baseUrl}/v1`, apiKey: "qwitch-bind-mimo" },
+                models: {},
+              },
+            },
+          },
+          null,
+          2
+        )}`,
+      };
+    }
+    case "zcode": {
+      return {
+        beforeSnippet: `// ~/.zcode/v2/config.json`,
+        afterSnippet: `// ~/.zcode/v2/config.json\n${JSON.stringify(
+          {
+            provider: {
+              qwitch: {
+                name: "Qwitch 号池网关",
+                kind: "anthropic",
+                options: { apiKey: "qwitch-bind-zcode", baseURL: baseUrl },
+                enabled: true,
+                source: "custom",
+              },
+            },
+          },
+          null,
+          2
+        )}`,
+      };
+    }
   }
 }
 
 export const TARGET_AGENT_ORDER: readonly TargetAgentId[] = [
   "dsh",
   "opencode",
+  "mimo",
+  "zcode",
   "codex_desktop",
   "claude_desktop",
 ];
@@ -1435,6 +1477,32 @@ export function createInitialAgentBindings(
       options: {
         claudeIsolatedTwin: false,
       },
+    },
+    {
+      agentId: "mimo",
+      name: "MiMo Code",
+      subtitle: "小米 MiMo / MiMo Code · OpenCode 兼容 provider，直连本地网关",
+      protocol: "openai_chat",
+      configPath: "~/.config/mimocode/mimocode.jsonc",
+      installed: true,
+      version: "MiMo Code",
+      status: "unbound",
+      mountedPoolIds: [],
+      defaultModelKey: null,
+      options: { opencodeSchemaVersion: "v1" },
+    },
+    {
+      agentId: "zcode",
+      name: "ZCode",
+      subtitle: "ZCode 桌面版 · Anthropic Messages 自定义 provider",
+      protocol: "anthropic_messages",
+      configPath: "~/.zcode/v2/config.json",
+      installed: true,
+      version: "ZCode",
+      status: "unbound",
+      mountedPoolIds: [],
+      defaultModelKey: null,
+      options: {},
     },
   ];
 

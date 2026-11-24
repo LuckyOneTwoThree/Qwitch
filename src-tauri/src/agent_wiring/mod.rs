@@ -5,7 +5,7 @@ use std::process::Command;
 use crate::adapter::write_private_file_atomic;
 use crate::domain::{
     compute_agent_exposed_models, AccountPool, AgentBinding, AgentBindingOptions,
-    AgentBindingStatus, TargetAgentId, WireProtocolKind,
+    AgentBindingStatus, AgentExposedModel, TargetAgentId, WireProtocolKind,
 };
 use crate::storage::pools::StoredAgentBinding;
 use crate::storage::QwitchDatabase;
@@ -33,6 +33,8 @@ fn agent_slug(agent_id: TargetAgentId) -> &'static str {
         TargetAgentId::CodexDesktop => "codex-desktop",
         TargetAgentId::Dsh => "dsh",
         TargetAgentId::Opencode => "opencode",
+        TargetAgentId::Mimo => "mimo",
+        TargetAgentId::Zcode => "zcode",
     }
 }
 
@@ -61,6 +63,8 @@ pub fn agent_id_from_token(token: &str) -> Option<TargetAgentId> {
         TargetAgentId::CodexDesktop,
         TargetAgentId::Dsh,
         TargetAgentId::Opencode,
+        TargetAgentId::Mimo,
+        TargetAgentId::Zcode,
     ] {
         if ct_eq(token, &agent_token(agent)) {
             return Some(agent);
@@ -317,6 +321,44 @@ fn resolve_agent_paths(
                 version: "Responses".into(),
             }
         }
+        TargetAgentId::Mimo => {
+            let dir = if let Some(base) = base_dir_override {
+                base.join("mimocode")
+            } else if let Ok(custom) = std::env::var("MIMOCODE_CONFIG_DIR") {
+                PathBuf::from(custom)
+            } else {
+                home.join(".config/mimocode")
+            };
+            let cfg_file = ["mimocode.jsonc", "mimocode.json", "config.json"]
+                .iter()
+                .map(|n| dir.join(n))
+                .find(|p| p.exists())
+                .unwrap_or_else(|| dir.join("mimocode.jsonc"));
+            let installed = base_dir_override.is_some() || dir.exists();
+            AgentPaths {
+                primary_display: "~/.config/mimocode/mimocode.jsonc".into(),
+                files: vec![cfg_file],
+                installed,
+                version: "MiMo Code".into(),
+            }
+        }
+        TargetAgentId::Zcode => {
+            let dir = if let Some(base) = base_dir_override {
+                base.join("zcode")
+            } else {
+                home.join(".zcode")
+            };
+            let installed = base_dir_override.is_some() || dir.exists();
+            AgentPaths {
+                primary_display: "~/.zcode/v2/config.json".into(),
+                files: vec![
+                    dir.join("v2/config.json"),
+                    dir.join("v2/provider_config.json"),
+                ],
+                installed,
+                version: "ZCode".into(),
+            }
+        }
     }
 }
 
@@ -498,6 +540,38 @@ pub fn build_agent_config_snippets(
             );
             (before, after)
         }
+        TargetAgentId::Mimo => {
+            let mut map = serde_json::Map::new();
+            for m in &exposed {
+                map.insert(
+                    m.wire_model_id.clone(),
+                    json!({"name": m.display_name, "limit": {"context": 200000, "output": 64000}, "modalities": {"input": ["text", "image"], "output": ["text"]}, "tool_call": true}),
+                );
+            }
+            let after_json = json!({
+                "model": format!("qwitch/{default_wire}"),
+                "provider": {"qwitch": {"npm": "@ai-sdk/openai-compatible", "name": "Qwitch 号池网关", "options": {"baseURL": format!("{base_url}/v1"), "apiKey": agent_token(agent_id)}, "models": map}}
+            });
+            (
+                "// ~/.config/mimocode/mimocode.jsonc".to_string(),
+                format!(
+                    "// ~/.config/mimocode/mimocode.jsonc\n{}",
+                    serde_json::to_string_pretty(&after_json).unwrap_or_default()
+                ),
+            )
+        }
+        TargetAgentId::Zcode => {
+            let after_json = json!({
+                "provider": {"qwitch": {"name": "Qwitch 号池网关", "kind": "anthropic", "options": {"apiKey": agent_token(agent_id), "baseURL": base_url}, "enabled": true, "source": "custom"}}
+            });
+            (
+                "// ~/.zcode/v2/config.json".to_string(),
+                format!(
+                    "// ~/.zcode/v2/config.json\n{}",
+                    serde_json::to_string_pretty(&after_json).unwrap_or_default()
+                ),
+            )
+        }
     }
 }
 
@@ -591,6 +665,27 @@ fn check_disk_drift(
             }
             None
         }
+        TargetAgentId::Mimo => {
+            let content = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
+            if !content.contains("\"qwitch\"") || !content.contains(&port_needle) {
+                return Some("检测到 MiMo Code 配置未同步 Qwitch provider 或端口".into());
+            }
+            None
+        }
+        TargetAgentId::Zcode => {
+            let cfg = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
+            let rules = paths
+                .files
+                .get(1)
+                .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+                .unwrap_or_default();
+            let cfg_ok = cfg.contains("qwitch") && cfg.contains(&port_needle);
+            let rules_ok = rules.contains("qwitch") && rules.contains(&port_needle);
+            if !cfg_ok && !rules_ok {
+                return Some("检测到 ZCode 配置未同步 Qwitch provider 或端口".into());
+            }
+            None
+        }
     }
 }
 
@@ -612,6 +707,11 @@ fn default_options_for_agent(agent_id: TargetAgentId) -> AgentBindingOptions {
             opencode_schema_version: Some("v2".into()),
             ..Default::default()
         },
+        TargetAgentId::Mimo => AgentBindingOptions {
+            opencode_schema_version: Some("v1".into()),
+            ..Default::default()
+        },
+        TargetAgentId::Zcode => AgentBindingOptions::default(),
     }
 }
 
@@ -636,6 +736,16 @@ fn agent_meta(agent_id: TargetAgentId) -> (&'static str, &'static str, WireProto
             "Codex 桌面版",
             "ChatGPT / Codex App · 独立 [model_providers.qwitch] Responses 端点",
             WireProtocolKind::OpenaiResponses,
+        ),
+        TargetAgentId::Mimo => (
+            "MiMo Code",
+            "小米 MiMo / MiMo Code · OpenCode 兼容 provider，直连本地网关",
+            WireProtocolKind::OpenaiChat,
+        ),
+        TargetAgentId::Zcode => (
+            "ZCode",
+            "ZCode 桌面版 · Anthropic Messages 自定义 provider",
+            WireProtocolKind::AnthropicMessages,
         ),
     }
 }
@@ -1115,6 +1225,178 @@ fn merge_codex_model_catalog(builtin_models: Vec<Value>, qwitch_entries: Vec<Val
 }
 
 #[allow(clippy::too_many_arguments)]
+fn write_opencode_like_provider(
+    path: &Path,
+    base_url: &str,
+    token: &str,
+    exposed: &[AgentExposedModel],
+    default_wire: &str,
+    v1: bool,
+) -> Result<(), String> {
+    let mut doc: Value = match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => parse_jsonc_lenient(&s)?,
+        _ => json!({}),
+    };
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert(
+            "model".into(),
+            Value::String(format!("qwitch/{default_wire}")),
+        );
+        let mut models_map = serde_json::Map::new();
+        for m in exposed {
+            let entry = if v1 {
+                json!({"name": m.display_name, "limit": {"context": 200000, "output": 64000}, "modalities": {"input": ["text", "image"], "output": ["text"]}, "tool_call": true})
+            } else {
+                json!({"name": m.display_name, "capabilities": {"tools": true, "input": ["text", "image"], "output": ["text"]}, "limit": {"context": 200000, "output": 64000}})
+            };
+            models_map.insert(m.wire_model_id.clone(), entry);
+        }
+        if v1 {
+            let pm = obj
+                .entry("provider")
+                .or_insert_with(|| json!({}))
+                .as_object_mut();
+            if let Some(pm) = pm {
+                pm.insert(
+                    "qwitch".into(),
+                    json!({"npm": "@ai-sdk/openai-compatible", "name": "Qwitch 号池网关", "options": {"baseURL": format!("{base_url}/v1"), "apiKey": token}, "models": models_map}),
+                );
+            }
+        } else {
+            let pm = obj
+                .entry("providers")
+                .or_insert_with(|| json!({}))
+                .as_object_mut();
+            if let Some(pm) = pm {
+                pm.insert(
+                    "qwitch".into(),
+                    json!({"name": "Qwitch 号池网关", "package": "aisdk:@ai-sdk/openai-compatible", "settings": {"baseURL": format!("{base_url}/v1"), "apiKey": token}, "models": models_map}),
+                );
+            }
+        }
+    }
+    write_private_file_atomic(
+        path,
+        serde_json::to_string_pretty(&doc)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn write_zcode_provider(
+    config_path: &Path,
+    rules_path: &Path,
+    base_url: &str,
+    token: &str,
+    exposed: &[AgentExposedModel],
+) -> Result<(), String> {
+    // ZCode config.json：OpenCode 形状的 provider，kind=anthropic，baseURL 根地址
+    let mut doc: Value = match std::fs::read_to_string(config_path) {
+        Ok(s) if !s.trim().is_empty() => {
+            serde_json::from_str(&s).map_err(|e| format!("ZCode config.json 解析失败：{e}"))?
+        }
+        _ => json!({}),
+    };
+    let mut models = serde_json::Map::new();
+    for m in exposed {
+        models.insert(
+            m.wire_model_id.clone(),
+            json!({"name": m.display_name, "limit": {"context": 200000, "output": 64000}, "modalities": {"input": ["text"], "output": ["text"]}}),
+        );
+    }
+    if let Some(obj) = doc.as_object_mut() {
+        let provider = obj
+            .entry("provider")
+            .or_insert_with(|| json!({}))
+            .as_object_mut();
+        if let Some(provider) = provider {
+            provider.insert(
+                "qwitch".into(),
+                json!({"name": "Qwitch 号池网关", "kind": "anthropic", "options": {"apiKey": token, "baseURL": base_url}, "enabled": true, "source": "custom", "models": models}),
+            );
+        }
+    }
+    write_private_file_atomic(
+        config_path,
+        serde_json::to_string_pretty(&doc)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // ZCode 3.14+ provider_config.json：rules 形式
+    let mut rules: Value = match std::fs::read_to_string(rules_path) {
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s)
+            .map_err(|e| format!("ZCode provider_config.json 解析失败：{e}"))?,
+        _ => json!({"schemaVersion": 1, "config": {}}),
+    };
+    let ids: Vec<Value> = exposed
+        .iter()
+        .map(|m| Value::String(m.wire_model_id.clone()))
+        .collect();
+    if let Some(root) = rules.as_object_mut() {
+        root.entry("schemaVersion").or_insert_with(|| json!(1));
+        let cfg = root
+            .entry("config")
+            .or_insert_with(|| json!({}))
+            .as_object_mut();
+        if let Some(cfg) = cfg {
+            let pcr = cfg
+                .entry("providerConfigRules")
+                .or_insert_with(|| json!({}))
+                .as_object_mut();
+            if let Some(pcr) = pcr {
+                let arr = pcr
+                    .entry("providerRules")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut();
+                if let Some(arr) = arr {
+                    arr.retain(|v| v.get("providerId").and_then(Value::as_str) != Some("qwitch"));
+                    arr.push(json!({
+                        "providerId": "qwitch",
+                        "providerName": "Qwitch 号池网关",
+                        "enabled": true,
+                        "config": {
+                            "group": "standard-personal",
+                            "access": {"type": "api-key", "apiKey": token},
+                            "api": {"type": "anthropic-messages", "baseUrl": base_url},
+                            "personalModelIds": ids.clone(),
+                            "modelOrder": ids
+                        }
+                    }));
+                }
+            }
+            let mcr = cfg
+                .entry("modelConfigRules")
+                .or_insert_with(|| json!({}))
+                .as_object_mut();
+            if let Some(mcr) = mcr {
+                let arr = mcr
+                    .entry("providerModelRules")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut();
+                if let Some(arr) = arr {
+                    arr.retain(|v| v.get("providerId").and_then(Value::as_str) != Some("qwitch"));
+                    for m in exposed {
+                        arr.push(json!({"providerId": "qwitch", "modelId": m.wire_model_id.clone(), "config": {"enabled": true}}));
+                    }
+                }
+                mcr.entry("manualProviderModelRules")
+                    .or_insert_with(|| json!([]));
+            }
+        }
+    }
+    write_private_file_atomic(
+        rules_path,
+        serde_json::to_string_pretty(&rules)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn apply_agent_wiring(
     db: &QwitchDatabase,
     master_key: &[u8; 32],
@@ -1291,6 +1573,25 @@ pub fn apply_agent_wiring(
                 )
                 .map_err(|e| e.to_string())?;
             }
+            TargetAgentId::Mimo => {
+                let v1 = clean_opts.opencode_schema_version.as_deref() != Some("v2");
+                write_opencode_like_provider(
+                    &paths.files[0],
+                    &base_url,
+                    &token,
+                    &exposed,
+                    &default_wire,
+                    v1,
+                )?;
+            }
+            TargetAgentId::Zcode => {
+                let rules_path = paths
+                    .files
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| paths.files[0].with_file_name("provider_config.json"));
+                write_zcode_provider(&paths.files[0], &rules_path, &base_url, &token, &exposed)?;
+            }
             TargetAgentId::Dsh => {
                 let models_yaml = if exposed.is_empty() {
                     format!(
@@ -1433,7 +1734,10 @@ pub fn apply_agent_wiring(
 
     let next_status = if matches!(
         agent_id,
-        TargetAgentId::ClaudeDesktop | TargetAgentId::CodexDesktop
+        TargetAgentId::ClaudeDesktop
+            | TargetAgentId::CodexDesktop
+            | TargetAgentId::Mimo
+            | TargetAgentId::Zcode
     ) {
         AgentBindingStatus::NeedsRestart
     } else {
@@ -1657,6 +1961,20 @@ pub fn restart_agent_process(
                 std::thread::sleep(std::time::Duration::from_millis(350));
                 let _ = Command::new("open")
                     .args(["-a", "/Applications/DeepSeek Harness.app"])
+                    .spawn();
+            }
+            TargetAgentId::Mimo => {
+                let _ = Command::new("pkill").args(["-x", "Xiaomi MiMo"]).output();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = Command::new("open")
+                    .args(["-a", "/Applications/Xiaomi MiMo.app"])
+                    .spawn();
+            }
+            TargetAgentId::Zcode => {
+                let _ = Command::new("pkill").args(["-x", "ZCode"]).output();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = Command::new("open")
+                    .args(["-a", "/Applications/ZCode.app"])
                     .spawn();
             }
             TargetAgentId::Opencode => {}
@@ -2165,5 +2483,65 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, original, "user config must be preserved verbatim");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wires_mimo_and_zcode_providers() {
+        let (db, key, root, home_dir, pools) = setup_wiring_env();
+        let pid = pools[0].id.clone();
+        std::fs::create_dir_all(home_dir.join("mimocode")).unwrap();
+        std::fs::create_dir_all(home_dir.join("zcode/v2")).unwrap();
+
+        let mimo = apply_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::Mimo,
+            std::slice::from_ref(&pid),
+            None,
+            &AgentBindingOptions::default(),
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+        )
+        .expect("wire mimo");
+        assert!(matches!(
+            mimo.status,
+            AgentBindingStatus::Bound | AgentBindingStatus::NeedsRestart
+        ));
+        let mimo_cfg = std::fs::read_to_string(home_dir.join("mimocode/mimocode.jsonc")).unwrap();
+        assert!(mimo_cfg.contains("\"qwitch\""));
+        assert!(mimo_cfg.contains("18425"));
+        assert!(mimo_cfg.contains("@ai-sdk/openai-compatible"));
+
+        let zcode = apply_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::Zcode,
+            std::slice::from_ref(&pid),
+            None,
+            &AgentBindingOptions::default(),
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+        )
+        .expect("wire zcode");
+        assert!(matches!(
+            zcode.status,
+            AgentBindingStatus::Bound | AgentBindingStatus::NeedsRestart
+        ));
+        let zc_cfg = std::fs::read_to_string(home_dir.join("zcode/v2/config.json")).unwrap();
+        assert!(zc_cfg.contains("qwitch"));
+        assert!(zc_cfg.contains("18425"));
+        assert!(zc_cfg.contains("anthropic"));
+        let zc_rules =
+            std::fs::read_to_string(home_dir.join("zcode/v2/provider_config.json")).unwrap();
+        assert!(zc_rules.contains("qwitch"));
+        assert!(zc_rules.contains("18425"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

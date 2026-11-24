@@ -257,7 +257,10 @@ function getAgentIncomingProtocol(agentId: TargetAgentId): WireProtocolKind {
       return "anthropic_messages";
     case "dsh":
     case "opencode":
+    case "mimo":
       return "openai_chat";
+    case "zcode":
+      return "anthropic_messages";
   }
 }
 
@@ -1342,7 +1345,11 @@ export function PoolPrototypeProvider({
               restartHint: undefined,
             };
           }
-          const needsRestart = agentId === "claude_desktop" || agentId === "codex_desktop";
+          const needsRestart =
+          agentId === "claude_desktop" ||
+          agentId === "codex_desktop" ||
+          agentId === "mimo" ||
+          agentId === "zcode";
           const nextDefault = resolveValidDefaultModelKey(
             agentId,
             uniqueIds,
@@ -1441,7 +1448,10 @@ export function PoolPrototypeProvider({
             ? b.mountedPoolIds
             : [...b.mountedPoolIds, poolId];
           const needsRestart =
-            b.agentId === "claude_desktop" || b.agentId === "codex_desktop";
+            b.agentId === "claude_desktop" ||
+              b.agentId === "codex_desktop" ||
+              b.agentId === "mimo" ||
+              b.agentId === "zcode";
           const nextDefault = resolveValidDefaultModelKey(
             b.agentId,
             nextMounted,
@@ -2099,7 +2109,11 @@ export function PoolPrototypeProvider({
           updatedPools
         );
         computedDefaultKey = validDefault;
-        const needsRestart = agentId === "claude_desktop" || agentId === "codex_desktop";
+        const needsRestart =
+          agentId === "claude_desktop" ||
+          agentId === "codex_desktop" ||
+          agentId === "mimo" ||
+          agentId === "zcode";
         const nextStatus: AgentBinding["status"] =
           b.status === "drifted"
             ? "bound"
@@ -2280,7 +2294,11 @@ export function PoolPrototypeProvider({
 
       const updatedBindings: AgentBinding[] = nextBindings.map((b) => {
         if (b.agentId !== agentId) return b;
-        const needsRestart = agentId === "claude_desktop" || agentId === "codex_desktop";
+        const needsRestart =
+          agentId === "claude_desktop" ||
+          agentId === "codex_desktop" ||
+          agentId === "mimo" ||
+          agentId === "zcode";
         const nextStatus: AgentBinding["status"] = needsRestart
           ? "needs_restart"
           : "bound";

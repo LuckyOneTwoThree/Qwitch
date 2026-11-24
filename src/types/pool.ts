@@ -4,7 +4,7 @@ export type AffinityMode = "auto_cache" | "session" | "turn" | "off";
 
 export type UpstreamChannel = "rust_native" | "opencode_bridge" | "api_key";
 
-export type TargetAgentId = "codex_desktop" | "claude_desktop" | "dsh" | "opencode";
+export type TargetAgentId = "codex_desktop" | "claude_desktop" | "dsh" | "opencode" | "mimo" | "zcode";
 
 export type AgentBindingStatus = "bound" | "drifted" | "unbound" | "needs_restart";
 

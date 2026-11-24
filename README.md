@@ -89,7 +89,7 @@
 
 ### ✅ 工程质量
 
-- 203 个 Rust 单元 / 回归测试 + 130 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、ESLint、构建、测试、`cargo fmt` / `clippy -D warnings` / `cargo audit`。
+- 204 个 Rust 单元 / 回归测试 + 130 个前端 Vitest 测试；GitHub Actions **macOS + Windows 双平台**门禁：依赖审计、ESLint、构建、测试、`cargo fmt` / `clippy -D warnings` / `cargo audit`。
 - 标签触发 Release 流水线，自动构建并发布 macOS Apple Silicon（arm64）、macOS Intel（x64）与 Windows x64 三个独立安装包。
 
 ## 支持的工具
@@ -242,7 +242,7 @@ npm run tauri dev            # 桌面应用开发模式
 npm run build                # 前端类型检查 + 生产构建
 npm run lint                 # ESLint（含 react-hooks/exhaustive-deps 作为 error）
 npm test                     # 前端测试（Vitest，130 例）
-cd src-tauri && cargo test   # 后端测试（203 例）
+cd src-tauri && cargo test   # 后端测试（204 例）
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 

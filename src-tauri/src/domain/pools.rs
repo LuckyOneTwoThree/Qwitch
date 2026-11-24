@@ -34,6 +34,8 @@ pub enum TargetAgentId {
     ClaudeDesktop,
     Dsh,
     Opencode,
+    Mimo,
+    Zcode,
 }
 
 impl TargetAgentId {
@@ -43,6 +45,8 @@ impl TargetAgentId {
             Self::ClaudeDesktop => "claude_desktop",
             Self::Dsh => "dsh",
             Self::Opencode => "opencode",
+            Self::Mimo => "mimo",
+            Self::Zcode => "zcode",
         }
     }
 
@@ -52,14 +56,18 @@ impl TargetAgentId {
             "claude_desktop" => Some(Self::ClaudeDesktop),
             "dsh" => Some(Self::Dsh),
             "opencode" => Some(Self::Opencode),
+            "mimo" => Some(Self::Mimo),
+            "zcode" => Some(Self::Zcode),
             _ => None,
         }
     }
 
-    pub fn all() -> [Self; 4] {
+    pub fn all() -> [Self; 6] {
         [
             Self::Dsh,
             Self::Opencode,
+            Self::Mimo,
+            Self::Zcode,
             Self::CodexDesktop,
             Self::ClaudeDesktop,
         ]

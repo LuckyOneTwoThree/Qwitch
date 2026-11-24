@@ -480,7 +480,10 @@ impl GatewayRuntime {
         let incoming_protocol = match input.agent_id {
             TargetAgentId::CodexDesktop => WireProtocolKind::OpenaiResponses,
             TargetAgentId::ClaudeDesktop => WireProtocolKind::AnthropicMessages,
-            TargetAgentId::Dsh | TargetAgentId::Opencode => WireProtocolKind::OpenaiChat,
+            TargetAgentId::Dsh | TargetAgentId::Opencode | TargetAgentId::Mimo => {
+                WireProtocolKind::OpenaiChat
+            }
+            TargetAgentId::Zcode => WireProtocolKind::AnthropicMessages,
         };
         let upstream_protocol = final_member
             .as_ref()
@@ -2743,6 +2746,10 @@ async fn handle_http_connection(
             Some(TargetAgentId::Dsh)
         } else if lower.contains("opencode") {
             Some(TargetAgentId::Opencode)
+        } else if lower.contains("mimocode") || lower.contains("mimo") {
+            Some(TargetAgentId::Mimo)
+        } else if lower.contains("zcode") {
+            Some(TargetAgentId::Zcode)
         } else {
             None
         }

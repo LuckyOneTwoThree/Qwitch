@@ -1054,6 +1054,8 @@ impl QwitchDatabase {
             TargetAgentId::Opencode => "OpenCode",
             TargetAgentId::Dsh => "DeepSeek Harness",
             TargetAgentId::CodexDesktop => "Codex 桌面版",
+            TargetAgentId::Mimo => "MiMo Code",
+            TargetAgentId::Zcode => "ZCode",
         };
         let now = Utc::now().to_rfc3339();
         let candidates = self.list_upstream_candidates(master_key)?;

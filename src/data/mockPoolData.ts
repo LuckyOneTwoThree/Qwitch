@@ -338,7 +338,7 @@ export const TOOL_DEFAULT_CHANNEL: Record<string, UpstreamChannel> = {
   custom_api_key: "api_key",
 };
 
-export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
+export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = import.meta.env.DEV ? [
   {
     accountId: "acc-wb-1",
     toolId: "workbuddy",
@@ -523,9 +523,9 @@ export const AVAILABLE_UPSTREAM_CANDIDATES: UpstreamAccountCandidate[] = [
     isActiveOnClient: false,
     accountStatus: "active",
   },
-];
+] : [];
 
-export const POOL_SCENE_TEMPLATES: PoolSceneTemplate[] = [
+export const POOL_SCENE_TEMPLATES: PoolSceneTemplate[] = import.meta.env.DEV ? [
   {
     id: "tpl-coding",
     title: "全栈 Coding 多模型池",
@@ -583,7 +583,7 @@ export const POOL_SCENE_TEMPLATES: PoolSceneTemplate[] = [
     fallbackApiKeyEnabled: false,
     recommendedTools: [],
   },
-];
+] : [];
 
 export const SCOPED_TOOL_IDS = new Set([
   "workbuddy",
@@ -881,7 +881,7 @@ export const INITIAL_GATEWAY_STATE: GatewayRuntimeState = {
   globalProxyDetected: true,
 };
 
-const POOL_1_MEMBERS: PoolMember[] = [
+const POOL_1_MEMBERS: PoolMember[] = import.meta.env.DEV ? [
   {
     id: "pm-1",
     accountId: "acc-wb-1",
@@ -1019,9 +1019,9 @@ const POOL_1_MEMBERS: PoolMember[] = [
     accountStatus: "active",
     lastLatencyMs: 360,
   },
-];
+] : [];
 
-const POOL_2_MEMBERS: PoolMember[] = [
+const POOL_2_MEMBERS: PoolMember[] = import.meta.env.DEV ? [
   {
     id: "pm-dr-1",
     accountId: "acc-doubaowork-1",
@@ -1073,9 +1073,9 @@ const POOL_2_MEMBERS: PoolMember[] = [
     accountStatus: "active",
     lastLatencyMs: 920,
   },
-];
+] : [];
 
-const POOL_3_MEMBERS: PoolMember[] = [
+const POOL_3_MEMBERS: PoolMember[] = import.meta.env.DEV ? [
   {
     id: "pm-fd-1",
     accountId: "acc-trae-1",
@@ -1127,9 +1127,9 @@ const POOL_3_MEMBERS: PoolMember[] = [
     accountStatus: "risk_paused",
     lastLatencyMs: 950,
   },
-];
+] : [];
 
-export const INITIAL_POOLS: AccountPool[] = [
+export const INITIAL_POOLS: AccountPool[] = import.meta.env.DEV ? [
   {
     id: "pool-coding-main",
     slug: "coding-main",
@@ -1214,7 +1214,7 @@ export const INITIAL_POOLS: AccountPool[] = [
     cacheHitRate: 76,
     createdAt: "2026-11-22T08:30:00+08:00",
   },
-];
+] : [];
 
 export function buildAgentConfigSnippets(
   agentId: TargetAgentId,
@@ -1455,7 +1455,7 @@ export function createInitialAgentBindings(
   });
 }
 
-export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
+export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = import.meta.env.DEV ? [
   {
     id: "tr-1008",
     timestamp: "13:42:18",
@@ -1707,4 +1707,4 @@ export const INITIAL_ROUTING_TRACES: RoutingTraceItem[] = [
       },
     ],
   },
-];
+] : [];

@@ -177,12 +177,12 @@ const detectTauriRuntime = () =>
 const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   isTauriRuntime: false,
   gateway: INITIAL_GATEWAY_STATE,
-  pools: INITIAL_POOLS,
-  selectedPoolId: INITIAL_POOLS[0].id,
+  pools: [],
+  selectedPoolId: "",
   setSelectedPoolId: () => {},
-  candidates: AVAILABLE_UPSTREAM_CANDIDATES,
-  agentBindings: createInitialAgentBindings(INITIAL_POOLS, INITIAL_GATEWAY_STATE),
-  traces: INITIAL_ROUTING_TRACES,
+  candidates: [],
+  agentBindings: createInitialAgentBindings([], INITIAL_GATEWAY_STATE),
+  traces: [],
   nowMs: Date.now(),
   isRefreshingModels: false,
   refreshUpstreamModels: async () => {},
@@ -221,7 +221,7 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
     getCatalogModelsForTool(toolId, AVAILABLE_UPSTREAM_CANDIDATES),
   getAgentToolEnabledModelIds: () => [],
   getAgentToolAccounts: () => [],
-  getAgentPrimaryPool: () => INITIAL_POOLS[0] ?? null,
+  getAgentPrimaryPool: () => null,
   setAgentToolModels: () => {},
   selectAllAgentToolModels: () => {},
   selectRecommendedAgentToolModels: () => {},
@@ -522,27 +522,30 @@ export function PoolPrototypeProvider({
   onToast?: (message: string, tone?: ToastTone) => void;
 }) {
   const isTauriRuntime = detectTauriRuntime();
+  // Mock 数据仅在「非 Tauri 运行时 + 开发构建」下启用；生产构建即使探测失效也只展示空态，
+  // 绝不回落到假号池/假候选/假成功。
+  const showMock = !isTauriRuntime && import.meta.env.DEV;
   const [gateway, setGateway] = useState<GatewayRuntimeState>(() =>
     isTauriRuntime
       ? { ...INITIAL_GATEWAY_STATE, running: false }
       : INITIAL_GATEWAY_STATE
   );
   const [pools, setPools] = useState<AccountPool[]>(() =>
-    isTauriRuntime ? [] : INITIAL_POOLS
+    showMock ? INITIAL_POOLS : []
   );
   const [selectedPoolId, setSelectedPoolId] = useState<string>(() =>
-    isTauriRuntime ? "" : INITIAL_POOLS[0].id
+    showMock ? INITIAL_POOLS[0].id : ""
   );
   const [candidates, setCandidates] = useState<UpstreamAccountCandidate[]>(() =>
-    isTauriRuntime ? [] : AVAILABLE_UPSTREAM_CANDIDATES
+    showMock ? AVAILABLE_UPSTREAM_CANDIDATES : []
   );
   const [rawBindings, setRawBindings] = useState<AgentBinding[]>(() =>
-    isTauriRuntime
-      ? createInitialAgentBindings([], INITIAL_GATEWAY_STATE)
-      : createInitialAgentBindings(INITIAL_POOLS, INITIAL_GATEWAY_STATE)
+    showMock
+      ? createInitialAgentBindings(INITIAL_POOLS, INITIAL_GATEWAY_STATE)
+      : createInitialAgentBindings([], INITIAL_GATEWAY_STATE)
   );
   const [traces, setTraces] = useState<RoutingTraceItem[]>(() =>
-    isTauriRuntime ? [] : INITIAL_ROUTING_TRACES
+    showMock ? INITIAL_ROUTING_TRACES : []
   );
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [isRefreshingModels, setIsRefreshingModels] = useState<boolean>(false);
@@ -551,6 +554,9 @@ export function PoolPrototypeProvider({
   poolsRef.current = pools;
   const rawBindingsRef = useRef<AgentBinding[]>(rawBindings);
   rawBindingsRef.current = rawBindings;
+  // 命令响应乱序保护：仅应用「不小于已应用序号」的快照，避免旧响应覆盖新状态。
+  const opSeqRef = useRef(0);
+  const appliedSeqRef = useRef(0);
 
   const hasActiveCooldown = useMemo(
     () =>
@@ -629,10 +635,14 @@ export function PoolPrototypeProvider({
   const syncWorkspaceCommand = useCallback(
     async (command: string, args?: Record<string, unknown>) => {
       if (!isTauriRuntime) return;
+      const seq = ++opSeqRef.current;
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const ws = await invoke<PoolWorkspaceState>(command, args);
-        applyWorkspaceState(ws);
+        if (seq >= appliedSeqRef.current) {
+          appliedSeqRef.current = seq;
+          applyWorkspaceState(ws);
+        }
       } catch (err) {
         notify(`操作同步失败：${err instanceof Error ? err.message : String(err)}`, "error");
         void refreshWorkspace();
@@ -795,10 +805,10 @@ export function PoolPrototypeProvider({
     (input: CreatePoolInput): AccountPool => {
       const id =
         input.id ??
-        `pool-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        `pool-${crypto.randomUUID()}`;
       const slug = slugifyPoolName(input.name);
       const members: PoolMember[] = input.members.map((item, idx) => ({
-        id: `pm-${Date.now().toString(36)}-${idx}`,
+        id: `pm-${crypto.randomUUID()}`,
         accountId: item.candidate.accountId,
         toolId: item.candidate.toolId,
         label: item.candidate.label,
@@ -1180,7 +1190,7 @@ export function PoolPrototypeProvider({
 
           const startPriority = nextMembers.length + 1;
           const appended: PoolMember[] = Array.from(byAccId.values()).map((item, idx) => ({
-            id: `pm-${Date.now().toString(36)}-${idx}`,
+            id: `pm-${crypto.randomUUID()}`,
             accountId: item.candidate.accountId,
             toolId: item.candidate.toolId,
             label: item.candidate.label,
@@ -1595,7 +1605,7 @@ export function PoolPrototypeProvider({
       const incomingProtocol = getAgentIncomingProtocol(input.agentId);
       if (!pool) {
         const emptyTrace: RoutingTraceItem = {
-          id: `tr-${Date.now().toString(36)}`,
+          id: `tr-${crypto.randomUUID()}`,
           timestamp: formatTimeHms(new Date(now)),
           agentId: input.agentId,
           poolId: input.poolId,
@@ -1849,7 +1859,7 @@ export function PoolPrototypeProvider({
       const tokenEstimate = Math.max(1200, input.prompt.trim().length * 38 + 2400);
 
       const newTrace: RoutingTraceItem = {
-        id: `tr-${Date.now().toString(36)}`,
+        id: `tr-${crypto.randomUUID()}`,
         timestamp: formatTimeHms(new Date(now)),
         agentId: input.agentId,
         poolId: pool.id,

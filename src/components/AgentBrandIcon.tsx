@@ -22,14 +22,14 @@ const AGENT_ICON_SRC: Partial<Record<AgentIconKind, string>> = {
 };
 
 const AGENT_SURFACE_STYLE: Record<AgentIconKind, string> = {
-  codex_desktop: "bg-transparent ring-0 shadow-none",
-  claude_desktop: "bg-transparent ring-0 shadow-none",
-  dsh: "bg-transparent ring-0 shadow-none",
-  opencode: "bg-transparent ring-0 shadow-none",
-  mimo: "bg-transparent ring-0 shadow-none",
-  zcode: "bg-transparent ring-0 shadow-none",
+  codex_desktop: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
+  claude_desktop: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
+  dsh: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
+  opencode: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
+  mimo: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
+  zcode: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
   custom_endpoint:
-    "bg-zinc-100 text-zinc-700 ring-black/8 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-white/12",
+    "bg-zinc-100 text-zinc-700 ring-1 ring-black/8 shadow-2xs dark:bg-zinc-800 dark:text-zinc-300 dark:ring-white/12",
 };
 
 export const AgentBrandIcon = React.memo(function AgentBrandIcon({
@@ -57,7 +57,7 @@ export const AgentBrandIcon = React.memo(function AgentBrandIcon({
   return (
     <div
       aria-hidden={decorative || undefined}
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden ring-1 shadow-2xs ${boxClass} ${surfaceClass} ${className}`}
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden ${boxClass} ${surfaceClass} ${className}`}
     >
       {renderMark()}
     </div>

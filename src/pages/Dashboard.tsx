@@ -521,16 +521,9 @@ export function Dashboard() {
 
   return (
     <div className="relative flex h-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      {/* 顶部 36px 拖拽区：贯穿全宽（红黄绿悬浮其上），整条可拖动、双击最大化/还原 */}
-      <div
-        data-tauri-drag-region
-        onDoubleClick={onTitleBarDoubleClick}
-        className="absolute inset-x-0 top-0 z-50 flex h-9"
-      >
-        <div className="pointer-events-none w-52 shrink-0" />
-        <div className="pointer-events-none flex-1 bg-white/85 backdrop-blur-xl dark:bg-zinc-900/70" />
-      </div>
-      <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200 bg-white px-3 pb-3 pt-9 dark:border-zinc-800 dark:bg-zinc-900">
+
+      <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200 bg-white px-3 pb-3 pt-0 dark:border-zinc-800 dark:bg-zinc-900">
+        <div data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="h-8 shrink-0 -mx-3" />
         <div className="flex min-h-0 flex-1 flex-col justify-between">
         <div className="overflow-y-auto pr-0.5">
           <div className="mb-5 flex items-center gap-2.5 px-1.5">
@@ -763,8 +756,8 @@ export function Dashboard() {
       </aside>
 
       <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-9 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
-          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <header className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
+          <div data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="flex min-w-0 flex-1 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>

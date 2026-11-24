@@ -433,6 +433,7 @@ pub fn run() {
             commands::refresh_upstream_models_cmd,
             commands::toggle_gateway_server,
             commands::update_gateway_port_cmd,
+            commands::check_gateway_port_available_cmd,
             commands::cycle_bridge_runtime_cmd,
             commands::toggle_proxy_simulation_cmd,
             commands::create_account_pool,

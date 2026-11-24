@@ -41,6 +41,7 @@ import type { AgentBinding, PoolStrategy, TargetAgentId } from "../../types/pool
 import { AgentBrandIcon } from "../../components/AgentBrandIcon";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
+import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
 
 /** 去掉展示名里的「工具短名 · 」前缀，配合左侧品牌图标，避免模型名过长 */
 function shortModelLabel(name: string): string {
@@ -190,6 +191,7 @@ export function AgentBindingsView({
     mode: "restore" | "force";
     agentId?: TargetAgentId;
   } | null>(null);
+  const [portModalOpen, setPortModalOpen] = useState(false);
 
   useEffect(() => {
     if (highlightAgentId) {
@@ -524,9 +526,14 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
             <span className="font-semibold text-zinc-900 dark:text-zinc-100">
               本地网关
             </span>
-            <code className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            <button
+              type="button"
+              onClick={() => setPortModalOpen(true)}
+              title="修改网关端口 / 检测占用"
+              className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-zinc-700 transition hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+            >
               {gateway.host}:{gateway.port}
-            </code>
+            </button>
           </div>
 
           {isTauriRuntime ? (
@@ -1715,6 +1722,8 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
           }
         }}
       />
+
+      <GatewayPortModal open={portModalOpen} onClose={() => setPortModalOpen(false)} />
     </div>
   );
 }

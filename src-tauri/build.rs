@@ -47,6 +47,7 @@ fn main() {
         "refresh_upstream_models_cmd",
         "toggle_gateway_server",
         "update_gateway_port_cmd",
+        "check_gateway_port_available_cmd",
         "cycle_bridge_runtime_cmd",
         "toggle_proxy_simulation_cmd",
         "create_account_pool",

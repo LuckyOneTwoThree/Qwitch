@@ -78,7 +78,12 @@ export interface PoolPrototypeContextValue {
   isRefreshingModels: boolean;
   refreshUpstreamModels: (accountId?: string) => Promise<void>;
   toggleGateway: () => void;
-  updateGatewayPort: (port: number) => void;
+  updateGatewayPort: (port: number) => Promise<{ ok: boolean; message?: string }>;
+  checkGatewayPort: (port: number) => Promise<{
+    available: boolean;
+    inUseBySelf: boolean;
+    message: string;
+  }>;
   cycleBridgeRuntime: () => void;
   toggleProxySimulation: () => void;
   createPool: (input: CreatePoolInput) => AccountPool;
@@ -189,7 +194,12 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   isRefreshingModels: false,
   refreshUpstreamModels: async () => {},
   toggleGateway: () => {},
-  updateGatewayPort: () => {},
+  updateGatewayPort: async () => ({ ok: false, message: "浏览器预览不支持" }),
+  checkGatewayPort: async () => ({
+    available: true,
+    inUseBySelf: false,
+    message: "浏览器预览：跳过检测",
+  }),
   cycleBridgeRuntime: () => {},
   toggleProxySimulation: () => {},
   createPool: () => INITIAL_POOLS[0],
@@ -751,16 +761,55 @@ export function PoolPrototypeProvider({
   }, [notify, syncWorkspaceCommand]);
 
   const updateGatewayPort = useCallback(
-    (port: number) => {
+    async (port: number) => {
       if (!Number.isFinite(port) || port < 1024 || port > 65535) {
-        notify("端口范围必须在 1024–65535 之间", "error");
-        return;
+        const message = "端口范围必须在 1024–65535 之间";
+        notify(message, "error");
+        return { ok: false, message };
       }
-      setGateway((prev) => ({ ...prev, port }));
-      notify(`网关监听端口已更新为 127.0.0.1:${port}，已同步所有已挂载配置`, "success");
-      void syncWorkspaceCommand("update_gateway_port_cmd", { port });
+      if (!isTauriRuntime) {
+        notify("仅桌面端支持修改网关端口", "error");
+        return { ok: false, message: "仅桌面端支持" };
+      }
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const ws = await invoke<PoolWorkspaceState>("update_gateway_port_cmd", { port });
+        applyWorkspaceState(ws);
+        notify(
+          `网关端口已更新为 127.0.0.1:${port}，已同步所有已挂载 Agent 配置（桌面客户端需重启生效）`,
+          "success"
+        );
+        return { ok: true };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        notify(`端口更新失败：${message}`, "error");
+        return { ok: false, message };
+      }
     },
-    [notify, syncWorkspaceCommand]
+    [applyWorkspaceState, isTauriRuntime, notify]
+  );
+
+  const checkGatewayPort = useCallback(
+    async (port: number) => {
+      if (!isTauriRuntime) {
+        return { available: true, inUseBySelf: false, message: "浏览器预览：跳过检测" };
+      }
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        return await invoke<{
+          available: boolean;
+          inUseBySelf: boolean;
+          message: string;
+        }>("check_gateway_port_available_cmd", { port });
+      } catch (err) {
+        return {
+          available: false,
+          inUseBySelf: false,
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+    [isTauriRuntime]
   );
 
   const cycleBridgeRuntime = useCallback(() => {
@@ -1651,7 +1700,10 @@ export function PoolPrototypeProvider({
   );
 
   const detectAgentEnvironment = useCallback(() => {
-    notify("已完成 4 个目标 Agent 安装路径、Schema 版本与本机代理状态重新探测", "success");
+    notify(
+      `已完成 ${rawBindingsRef.current.length} 个目标 Agent 安装路径、Schema 版本与本机代理状态重新探测`,
+      "success"
+    );
     void syncWorkspaceCommand("detect_agent_environment_cmd");
   }, [notify, syncWorkspaceCommand]);
 
@@ -2618,6 +2670,7 @@ export function PoolPrototypeProvider({
       refreshUpstreamModels,
       toggleGateway,
       updateGatewayPort,
+      checkGatewayPort,
       cycleBridgeRuntime,
       toggleProxySimulation,
       createPool,
@@ -2679,6 +2732,7 @@ export function PoolPrototypeProvider({
       refreshUpstreamModels,
       toggleGateway,
       updateGatewayPort,
+      checkGatewayPort,
       cycleBridgeRuntime,
       toggleProxySimulation,
       createPool,

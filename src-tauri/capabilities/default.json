@@ -50,6 +50,7 @@
     "allow-refresh-upstream-models-cmd",
     "allow-toggle-gateway-server",
     "allow-update-gateway-port-cmd",
+    "allow-check-gateway-port-available-cmd",
     "allow-cycle-bridge-runtime-cmd",
     "allow-toggle-proxy-simulation-cmd",
     "allow-create-account-pool",

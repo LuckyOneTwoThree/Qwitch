@@ -22,6 +22,14 @@ pub struct ClearAllAgentsResult {
     pub failed: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayPortCheck {
+    pub available: bool,
+    pub in_use_by_self: bool,
+    pub message: String,
+}
+
 fn build_workspace_state(
     db: &QwitchDatabase,
     master_key: &[u8; 32],
@@ -127,11 +135,69 @@ pub async fn toggle_gateway_server(
 }
 
 #[tauri::command]
+pub fn check_gateway_port_available_cmd(
+    state: State<'_, AppState>,
+    port: u16,
+) -> Result<GatewayPortCheck, String> {
+    if port < 1024 {
+        return Ok(GatewayPortCheck {
+            available: false,
+            in_use_by_self: false,
+            message: "端口必须 >= 1024".into(),
+        });
+    }
+    let cur = state.gateway.runtime_state();
+    if cur.running && cur.port == port {
+        return Ok(GatewayPortCheck {
+            available: true,
+            in_use_by_self: true,
+            message: "当前网关正在使用该端口".into(),
+        });
+    }
+    match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(GatewayPortCheck {
+                available: true,
+                in_use_by_self: false,
+                message: "端口可用".into(),
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Ok(GatewayPortCheck {
+            available: false,
+            in_use_by_self: false,
+            message: format!("端口 {port} 已被其它进程占用"),
+        }),
+        Err(e) => Ok(GatewayPortCheck {
+            available: false,
+            in_use_by_self: false,
+            message: format!("端口检测失败：{e}"),
+        }),
+    }
+}
+
+#[tauri::command]
 pub async fn update_gateway_port_cmd(
     app: AppHandle,
     state: State<'_, AppState>,
     port: u16,
 ) -> Result<PoolWorkspaceState, String> {
+    if port < 1024 {
+        return Err("端口必须 >= 1024".into());
+    }
+    let cur = state.gateway.runtime_state();
+    if cur.running && cur.port == port {
+        return build_workspace_state(&state.db, &state.master_key, &state.gateway);
+    }
+    if cur.port != port {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => drop(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(format!("端口 {port} 已被其它进程占用，请更换后再试"));
+            }
+            Err(e) => return Err(format!("端口 {port} 不可用：{e}")),
+        }
+    }
     let was_running = state.gateway.runtime_state().running;
     if was_running {
         state.gateway.stop_server();

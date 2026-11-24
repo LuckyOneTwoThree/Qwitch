@@ -430,7 +430,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
               </button>
             </div>
 
-            {/* 4 个目标 Agent 快速默认模型热切换 */}
+            {/* 各目标 Agent 快速默认模型热切换 */}
             <section className="space-y-1.5">
               <div className="flex items-center justify-between px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
                 <span>Agent 指向与 ★ 默认模型热切</span>

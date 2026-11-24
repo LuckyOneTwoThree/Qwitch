@@ -58,10 +58,10 @@ impl TargetAgentId {
 
     pub fn all() -> [Self; 4] {
         [
-            Self::ClaudeDesktop,
-            Self::Opencode,
             Self::Dsh,
+            Self::Opencode,
             Self::CodexDesktop,
+            Self::ClaudeDesktop,
         ]
     }
 }

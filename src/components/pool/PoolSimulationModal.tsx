@@ -48,7 +48,7 @@ export function PoolSimulationModal({
   const titleId = useId();
   const { pools, agentBindings, gateway, nowMs, runPoolSimulation } = usePoolPrototype();
 
-  const [agentId, setAgentId] = useState<TargetAgentId>("claude_desktop");
+  const [agentId, setAgentId] = useState<TargetAgentId>("dsh");
   const [poolId, setPoolId] = useState<string>(defaultPoolId || pools[0]?.id || "");
   const [modelId, setModelId] = useState<string>(defaultModelId || "");
   const [prompt, setPrompt] = useState<string>(PRESET_PROMPTS[0]);

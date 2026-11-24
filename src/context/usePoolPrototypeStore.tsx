@@ -29,6 +29,7 @@ import {
   INITIAL_POOLS,
   INITIAL_ROUTING_TRACES,
   MEMBER_TIER_META,
+  TARGET_AGENT_ORDER,
   TOOL_SHORT_LABELS,
   UPSTREAM_MODEL_OPTIONS,
   buildAgentConfigSnippets,
@@ -684,7 +685,12 @@ export function PoolPrototypeProvider({
 
   // 实时同步每个 Agent 的多号池配置 Diff 与代理预警（Tauri 模式优先保留 Rust 磁盘探测结果）
   const agentBindings = useMemo<AgentBinding[]>(() => {
-    return rawBindings.map((binding) => {
+    const ordered = [...rawBindings].sort((a, b) => {
+      const ia = TARGET_AGENT_ORDER.indexOf(a.agentId);
+      const ib = TARGET_AGENT_ORDER.indexOf(b.agentId);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+    return ordered.map((binding) => {
       const validPoolIds = binding.mountedPoolIds.filter((pid) =>
         pools.some((p) => p.id === pid)
       );
@@ -2476,7 +2482,7 @@ export function PoolPrototypeProvider({
       const sourceOrder = getAgentToolAccounts(sourceAgentId, toolId);
       const orderedIds = sourceOrder.map((m) => m.accountId);
       const enabledSet = new Set(sourceOrder.filter((m) => m.enabled).map((m) => m.accountId));
-      const allAgents: TargetAgentId[] = ["claude_desktop", "opencode", "dsh", "codex_desktop"];
+      const allAgents = TARGET_AGENT_ORDER;
       for (const targetAgentId of allAgents) {
         if (targetAgentId === sourceAgentId) continue;
         commitAgentToolAccountSchedule(

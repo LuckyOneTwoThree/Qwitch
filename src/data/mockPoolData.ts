@@ -1356,43 +1356,18 @@ export function buildAgentConfigSnippets(
   }
 }
 
+export const TARGET_AGENT_ORDER: readonly TargetAgentId[] = [
+  "dsh",
+  "opencode",
+  "codex_desktop",
+  "claude_desktop",
+];
+
 export function createInitialAgentBindings(
   pools: AccountPool[],
   gateway: GatewayRuntimeState
 ): AgentBinding[] {
   const raw: Omit<AgentBinding, "beforeSnippet" | "afterSnippet">[] = [
-    {
-      agentId: "claude_desktop",
-      name: "Claude 桌面版",
-      subtitle: "官方 3p 网关模式 · 同时挂载多号池，下拉框直选具体模型",
-      protocol: "anthropic_messages",
-      configPath: "~/Library/Application Support/Claude-3p/configLibrary/",
-      installed: true,
-      version: "2.7032.0",
-      status: "bound",
-      mountedPoolIds: ["pool-coding-main", "pool-deep-reason"],
-      defaultModelKey: makeDefaultModelKey("pool-coding-main", "deepseek-v4-pro"),
-      lastHitAt: "3 分钟前",
-      options: {
-        claudeIsolatedTwin: false,
-      },
-    },
-    {
-      agentId: "opencode",
-      name: "OpenCode",
-      subtitle: "CLI / TUI / OpenChamber 编码代理 · 支持多号池同列切换",
-      protocol: "openai_chat",
-      configPath: "~/.config/opencode/opencode.jsonc",
-      installed: true,
-      version: "2.2.6",
-      status: "bound",
-      mountedPoolIds: ["pool-coding-main", "pool-fast-daily"],
-      defaultModelKey: makeDefaultModelKey("pool-coding-main", "deepseek-v4-pro"),
-      lastHitAt: "12 分钟前",
-      options: {
-        opencodeSchemaVersion: "v2",
-      },
-    },
     {
       agentId: "dsh",
       name: "DeepSeek Harness",
@@ -1412,6 +1387,22 @@ export function createInitialAgentBindings(
       },
     },
     {
+      agentId: "opencode",
+      name: "OpenCode",
+      subtitle: "CLI / TUI / OpenChamber 编码代理 · 支持多号池同列切换",
+      protocol: "openai_chat",
+      configPath: "~/.config/opencode/opencode.jsonc",
+      installed: true,
+      version: "2.2.6",
+      status: "bound",
+      mountedPoolIds: ["pool-coding-main", "pool-fast-daily"],
+      defaultModelKey: makeDefaultModelKey("pool-coding-main", "deepseek-v4-pro"),
+      lastHitAt: "12 分钟前",
+      options: {
+        opencodeSchemaVersion: "v2",
+      },
+    },
+    {
       agentId: "codex_desktop",
       name: "Codex 桌面版",
       subtitle: "ChatGPT / Codex App · 独立 [model_providers.qwitch] Responses 端点",
@@ -1427,6 +1418,22 @@ export function createInitialAgentBindings(
         : undefined,
       options: {
         codexPreserveTable: true,
+      },
+    },
+    {
+      agentId: "claude_desktop",
+      name: "Claude 桌面版",
+      subtitle: "官方 3p 网关模式 · 同时挂载多号池，下拉框直选具体模型",
+      protocol: "anthropic_messages",
+      configPath: "~/Library/Application Support/Claude-3p/configLibrary/",
+      installed: true,
+      version: "2.7032.0",
+      status: "bound",
+      mountedPoolIds: ["pool-coding-main", "pool-deep-reason"],
+      defaultModelKey: makeDefaultModelKey("pool-coding-main", "deepseek-v4-pro"),
+      lastHitAt: "3 分钟前",
+      options: {
+        claudeIsolatedTwin: false,
       },
     },
   ];

@@ -163,7 +163,7 @@ export function AgentBindingsView({
     ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
 
   const [selectedAgentId, setSelectedAgentId] = useState<TargetAgentId>(
-    highlightAgentId ?? agentBindings[0]?.agentId ?? "claude_desktop"
+    highlightAgentId ?? agentBindings[0]?.agentId ?? "dsh"
   );
   const [subTab, setSubTab] = useState<AgentSubTab>("models");
   const [selectedToolId, setSelectedToolId] = useState<string>("workbuddy");

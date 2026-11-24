@@ -15,12 +15,14 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
     );
 
     const agentList = screen.getByRole("complementary", { name: "目标 Agent 客户端列表" });
-    expect(within(agentList).getByText("Claude 桌面版")).toBeTruthy();
-    expect(within(agentList).getByText("OpenCode")).toBeTruthy();
-    expect(within(agentList).getByText("DeepSeek Harness")).toBeTruthy();
-    expect(within(agentList).getByText("Codex 桌面版")).toBeTruthy();
+    const cardOrder = within(agentList)
+      .getAllByRole("heading", { level: 2 })
+      .map((h) => h.textContent);
+    expect(cardOrder).toEqual(["DeepSeek Harness", "OpenCode", "Codex 桌面版", "Claude 桌面版"]);
 
-    // 默认选中 Claude 桌面版 + WorkBuddy；测试「全选当前」「清空本工具」「仅选推荐主力」与「设为默认」
+    // 切换到 Claude 桌面版测试「全选当前」「清空本工具」「仅选推荐主力」与「设为默认」
+    const claudeCard = screen.getByRole("region", { name: "Claude 桌面版 挂载卡片" });
+    fireEvent.click(within(claudeCard).getByRole("button", { name: /Claude 桌面版/ }));
     const modelSection = screen.getByRole("region", { name: "WorkBuddy 订阅模型选择" });
     fireEvent.click(within(modelSection).getByRole("button", { name: "全选当前" }));
     expect(within(modelSection).getByText(/\/ 15 个模型/)).toBeTruthy();

@@ -40,8 +40,14 @@ fn sort_members_in_tier(
                         .cmp(&a.quota_percent)
                         .then_with(|| a.priority.cmp(&b.priority))
                 } else {
-                    let pa = first_prio_by_tool.get(&a.tool_id).copied().unwrap_or(a.priority);
-                    let pb = first_prio_by_tool.get(&b.tool_id).copied().unwrap_or(b.priority);
+                    let pa = first_prio_by_tool
+                        .get(&a.tool_id)
+                        .copied()
+                        .unwrap_or(a.priority);
+                    let pb = first_prio_by_tool
+                        .get(&b.tool_id)
+                        .copied()
+                        .unwrap_or(b.priority);
                     pa.cmp(&pb)
                 }
             });
@@ -74,11 +80,9 @@ fn collect_for_model(
                 continue;
             }
         }
-        if !m
-            .supported_models
-            .iter()
-            .any(|id| id == target_model || crate::domain::split_scoped_model_id(id).1 == bare_target)
-        {
+        if !m.supported_models.iter().any(|id| {
+            id == target_model || crate::domain::split_scoped_model_id(id).1 == bare_target
+        }) {
             continue;
         }
         if !m.enabled {
@@ -96,7 +100,10 @@ fn collect_for_model(
         if m.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly) {
             continue;
         }
-        let runtime_cool = cooldowns.get(&m.account_id).copied().or(m.cooldown_until_ms);
+        let runtime_cool = cooldowns
+            .get(&m.account_id)
+            .copied()
+            .or(m.cooldown_until_ms);
         if runtime_cool.is_some_and(|until| until > now_ms) {
             continue;
         }
@@ -151,8 +158,7 @@ pub fn select_candidates_for_request(
     if candidates.is_empty() {
         if let Some(fb) = policy.and_then(|p| p.fallback_model_id.as_deref()) {
             let mut fb_skipped = Vec::new();
-            let fb_candidates =
-                collect_for_model(pool, fb, cooldowns, now_ms, &mut fb_skipped);
+            let fb_candidates = collect_for_model(pool, fb, cooldowns, now_ms, &mut fb_skipped);
             if !fb_candidates.is_empty() {
                 used_explicit_fallback = true;
                 effective_model = fb.to_string();
@@ -261,10 +267,38 @@ mod tests {
             }],
             members: vec![
                 // T1 WorkBuddy low quota comes first in priority, Trae high quota in T1, WorkBuddy higher quota #3
-                make_member("wb-low", "workbuddy", MemberTier::T1Primary, 1, 30, &["claude-sonnet-4.6"]),
-                make_member("trae-high", "trae_cn", MemberTier::T1Primary, 2, 99, &["claude-sonnet-4.6"]),
-                make_member("wb-high", "workbuddy", MemberTier::T1Primary, 3, 85, &["claude-sonnet-4.6"]),
-                make_member("api-key", "custom_api_key", MemberTier::T3Fallback, 4, 100, &["claude-sonnet-4.6"]),
+                make_member(
+                    "wb-low",
+                    "workbuddy",
+                    MemberTier::T1Primary,
+                    1,
+                    30,
+                    &["claude-sonnet-4.6"],
+                ),
+                make_member(
+                    "trae-high",
+                    "trae_cn",
+                    MemberTier::T1Primary,
+                    2,
+                    99,
+                    &["claude-sonnet-4.6"],
+                ),
+                make_member(
+                    "wb-high",
+                    "workbuddy",
+                    MemberTier::T1Primary,
+                    3,
+                    85,
+                    &["claude-sonnet-4.6"],
+                ),
+                make_member(
+                    "api-key",
+                    "custom_api_key",
+                    MemberTier::T3Fallback,
+                    4,
+                    100,
+                    &["claude-sonnet-4.6"],
+                ),
             ],
             today_requests: 0,
             today_failovers: 0,
@@ -280,7 +314,11 @@ mod tests {
             &HashMap::new(),
             1000,
         );
-        let order: Vec<&str> = plan.candidates.iter().map(|c| c.account_id.as_str()).collect();
+        let order: Vec<&str> = plan
+            .candidates
+            .iter()
+            .map(|c| c.account_id.as_str())
+            .collect();
         // WorkBuddy stays ahead of Trae per tool priority (#1), while inside WorkBuddy wb-high (85%) beats wb-low (30%)!
         // API Key stays strictly at T3!
         assert_eq!(order, vec!["wb-high", "wb-low", "trae-high", "api-key"]);
@@ -316,8 +354,22 @@ mod tests {
                 },
             ],
             members: vec![
-                make_member("opus-acc", "workbuddy", MemberTier::T1Primary, 1, 50, &["claude-opus-4.6"]),
-                make_member("sonnet-acc", "workbuddy", MemberTier::T1Primary, 2, 90, &["claude-sonnet-4.6"]),
+                make_member(
+                    "opus-acc",
+                    "workbuddy",
+                    MemberTier::T1Primary,
+                    1,
+                    50,
+                    &["claude-opus-4.6"],
+                ),
+                make_member(
+                    "sonnet-acc",
+                    "workbuddy",
+                    MemberTier::T1Primary,
+                    2,
+                    90,
+                    &["claude-sonnet-4.6"],
+                ),
             ],
             today_requests: 0,
             today_failovers: 0,
@@ -376,9 +428,30 @@ mod tests {
                 claude_alias_id: None,
             }],
             members: vec![
-                make_member("wb-1", "workbuddy", MemberTier::T1Primary, 1, 95, &["deepseek-v4-pro"]),
-                make_member("qd-1", "qoder_cn", MemberTier::T1Primary, 2, 40, &["deepseek-v4-pro"]),
-                make_member("qd-2", "qoder_cn", MemberTier::T1Primary, 3, 75, &["deepseek-v4-pro"]),
+                make_member(
+                    "wb-1",
+                    "workbuddy",
+                    MemberTier::T1Primary,
+                    1,
+                    95,
+                    &["deepseek-v4-pro"],
+                ),
+                make_member(
+                    "qd-1",
+                    "qoder_cn",
+                    MemberTier::T1Primary,
+                    2,
+                    40,
+                    &["deepseek-v4-pro"],
+                ),
+                make_member(
+                    "qd-2",
+                    "qoder_cn",
+                    MemberTier::T1Primary,
+                    3,
+                    75,
+                    &["deepseek-v4-pro"],
+                ),
             ],
             today_requests: 0,
             today_failovers: 0,
@@ -394,7 +467,11 @@ mod tests {
             &HashMap::new(),
             1000,
         );
-        let ids: Vec<&str> = plan.candidates.iter().map(|c| c.account_id.as_str()).collect();
+        let ids: Vec<&str> = plan
+            .candidates
+            .iter()
+            .map(|c| c.account_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["qd-1", "qd-2"]);
     }
 }

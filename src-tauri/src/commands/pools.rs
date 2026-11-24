@@ -2,8 +2,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::agent_wiring::{
-    apply_agent_wiring, inspect_all_agent_bindings, restart_agent_process,
-    unbind_and_restore_agent,
+    apply_agent_wiring, inspect_all_agent_bindings, restart_agent_process, unbind_and_restore_agent,
 };
 use crate::commands::AppState;
 use crate::domain::{
@@ -60,11 +59,11 @@ pub async fn refresh_upstream_models_cmd(
     state: State<'_, AppState>,
     account_id: Option<String>,
 ) -> Result<PoolWorkspaceState, String> {
-    let target_accounts = state
-        .db
-        .list_accounts(None)
-        .map_err(|e| e.to_string())?;
-    let filter_id = account_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let target_accounts = state.db.list_accounts(None).map_err(|e| e.to_string())?;
+    let filter_id = account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let mut handles = Vec::new();
     for acc in target_accounts {
@@ -221,10 +220,7 @@ pub fn delete_account_pool(
         .db
         .get_stored_agent_bindings()
         .map_err(|e| e.to_string())?;
-    state
-        .db
-        .delete_pool(&pool_id)
-        .map_err(|e| e.to_string())?;
+    state.db.delete_pool(&pool_id).map_err(|e| e.to_string())?;
 
     let remaining_pools = state
         .db
@@ -478,8 +474,12 @@ pub fn update_agent_mounted_pools_cmd(
         .map_err(|e| e.to_string())?
         .into_iter()
         .find(|b| b.agent_id == agent_id);
-    let options = existing.as_ref().map(|b| b.options.clone()).unwrap_or_default();
-    let effective_default = default_model_key.or_else(|| existing.and_then(|b| b.default_model_key));
+    let options = existing
+        .as_ref()
+        .map(|b| b.options.clone())
+        .unwrap_or_default();
+    let effective_default =
+        default_model_key.or_else(|| existing.and_then(|b| b.default_model_key));
 
     let _binding: AgentBinding = apply_agent_wiring(
         &state.db,
@@ -607,7 +607,13 @@ pub fn unmount_pool_from_agent_cmd(
         .into_iter()
         .filter(|id| id != &pool_id)
         .collect();
-    update_agent_mounted_pools_cmd(app, state, agent_id, next_mounted, existing.default_model_key)
+    update_agent_mounted_pools_cmd(
+        app,
+        state,
+        agent_id,
+        next_mounted,
+        existing.default_model_key,
+    )
 }
 
 #[tauri::command]

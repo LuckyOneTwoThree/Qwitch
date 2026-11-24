@@ -267,9 +267,8 @@ impl QwitchDatabase {
         &self,
     ) -> Result<HashMap<String, Vec<UpstreamModelOption>>, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let mut stmt = conn.prepare(
-            "SELECT account_id, models_json FROM account_discovered_models",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT account_id, models_json FROM account_discovered_models")?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -535,10 +534,15 @@ impl QwitchDatabase {
         let now = Utc::now().to_rfc3339();
 
         let mut built_members = Vec::new();
-        for (idx, item) in input.members.iter().enumerate() {
+        let mut seen_accounts: HashSet<String> = HashSet::new();
+        for item in input.members.iter() {
             let Some(cand) = candidate_map.get(&item.account_id) else {
                 continue;
             };
+            // 同一账号重复入池：仅保留首次出现，避免唯一约束半写入
+            if !seen_accounts.insert(cand.account_id.clone()) {
+                continue;
+            }
             if cand.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly) {
                 return Err(StorageError::Validation(format!(
                     "{} 为只读客户端凭据，请先签发独立 OAuth 后再入池",
@@ -570,19 +574,21 @@ impl QwitchDatabase {
                 tier,
                 channel: cand.channel,
                 enabled: true,
-                priority: idx + 1,
+                priority: built_members.len() + 1,
                 quota_percent: cand.quota_percent,
                 quota_text: cand.quota_text.clone(),
                 cooldown_until_ms: None,
                 is_active_on_client: cand.is_active_on_client,
                 account_status: Some(cand.account_status.clone()),
                 code_arts_mode: cand.code_arts_mode,
-                last_latency_ms: Some(520 + (idx as u64) * 65),
+                last_latency_ms: Some(520 + (built_members.len() as u64) * 65),
             });
         }
 
         if built_members.is_empty() {
-            return Err(StorageError::Validation("号池至少需要 1 个有效可用账号成员".into()));
+            return Err(StorageError::Validation(
+                "号池至少需要 1 个有效可用账号成员".into(),
+            ));
         }
 
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
@@ -605,7 +611,8 @@ impl QwitchDatabase {
             input.enabled_model_ids.as_deref(),
         );
 
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO account_pools (
                 id, slug, name, description, scene_tag, strategy, affinity_mode,
                 skip_active_client_account, cooldown_seconds, auto_refresh_on_401,
@@ -629,7 +636,7 @@ impl QwitchDatabase {
         )?;
 
         for pol in &policies {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO pool_model_policies (pool_id, model_id, enabled, fallback_model_id, claude_alias_id)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
@@ -644,7 +651,7 @@ impl QwitchDatabase {
 
         for m in &built_members {
             let models_json = serde_json::to_string(&m.supported_models)?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled, last_latency_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
                 params![
@@ -658,6 +665,8 @@ impl QwitchDatabase {
                 ],
             )?;
         }
+
+        tx.commit()?;
 
         Ok(AccountPool {
             id,
@@ -681,6 +690,7 @@ impl QwitchDatabase {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn update_pool(&self, pool_id: &str, patch: &UpdatePoolPatch) -> Result<(), StorageError> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
@@ -721,10 +731,22 @@ impl QwitchDatabase {
                 patch.description.as_deref().unwrap_or(&desc),
                 patch.strategy.map(strategy_to_str).unwrap_or(&strat),
                 patch.affinity_mode.map(affinity_to_str).unwrap_or(&aff),
-                patch.skip_active_client_account.map(|v| v as i64).unwrap_or(skip),
-                patch.cooldown_seconds.map(|v| v.max(10) as i64).unwrap_or(cd),
-                patch.auto_refresh_on_401.map(|v| v as i64).unwrap_or(auto401),
-                patch.fallback_api_key_enabled.map(|v| v as i64).unwrap_or(fb_key),
+                patch
+                    .skip_active_client_account
+                    .map(|v| v as i64)
+                    .unwrap_or(skip),
+                patch
+                    .cooldown_seconds
+                    .map(|v| v.max(10) as i64)
+                    .unwrap_or(cd),
+                patch
+                    .auto_refresh_on_401
+                    .map(|v| v as i64)
+                    .unwrap_or(auto401),
+                patch
+                    .fallback_api_key_enabled
+                    .map(|v| v as i64)
+                    .unwrap_or(fb_key),
                 patch.enabled.map(|v| v as i64).unwrap_or(enabled),
                 now,
                 pool_id
@@ -842,9 +864,8 @@ impl QwitchDatabase {
             }
         }
 
-        let mut pstmt = conn.prepare(
-            "SELECT model_id FROM pool_model_policies WHERE pool_id = ?1",
-        )?;
+        let mut pstmt =
+            conn.prepare("SELECT model_id FROM pool_model_policies WHERE pool_id = ?1")?;
         let existing: HashSet<String> = pstmt
             .query_map(params![pool_id], |r| r.get(0))?
             .collect::<Result<HashSet<_>, _>>()?;
@@ -1031,7 +1052,9 @@ impl QwitchDatabase {
             .and_then(|b| b.mounted_pool_ids.first())
             .and_then(|pid| pools.iter().find(|p| &p.id == pid));
 
-        let strategy = source_pool.map(|p| p.strategy).unwrap_or(PoolStrategy::Order);
+        let strategy = source_pool
+            .map(|p| p.strategy)
+            .unwrap_or(PoolStrategy::Order);
         let affinity_mode = source_pool
             .map(|p| p.affinity_mode)
             .unwrap_or(AffinityMode::AutoCache);
@@ -1063,9 +1086,8 @@ impl QwitchDatabase {
                     .filter(|mid| {
                         enabled_policies.is_empty()
                             || enabled_policies.contains(mid.as_str())
-                            || enabled_policies.contains(
-                                format_scoped_model_id(&m.tool_id, mid).as_str(),
-                            )
+                            || enabled_policies
+                                .contains(format_scoped_model_id(&m.tool_id, mid).as_str())
                     })
                     .map(|mid| {
                         format_scoped_model_id(
@@ -1242,10 +1264,9 @@ impl QwitchDatabase {
         )?;
         let mut next_prio = max_prio + 1;
 
-        for cand in candidates
-            .iter()
-            .filter(|c| c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly))
-        {
+        for cand in candidates.iter().filter(|c| {
+            c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly)
+        }) {
             let existing: Option<String> = conn
                 .query_row(
                     "SELECT id FROM pool_members WHERE pool_id = ?1 AND account_id = ?2",
@@ -1284,6 +1305,7 @@ impl QwitchDatabase {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_pool_tool_account_schedule(
         &self,
         master_key: &[u8; 32],
@@ -1301,7 +1323,8 @@ impl QwitchDatabase {
             cooldown_seconds,
             ..Default::default()
         };
-        if strategy.is_some() || skip_active_client_account.is_some() || cooldown_seconds.is_some() {
+        if strategy.is_some() || skip_active_client_account.is_some() || cooldown_seconds.is_some()
+        {
             self.update_pool(pool_id, &patch)?;
         }
 
@@ -1317,7 +1340,9 @@ impl QwitchDatabase {
              ORDER BY pm.priority ASC, pm.id ASC",
         )?;
         let all_rows: Vec<(String, String, String, i64)> = stmt
-            .query_map(params![pool_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .query_map(params![pool_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
 
@@ -1331,10 +1356,9 @@ impl QwitchDatabase {
         }
         let mut next_prio = all_rows.iter().map(|r| r.3).max().unwrap_or(0) + 1;
 
-        for cand in candidates
-            .iter()
-            .filter(|c| c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly))
-        {
+        for cand in candidates.iter().filter(|c| {
+            c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly)
+        }) {
             if !tool_member_by_acc.contains_key(&cand.account_id) {
                 let mid = format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]);
                 let tier = if tool_id == "custom_api_key" {
@@ -1468,11 +1492,7 @@ impl QwitchDatabase {
         Ok(())
     }
 
-    pub fn remove_pool_member(
-        &self,
-        pool_id: &str,
-        member_id: &str,
-    ) -> Result<(), StorageError> {
+    pub fn remove_pool_member(&self, pool_id: &str, member_id: &str) -> Result<(), StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let affected = conn.execute(
             "DELETE FROM pool_members WHERE id = ?1 AND pool_id = ?2",
@@ -1555,8 +1575,7 @@ impl QwitchDatabase {
             };
             let mounted_pool_ids: Vec<String> =
                 serde_json::from_str(&pools_json).unwrap_or_default();
-            let options: AgentBindingOptions =
-                serde_json::from_str(&opts_json).unwrap_or_default();
+            let options: AgentBindingOptions = serde_json::from_str(&opts_json).unwrap_or_default();
             out.push(StoredAgentBinding {
                 agent_id,
                 mounted_pool_ids,
@@ -1569,10 +1588,7 @@ impl QwitchDatabase {
         Ok(out)
     }
 
-    pub fn upsert_agent_binding(
-        &self,
-        binding: &StoredAgentBinding,
-    ) -> Result<(), StorageError> {
+    pub fn upsert_agent_binding(&self, binding: &StoredAgentBinding) -> Result<(), StorageError> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         conn.execute(
@@ -1857,7 +1873,8 @@ mod tests {
         assert!(bad.is_err());
 
         // 签发独立 OAuth 后解锁
-        db.authorize_codearts_isolated(&key, &ca_id).expect("unlock");
+        db.authorize_codearts_isolated(&key, &ca_id)
+            .expect("unlock");
 
         let pool = db
             .create_pool(
@@ -1914,12 +1931,20 @@ mod tests {
         let pools = db.list_pools(&key, &HashMap::new()).expect("list pools");
         assert_eq!(pools.len(), 1);
         assert_eq!(pools[0].members.len(), 3);
-        let wb_member = pools[0].members.iter().find(|m| m.account_id == wb_id).unwrap();
+        let wb_member = pools[0]
+            .members
+            .iter()
+            .find(|m| m.account_id == wb_id)
+            .unwrap();
         assert_eq!(
             wb_member.supported_models,
             vec!["deepseek-v4-pro".to_string(), "glm-5.3".to_string()]
         );
-        let ca_member = pools[0].members.iter().find(|m| m.tool_id == "codearts").unwrap();
+        let ca_member = pools[0]
+            .members
+            .iter()
+            .find(|m| m.tool_id == "codearts")
+            .unwrap();
         assert_eq!(
             ca_member.supported_models,
             vec!["openpangu-coder-pro".to_string()]
@@ -2013,7 +2038,9 @@ mod tests {
         // 清空 workbuddy 模型，不影响 qoder_cn 模型和 wb 账号队列顺序
         db.set_pool_tool_models(&key, &pool_id, "workbuddy", &[])
             .expect("clear workbuddy models");
-        let pools_after = db.list_pools(&key, &HashMap::new()).expect("list after clear");
+        let pools_after = db
+            .list_pools(&key, &HashMap::new())
+            .expect("list after clear");
         let pool_after = pools_after.iter().find(|p| p.id == pool_id).unwrap();
         let policy_ids: Vec<&str> = pool_after
             .model_policies

@@ -44,6 +44,8 @@ pub struct IrRequest {
     pub system_prompt: Option<String>,
     pub messages: Vec<IrMessage>,
     pub tools: Vec<Value>,
+    /// 原始 `tool_choice`（协议相关）；跨协议时由上游构造器翻译。
+    pub tool_choice: Option<Value>,
     pub max_tokens: Option<u64>,
     pub temperature: Option<f64>,
 }
@@ -83,7 +85,10 @@ pub fn parse_openai_chat_request(body: &Value) -> Result<IrRequest, String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| "缺少 model 字段".to_string())?
         .to_string();
-    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let max_tokens = body
         .get("max_tokens")
         .or_else(|| body.get("max_completion_tokens"))
@@ -94,6 +99,7 @@ pub fn parse_openai_chat_request(body: &Value) -> Result<IrRequest, String> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let tool_choice = body.get("tool_choice").cloned();
 
     let mut system_parts = Vec::new();
     let mut messages = Vec::new();
@@ -171,6 +177,7 @@ pub fn parse_openai_chat_request(body: &Value) -> Result<IrRequest, String> {
         system_prompt: (!system_parts.is_empty()).then(|| system_parts.join("\n\n")),
         messages,
         tools,
+        tool_choice,
         max_tokens,
         temperature,
     })
@@ -182,7 +189,10 @@ pub fn parse_anthropic_messages_request(body: &Value) -> Result<IrRequest, Strin
         .and_then(|v| v.as_str())
         .ok_or_else(|| "缺少 model 字段".to_string())?
         .to_string();
-    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let max_tokens = body.get("max_tokens").and_then(|v| v.as_u64());
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
     let system_prompt = body.get("system").map(|s| extract_text_from_value(Some(s)));
@@ -191,6 +201,7 @@ pub fn parse_anthropic_messages_request(body: &Value) -> Result<IrRequest, Strin
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let tool_choice = body.get("tool_choice").cloned();
 
     let mut messages = Vec::new();
     if let Some(arr) = body.get("messages").and_then(|v| v.as_array()) {
@@ -278,6 +289,7 @@ pub fn parse_anthropic_messages_request(body: &Value) -> Result<IrRequest, Strin
         system_prompt: system_prompt.filter(|s| !s.is_empty()),
         messages,
         tools,
+        tool_choice,
         max_tokens,
         temperature,
     })
@@ -289,7 +301,10 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
         .and_then(|v| v.as_str())
         .ok_or_else(|| "缺少 model 字段".to_string())?
         .to_string();
-    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let max_tokens = body.get("max_output_tokens").and_then(|v| v.as_u64());
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
     let system_prompt = body
@@ -302,6 +317,7 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let tool_choice = body.get("tool_choice").cloned();
 
     let mut messages = Vec::new();
     match body.get("input") {
@@ -313,7 +329,10 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
         }
         Some(Value::Array(items)) => {
             for item in items {
-                let itype = item.get("type").and_then(|v| v.as_str()).unwrap_or("message");
+                let itype = item
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("message");
                 match itype {
                     "function_call" => {
                         let call_id = normalize_tool_call_id(
@@ -358,7 +377,8 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
                         });
                     }
                     _ => {
-                        let role = match item.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
+                        let role = match item.get("role").and_then(|v| v.as_str()).unwrap_or("user")
+                        {
                             "assistant" => IrRole::Assistant,
                             _ => IrRole::User,
                         };
@@ -383,6 +403,7 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
         system_prompt,
         messages,
         tools,
+        tool_choice,
         max_tokens,
         temperature,
     })
@@ -408,6 +429,101 @@ fn extract_text_from_value(val: Option<&Value>) -> String {
     }
 }
 
+/// 将任意入站协议的工具声明归一化为 `(name, description, parameters)` 三元组。
+///
+/// 支持三种入站形态：
+/// - OpenAI Chat：`{ type:"function", function:{name,description,parameters} }`
+/// - OpenAI Responses：`{ type:"function", name, description, parameters }`
+/// - Anthropic Messages：`{ name, description, input_schema }`
+fn canonical_tools(tools: &[Value]) -> Vec<(String, String, Value)> {
+    let mut out = Vec::new();
+    for t in tools {
+        let func = t.get("function").filter(|v| v.is_object());
+        let name = func
+            .and_then(|f| f.get("name"))
+            .or_else(|| t.get("name"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let Some(name) = name else { continue };
+        let description = func
+            .and_then(|f| f.get("description"))
+            .or_else(|| t.get("description"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let parameters = func
+            .and_then(|f| f.get("parameters"))
+            .or_else(|| t.get("parameters"))
+            .or_else(|| t.get("input_schema"))
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+        out.push((name, description, parameters));
+    }
+    out
+}
+
+fn tools_to_openai_chat(tools: &[Value]) -> Vec<Value> {
+    canonical_tools(tools)
+        .into_iter()
+        .map(|(name, description, parameters)| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters
+                }
+            })
+        })
+        .collect()
+}
+
+fn tools_to_anthropic(tools: &[Value]) -> Vec<Value> {
+    canonical_tools(tools)
+        .into_iter()
+        .map(|(name, description, parameters)| {
+            json!({
+                "name": name,
+                "description": description,
+                "input_schema": parameters
+            })
+        })
+        .collect()
+}
+
+fn tool_choice_to_openai(choice: &Value) -> Option<Value> {
+    match choice.get("type").and_then(|v| v.as_str()) {
+        Some("auto") => Some(json!("auto")),
+        Some("any") => Some(json!("required")),
+        Some("none") => Some(json!("none")),
+        Some("tool") => choice
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| json!({ "type": "function", "function": { "name": n } })),
+        // 已是 OpenAI 形态（"auto"/"none"/{type:"function",...}）或未知 -> 原样透传
+        _ => Some(choice.clone()),
+    }
+}
+
+fn tool_choice_to_anthropic(choice: &Value) -> Option<Value> {
+    if let Some(s) = choice.as_str() {
+        return match s {
+            "auto" => Some(json!({ "type": "auto" })),
+            "required" => Some(json!({ "type": "any" })),
+            _ => None, // "none" 等 Anthropic 无对应，省略
+        };
+    }
+    if let Some(name) = choice
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(json!({ "type": "tool", "name": name }));
+    }
+    // 已是 Anthropic 形态
+    choice.get("type").map(|_| choice.clone())
+}
+
 pub fn to_upstream_openai_chat_body(ir: &IrRequest, upstream_model: &str, stream: bool) -> Value {
     let mut msgs = Vec::new();
     if let Some(sys) = &ir.system_prompt {
@@ -416,17 +532,32 @@ pub fn to_upstream_openai_chat_body(ir: &IrRequest, upstream_model: &str, stream
     for msg in &ir.messages {
         match msg.role {
             IrRole::User => {
+                // OpenAI 要求工具结果以独立 `role:"tool"` 消息紧跟 assistant tool_calls，
+                // 且必须保留 `tool_call_id`；因此先输出工具结果，再输出普通用户文本。
+                for p in &msg.parts {
+                    if let IrPart::ToolResult {
+                        call_id, content, ..
+                    } = p
+                    {
+                        msgs.push(json!({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": content
+                        }));
+                    }
+                }
                 let text: String = msg
                     .parts
                     .iter()
                     .filter_map(|p| match p {
                         IrPart::Text(t) => Some(t.as_str()),
-                        IrPart::ToolResult { content, .. } => Some(content.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                msgs.push(json!({ "role": "user", "content": text }));
+                if !text.is_empty() {
+                    msgs.push(json!({ "role": "user", "content": text }));
+                }
             }
             IrRole::Tool => {
                 for p in &msg.parts {
@@ -493,6 +624,13 @@ pub fn to_upstream_openai_chat_body(ir: &IrRequest, upstream_model: &str, stream
     }
     if let Some(temp) = ir.temperature {
         body["temperature"] = json!(temp);
+    }
+    let tools = tools_to_openai_chat(&ir.tools);
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+        if let Some(tc) = ir.tool_choice.as_ref().and_then(tool_choice_to_openai) {
+            body["tool_choice"] = tc;
+        }
     }
     body
 }
@@ -572,6 +710,13 @@ pub fn to_upstream_anthropic_body(ir: &IrRequest, upstream_model: &str, stream: 
     });
     if let Some(sys) = &ir.system_prompt {
         body["system"] = json!(sys);
+    }
+    let tools = tools_to_anthropic(&ir.tools);
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+        if let Some(tc) = ir.tool_choice.as_ref().and_then(tool_choice_to_anthropic) {
+            body["tool_choice"] = tc;
+        }
     }
     body
 }
@@ -1130,7 +1275,10 @@ mod tests {
             }]
         }))
         .unwrap();
-        assert_eq!(anthropic_req.system_prompt.as_deref(), Some("You are terse"));
+        assert_eq!(
+            anthropic_req.system_prompt.as_deref(),
+            Some("You are terse")
+        );
 
         let chat_req = parse_openai_chat_request(&json!({
             "model": "deepseek-v4",
@@ -1148,6 +1296,62 @@ mod tests {
         .unwrap();
         assert_eq!(resp_req.system_prompt.as_deref(), Some("Be brief"));
         assert_eq!(resp_req.messages.len(), 1);
+    }
+
+    #[test]
+    fn forwards_tools_and_tool_choice_across_protocols() {
+        // Anthropic 入站 -> OpenAI Chat 上游
+        let anth = parse_anthropic_messages_request(&json!({
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": "list files" }],
+            "tools": [{ "name": "read_file", "description": "read a file",
+                        "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } } }],
+            "tool_choice": { "type": "tool", "name": "read_file" }
+        }))
+        .unwrap();
+        let up_chat = to_upstream_openai_chat_body(&anth, "gpt-x", false);
+        assert_eq!(up_chat["tools"][0]["type"], "function");
+        assert_eq!(up_chat["tools"][0]["function"]["name"], "read_file");
+        assert_eq!(
+            up_chat["tools"][0]["function"]["parameters"]["type"],
+            "object"
+        );
+        assert_eq!(up_chat["tool_choice"]["function"]["name"], "read_file");
+
+        // OpenAI Chat 入站 -> Anthropic 上游
+        let chat = parse_openai_chat_request(&json!({
+            "model": "deepseek-v4",
+            "messages": [{ "role": "user", "content": "go" }],
+            "tools": [{ "type": "function", "function": { "name": "run", "description": "run cmd",
+                        "parameters": { "type": "object", "properties": {} } } }],
+            "tool_choice": "required"
+        }))
+        .unwrap();
+        let up_anth = to_upstream_anthropic_body(&chat, "MiniMax-M2.5", false);
+        assert_eq!(up_anth["tools"][0]["name"], "run");
+        assert_eq!(up_anth["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(up_anth["tool_choice"]["type"], "any");
+    }
+
+    #[test]
+    fn openai_tool_result_keeps_call_id() {
+        let anth = parse_anthropic_messages_request(&json!({
+            "model": "claude",
+            "messages": [
+                { "role": "assistant", "content": [{ "type": "tool_use", "id": "call_1", "name": "read_file", "input": {} }] },
+                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "call_1", "content": "file body" }] }
+            ]
+        }))
+        .unwrap();
+        let up = to_upstream_openai_chat_body(&anth, "gpt", false);
+        let msgs = up["messages"].as_array().unwrap();
+        let tool_msg = msgs
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool message present");
+        assert_eq!(tool_msg["tool_call_id"], "call_1");
+        assert_eq!(tool_msg["content"], "file body");
     }
 
     #[test]
@@ -1239,8 +1443,14 @@ mod tests {
 
         let chat_json = to_openai_chat_response(&resp);
         assert_eq!(chat_json["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(chat_json["choices"][0]["message"]["reasoning_content"], "hmm");
-        assert_eq!(chat_json["choices"][0]["message"]["tool_calls"][0]["id"], "toolu_1");
+        assert_eq!(
+            chat_json["choices"][0]["message"]["reasoning_content"],
+            "hmm"
+        );
+        assert_eq!(
+            chat_json["choices"][0]["message"]["tool_calls"][0]["id"],
+            "toolu_1"
+        );
 
         let chat_sse = to_openai_chat_sse(&resp);
         assert!(chat_sse.contains("\"reasoning_content\":\"hmm\""));

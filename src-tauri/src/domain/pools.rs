@@ -455,9 +455,17 @@ pub fn tool_short_display_name(tool_id: &str) -> &'static str {
 
 pub fn is_anthropic_model_name(model_id: &str) -> bool {
     let lower = model_id.to_ascii_lowercase();
-    ["claude", "sonnet", "opus", "haiku", "fable", "mythos", "anthropic"]
-        .iter()
-        .any(|kw| lower.contains(kw))
+    [
+        "claude",
+        "sonnet",
+        "opus",
+        "haiku",
+        "fable",
+        "mythos",
+        "anthropic",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
 }
 
 pub fn build_claude_model_alias(pool_slug: &str, model_id: &str) -> String {
@@ -489,39 +497,159 @@ struct CanonicalModelSpec {
 }
 
 const CANONICAL_MODEL_SPECS: &[CanonicalModelSpec] = &[
-    CanonicalModelSpec { canonical_id: "deepseek-v4-pro", display_name: "DeepSeek-V4-Pro", family: "DeepSeek" },
-    CanonicalModelSpec { canonical_id: "deepseek-v4.1-flash", display_name: "DeepSeek-V4.1-Flash", family: "DeepSeek" },
-    CanonicalModelSpec { canonical_id: "glm-5.3", display_name: "GLM-5.3", family: "GLM" },
-    CanonicalModelSpec { canonical_id: "glm-5.3-flash", display_name: "GLM-5.3-Flash", family: "GLM" },
-    CanonicalModelSpec { canonical_id: "glm-5.2", display_name: "GLM-5.2", family: "GLM" },
-    CanonicalModelSpec { canonical_id: "kimi-k3.1-pro", display_name: "Kimi-K3.1-Pro", family: "Kimi" },
-    CanonicalModelSpec { canonical_id: "kimi-k3", display_name: "Kimi-K3", family: "Kimi" },
-    CanonicalModelSpec { canonical_id: "kimi-k2.8-preview", display_name: "Kimi-K2.8-Preview", family: "Kimi" },
-    CanonicalModelSpec { canonical_id: "kimi-k2.7-code", display_name: "Kimi-K2.7-Code", family: "Kimi" },
-    CanonicalModelSpec { canonical_id: "minimax-m3.1-flash", display_name: "MiniMax-M3.1-Flash", family: "MiniMax" },
-    CanonicalModelSpec { canonical_id: "minimax-m3", display_name: "MiniMax-M3", family: "MiniMax" },
-    CanonicalModelSpec { canonical_id: "minimax-m2.7", display_name: "MiniMax-M2.7", family: "MiniMax" },
-    CanonicalModelSpec { canonical_id: "minimax-m2.7-highspeed", display_name: "MiniMax-M2.7-Highspeed", family: "MiniMax" },
-    CanonicalModelSpec { canonical_id: "qwen4-max", display_name: "Qwen4-Max", family: "Qwen" },
-    CanonicalModelSpec { canonical_id: "qwen3.8-max", display_name: "Qwen3.8-Max", family: "Qwen" },
-    CanonicalModelSpec { canonical_id: "qwen3.8-flash", display_name: "Qwen3.8-Flash", family: "Qwen" },
-    CanonicalModelSpec { canonical_id: "step-5-preview", display_name: "Step-5-Preview", family: "Step" },
-    CanonicalModelSpec { canonical_id: "mimo-v2.6-pro", display_name: "MiMo-V2.6-Pro", family: "MiMo" },
-    CanonicalModelSpec { canonical_id: "mimo-v2.6-flash", display_name: "MiMo-V2.6-Flash", family: "MiMo" },
-    CanonicalModelSpec { canonical_id: "hy4flash-free", display_name: "Hy4-Flash-Free", family: "Hunyuan" },
-    CanonicalModelSpec { canonical_id: "hy4std", display_name: "Hy4", family: "Hunyuan" },
-    CanonicalModelSpec { canonical_id: "hy4flash", display_name: "Hy4-Flash", family: "Hunyuan" },
-    CanonicalModelSpec { canonical_id: "space-bunny", display_name: "Space-Bunny", family: "Hunyuan" },
-    CanonicalModelSpec { canonical_id: "doubao-seed-2.1-pro", display_name: "Doubao-Seed-2.1-Pro", family: "Doubao" },
-    CanonicalModelSpec { canonical_id: "doubao-seed-2.1-turbo", display_name: "Doubao-Seed-2.1-Turbo", family: "Doubao" },
-    CanonicalModelSpec { canonical_id: "doubao-seed-code", display_name: "Doubao-Seed-Code", family: "Doubao" },
-    CanonicalModelSpec { canonical_id: "openpangu-coder-pro", display_name: "openPangu-Coder-Pro", family: "Pangu" },
-    CanonicalModelSpec { canonical_id: "fast", display_name: "Fast", family: "Other" },
-    CanonicalModelSpec { canonical_id: "auto", display_name: "Auto", family: "Other" },
+    CanonicalModelSpec {
+        canonical_id: "deepseek-v4-pro",
+        display_name: "DeepSeek-V4-Pro",
+        family: "DeepSeek",
+    },
+    CanonicalModelSpec {
+        canonical_id: "deepseek-v4.1-flash",
+        display_name: "DeepSeek-V4.1-Flash",
+        family: "DeepSeek",
+    },
+    CanonicalModelSpec {
+        canonical_id: "glm-5.3",
+        display_name: "GLM-5.3",
+        family: "GLM",
+    },
+    CanonicalModelSpec {
+        canonical_id: "glm-5.3-flash",
+        display_name: "GLM-5.3-Flash",
+        family: "GLM",
+    },
+    CanonicalModelSpec {
+        canonical_id: "glm-5.2",
+        display_name: "GLM-5.2",
+        family: "GLM",
+    },
+    CanonicalModelSpec {
+        canonical_id: "kimi-k3.1-pro",
+        display_name: "Kimi-K3.1-Pro",
+        family: "Kimi",
+    },
+    CanonicalModelSpec {
+        canonical_id: "kimi-k3",
+        display_name: "Kimi-K3",
+        family: "Kimi",
+    },
+    CanonicalModelSpec {
+        canonical_id: "kimi-k2.8-preview",
+        display_name: "Kimi-K2.8-Preview",
+        family: "Kimi",
+    },
+    CanonicalModelSpec {
+        canonical_id: "kimi-k2.7-code",
+        display_name: "Kimi-K2.7-Code",
+        family: "Kimi",
+    },
+    CanonicalModelSpec {
+        canonical_id: "minimax-m3.1-flash",
+        display_name: "MiniMax-M3.1-Flash",
+        family: "MiniMax",
+    },
+    CanonicalModelSpec {
+        canonical_id: "minimax-m3",
+        display_name: "MiniMax-M3",
+        family: "MiniMax",
+    },
+    CanonicalModelSpec {
+        canonical_id: "minimax-m2.7",
+        display_name: "MiniMax-M2.7",
+        family: "MiniMax",
+    },
+    CanonicalModelSpec {
+        canonical_id: "minimax-m2.7-highspeed",
+        display_name: "MiniMax-M2.7-Highspeed",
+        family: "MiniMax",
+    },
+    CanonicalModelSpec {
+        canonical_id: "qwen4-max",
+        display_name: "Qwen4-Max",
+        family: "Qwen",
+    },
+    CanonicalModelSpec {
+        canonical_id: "qwen3.8-max",
+        display_name: "Qwen3.8-Max",
+        family: "Qwen",
+    },
+    CanonicalModelSpec {
+        canonical_id: "qwen3.8-flash",
+        display_name: "Qwen3.8-Flash",
+        family: "Qwen",
+    },
+    CanonicalModelSpec {
+        canonical_id: "step-5-preview",
+        display_name: "Step-5-Preview",
+        family: "Step",
+    },
+    CanonicalModelSpec {
+        canonical_id: "mimo-v2.6-pro",
+        display_name: "MiMo-V2.6-Pro",
+        family: "MiMo",
+    },
+    CanonicalModelSpec {
+        canonical_id: "mimo-v2.6-flash",
+        display_name: "MiMo-V2.6-Flash",
+        family: "MiMo",
+    },
+    CanonicalModelSpec {
+        canonical_id: "hy4flash-free",
+        display_name: "Hy4-Flash-Free",
+        family: "Hunyuan",
+    },
+    CanonicalModelSpec {
+        canonical_id: "hy4std",
+        display_name: "Hy4",
+        family: "Hunyuan",
+    },
+    CanonicalModelSpec {
+        canonical_id: "hy4flash",
+        display_name: "Hy4-Flash",
+        family: "Hunyuan",
+    },
+    CanonicalModelSpec {
+        canonical_id: "space-bunny",
+        display_name: "Space-Bunny",
+        family: "Hunyuan",
+    },
+    CanonicalModelSpec {
+        canonical_id: "doubao-seed-2.1-pro",
+        display_name: "Doubao-Seed-2.1-Pro",
+        family: "Doubao",
+    },
+    CanonicalModelSpec {
+        canonical_id: "doubao-seed-2.1-turbo",
+        display_name: "Doubao-Seed-2.1-Turbo",
+        family: "Doubao",
+    },
+    CanonicalModelSpec {
+        canonical_id: "doubao-seed-code",
+        display_name: "Doubao-Seed-Code",
+        family: "Doubao",
+    },
+    CanonicalModelSpec {
+        canonical_id: "openpangu-coder-pro",
+        display_name: "openPangu-Coder-Pro",
+        family: "Pangu",
+    },
+    CanonicalModelSpec {
+        canonical_id: "fast",
+        display_name: "Fast",
+        family: "Other",
+    },
+    CanonicalModelSpec {
+        canonical_id: "auto",
+        display_name: "Auto",
+        family: "Other",
+    },
 ];
 
 /// 工具层原始模型 ID / Qoder 槽位 Key -> 跨工具标准 Canonical ID 的对齐表
-fn map_raw_to_canonical_id(tool_id: &str, raw_id: &str, raw_display_name: Option<&str>) -> Option<&'static str> {
+fn map_raw_to_canonical_id(
+    tool_id: &str,
+    raw_id: &str,
+    raw_display_name: Option<&str>,
+) -> Option<&'static str> {
     let trimmed = raw_id.trim();
     let lower = trimmed.to_ascii_lowercase();
     let display_lower = raw_display_name.unwrap_or("").trim().to_ascii_lowercase();
@@ -548,9 +676,10 @@ fn map_raw_to_canonical_id(tool_id: &str, raw_id: &str, raw_display_name: Option
     // 2. 跨工具标准 ID 与常见别名映射
     match lower.as_str() {
         "deepseek-v4-pro" | "deepseek-v4-pro-official" => Some("deepseek-v4-pro"),
-        "deepseek-v4.1-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-official" | "deepseek-flash" => {
-            Some("deepseek-v4.1-flash")
-        }
+        "deepseek-v4.1-flash"
+        | "deepseek-v4-flash"
+        | "deepseek-v4-flash-official"
+        | "deepseek-flash" => Some("deepseek-v4.1-flash"),
         "glm-5.3" => Some("glm-5.3"),
         "glm-5.3-flash" => Some("glm-5.3-flash"),
         "glm-5.2" => Some("glm-5.2"),
@@ -632,7 +761,11 @@ pub fn infer_model_family(model_id: &str) -> String {
         "Pangu".into()
     } else if is_anthropic_model_name(&lower) {
         "Claude".into()
-    } else if lower.contains("gpt") || lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("o4") {
+    } else if lower.contains("gpt")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
         "GPT".into()
     } else {
         "Other".into()
@@ -683,7 +816,8 @@ pub fn normalize_upstream_model(
 pub fn normalize_canonical_model_id(tool_id: &str, raw_or_canonical: &str) -> String {
     let (scoped_tid, bare) = split_scoped_model_id(raw_or_canonical);
     let effective_tid = scoped_tid.unwrap_or(tool_id);
-    let canonical_bare = normalize_upstream_model(effective_tid, bare, None, None, false, "catalog").id;
+    let canonical_bare =
+        normalize_upstream_model(effective_tid, bare, None, None, false, "catalog").id;
     if scoped_tid.is_some() {
         format!("{effective_tid}/{canonical_bare}")
     } else {
@@ -753,10 +887,22 @@ pub fn resolve_vendor_wire_model_id(tool_id: &str, canonical_or_raw_model_id: &s
             "doubao-seed-2.1-pro" => "Doubao-Seed-2.1-Pro".into(),
             "doubao-seed-2.1-turbo" => "Doubao-Seed-2.1-Turbo".into(),
             "doubao-seed-code" => "Doubao-Seed-Code".into(),
-            "glm-5.3" | "glm-5.3-flash" | "glm-5.2" | "kimi-k3.1-pro" | "kimi-k3"
-            | "kimi-k2.8-preview" | "kimi-k2.7-code" | "deepseek-v4.1-flash"
-            | "minimax-m3" | "minimax-m3.1-flash" | "mimo-v2.6-pro" | "mimo-v2.6-flash"
-            | "step-5-preview" | "qwen4-max" | "qwen3.8-max" | "qwen3.8-flash" => cid.to_string(),
+            "glm-5.3"
+            | "glm-5.3-flash"
+            | "glm-5.2"
+            | "kimi-k3.1-pro"
+            | "kimi-k3"
+            | "kimi-k2.8-preview"
+            | "kimi-k2.7-code"
+            | "deepseek-v4.1-flash"
+            | "minimax-m3"
+            | "minimax-m3.1-flash"
+            | "mimo-v2.6-pro"
+            | "mimo-v2.6-flash"
+            | "step-5-preview"
+            | "qwen4-max"
+            | "qwen3.8-max"
+            | "qwen3.8-flash" => cid.to_string(),
             _ => trimmed.to_string(),
         },
         "minimax_code_cn" => match cid {
@@ -777,7 +923,12 @@ pub fn resolve_vendor_wire_model_id(tool_id: &str, canonical_or_raw_model_id: &s
     }
 }
 
-fn catalog_opt(tool_id: &str, raw_id: &str, rate: Option<f64>, is_free: bool) -> UpstreamModelOption {
+fn catalog_opt(
+    tool_id: &str,
+    raw_id: &str,
+    rate: Option<f64>,
+    is_free: bool,
+) -> UpstreamModelOption {
     normalize_upstream_model(tool_id, raw_id, None, rate, is_free, "catalog")
 }
 
@@ -882,7 +1033,9 @@ pub fn default_models_for_tool(tool_id: &str) -> Vec<String> {
 }
 
 pub fn upstream_model_protocol(tool_id: &str, model_id: &str) -> WireProtocolKind {
-    if tool_id == "minimax_code_cn" || is_anthropic_model_name(model_id) && tool_id == "custom_api_key" {
+    if tool_id == "minimax_code_cn"
+        || is_anthropic_model_name(model_id) && tool_id == "custom_api_key"
+    {
         WireProtocolKind::AnthropicMessages
     } else {
         WireProtocolKind::OpenaiChat
@@ -895,10 +1048,8 @@ pub fn sync_pool_model_policies(
     existing: &[PoolModelPolicy],
     enabled_override: Option<&[String]>,
 ) -> Vec<PoolModelPolicy> {
-    let existing_map: HashMap<&str, &PoolModelPolicy> = existing
-        .iter()
-        .map(|p| (p.model_id.as_str(), p))
-        .collect();
+    let existing_map: HashMap<&str, &PoolModelPolicy> =
+        existing.iter().map(|p| (p.model_id.as_str(), p)).collect();
     let enabled_set: Option<HashSet<&str>> =
         enabled_override.map(|ids| ids.iter().map(|s| s.as_str()).collect());
 
@@ -1039,15 +1190,16 @@ pub fn compute_agent_exposed_models(
 
     let mut model_counts: HashMap<&str, usize> = HashMap::new();
     for item in &raw_items {
-        *model_counts.entry(item.policy.model_id.as_str()).or_insert(0) += 1;
+        *model_counts
+            .entry(item.policy.model_id.as_str())
+            .or_insert(0) += 1;
     }
 
     let keys: Vec<String> = raw_items
         .iter()
         .map(|item| make_default_model_key(&item.pool.id, &item.policy.model_id))
         .collect();
-    let has_explicit_default =
-        default_model_key.is_some_and(|dk| keys.iter().any(|k| k == dk));
+    let has_explicit_default = default_model_key.is_some_and(|dk| keys.iter().any(|k| k == dk));
 
     raw_items
         .into_iter()
@@ -1081,10 +1233,9 @@ pub fn compute_agent_exposed_models(
                 if scoped_tid.is_some() && is_anthropic_model_name(bare_model) && !collision {
                     bare_model.to_string()
                 } else {
-                    item.policy
-                        .claude_alias_id
-                        .clone()
-                        .unwrap_or_else(|| build_claude_model_alias(&item.pool.slug, &item.policy.model_id))
+                    item.policy.claude_alias_id.clone().unwrap_or_else(|| {
+                        build_claude_model_alias(&item.pool.slug, &item.policy.model_id)
+                    })
                 }
             } else if let Some(tid) = scoped_tid {
                 if collision {
@@ -1137,20 +1288,56 @@ mod tests {
 
     #[test]
     fn normalizes_cross_tool_models_and_resolves_vendor_wire_ids() {
-        let wb = normalize_upstream_model("workbuddy", "deepseek-v4-pro", Some("DeepSeek-V4-Pro"), Some(0.51), false, "live");
-        let qd = normalize_upstream_model("qoder_cn", "dmodel", Some("DeepSeek-V4-Pro"), Some(0.5), false, "live");
-        let tr = normalize_upstream_model("trae_cn", "DeepSeek-V4-Pro", Some("DeepSeek-V4-Pro"), Some(0.72), false, "live");
+        let wb = normalize_upstream_model(
+            "workbuddy",
+            "deepseek-v4-pro",
+            Some("DeepSeek-V4-Pro"),
+            Some(0.51),
+            false,
+            "live",
+        );
+        let qd = normalize_upstream_model(
+            "qoder_cn",
+            "dmodel",
+            Some("DeepSeek-V4-Pro"),
+            Some(0.5),
+            false,
+            "live",
+        );
+        let tr = normalize_upstream_model(
+            "trae_cn",
+            "DeepSeek-V4-Pro",
+            Some("DeepSeek-V4-Pro"),
+            Some(0.72),
+            false,
+            "live",
+        );
 
         assert_eq!(wb.id, "deepseek-v4-pro");
         assert_eq!(qd.id, "deepseek-v4-pro");
         assert_eq!(tr.id, "deepseek-v4-pro");
         assert_eq!(qd.vendor_wire_id, "dmodel");
 
-        assert_eq!(resolve_vendor_wire_model_id("qoder_cn", "deepseek-v4-pro"), "dmodel");
-        assert_eq!(resolve_vendor_wire_model_id("qoder_cn", "glm-5.3"), "gmodel");
-        assert_eq!(resolve_vendor_wire_model_id("qoder_cn", "kimi-k3.1-pro"), "kmodel_latest");
-        assert_eq!(resolve_vendor_wire_model_id("workbuddy", "kimi-k3"), "kimi-k3-1");
-        assert_eq!(resolve_vendor_wire_model_id("trae_cn", "deepseek-v4-pro"), "DeepSeek-V4-Pro");
+        assert_eq!(
+            resolve_vendor_wire_model_id("qoder_cn", "deepseek-v4-pro"),
+            "dmodel"
+        );
+        assert_eq!(
+            resolve_vendor_wire_model_id("qoder_cn", "glm-5.3"),
+            "gmodel"
+        );
+        assert_eq!(
+            resolve_vendor_wire_model_id("qoder_cn", "kimi-k3.1-pro"),
+            "kmodel_latest"
+        );
+        assert_eq!(
+            resolve_vendor_wire_model_id("workbuddy", "kimi-k3"),
+            "kimi-k3-1"
+        );
+        assert_eq!(
+            resolve_vendor_wire_model_id("trae_cn", "deepseek-v4-pro"),
+            "DeepSeek-V4-Pro"
+        );
         assert_eq!(
             resolve_vendor_wire_model_id("minimax_code_cn", "minimax-m3.1-flash"),
             "MiniMax-M3.1-Flash-Preview"

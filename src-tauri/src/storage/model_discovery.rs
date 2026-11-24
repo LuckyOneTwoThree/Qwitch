@@ -78,12 +78,7 @@ pub fn load_magpie_provider_models(tool_id: &str) -> Option<Vec<UpstreamModelOpt
         let is_free = m.get("free").and_then(|v| v.as_bool()).unwrap_or(false)
             || rate.is_some_and(|r| r == 0.0 && raw_id.contains("free"));
         parsed.push(normalize_upstream_model(
-            tool_id,
-            raw_id,
-            display,
-            rate,
-            is_free,
-            "live",
+            tool_id, raw_id, display, rate, is_free, "live",
         ));
     }
 
@@ -107,9 +102,9 @@ pub fn parse_workbuddy_v3_config(body: &Value) -> Vec<UpstreamModelOption> {
                     let ids: Vec<String> = arr
                         .iter()
                         .filter_map(|v| {
-                            v.as_str()
-                                .map(ToOwned::to_owned)
-                                .or_else(|| v.get("id").and_then(|x| x.as_str()).map(ToOwned::to_owned))
+                            v.as_str().map(ToOwned::to_owned).or_else(|| {
+                                v.get("id").and_then(|x| x.as_str()).map(ToOwned::to_owned)
+                            })
                         })
                         .collect();
                     if name.eq_ignore_ascii_case("cli") {
@@ -241,10 +236,14 @@ pub fn parse_qoder_model_list(body: &Value) -> Vec<UpstreamModelOption> {
             .and_then(|p| p.get("active"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let promo_before = promo
-            .and_then(|p| as_opt_f64(p.get("before_promotion_price_factor").or_else(|| p.get("beforePromotionPriceFactor"))));
+        let promo_before = promo.and_then(|p| {
+            as_opt_f64(
+                p.get("before_promotion_price_factor")
+                    .or_else(|| p.get("beforePromotionPriceFactor")),
+            )
+        });
         let is_free = match price {
-            Some(p) if p == 0.0 => !(promo_active && promo_before.is_some_and(|b| b > 0.0)),
+            Some(0.0) => !(promo_active && promo_before.is_some_and(|b| b > 0.0)),
             Some(_) => false,
             None => item
                 .get("is_free")
@@ -253,12 +252,7 @@ pub fn parse_qoder_model_list(body: &Value) -> Vec<UpstreamModelOption> {
                 .unwrap_or(false),
         };
         out.push(normalize_upstream_model(
-            "qoder_cn",
-            key,
-            display,
-            price,
-            is_free,
-            "live",
+            "qoder_cn", key, display, price, is_free, "live",
         ));
     }
 
@@ -310,12 +304,7 @@ fn collect_trae_model_objects(val: &Value, out: &mut Vec<UpstreamModelOption>) {
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(false);
                                 out.push(normalize_upstream_model(
-                                    "trae_cn",
-                                    raw_id,
-                                    display,
-                                    rate,
-                                    is_free,
-                                    "live",
+                                    "trae_cn", raw_id, display, rate, is_free, "live",
                                 ));
                             }
                         }
@@ -404,12 +393,7 @@ pub fn parse_openai_models_list(tool_id: &str, body: &Value) -> Vec<UpstreamMode
             .or_else(|| m.get("name"))
             .and_then(|v| v.as_str());
         out.push(normalize_upstream_model(
-            tool_id,
-            raw_id,
-            display,
-            None,
-            false,
-            "live",
+            tool_id, raw_id, display, None, false, "live",
         ));
     }
     dedup_model_options(out)
@@ -432,9 +416,15 @@ fn extract_snapshot_plain_string(files: &HashMap<String, String>, key: &str) -> 
     }
 }
 
-fn extract_workbuddy_probe_params(cred: &CredentialEnvelope) -> Option<(String, String, String, Option<String>)> {
+fn extract_workbuddy_probe_params(
+    cred: &CredentialEnvelope,
+) -> Option<(String, String, String, Option<String>)> {
     match &cred.payload {
-        CredentialPayload::Token { access_token, extra, .. } => {
+        CredentialPayload::Token {
+            access_token,
+            extra,
+            ..
+        } => {
             if access_token.trim().is_empty() {
                 return None;
             }
@@ -445,7 +435,12 @@ fn extract_workbuddy_probe_params(cred: &CredentialEnvelope) -> Option<(String, 
                 .cloned()
                 .unwrap_or_else(|| "https://copilot.tencent.com".into());
             let domain = extra.get("domain").cloned();
-            Some((base.trim_end_matches('/').to_string(), access_token.clone(), cred.uid.clone(), domain))
+            Some((
+                base.trim_end_matches('/').to_string(),
+                access_token.clone(),
+                cred.uid.clone(),
+                domain,
+            ))
         }
         CredentialPayload::LocalSnapshot { files } => {
             let sess = extract_snapshot_file_json(files, "session.json")?;
@@ -467,16 +462,25 @@ fn extract_workbuddy_probe_params(cred: &CredentialEnvelope) -> Option<(String, 
                 .and_then(|v| v.as_str())
                 .unwrap_or(&cred.uid)
                 .to_string();
-            let domain = sess.pointer("/auth/domain").and_then(|v| v.as_str()).map(ToOwned::to_owned);
+            let domain = sess
+                .pointer("/auth/domain")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
             Some((base, token, uid, domain))
         }
         CredentialPayload::Cookies { .. } => None,
     }
 }
 
-fn extract_token_and_extra(cred: &CredentialEnvelope) -> (Option<String>, Option<String>, Option<String>) {
+fn extract_token_and_extra(
+    cred: &CredentialEnvelope,
+) -> (Option<String>, Option<String>, Option<String>) {
     match &cred.payload {
-        CredentialPayload::Token { access_token, extra, .. } => (
+        CredentialPayload::Token {
+            access_token,
+            extra,
+            ..
+        } => (
             Some(access_token.clone()).filter(|s| !s.trim().is_empty()),
             extra.get("base_url").cloned(),
             extra.get("machine_id").cloned(),
@@ -531,7 +535,11 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
             }
             let json: Value = resp.json().await.ok()?;
             let parsed = parse_workbuddy_v3_config(&json);
-            if parsed.is_empty() { None } else { Some(parsed) }
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
         }
         "qoder_cn" => {
             let (token_opt, _, mid_opt) = extract_token_and_extra(cred);
@@ -552,7 +560,11 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
             }
             let json: Value = resp.json().await.ok()?;
             let parsed = parse_qoder_model_list(&json);
-            if parsed.is_empty() { None } else { Some(parsed) }
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
         }
         "trae_cn" => {
             let (token_opt, _, _) = extract_token_and_extra(cred);
@@ -575,7 +587,11 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
             }
             let json: Value = resp.json().await.ok()?;
             let parsed = parse_trae_detail_param(&json);
-            if parsed.is_empty() { None } else { Some(parsed) }
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
         }
         "minimax_code_cn" => {
             let (token_opt, _, _) = extract_token_and_extra(cred);
@@ -590,7 +606,11 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
             }
             let json: Value = resp.json().await.ok()?;
             let parsed = parse_minimax_models(&json);
-            if parsed.is_empty() { None } else { Some(parsed) }
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
         }
         "custom_api_key" => {
             let (token_opt, base_opt, _) = extract_token_and_extra(cred);
@@ -618,7 +638,11 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
             }
             let json: Value = resp.json().await.ok()?;
             let parsed = parse_openai_models_list("custom_api_key", &json);
-            if parsed.is_empty() { None } else { Some(parsed) }
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
         }
         _ => None,
     }

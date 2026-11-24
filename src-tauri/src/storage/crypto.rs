@@ -156,7 +156,9 @@ pub fn decrypt_bytes_with_aad(
     blob: &[u8],
 ) -> Result<Vec<u8>, StorageError> {
     if blob.len() < AAD_MAGIC.len() + NONCE_LEN || &blob[..AAD_MAGIC.len()] != AAD_MAGIC {
-        return Err(StorageError::Crypto("Invalid encrypted stash format".into()));
+        return Err(StorageError::Crypto(
+            "Invalid encrypted stash format".into(),
+        ));
     }
     let cipher =
         Aes256Gcm::new_from_slice(master_key).map_err(|e| StorageError::Crypto(e.to_string()))?;

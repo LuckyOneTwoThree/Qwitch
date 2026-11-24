@@ -81,10 +81,8 @@ impl GatewayRuntime {
                 g.sim_bridge_override.clone(),
             )
         };
-        let (bridge_runtime, bridge_version) =
-            bridge_ovr.unwrap_or_else(detect_bridge_runtime);
-        let global_proxy_detected =
-            proxy_ovr.unwrap_or_else(detect_global_proxy_active);
+        let (bridge_runtime, bridge_version) = bridge_ovr.unwrap_or_else(detect_bridge_runtime);
+        let global_proxy_detected = proxy_ovr.unwrap_or_else(detect_global_proxy_active);
         GatewayRuntimeState {
             running,
             host,
@@ -104,7 +102,8 @@ impl GatewayRuntime {
 
     pub fn set_member_cooldown(&self, account_id: &str, cooldown_until_ms: i64) {
         let mut g = self.inner.lock().expect("gateway lock");
-        g.cooldowns.insert(account_id.to_string(), cooldown_until_ms);
+        g.cooldowns
+            .insert(account_id.to_string(), cooldown_until_ms);
     }
 
     pub fn clear_member_cooldown(&self, account_id: &str) {
@@ -353,7 +352,9 @@ impl GatewayRuntime {
                                         tier: Some(fb_m.tier),
                                         outcome: RoutingAttemptOutcome::Ok,
                                         latency_ms: fb_m.last_latency_ms.unwrap_or(520),
-                                        detail: format!("显式降级模型「{effective_model}」返回成功"),
+                                        detail: format!(
+                                            "显式降级模型「{effective_model}」返回成功"
+                                        ),
                                     });
                                 }
                             }
@@ -415,9 +416,15 @@ impl GatewayRuntime {
                         detail: if plan.used_explicit_fallback {
                             format!("主模型不可用，按显式降级配置由「{effective_model}」接管")
                         } else if plan.cache_affinity_hit {
-                            format!("同会话亲和命中 Prompt Cache（自动跳过已冷却号并粘住 {}）", first.label)
+                            format!(
+                                "同会话亲和命中 Prompt Cache（自动跳过已冷却号并粘住 {}）",
+                                first.label
+                            )
                         } else {
-                            format!("按 {} + 策略命中「{effective_model}」", first.tier.short_label())
+                            format!(
+                                "按 {} + 策略命中「{effective_model}」",
+                                first.tier.short_label()
+                            )
                         },
                     });
                 }
@@ -541,9 +548,9 @@ fn resolve_target_pool_and_model(
             let has_tool_member = p.members.iter().any(|m| {
                 m.enabled
                     && m.tool_id == tid
-                    && m.supported_models
-                        .iter()
-                        .any(|s| s == trimmed_raw || crate::domain::split_scoped_model_id(s).1 == bare)
+                    && m.supported_models.iter().any(|s| {
+                        s == trimmed_raw || crate::domain::split_scoped_model_id(s).1 == bare
+                    })
             });
             if has_tool_member
                 && p.model_policies
@@ -756,14 +763,19 @@ async fn forward_codex_own_signin_request(
     Ok((status_code, resp_len))
 }
 
-fn extract_bearer_and_base_url(env: &CredentialEnvelope) -> (Option<String>, Option<String>, Vec<(&'static str, String)>) {
+fn extract_bearer_and_base_url(
+    env: &CredentialEnvelope,
+) -> (Option<String>, Option<String>, Vec<(&'static str, String)>) {
     match &env.payload {
         CredentialPayload::Token {
             access_token,
             extra,
             ..
         } => {
-            let base_url = extra.get("base_url").cloned().filter(|s| !s.trim().is_empty());
+            let base_url = extra
+                .get("base_url")
+                .cloned()
+                .filter(|s| !s.trim().is_empty());
             let mut headers = Vec::new();
             if env.tool_id == "workbuddy" {
                 let domain = extra
@@ -771,7 +783,10 @@ fn extract_bearer_and_base_url(env: &CredentialEnvelope) -> (Option<String>, Opt
                     .cloned()
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| "copilot.tencent.com".into());
-                headers.push(("User-Agent", "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0".into()));
+                headers.push((
+                    "User-Agent",
+                    "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0".into(),
+                ));
                 headers.push(("X-User-Id", env.uid.clone()));
                 headers.push(("X-Domain", domain));
                 headers.push(("X-Product", "SaaS".into()));
@@ -804,7 +819,9 @@ fn extract_bearer_and_base_url(env: &CredentialEnvelope) -> (Option<String>, Opt
         CredentialPayload::LocalSnapshot { files } => {
             let tok = files
                 .get("decrypted_token.txt")
-                .and_then(|b64| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok())
+                .and_then(|b64| {
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok()
+                })
                 .and_then(|bytes| String::from_utf8(bytes).ok())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
@@ -904,7 +921,8 @@ fn rewrite_codex_opener_if_unprefixed(input: &str) -> String {
 fn rewrite_web_gui_opener(input: &str) -> String {
     const HEAD: &str = "Web GUI whose URL the runtime context names.";
     const TAIL: &str = "When the user refers";
-    const REPL: &str = "Web GUI whose URL the runtime context names. The interface, when the user refers";
+    const REPL: &str =
+        "Web GUI whose URL the runtime context names. The interface, when the user refers";
     let mut out = String::with_capacity(input.len() + 20);
     let mut i = 0usize;
     let hlen = HEAD.len();
@@ -1007,9 +1025,7 @@ fn insert_comma_in_generic_agent_openers(input: &str) -> String {
                 if let Some(role) = role_word {
                     let ws_start = pos + role.len();
                     let mut ws_end = ws_start;
-                    while ws_end < slice.len()
-                        && matches!(slice.as_bytes()[ws_end], b' ' | b'\t')
-                    {
+                    while ws_end < slice.len() && matches!(slice.as_bytes()[ws_end], b' ' | b'\t') {
                         ws_end += 1;
                     }
                     if ws_end > ws_start {
@@ -1018,8 +1034,7 @@ fn insert_comma_in_generic_agent_openers(input: &str) -> String {
                         let phrase_match = PHRASES.into_iter().find(|ph| {
                             input.len() - abs_ws_end >= ph.len()
                                 && input.is_char_boundary(abs_ws_end + ph.len())
-                                && input[abs_ws_end..abs_ws_end + ph.len()]
-                                    .eq_ignore_ascii_case(ph)
+                                && input[abs_ws_end..abs_ws_end + ph.len()].eq_ignore_ascii_case(ph)
                                 && !input[abs_ws_end + ph.len()..]
                                     .chars()
                                     .next()
@@ -1136,8 +1151,7 @@ fn sanitize_workbuddy_chat_body(body: &mut Value) {
                     }
                     _ => {}
                 }
-                let is_assistant =
-                    obj.get("role").and_then(Value::as_str) == Some("assistant");
+                let is_assistant = obj.get("role").and_then(Value::as_str) == Some("assistant");
                 let has_tool_calls = obj
                     .get("tool_calls")
                     .and_then(Value::as_array)
@@ -1314,8 +1328,14 @@ async fn call_upstream_member(
         if is_workbuddy_chat {
             req = req
                 .header("X-Conversation-ID", Uuid::new_v4().simple().to_string())
-                .header("X-Conversation-Request-ID", Uuid::new_v4().simple().to_string())
-                .header("X-Conversation-Message-ID", Uuid::new_v4().simple().to_string())
+                .header(
+                    "X-Conversation-Request-ID",
+                    Uuid::new_v4().simple().to_string(),
+                )
+                .header(
+                    "X-Conversation-Message-ID",
+                    Uuid::new_v4().simple().to_string(),
+                )
                 .header("X-Request-ID", Uuid::new_v4().simple().to_string())
                 .header("Accept", "text/event-stream");
         }
@@ -1509,17 +1529,21 @@ fn parse_upstream_response_body(body_txt: &str, model: &str) -> IrResponse {
                 if let Some(tcs) = delta.get("tool_calls").and_then(Value::as_array) {
                     for tc in tcs {
                         let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                        let entry = tool_calls_map
-                            .entry(idx)
-                            .or_insert_with(|| (format!("call_{idx}"), String::new(), String::new()));
-                        if let Some(id) = tc.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())
+                        let entry = tool_calls_map.entry(idx).or_insert_with(|| {
+                            (format!("call_{idx}"), String::new(), String::new())
+                        });
+                        if let Some(id) = tc
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
                         {
                             entry.0 = id.to_string();
                         }
                         if let Some(name) = tc.pointer("/function/name").and_then(Value::as_str) {
                             entry.1.push_str(name);
                         }
-                        if let Some(args) = tc.pointer("/function/arguments").and_then(Value::as_str)
+                        if let Some(args) =
+                            tc.pointer("/function/arguments").and_then(Value::as_str)
                         {
                             entry.2.push_str(args);
                         }
@@ -1643,7 +1667,14 @@ async fn handle_http_connection(
     }
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
-        return write_http_response(&mut stream, "400 Bad Request", "text/plain", b"Bad Request", &[]).await;
+        return write_http_response(
+            &mut stream,
+            "400 Bad Request",
+            "text/plain",
+            b"Bad Request",
+            &[],
+        )
+        .await;
     }
     let method = parts[0].to_string();
     let full_target = parts[1];
@@ -1676,14 +1707,28 @@ async fn handle_http_connection(
     // 环回安全校验：防 DNS Rebinding 与浏览器跨站注入
     let host_hdr = headers.get("host").map(String::as_str).unwrap_or("");
     if !is_valid_loopback_host(host_hdr) {
-        return write_http_response(stream_from_reader(reader), "403 Forbidden", "application/json", br#"{"error":"Invalid Host header"}"#, &[]).await;
+        return write_http_response(
+            stream_from_reader(reader),
+            "403 Forbidden",
+            "application/json",
+            br#"{"error":"Invalid Host header"}"#,
+            &[],
+        )
+        .await;
     }
     let has_browser_origin = headers.contains_key("origin");
     let cross_site = headers
         .get("sec-fetch-site")
         .is_some_and(|s| s.eq_ignore_ascii_case("cross-site"));
     if has_browser_origin || cross_site {
-        return write_http_response(stream_from_reader(reader), "403 Forbidden", "application/json", br#"{"error":"Browser cross-origin blocked"}"#, &[]).await;
+        return write_http_response(
+            stream_from_reader(reader),
+            "403 Forbidden",
+            "application/json",
+            br#"{"error":"Browser cross-origin blocked"}"#,
+            &[],
+        )
+        .await;
     }
 
     let mut body_bytes = vec![0u8; content_len.min(16 * 1024 * 1024)];
@@ -1709,7 +1754,10 @@ async fn handle_http_connection(
 
     let auth_token = headers
         .get("authorization")
-        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
         .or_else(|| headers.get("x-api-key").map(String::as_str))
         .unwrap_or("");
     let query_agent = query_str
@@ -1748,9 +1796,7 @@ async fn handle_http_connection(
         });
 
     let cooldowns = runtime.cooldown_snapshot();
-    let pools = db
-        .list_pools(&master_key, &cooldowns)
-        .unwrap_or_default();
+    let pools = db.list_pools(&master_key, &cooldowns).unwrap_or_default();
 
     if method == "GET" && path == "/v1/models" {
         let bindings = db.get_stored_agent_bindings().unwrap_or_default();
@@ -1759,7 +1805,13 @@ async fn handle_http_connection(
             .iter()
             .find(|b| b.agent_id == target_agent)
             .map(|b| b.mounted_pool_ids.clone())
-            .unwrap_or_else(|| pools.iter().filter(|p| p.enabled).map(|p| p.id.clone()).collect());
+            .unwrap_or_else(|| {
+                pools
+                    .iter()
+                    .filter(|p| p.enabled)
+                    .map(|p| p.id.clone())
+                    .collect()
+            });
         let exposed = compute_agent_exposed_models(
             target_agent,
             &mounted_ids,
@@ -1887,7 +1939,9 @@ async fn handle_http_connection(
                 if matches!(path.as_str(), "/v1/responses" | "/v1/responses/compact")
                     || caller_agent == Some(TargetAgentId::CodexDesktop)
                 {
-                    if let Some(own_auth) = resolve_codex_own_auth(&path, &headers, auth_token, None) {
+                    if let Some(own_auth) =
+                        resolve_codex_own_auth(&path, &headers, auth_token, None)
+                    {
                         let t_start = std::time::Instant::now();
                         match forward_codex_own_signin_request(
                             stream,
@@ -2036,7 +2090,8 @@ async fn handle_http_connection(
                 if let Some(adapter) = adapters.get(&cand.tool_id) {
                     let lock = runtime.refresh_lock_for(&cand.account_id);
                     let _guard = lock.lock().await;
-                    if let Ok((_, fresh)) = db.get_account_credential(&master_key, &cand.account_id) {
+                    if let Ok((_, fresh)) = db.get_account_credential(&master_key, &cand.account_id)
+                    {
                         cred = fresh;
                     }
                     if let Ok(Some(refreshed)) = adapter.refresh_credential(&cred).await {
@@ -2051,7 +2106,8 @@ async fn handle_http_connection(
                             latency_ms: t_hop.elapsed().as_millis() as u64,
                             detail: "401 单飞刷新凭据并回写加密库".into(),
                         });
-                        res = call_upstream_member(cand, &cred, &ir_req, &plan.effective_model).await;
+                        res =
+                            call_upstream_member(cand, &cred, &ir_req, &plan.effective_model).await;
                     }
                 }
             }
@@ -2084,7 +2140,10 @@ async fn handle_http_connection(
                     tier: Some(cand.tier),
                     outcome: RoutingAttemptOutcome::Cooldown429,
                     latency_ms: t_hop.elapsed().as_millis() as u64,
-                    detail: format!("HTTP 429 限流，置入 {}s 冷却并切换下一账号", pool.cooldown_seconds),
+                    detail: format!(
+                        "HTTP 429 限流，置入 {}s 冷却并切换下一账号",
+                        pool.cooldown_seconds
+                    ),
                 });
             }
             Ok((code, err_body)) => {
@@ -2095,7 +2154,10 @@ async fn handle_http_connection(
                     tier: Some(cand.tier),
                     outcome: RoutingAttemptOutcome::Cooldown429,
                     latency_ms: t_hop.elapsed().as_millis() as u64,
-                    detail: format!("HTTP {code}: {}", &err_body.chars().take(80).collect::<String>()),
+                    detail: format!(
+                        "HTTP {code}: {}",
+                        err_body.chars().take(80).collect::<String>()
+                    ),
                 });
             }
             Err(e) => {
@@ -2202,7 +2264,7 @@ async fn handle_http_connection(
     }
 }
 
-fn stream_from_reader<'a>(reader: BufReader<&'a mut TcpStream>) -> &'a mut TcpStream {
+fn stream_from_reader(reader: BufReader<&mut TcpStream>) -> &mut TcpStream {
     reader.into_inner()
 }
 
@@ -2336,7 +2398,10 @@ mod tests {
             .unwrap();
         assert_eq!(chat.status().as_u16(), 200);
         let body: Value = chat.json().await.unwrap();
-        assert_eq!(body["choices"][0]["message"]["content"], "pong from mock upstream");
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "pong from mock upstream"
+        );
 
         let traces = db.list_routing_traces(10).unwrap();
         assert_eq!(traces.len(), 1);
@@ -2348,7 +2413,12 @@ mod tests {
 
     #[tokio::test]
     async fn codex_unmatched_model_resolves_own_signin_and_forwards_upstream() {
-        assert!(resolve_target_pool_and_model(&[], Some(TargetAgentId::CodexDesktop), "gpt-6-luna").is_none());
+        assert!(resolve_target_pool_and_model(
+            &[],
+            Some(TargetAgentId::CodexDesktop),
+            "gpt-6-luna"
+        )
+        .is_none());
 
         let tmp = std::env::temp_dir().join(format!("qwitch-codex-own-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -2399,7 +2469,9 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"),
+                    .set_body_string(
+                        "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+                    ),
             )
             .mount(&mock_chatgpt)
             .await;
@@ -2430,11 +2502,7 @@ mod tests {
         });
 
         let client = reqwest::Client::new();
-        let resp = client
-            .get(format!("http://{addr}/"))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.get(format!("http://{addr}/")).send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 200);
         assert!(resp.text().await.unwrap().contains("response.completed"));
         srv.await.unwrap();
@@ -2442,18 +2510,36 @@ mod tests {
         let received = mock_chatgpt.received_requests().await.unwrap();
         assert_eq!(received.len(), 1);
         assert_eq!(
-            received[0].headers.get("authorization").unwrap().to_str().unwrap(),
+            received[0]
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Bearer oauth-jwt-sample"
         );
         assert_eq!(
-            received[0].headers.get("chatgpt-account-id").unwrap().to_str().unwrap(),
+            received[0]
+                .headers
+                .get("chatgpt-account-id")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "acc-uuid-123"
         );
         assert_eq!(
-            received[0].headers.get("x-codex-turn-metadata").unwrap().to_str().unwrap(),
+            received[0]
+                .headers
+                .get("x-codex-turn-metadata")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "turn-1"
         );
-        assert!(received[0].headers.get("x-openai-actor-authorization").is_none());
+        assert!(received[0]
+            .headers
+            .get("x-openai-actor-authorization")
+            .is_none());
 
         let _ = std::fs::remove_dir_all(tmp);
     }
@@ -2577,15 +2663,30 @@ mod tests {
         assert_eq!(req_json["stream"], true);
         assert_eq!(req_json["model"], "hy4flash-free");
         assert_eq!(
-            received[0].headers.get("user-agent").unwrap().to_str().unwrap(),
+            received[0]
+                .headers
+                .get("user-agent")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
         );
         assert_eq!(
-            received[0].headers.get("x-domain").unwrap().to_str().unwrap(),
+            received[0]
+                .headers
+                .get("x-domain")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "copilot.tencent.com"
         );
         assert_eq!(
-            received[0].headers.get("x-product").unwrap().to_str().unwrap(),
+            received[0]
+                .headers
+                .get("x-product")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "SaaS"
         );
         assert!(received[0].headers.get("x-conversation-id").is_some());
@@ -2674,9 +2775,15 @@ mod tests {
 
         assert!(move_system_to_user_for_workbuddy(&mut body));
         let msgs = body["messages"].as_array().unwrap();
-        assert_eq!(msgs[0], json!({ "role": "system", "content": WORKBUDDY_DEFAULT_SYSTEM }));
+        assert_eq!(
+            msgs[0],
+            json!({ "role": "system", "content": WORKBUDDY_DEFAULT_SYSTEM })
+        );
         assert_eq!(msgs[1]["role"], "user");
-        assert_eq!(msgs[1]["content"], "<instructions>\nRule A\n</instructions>\n\nhello");
+        assert_eq!(
+            msgs[1]["content"],
+            "<instructions>\nRule A\n</instructions>\n\nhello"
+        );
         assert_eq!(msgs[2]["role"], "user");
         assert_eq!(msgs[2]["content"], "late note");
 
@@ -2688,10 +2795,9 @@ mod tests {
         let mock_wb = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v2/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_string(r#"{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}"#),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}"#,
+            ))
             .up_to_n_times(1)
             .mount(&mock_wb)
             .await;
@@ -2750,13 +2856,15 @@ mod tests {
                 parts: vec![crate::gateway::ir::IrPart::Text("ping".into())],
             }],
             tools: Vec::new(),
+            tool_choice: None,
             max_tokens: Some(128),
             temperature: None,
         };
 
-        let (code, body_txt) = call_upstream_member(&member, &cred, &ir_req, "workbuddy/hy4flash-free")
-            .await
-            .unwrap();
+        let (code, body_txt) =
+            call_upstream_member(&member, &cred, &ir_req, "workbuddy/hy4flash-free")
+                .await
+                .unwrap();
         assert_eq!(code, 200);
         assert!(body_txt.contains("recovered-11128"));
 

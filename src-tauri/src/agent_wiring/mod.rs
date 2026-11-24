@@ -70,9 +70,16 @@ pub fn detect_bridge_runtime() -> (String, String) {
 }
 
 pub fn detect_global_proxy_active() -> bool {
-    let has_env_proxy = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
-        .iter()
-        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()));
+    let has_env_proxy = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .iter()
+    .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()));
     let no_proxy = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
         .unwrap_or_default();
@@ -86,8 +93,7 @@ pub fn detect_global_proxy_active() -> bool {
         if let Ok(out) = Command::new("scutil").arg("--proxy").output() {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
-                let http_on =
-                    text.contains("HTTPEnable : 1") || text.contains("HTTPSEnable : 1");
+                let http_on = text.contains("HTTPEnable : 1") || text.contains("HTTPSEnable : 1");
                 if http_on && !text.contains("127.0.0.1") {
                     return true;
                 }
@@ -124,7 +130,11 @@ fn resolve_agent_paths(
             {
                 (
                     base.to_path_buf(),
-                    base.join(if isolated { "Claude-Qwitch-3p" } else { "Claude-3p" }),
+                    base.join(if isolated {
+                        "Claude-Qwitch-3p"
+                    } else {
+                        "Claude-3p"
+                    }),
                     base.join("Claude-3p"),
                 )
             } else {
@@ -262,6 +272,7 @@ fn resolve_agent_paths(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_agent_config_snippets(
     agent_id: TargetAgentId,
     mounted_pool_ids: &[String],
@@ -326,11 +337,17 @@ pub fn build_agent_config_snippets(
             } else {
                 exposed
                     .iter()
-                    .map(|m| format!("#   - {} ({}, {})", m.wire_model_id, m.display_name, m.tier_summary))
+                    .map(|m| {
+                        format!(
+                            "#   - {} ({}, {})",
+                            m.wire_model_id, m.display_name, m.tier_summary
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            let before = "# ~/.codex/config.toml\nmodel = \"gpt-5.4\"\n# 未写入 Qwitch provider".to_string();
+            let before =
+                "# ~/.codex/config.toml\nmodel = \"gpt-5.4\"\n# 未写入 Qwitch provider".to_string();
             let after = format!(
                 "# ~/.codex/config.toml\n# qwitch:managed-start\nmodel_provider = \"qwitch\"\nmodel = \"{default_wire}\"\nmodel_catalog_json = \"~/.codex/qwitch_models.json\"\n# qwitch:managed-end\n\n[model_providers.qwitch]\nname = \"Qwitch Multi-Pool Gateway\"\nbase_url = \"{base_url}/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"{}\"\nhttp_headers = {{ \"x-openai-actor-authorization\" = \"qwitch\" }}\nrequires_openai_auth = true\n# Catalog 模型清单:\n{catalog_lines}",
                 agent_token(agent_id)
@@ -477,7 +494,9 @@ fn check_disk_drift(
                 content.contains("\"providers\"")
             };
             if !has_key || !content.contains("\"qwitch\"") || !content.contains(&port_needle) {
-                return Some("检测到 opencode 配置与当前 Schema / 端口不一致，建议重新同步写入".into());
+                return Some(
+                    "检测到 opencode 配置与当前 Schema / 端口不一致，建议重新同步写入".into(),
+                );
             }
             None
         }
@@ -488,16 +507,21 @@ fn check_disk_drift(
             let lib_ok = std::fs::read_to_string(&paths.files[1])
                 .map(|c| c.contains(&port_needle))
                 .unwrap_or(false);
-            let official_3p_cfg_ok = paths
-                .files
-                .get(3)
-                .is_none_or(|p| std::fs::read_to_string(p).map(|c| c.contains("\"3p\"")).unwrap_or(false));
-            let official_3p_lib_ok = paths
-                .files
-                .get(4)
-                .is_none_or(|p| std::fs::read_to_string(p).map(|c| c.contains(&port_needle)).unwrap_or(false));
+            let official_3p_cfg_ok = paths.files.get(3).is_none_or(|p| {
+                std::fs::read_to_string(p)
+                    .map(|c| c.contains("\"3p\""))
+                    .unwrap_or(false)
+            });
+            let official_3p_lib_ok = paths.files.get(4).is_none_or(|p| {
+                std::fs::read_to_string(p)
+                    .map(|c| c.contains(&port_needle))
+                    .unwrap_or(false)
+            });
             if !main_ok || !lib_ok || !official_3p_cfg_ok || !official_3p_lib_ok {
-                return Some("检测到 Claude Desktop 3p 网关配置被修改、缺少 Claude-3p 镜像或端口未同步".into());
+                return Some(
+                    "检测到 Claude Desktop 3p 网关配置被修改、缺少 Claude-3p 镜像或端口未同步"
+                        .into(),
+                );
             }
             None
         }
@@ -513,7 +537,9 @@ fn check_disk_drift(
                 .unwrap_or(false);
             let catalog_ok = paths.files[1].is_file();
             if !toml_ok || !catalog_ok {
-                return Some("检测到 ~/.codex/config.toml 或 qwitch_models.json 目录配置已漂移".into());
+                return Some(
+                    "检测到 ~/.codex/config.toml 或 qwitch_models.json 目录配置已漂移".into(),
+                );
             }
             None
         }
@@ -725,7 +751,10 @@ fn upsert_toml_key_line(content: &str, key: &str, new_line: &str) -> String {
         if trimmed.starts_with('[') {
             in_section = true;
         }
-        if !in_section && (trimmed.starts_with(&prefix) || trimmed.starts_with(&prefix_tight)) && !replaced {
+        if !in_section
+            && (trimmed.starts_with(&prefix) || trimmed.starts_with(&prefix_tight))
+            && !replaced
+        {
             lines.push(new_line.to_string());
             replaced = true;
         } else {
@@ -804,10 +833,15 @@ fn strip_jsonc_comments(raw: &str) -> String {
 }
 
 fn write_json_deployment_mode_3p(path: &Path) -> Result<(), String> {
-    let mut doc: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut doc: Value = match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s).map_err(|e| {
+            format!(
+                "拒绝覆盖无法解析的 JSON 配置 {}：{e}（请先修复该文件语法，Qwitch 不会清空你的原有配置）",
+                path.display()
+            )
+        })?,
+        _ => json!({}),
+    };
     if let Some(obj) = doc.as_object_mut() {
         obj.insert("deploymentMode".into(), Value::String("3p".into()));
     }
@@ -818,6 +852,62 @@ fn write_json_deployment_mode_3p(path: &Path) -> Result<(), String> {
             .as_bytes(),
     )
     .map_err(|e| e.to_string())
+}
+
+/// 去除 JSONC 中位于 `}` / `]` 之前的尾随逗号（字符状态机，尊重字符串）。
+fn strip_trailing_commas(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len());
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_str {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_str = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            // 向后看是否只剩空白后跟 } 或 ]
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1; // 跳过该逗号
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// 宽松解析 JSONC（去注释 + 去尾随逗号）。解析失败返回错误而**绝不**回退为空文档。
+fn parse_jsonc_lenient(raw: &str) -> Result<Value, String> {
+    let cleaned = strip_jsonc_comments(raw);
+    if let Ok(v) = serde_json::from_str::<Value>(&cleaned) {
+        return Ok(v);
+    }
+    let no_trailing = strip_trailing_commas(&cleaned);
+    serde_json::from_str::<Value>(&no_trailing).map_err(|e| {
+        format!("无法解析 JSONC：{e}（请先修复该文件语法，Qwitch 不会清空你的原有配置）")
+    })
 }
 
 fn upsert_dsh_credentials_yaml(existing: &str, key_name: &str, token: &str) -> String {
@@ -860,7 +950,8 @@ fn upsert_dsh_credentials_yaml(existing: &str, key_name: &str, token: &str) -> S
     let mut inserted_in_refs = false;
     for line in &lines {
         let trimmed = line.trim();
-        if !inserted_in_refs && (trimmed == "refs:" || trimmed == "refs: {}" || trimmed == "refs:{}")
+        if !inserted_in_refs
+            && (trimmed == "refs:" || trimmed == "refs: {}" || trimmed == "refs:{}")
         {
             out_lines.push("refs:".to_string());
             out_lines.push(format!("  {key_name}: \"{token}\""));
@@ -938,10 +1029,7 @@ fn load_codex_builtin_models(codex_dir: &Path) -> Vec<Value> {
     Vec::new()
 }
 
-fn merge_codex_model_catalog(
-    builtin_models: Vec<Value>,
-    qwitch_entries: Vec<Value>,
-) -> Vec<Value> {
+fn merge_codex_model_catalog(builtin_models: Vec<Value>, qwitch_entries: Vec<Value>) -> Vec<Value> {
     let mut seen_slugs = std::collections::HashSet::new();
     let mut merged = Vec::with_capacity(builtin_models.len() + qwitch_entries.len());
 
@@ -966,7 +1054,10 @@ fn merge_codex_model_catalog(
             continue;
         }
         if let Some(obj) = item.as_object_mut() {
-            obj.insert("priority".into(), json!((builtin_count + appended_idx) as i64));
+            obj.insert(
+                "priority".into(),
+                json!((builtin_count + appended_idx) as i64),
+            );
         }
         appended_idx += 1;
         merged.push(item);
@@ -975,6 +1066,7 @@ fn merge_codex_model_catalog(
     merged
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_agent_wiring(
     db: &QwitchDatabase,
     master_key: &[u8; 32],
@@ -1012,7 +1104,10 @@ pub fn apply_agent_wiring(
         all_pools,
         chrono::Utc::now().timestamp_millis(),
     );
-    let default_item = exposed.iter().find(|m| m.is_default).or_else(|| exposed.first());
+    let default_item = exposed
+        .iter()
+        .find(|m| m.is_default)
+        .or_else(|| exposed.first());
     let effective_default_key = default_item.map(|m| m.key.clone());
     let default_wire = default_item
         .map(|m| m.wire_model_id.clone())
@@ -1059,12 +1154,16 @@ pub fn apply_agent_wiring(
             }
         }
         TargetAgentId::Opencode => {
-            let existing = std::fs::read_to_string(&paths.files[0]).unwrap_or_else(|_| "{}".into());
-            let mut doc: Value = serde_json::from_str(&strip_jsonc_comments(&existing))
-                .unwrap_or_else(|_| json!({}));
+            let mut doc: Value = match std::fs::read_to_string(&paths.files[0]) {
+                Ok(s) if !s.trim().is_empty() => parse_jsonc_lenient(&s)?,
+                _ => json!({}),
+            };
             let is_v1 = clean_opts.opencode_schema_version.as_deref() == Some("v1");
             if let Some(obj) = doc.as_object_mut() {
-                obj.insert("model".into(), Value::String(format!("qwitch/{default_wire}")));
+                obj.insert(
+                    "model".into(),
+                    Value::String(format!("qwitch/{default_wire}")),
+                );
                 if is_v1 {
                     let mut models_map = serde_json::Map::new();
                     for m in &exposed {
@@ -1276,7 +1375,8 @@ pub fn apply_agent_wiring(
         status: next_status,
         last_hit_at: None,
     };
-    db.upsert_agent_binding(&stored).map_err(|e| e.to_string())?;
+    db.upsert_agent_binding(&stored)
+        .map_err(|e| e.to_string())?;
 
     Ok(build_agent_binding_dto(
         &stored,
@@ -1288,6 +1388,7 @@ pub fn apply_agent_wiring(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn unbind_and_restore_agent(
     db: &QwitchDatabase,
     master_key: &[u8; 32],
@@ -1365,7 +1466,8 @@ pub fn unbind_and_restore_agent(
         status: AgentBindingStatus::Unbound,
         last_hit_at: None,
     };
-    db.upsert_agent_binding(&stored).map_err(|e| e.to_string())?;
+    db.upsert_agent_binding(&stored)
+        .map_err(|e| e.to_string())?;
 
     Ok(build_agent_binding_dto(
         &stored,
@@ -1418,14 +1520,20 @@ pub fn restart_agent_process(
                         .args(["-n", "-a", "/Applications/Claude.app", "--args", &arg])
                         .status();
                     if !matches!(status, Ok(s) if s.success()) {
-                        let _ = Command::new("open").args(["-a", "/Applications/Claude.app"]).spawn();
+                        let _ = Command::new("open")
+                            .args(["-a", "/Applications/Claude.app"])
+                            .spawn();
                     }
                 } else {
-                    let _ = Command::new("open").args(["-a", "/Applications/Claude.app"]).spawn();
+                    let _ = Command::new("open")
+                        .args(["-a", "/Applications/Claude.app"])
+                        .spawn();
                 }
             }
             TargetAgentId::Dsh => {
-                let _ = Command::new("pkill").args(["-f", "DeepSeek Harness"]).output();
+                let _ = Command::new("pkill")
+                    .args(["-f", "DeepSeek Harness"])
+                    .output();
                 std::thread::sleep(std::time::Duration::from_millis(350));
                 let _ = Command::new("open")
                     .args(["-a", "/Applications/DeepSeek Harness.app"])
@@ -1447,7 +1555,8 @@ pub fn restart_agent_process(
     } else {
         AgentBindingStatus::Bound
     };
-    db.upsert_agent_binding(&stored).map_err(|e| e.to_string())?;
+    db.upsert_agent_binding(&stored)
+        .map_err(|e| e.to_string())?;
 
     Ok(build_agent_binding_dto(
         &stored,
@@ -1469,13 +1578,22 @@ mod tests {
     use std::collections::HashMap;
     use uuid::Uuid;
 
-    fn setup_wiring_env() -> (
-        QwitchDatabase,
-        [u8; 32],
-        PathBuf,
-        PathBuf,
-        Vec<AccountPool>,
-    ) {
+    #[test]
+    fn jsonc_lenient_parses_trailing_comma_and_preserves_fields() {
+        let v = parse_jsonc_lenient(
+            "{\n  // user config\n  \"mcpServers\": { \"a\": {} },\n  \"theme\": \"dark\",\n}",
+        )
+        .expect("parse lenient");
+        assert_eq!(v["mcpServers"]["a"], serde_json::json!({}));
+        assert_eq!(v["theme"], "dark");
+    }
+
+    #[test]
+    fn jsonc_lenient_rejects_unparseable_config_instead_of_emptying() {
+        assert!(parse_jsonc_lenient("{ this is not json ").is_err());
+    }
+
+    fn setup_wiring_env() -> (QwitchDatabase, [u8; 32], PathBuf, PathBuf, Vec<AccountPool>) {
         let root = std::env::temp_dir().join(format!("qwitch-wiring-{}", Uuid::new_v4()));
         let db = QwitchDatabase::open(&root.join("qwitch.db")).expect("open db");
         let home_dir = root.join("agent-home");
@@ -1554,9 +1672,11 @@ mod tests {
         )
         .expect("wire dsh");
         assert_eq!(wired.status, AgentBindingStatus::Bound);
-        assert!(std::fs::read_to_string(home_dir.join("dsh/.credentials.yaml"))
-            .unwrap()
-            .contains("QWITCH_GATEWAY_KEY"));
+        assert!(
+            std::fs::read_to_string(home_dir.join("dsh/.credentials.yaml"))
+                .unwrap()
+                .contains("QWITCH_GATEWAY_KEY")
+        );
 
         // 模拟外部删掉 .credentials.yaml 中的 Qwitch key -> 必须报配置漂移
         std::fs::write(
@@ -1564,15 +1684,9 @@ mod tests {
             "refs:\n  DEEPSEEK_API_KEY: \"sk-orig\"\n",
         )
         .unwrap();
-        let inspected = inspect_all_agent_bindings(
-            &db,
-            &pools,
-            "127.0.0.1",
-            18425,
-            false,
-            Some(&home_dir),
-        )
-        .unwrap();
+        let inspected =
+            inspect_all_agent_bindings(&db, &pools, "127.0.0.1", 18425, false, Some(&home_dir))
+                .unwrap();
         let dsh = inspected
             .iter()
             .find(|b| b.agent_id == TargetAgentId::Dsh)
@@ -1686,7 +1800,10 @@ mod tests {
         )
         .unwrap();
         let models = &cfg["providers"]["qwitch"]["models"];
-        assert!(models.is_object(), "OpenCode v2 models must be an object map, got: {models}");
+        assert!(
+            models.is_object(),
+            "OpenCode v2 models must be an object map, got: {models}"
+        );
         let expected_key = format!("{}/deepseek-v4-pro", pools[0].slug);
         let entry = models.get(&expected_key).expect("model key");
         assert_eq!(entry["capabilities"]["tools"], true);
@@ -1742,9 +1859,8 @@ mod tests {
         assert!(creds.contains("refs:\n  QWITCH_GATEWAY_KEY: \"qwitch-bind-dsh\""));
         assert!(creds.contains("deepseek/default/apiKey:"));
 
-        let patch =
-            std::fs::read_to_string(home_dir.join("dsh/profiles/desktop/cordis.patch.yml"))
-                .unwrap();
+        let patch = std::fs::read_to_string(home_dir.join("dsh/profiles/desktop/cordis.patch.yml"))
+            .unwrap();
         assert!(patch.contains("baseURL: \"http://127.0.0.1:18425/v1\""));
         assert!(patch.contains("api: openai-completions"));
         assert!(patch.contains("displayName: Qwitch"));
@@ -1813,8 +1929,10 @@ mod tests {
 
         for dir_name in ["Claude-3p", "Claude-Qwitch-3p"] {
             let desktop_cfg: Value = serde_json::from_str(
-                &std::fs::read_to_string(home_dir.join(dir_name).join("claude_desktop_config.json"))
-                    .unwrap(),
+                &std::fs::read_to_string(
+                    home_dir.join(dir_name).join("claude_desktop_config.json"),
+                )
+                .unwrap(),
             )
             .unwrap();
             assert_eq!(desktop_cfg["deploymentMode"], "3p");
@@ -1901,7 +2019,10 @@ mod tests {
         assert_eq!(models[0]["slug"], "gpt-6-luna");
         assert_eq!(models[1]["slug"], "codex-auto-review");
         assert_eq!(models[2]["priority"], 2);
-        assert!(models[2]["slug"].as_str().unwrap().contains("deepseek-v4-pro"));
+        assert!(models[2]["slug"]
+            .as_str()
+            .unwrap()
+            .contains("deepseek-v4-pro"));
 
         let _ = std::fs::remove_dir_all(root);
     }

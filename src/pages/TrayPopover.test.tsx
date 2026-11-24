@@ -1,14 +1,32 @@
 // @vitest-environment jsdom
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { INITIAL_ACCOUNTS, MOCK_ADAPTERS } from "../data/mockStore";
+import { createInitialAgentBindings, INITIAL_GATEWAY_STATE, makeDefaultModelKey } from "../data/mockPoolData";
+import type { AccountPool, AgentBinding, RoutingTraceItem } from "../types/pool";
 
-const h = vi.hoisted(() => ({ useQwitch: vi.fn() }));
+const h = vi.hoisted(() => ({
+  useQwitch: vi.fn(),
+  poolOverride: null as Record<string, unknown> | null,
+}));
 vi.mock("../context/QwitchContext", () => ({ useQwitch: h.useQwitch }));
+vi.mock("../context/usePoolPrototypeStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../context/usePoolPrototypeStore")>();
+  return {
+    ...actual,
+    usePoolPrototype: () => {
+      const base = actual.usePoolPrototype();
+      return h.poolOverride ? { ...base, ...h.poolOverride } : base;
+    },
+  };
+});
 
 import { TrayPopover } from "./TrayPopover";
 
-afterEach(cleanup);
+afterEach(() => {
+  h.poolOverride = null;
+  cleanup();
+});
 
 let ctx: Record<string, unknown>;
 
@@ -174,5 +192,273 @@ describe("TrayPopover", () => {
     expect(screen.getByText("未关联本机")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /去授权/ }));
     expect(onOpenMain).toHaveBeenCalled();
+  });
+
+  it("Agent 接入页签支持网关启停、环境重探、漂移一键修复与路由观测直达", () => {
+    const pools: AccountPool[] = [
+      {
+        id: "pool-dsh",
+        slug: "dsh",
+        name: "DSH 专属号池",
+        description: "dsh",
+        sceneTag: "dsh",
+        enabled: true,
+        strategy: "quota_first",
+        affinityMode: "auto_cache",
+        skipActiveClientAccount: false,
+        cooldownSeconds: 60,
+        autoRefreshOn401: true,
+        fallbackApiKeyEnabled: false,
+        modelPolicies: [
+          {
+            modelId: "workbuddy/deepseek-v4-pro",
+            enabled: true,
+            fallbackModelId: null,
+          },
+        ],
+        members: [
+          {
+            id: "m1",
+            accountId: "a1",
+            toolId: "workbuddy",
+            label: "WB 主号",
+            uidMasked: "u1",
+            supportedModels: ["workbuddy/deepseek-v4-pro"],
+            tier: "t1_primary",
+            channel: "rust_native",
+            enabled: true,
+            priority: 1,
+            quotaPercent: 90,
+            quotaText: "90%",
+          },
+        ],
+        todayRequests: 0,
+        todayFailovers: 0,
+        cacheHitRate: 0,
+        createdAt: "2026-11-24T00:00:00Z",
+      },
+    ];
+    const bindings: AgentBinding[] = createInitialAgentBindings(pools, INITIAL_GATEWAY_STATE)
+      .slice(0, 2)
+      .map((b, idx) =>
+        idx === 0
+          ? {
+              ...b,
+              agentId: "dsh",
+              name: "DeepSeek Harness",
+              mountedPoolIds: ["pool-dsh"],
+              defaultModelKey: makeDefaultModelKey("pool-dsh", "workbuddy/deepseek-v4-pro"),
+              status: "drifted",
+              installed: true,
+              running: true,
+            }
+          : {
+              ...b,
+              agentId: "claude_desktop",
+              name: "Claude 桌面版",
+              mountedPoolIds: [],
+              defaultModelKey: null,
+              status: "unbound",
+              installed: true,
+              running: false,
+            }
+      );
+    const traces: RoutingTraceItem[] = [
+      {
+        id: "t1",
+        timestamp: "16:00:00",
+        agentId: "dsh",
+        poolId: "pool-dsh",
+        poolName: "DSH 专属号池",
+        requestedModel: "deepseek-v4-pro",
+        incomingProtocol: "openai_chat",
+        upstreamProtocol: "openai_chat",
+        finalToolId: "workbuddy",
+        finalAccountLabel: "WB 主号",
+        finalModel: "deepseek-v4-pro",
+        cacheAffinityHit: false,
+        ttftMs: 120,
+        totalTokens: 100,
+        status: "success",
+        attempts: [],
+      },
+    ];
+
+    const toggleGateway = vi.fn().mockResolvedValue(undefined);
+    const detectAgentEnvironment = vi.fn().mockResolvedValue(undefined);
+    const repairAgentDrift = vi.fn();
+    const onOpenMain = vi.fn();
+
+    h.poolOverride = {
+      gateway: { ...INITIAL_GATEWAY_STATE, running: false },
+      pools,
+      agentBindings: bindings,
+      traces,
+      toggleGateway,
+      detectAgentEnvironment,
+      repairAgentDrift,
+    };
+
+    render(<TrayPopover onOpenMain={onOpenMain} />);
+    fireEvent.click(screen.getByRole("tab", { name: /Agent 接入/ }));
+
+    expect(screen.getByText(/网关已关闭 · 已接入 1\/2 个 Agent · 1 漂移/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "启动" }));
+    expect(toggleGateway).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByLabelText("重新探测 Agent 环境"));
+    expect(detectAgentEnvironment).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "一键修复" }));
+    expect(repairAgentDrift).toHaveBeenCalledWith("dsh");
+
+    fireEvent.click(screen.getByRole("button", { name: /查看观测/ }));
+    expect(onOpenMain).toHaveBeenCalledWith({ nav: "routing" });
+
+    fireEvent.click(screen.getByRole("button", { name: /打开 Agent 接入与调度/ }));
+    expect(onOpenMain).toHaveBeenCalledWith({ nav: "agents" });
+  });
+
+  it("已挂载 Agent 下拉框严格隔离自身模型，支持热切默认模型、解绑与定向跳转", () => {
+    const pools: AccountPool[] = [
+      {
+        id: "pool-dsh",
+        slug: "dsh",
+        name: "DSH 号池",
+        description: "dsh",
+        sceneTag: "dsh",
+        enabled: true,
+        strategy: "quota_first",
+        affinityMode: "auto_cache",
+        skipActiveClientAccount: false,
+        cooldownSeconds: 60,
+        autoRefreshOn401: true,
+        fallbackApiKeyEnabled: false,
+        modelPolicies: [
+          { modelId: "workbuddy/deepseek-v4-pro", enabled: true, fallbackModelId: null },
+          { modelId: "workbuddy/kimi-k3.1-pro", enabled: true, fallbackModelId: null },
+        ],
+        members: [
+          {
+            id: "m1",
+            accountId: "a1",
+            toolId: "workbuddy",
+            label: "WB-1",
+            uidMasked: "u1",
+            supportedModels: ["workbuddy/deepseek-v4-pro", "workbuddy/kimi-k3.1-pro"],
+            tier: "t1_primary",
+            channel: "rust_native",
+            enabled: true,
+            priority: 1,
+            quotaPercent: 80,
+            quotaText: "80%",
+          },
+        ],
+        todayRequests: 0,
+        todayFailovers: 0,
+        cacheHitRate: 0,
+        createdAt: "2026-11-24T00:00:00Z",
+      },
+      {
+        id: "pool-other-agent",
+        slug: "other",
+        name: "其它 Agent 专用池",
+        description: "other",
+        sceneTag: "other",
+        enabled: true,
+        strategy: "quota_first",
+        affinityMode: "auto_cache",
+        skipActiveClientAccount: false,
+        cooldownSeconds: 60,
+        autoRefreshOn401: true,
+        fallbackApiKeyEnabled: false,
+        modelPolicies: [
+          { modelId: "qoder_cn/qwen4-max", enabled: true, fallbackModelId: null },
+        ],
+        members: [
+          {
+            id: "m2",
+            accountId: "a2",
+            toolId: "qoder_cn",
+            label: "Qoder-1",
+            uidMasked: "u2",
+            supportedModels: ["qoder_cn/qwen4-max"],
+            tier: "t1_primary",
+            channel: "rust_native",
+            enabled: true,
+            priority: 1,
+            quotaPercent: 90,
+            quotaText: "90%",
+          },
+        ],
+        todayRequests: 0,
+        todayFailovers: 0,
+        cacheHitRate: 0,
+        createdAt: "2026-11-24T00:00:00Z",
+      },
+    ];
+    const bindings: AgentBinding[] = createInitialAgentBindings(pools, INITIAL_GATEWAY_STATE)
+      .slice(0, 2)
+      .map((b, idx) =>
+        idx === 0
+          ? {
+              ...b,
+              agentId: "dsh",
+              name: "DeepSeek Harness",
+              mountedPoolIds: ["pool-dsh"],
+              defaultModelKey: makeDefaultModelKey("pool-dsh", "workbuddy/deepseek-v4-pro"),
+              status: "bound",
+              installed: true,
+              running: true,
+            }
+          : {
+              ...b,
+              agentId: "codex_desktop",
+              name: "Codex 桌面版",
+              mountedPoolIds: [],
+              defaultModelKey: null,
+              status: "unbound",
+              installed: true,
+              running: false,
+            }
+      );
+
+    const setAgentDefaultModel = vi.fn();
+    const unbindAgent = vi.fn();
+    const onOpenMain = vi.fn();
+    const kimiKey = makeDefaultModelKey("pool-dsh", "workbuddy/kimi-k3.1-pro");
+
+    h.poolOverride = {
+      gateway: { ...INITIAL_GATEWAY_STATE, running: true },
+      pools,
+      agentBindings: bindings,
+      traces: [],
+      setAgentDefaultModel,
+      unbindAgent,
+    };
+
+    render(<TrayPopover onOpenMain={onOpenMain} />);
+    fireEvent.click(screen.getByRole("tab", { name: /Agent 接入/ }));
+
+    const select = screen.getByLabelText("切换 DeepSeek Harness 默认模型") as HTMLSelectElement;
+    const optionsText = within(select)
+      .getAllByRole("option")
+      .map((o) => o.textContent ?? "");
+    expect(optionsText.some((t) => t.includes("DeepSeek-V4-Pro"))).toBe(true);
+    expect(optionsText.some((t) => t.includes("Kimi-K3.1-Pro"))).toBe(true);
+    // 严格隔离：未挂载的其它 Agent 号池模型不能混入
+    expect(optionsText.some((t) => t.includes("Qwen4-Max"))).toBe(false);
+
+    fireEvent.change(select, { target: { value: kimiKey } });
+    expect(setAgentDefaultModel).toHaveBeenCalledWith("dsh", kimiKey);
+
+    fireEvent.click(screen.getByLabelText("配置 DeepSeek Harness"));
+    expect(onOpenMain).toHaveBeenCalledWith({ nav: "agents", agentId: "dsh" });
+
+    fireEvent.click(screen.getByLabelText("解绑 DeepSeek Harness"));
+    expect(unbindAgent).toHaveBeenCalledWith("dsh");
+
+    fireEvent.click(screen.getByRole("button", { name: "去接入" }));
+    expect(onOpenMain).toHaveBeenCalledWith({ nav: "agents", agentId: "codex_desktop" });
   });
 });

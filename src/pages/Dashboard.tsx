@@ -69,7 +69,7 @@ import { AgentBindingsView } from "./dashboard/AgentBindingsView";
 import { RoutingTraceView } from "./dashboard/RoutingTraceView";
 import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
-import type { TargetAgentId } from "../types/pool";
+import type { TargetAgentId, TrayNavigateTarget } from "../types/pool";
 
 function SecondAccountGhostCard({
   toolName,
@@ -99,7 +99,11 @@ function SecondAccountGhostCard({
   );
 }
 
-export function Dashboard() {
+export function Dashboard({
+  externalNavTarget = null,
+}: {
+  externalNavTarget?: TrayNavigateTarget | null;
+} = {}) {
   const {
     isInitializing,
     isTauriRuntime,
@@ -156,6 +160,41 @@ export function Dashboard() {
   const [pathDraftsDirty, setPathDraftsDirty] = useState(false);
   const [externalPlugins, setExternalPlugins] = useState<ExternalAdapterInfo[]>([]);
   const [trustedDraft, setTrustedDraft] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!externalNavTarget) return;
+    if (externalNavTarget.nav) {
+      setNav(externalNavTarget.nav);
+    }
+    setHighlightAgentId(externalNavTarget.agentId ?? null);
+  }, [externalNavTarget]);
+
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const fn = await listen<TrayNavigateTarget>("qwitch://navigate", (event) => {
+          if (disposed) return;
+          const payload = event.payload;
+          if (payload?.nav) {
+            setNav(payload.nav);
+          }
+          setHighlightAgentId(payload?.agentId ?? null);
+        });
+        if (disposed) fn();
+        else unlisten = fn;
+      } catch {
+        /* ignore event listen errors outside full Tauri runtime */
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isTauriRuntime]);
 
   const reloadExternalPlugins = useCallback(async () => {
     if (!isTauriRuntime) return;

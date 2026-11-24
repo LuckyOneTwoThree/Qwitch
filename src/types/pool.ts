@@ -203,3 +203,8 @@ export interface RunPoolSimulationResult {
   trace: RoutingTraceItem;
   cooledMemberId?: string;
 }
+
+export interface TrayNavigateTarget {
+  nav?: "all" | "agents" | "routing" | "settings";
+  agentId?: TargetAgentId;
+}

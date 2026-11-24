@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { Monitor, PanelTop, Moon, Sun } from "lucide-react";
 import { QwitchProvider, useQwitch } from "./context/QwitchContext";
 import { PoolPrototypeProvider } from "./context/usePoolPrototypeStore";
 import { Dashboard } from "./pages/Dashboard";
 import { TrayPopover } from "./pages/TrayPopover";
 import { ToastViewport } from "./components/ui/ToastViewport";
+import type { TrayNavigateTarget } from "./types/pool";
 
 function PrototypeShell() {
   const params = new URLSearchParams(window.location.search);
@@ -13,6 +15,7 @@ function PrototypeShell() {
   const isTauriRuntime = "__TAURI_INTERNALS__" in window;
 
   const [previewMode, setPreviewMode] = useState<"dashboard" | "tray">("dashboard");
+  const [previewNavTarget, setPreviewNavTarget] = useState<TrayNavigateTarget | null>(null);
   const { theme, toggleTheme } = useQwitch();
 
   useEffect(() => {
@@ -26,8 +29,13 @@ function PrototypeShell() {
     return (
       <div className="relative h-screen w-screen bg-transparent p-2 pt-1 pb-2.5">
         <TrayPopover
-          onOpenMain={() => {
-            void invoke("show_main_window");
+          onOpenMain={(target) => {
+            void (async () => {
+              await invoke("show_main_window");
+              if (target?.nav || target?.agentId) {
+                await emit("qwitch://navigate", target);
+              }
+            })();
           }}
         />
         <ToastViewport compact />
@@ -88,12 +96,17 @@ function PrototypeShell() {
 
       {previewMode === "dashboard" ? (
         <div className="min-h-0 flex-1 overflow-hidden">
-          <Dashboard />
+          <Dashboard externalNavTarget={previewNavTarget} />
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-zinc-100 p-8 dark:bg-zinc-950">
           <div className="relative h-[500px] w-[384px] p-2 pt-1 pb-2.5">
-            <TrayPopover onOpenMain={() => setPreviewMode("dashboard")} />
+            <TrayPopover
+              onOpenMain={(target) => {
+                if (target) setPreviewNavTarget({ ...target });
+                setPreviewMode("dashboard");
+              }}
+            />
           </div>
         </div>
       )}

@@ -2,37 +2,46 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeftRight,
+  ArrowRight,
   CheckCircle2,
   Download,
   ExternalLink,
-  Layers,
+  Link2,
   Loader2,
   Moon,
   Power,
+  Radio,
   RefreshCw,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Sun,
+  Unlink,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import { getEffectiveClaimStatus, selectScopedStats } from "../domain/selectors";
-import { computeAgentExposedModels, computePoolAggregateQuota, makeDefaultModelKey } from "../data/mockPoolData";
+import { computeAgentExposedModels } from "../data/mockPoolData";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
 import { ColdSwitchModal } from "../components/ColdSwitchModal";
 import { AccountStatusBadge, ClaimStatusBadge } from "../components/StatusBadge";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
 import { AgentBrandIcon } from "../components/AgentBrandIcon";
 import type { ToolId } from "../types/qwitch";
+import type { TrayNavigateTarget } from "../types/pool";
 
 function formatCompactQuota(value: number): string {
   const rounded = Math.round(value * 100) / 100;
   return rounded.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 }
 
-export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
+export function TrayPopover({
+  onOpenMain,
+}: {
+  onOpenMain?: (target?: TrayNavigateTarget) => void;
+}) {
   const {
     adapters,
     accounts,
@@ -55,18 +64,23 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
 
   const [trayTab, setTrayTab] = useState<"accounts" | "pools">("accounts");
   const [toolFilter, setToolFilter] = useState<"all" | ToolId>("all");
+  const [batchRestarting, setBatchRestarting] = useState(false);
   const {
     gateway,
     pools,
     agentBindings,
+    traces,
     toggleGateway,
     gatewayBusy,
-    updateAgentMountedPools,
     setAgentDefaultModel,
     unbindAgent,
     repairAgentDrift,
     restartAgentClient,
     restartingAgentId,
+    detectAgentEnvironment,
+    detectingAgents,
+    restartRunningDesktopAgents,
+    refreshAgentRunning,
   } = usePoolPrototype();
   const {
     installing: updateInstalling,
@@ -76,12 +90,14 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
 
   useEffect(() => {
     void refreshClientStatuses();
+    refreshAgentRunning();
     const handleFocus = () => {
       void refreshClientStatuses();
+      refreshAgentRunning();
     };
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
-  }, [refreshClientStatuses]);
+  }, [refreshAgentRunning, refreshClientStatuses]);
 
   useEffect(() => {
     const handleBlur = () => {
@@ -140,7 +156,30 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
     [populatedGroups, resolvedToolFilter]
   );
 
+  const boundAgentCount = useMemo(
+    () => agentBindings.filter((b) => b.mountedPoolIds.length > 0).length,
+    [agentBindings]
+  );
+  const driftedAgents = useMemo(
+    () => agentBindings.filter((b) => b.status === "drifted"),
+    [agentBindings]
+  );
+  const runningDesktopAgents = useMemo(
+    () =>
+      agentBindings.filter(
+        (b) =>
+          ["claude_desktop", "codex_desktop", "mimo", "zcode"].includes(b.agentId) &&
+          b.running
+      ),
+    [agentBindings]
+  );
+
   const headerSubtitle = useMemo(() => {
+    if (trayTab === "pools") {
+      return `${gateway.running ? "网关运行中" : "网关已关闭"} · 已接入 ${boundAgentCount}/${agentBindings.length} 个 Agent${
+        driftedAgents.length > 0 ? ` · ${driftedAgents.length} 漂移` : ""
+      }`;
+    }
     if (accounts.length === 0) {
       return "Local-First 多账号与额度快捷管理";
     }
@@ -149,7 +188,15 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
       return `${clientPart} · 今日 ${globalStats.claimedCount}/${globalStats.eligibleClaimTotal} 已签`;
     }
     return `${clientPart} · ${accounts.length} 个纳管账号`;
-  }, [accounts.length, globalStats]);
+  }, [
+    trayTab,
+    gateway.running,
+    boundAgentCount,
+    agentBindings.length,
+    driftedAgents.length,
+    accounts.length,
+    globalStats,
+  ]);
 
   const renderFooterClaimButton = () => {
     if (isBusy) {
@@ -260,7 +307,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           {onOpenMain && (
             <button
               type="button"
-              onClick={onOpenMain}
+              onClick={() => onOpenMain()}
               title="查看更新详情"
               aria-label="查看更新详情"
               className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-indigo-700 transition hover:bg-indigo-500/15 dark:text-indigo-200"
@@ -318,7 +365,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
 
             <button
               type="button"
-              onClick={onOpenMain}
+              onClick={() => onOpenMain?.()}
               className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
             >
               主面板
@@ -327,7 +374,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           </div>
         </div>
 
-        {/* 托盘双态切换：账号与签到 | 号池与指向 */}
+        {/* 托盘双态切换：账号与签到 | Agent 接入 */}
         <div
           role="tablist"
           aria-label="托盘视图模式"
@@ -359,10 +406,17 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                gateway.running ? "bg-emerald-500" : "bg-zinc-400"
+                driftedAgents.length > 0
+                  ? "bg-amber-500"
+                  : gateway.running
+                    ? "bg-emerald-500"
+                    : "bg-zinc-400"
               }`}
             />
-            号池与指向
+            <span>Agent 接入</span>
+            <span className="tabular-nums opacity-75">
+              {boundAgentCount}/{agentBindings.length}
+            </span>
           </button>
         </div>
 
@@ -404,57 +458,145 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
         )}
       </header>
 
-      {/* 账号 / 号池滚动画布 */}
+      {/* 账号 / Agent 接入滚动画布 */}
       <div className="mask-fade-b min-h-0 flex-1 space-y-2.5 overflow-y-auto scroll-smooth p-3 pb-5">
         {trayTab === "pools" ? (
           <div className="space-y-2.5">
-            {/* 本地网关控制条 */}
+            {/* 本地网关控制条 + 环境重探 */}
             <div className="surface-card flex items-center justify-between gap-2 px-3 py-2">
-              <div className="flex min-w-0 items-center gap-2 text-xs">
+              <div
+                className="flex min-w-0 items-center gap-2 text-xs"
+                title={`本地多协议网关监听地址：${gateway.host}:${gateway.port}`}
+              >
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${
                     gateway.running ? "bg-emerald-500" : "bg-zinc-400"
                   }`}
                 />
-                <span className="font-semibold text-zinc-900 dark:text-zinc-100">本地网关</span>
-                <code className="truncate font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
-                  {gateway.host}:{gateway.port}
-                </code>
+                <span className="truncate font-semibold text-zinc-900 dark:text-zinc-100">
+                  {gateway.running ? "本地网关运行中" : "本地网关已关闭"}
+                </span>
               </div>
-              <button
-                type="button"
-                onClick={() => void toggleGateway()}
-                disabled={gatewayBusy}
-                aria-busy={gatewayBusy}
-                className={`btn btn-xs shrink-0 gap-1 disabled:cursor-not-allowed disabled:opacity-60 ${
-                  gateway.running ? "btn-secondary" : "btn-primary"
-                }`}
-              >
-                {gatewayBusy ? (
-                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
-                ) : null}
-                {gatewayBusy ? "处理中" : gateway.running ? "停止" : "启动"}
-              </button>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void detectAgentEnvironment()}
+                  disabled={detectingAgents}
+                  aria-busy={detectingAgents}
+                  title="重新探测 Agent 安装路径与运行状态"
+                  aria-label="重新探测 Agent 环境"
+                  className="btn btn-icon btn-secondary shrink-0 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <RefreshCw
+                    className={`h-3 w-3 ${detectingAgents ? "animate-spin" : ""}`}
+                    aria-hidden="true"
+                  />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void toggleGateway()}
+                  disabled={gatewayBusy}
+                  aria-busy={gatewayBusy}
+                  className={`btn btn-xs shrink-0 gap-1 disabled:cursor-not-allowed disabled:opacity-60 ${
+                    gateway.running ? "btn-secondary" : "btn-primary"
+                  }`}
+                >
+                  {gatewayBusy ? (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                  ) : null}
+                  {gatewayBusy ? "处理中" : gateway.running ? "关闭" : "启动"}
+                </button>
+              </div>
             </div>
 
-            {/* 各目标 Agent 快速默认模型热切换 */}
-            <section className="space-y-1.5">
+            {/* 场景化快捷动作条：配置漂移优先一键修复，其次运行中桌面端批量重启 */}
+            {driftedAgents.length > 0 ? (
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                <span className="flex min-w-0 items-center gap-1.5 font-medium">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span className="truncate">发现 {driftedAgents.length} 个配置漂移</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    for (const d of driftedAgents) {
+                      repairAgentDrift(d.agentId);
+                    }
+                  }}
+                  className="btn btn-xs btn-primary shrink-0"
+                >
+                  一键修复
+                </button>
+              </div>
+            ) : runningDesktopAgents.length > 0 ? (
+              <div className="surface-card flex items-center justify-between gap-2 px-3 py-1.5 text-[11px]">
+                <span className="truncate text-zinc-600 dark:text-zinc-300">
+                  {runningDesktopAgents.length} 个桌面 Agent 运行中
+                </span>
+                <button
+                  type="button"
+                  disabled={batchRestarting}
+                  aria-busy={batchRestarting}
+                  onClick={async () => {
+                    setBatchRestarting(true);
+                    try {
+                      await restartRunningDesktopAgents();
+                    } finally {
+                      setBatchRestarting(false);
+                    }
+                  }}
+                  className="btn btn-xs btn-secondary shrink-0 gap-1 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {batchRestarting ? (
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" aria-hidden="true" />
+                  ) : null}
+                  {batchRestarting ? "重启中…" : "批量重启"}
+                </button>
+              </div>
+            ) : null}
+
+            {/* 各目标 Agent 快捷面板（按单 Agent 独立目录隔离，支持热切默认模型、重启、修复、解绑与直达配置） */}
+            <section className="space-y-1.5" aria-label="Agent 快捷接入列表">
               <div className="flex items-center justify-between px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                <span>Agent 指向与 ★ 默认模型热切</span>
-                <span>多号池可在主面板配置</span>
+                <span>Agent 状态与默认模型热切</span>
+                <span>点右侧配置完整编排</span>
               </div>
               {agentBindings.map((b) => {
-                const exposed = computeAgentExposedModels(b, pools);
-                const selectedVal = b.defaultModelKey ?? "";
-                const poolOptions = pools.flatMap((p) =>
-                  p.modelPolicies
-                    .filter((mp) => mp.enabled)
-                    .map((mp) => ({
-                      key: makeDefaultModelKey(p.id, mp.modelId),
-                      label: `${mp.modelId} · ${p.name}`,
-                      mounted: b.mountedPoolIds.includes(p.id),
-                    }))
-                );
+                const isMounted = b.mountedPoolIds.length > 0;
+                const exposed = isMounted ? computeAgentExposedModels(b, pools) : [];
+                const selectedVal = exposed.some((m) => m.key === b.defaultModelKey)
+                  ? (b.defaultModelKey ?? "")
+                  : "";
+
+                if (!isMounted) {
+                  return (
+                    <div
+                      key={b.agentId}
+                      className="surface-card flex items-center justify-between gap-2 px-2.5 py-2"
+                    >
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <AgentBrandIcon agentId={b.agentId} size="xs" />
+                        <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                          {b.name}
+                        </span>
+                        <span className="badge badge-neutral shrink-0">
+                          {!b.installed && b.agentId !== "opencode"
+                            ? "未安装"
+                            : b.running
+                              ? "运行中"
+                              : "未接入"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onOpenMain?.({ nav: "agents", agentId: b.agentId })}
+                        className="btn btn-xs btn-secondary shrink-0"
+                      >
+                        去接入
+                      </button>
+                    </div>
+                  );
+                }
 
                 return (
                   <div key={b.agentId} className="surface-card space-y-1.5 p-2.5">
@@ -464,19 +606,21 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                         <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
                           {b.name}
                         </span>
-                        {b.mountedPoolIds.length > 0 && (
-                          <span className="badge badge-neutral">
-                            已挂 {b.mountedPoolIds.length} 池 · {exposed.length} 模
-                          </span>
+                        {b.running && (
+                          <span
+                            title="进程运行中"
+                            className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
+                          />
                         )}
+                        <span className="badge badge-neutral shrink-0">{exposed.length} 模</span>
                         {b.status === "drifted" && (
-                          <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-300">
+                          <span className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-300">
                             <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
                             漂移
                           </span>
                         )}
                         {b.status === "needs_restart" && (
-                          <span className="text-[10px] font-medium text-sky-600 dark:text-sky-300">
+                          <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-300">
                             待重启
                           </span>
                         )}
@@ -490,81 +634,101 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                         >
                           修复
                         </button>
-                      ) : b.status === "needs_restart" ? (
+                      ) : b.agentId !== "opencode" && b.installed ? (
                         <button
                           type="button"
                           onClick={() => void restartAgentClient(b.agentId)}
                           disabled={restartingAgentId === b.agentId}
                           aria-busy={restartingAgentId === b.agentId}
-                          className="btn btn-xs btn-sky-soft shrink-0 gap-1 disabled:cursor-not-allowed disabled:opacity-60"
+                          className={`btn btn-xs shrink-0 gap-1 disabled:cursor-not-allowed disabled:opacity-60 ${
+                            b.status === "needs_restart" ? "btn-sky-soft" : "btn-secondary"
+                          }`}
                         >
                           {restartingAgentId === b.agentId ? (
                             <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin" aria-hidden="true" />
                           ) : null}
-                          {restartingAgentId === b.agentId ? "处理中…" : "重启"}
+                          {restartingAgentId === b.agentId
+                            ? "处理中…"
+                            : b.running
+                              ? "重启"
+                              : "启动"}
                         </button>
                       ) : null}
                     </div>
 
-                    <select
-                      value={selectedVal}
-                      aria-label={`切换 ${b.name} 默认模型或号池`}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (!val) {
-                          unbindAgent(b.agentId);
-                          return;
-                        }
-                        const [pid] = val.split("::");
-                        if (b.mountedPoolIds.includes(pid)) {
-                          setAgentDefaultModel(b.agentId, val);
-                        } else {
-                          updateAgentMountedPools(
-                            b.agentId,
-                            [...b.mountedPoolIds, pid],
-                            val
-                          );
-                        }
-                      }}
-                      className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-800 focus:border-brand-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                    >
-                      <option value="">-- 未指向（使用原厂配置） --</option>
-                      {poolOptions.map((opt) => (
-                        <option key={opt.key} value={opt.key}>
-                          {opt.mounted ? "★ " : "+ 挂载并设为默认: "}
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={selectedVal}
+                        disabled={exposed.length === 0}
+                        aria-label={`切换 ${b.name} 默认模型`}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val) {
+                            setAgentDefaultModel(b.agentId, val);
+                          }
+                        }}
+                        className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-800 focus:border-brand-500 focus:outline-none disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      >
+                        {exposed.length === 0 ? (
+                          <option value="">-- 暂无可用模型，点右侧配置 --</option>
+                        ) : (
+                          <>
+                            {!selectedVal && (
+                              <option value="" disabled>
+                                -- 选择默认模型 --
+                              </option>
+                            )}
+                            {exposed.map((m) => (
+                              <option key={m.key} value={m.key}>
+                                ★ {m.collision ? m.displayName : `${m.displayName} · ${m.poolName}`}
+                              </option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => onOpenMain?.({ nav: "agents", agentId: b.agentId })}
+                        title={`在主面板配置 ${b.name} 的模型与账号顺位`}
+                        aria-label={`配置 ${b.name}`}
+                        className="btn btn-icon btn-secondary shrink-0"
+                      >
+                        <SlidersHorizontal className="h-3 w-3" aria-hidden="true" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => unbindAgent(b.agentId)}
+                        title={`解绑 ${b.name} 并还原原厂配置`}
+                        aria-label={`解绑 ${b.name}`}
+                        className="btn btn-icon btn-secondary shrink-0 hover:border-rose-500/40 hover:text-rose-600 dark:hover:text-rose-400"
+                      >
+                        <Unlink className="h-3 w-3" aria-hidden="true" />
+                      </button>
+                    </div>
                   </div>
                 );
               })}
             </section>
 
-            {/* 号池水位速览 */}
-            <section className="space-y-1.5">
-              <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                号池聚合水位
+            {/* 路由观测快捷跳转 */}
+            {traces.length > 0 && (
+              <div className="surface-card flex items-center justify-between gap-2 px-3 py-2 text-[11px]">
+                <span className="flex min-w-0 items-center gap-1.5 text-zinc-600 dark:text-zinc-300">
+                  <Radio className="h-3.5 w-3.5 shrink-0 text-brand-600 dark:text-brand-400" aria-hidden="true" />
+                  <span className="truncate">近期路由采样 {traces.length} 条</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onOpenMain?.({ nav: "routing" })}
+                  className="inline-flex shrink-0 items-center gap-1 font-medium text-brand-700 hover:underline dark:text-brand-300"
+                >
+                  查看观测
+                  <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                </button>
               </div>
-              {pools.map((pool) => {
-                const agg = computePoolAggregateQuota(pool.members);
-                return (
-                  <div key={pool.id} className="surface-card px-2.5 py-2">
-                    <div className="flex items-center justify-between gap-2 text-[11px]">
-                      <span className="truncate font-semibold text-zinc-900 dark:text-zinc-100">
-                        {pool.name}
-                      </span>
-                      <span className="shrink-0 tabular-nums text-zinc-600 dark:text-zinc-300">
-                        均余 {agg}% · {pool.members.length} 成员
-                      </span>
-                    </div>
-                    <div className="meter mt-1.5">
-                      <div className="meter-fill" style={{ width: `${agg}%` }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </section>
+            )}
           </div>
         ) : (
           <>
@@ -590,7 +754,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
             </p>
             <button
               type="button"
-              onClick={onOpenMain}
+              onClick={() => onOpenMain?.()}
               className="mt-3.5 inline-flex items-center gap-1.5 rounded-xl bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
             >
               打开主面板导入
@@ -759,7 +923,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
                               {onOpenMain && (
                                 <button
                                   type="button"
-                                  onClick={onOpenMain}
+                                  onClick={() => onOpenMain()}
                                   className="inline-flex shrink-0 items-center gap-0.5 font-medium underline underline-offset-2 transition hover:text-amber-950 dark:hover:text-amber-200"
                                 >
                                   去授权
@@ -825,7 +989,7 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
             {emptyToolNames.length > 0 && resolvedToolFilter === "all" && (
               <button
                 type="button"
-                onClick={onOpenMain}
+                onClick={() => onOpenMain?.()}
                 className="flex w-full items-center justify-between gap-2 rounded-xl border border-dashed border-zinc-200 bg-white/80 px-3 py-2 text-left text-[11px] text-zinc-600 transition hover:border-zinc-300 hover:bg-white hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200"
               >
                 <span className="truncate">
@@ -847,11 +1011,11 @@ export function TrayPopover({ onOpenMain }: { onOpenMain?: () => void }) {
         {trayTab === "pools" ? (
           <button
             type="button"
-            onClick={onOpenMain}
+            onClick={() => onOpenMain?.({ nav: "agents" })}
             className="btn btn-md btn-primary min-w-0 flex-1 gap-1.5 whitespace-nowrap"
           >
-            <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            打开主面板编排号池
+            <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            打开 Agent 接入与调度
           </button>
         ) : (
           renderFooterClaimButton()

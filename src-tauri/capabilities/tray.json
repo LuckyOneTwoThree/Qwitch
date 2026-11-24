@@ -27,6 +27,7 @@
     "allow-unbind-agent-cmd",
     "allow-repair-agent-drift-cmd",
     "allow-restart-agent-client-cmd",
+    "allow-detect-agent-environment-cmd",
     "allow-check-app-update",
     "allow-download-and-install-update",
     "allow-open-update-url"

@@ -11,9 +11,9 @@ pub mod update;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, PhysicalPosition, Position, WindowEvent,
+    Emitter, Manager, PhysicalPosition, Position, WindowEvent,
 };
 
 use adapter::create_all_adapters;
@@ -239,8 +239,21 @@ pub fn run() {
 
             let show_main =
                 MenuItem::with_id(app, "show_main", "打开 Qwitch 主面板", true, None::<&str>)?;
+            let open_agents =
+                MenuItem::with_id(app, "open_agents", "Agent 接入与调度", true, None::<&str>)?;
+            let toggle_gateway = MenuItem::with_id(
+                app,
+                "toggle_gateway",
+                "启动 / 停止本地网关",
+                true,
+                None::<&str>,
+            )?;
+            let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出 Qwitch", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_main, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[&show_main, &open_agents, &toggle_gateway, &sep, &quit],
+            )?;
 
             #[cfg(target_os = "macos")]
             let tray_builder = TrayIconBuilder::with_id("qwitch-tray")
@@ -253,7 +266,7 @@ pub fn run() {
             tray_builder
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .tooltip("Qwitch - AI 多账号与额度管理")
+                .tooltip("Qwitch - AI 多账号与 Agent 网关")
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -392,6 +405,31 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show_main" => {
                         commands::present_main_window(app);
+                    }
+                    "open_agents" => {
+                        commands::present_main_window(app);
+                        let _ =
+                            app.emit("qwitch://navigate", serde_json::json!({ "nav": "agents" }));
+                    }
+                    "toggle_gateway" => {
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(state) = app_handle.try_state::<AppState>() {
+                                if state.gateway.runtime_state().running {
+                                    state.gateway.stop_server();
+                                } else {
+                                    let _ = state
+                                        .gateway
+                                        .start_server(
+                                            Arc::clone(&state.db),
+                                            state.master_key,
+                                            Arc::clone(&state.adapters),
+                                        )
+                                        .await;
+                                }
+                                let _ = app_handle.emit("qwitch://pool-workspace-updated", ());
+                            }
+                        });
                     }
                     "quit" => {
                         app.exit(0);

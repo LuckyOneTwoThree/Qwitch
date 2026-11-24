@@ -17,6 +17,22 @@ pub fn shared_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// 网关推理专用 HTTP 客户端：长连接/长生成需要远超配额查询的超时。
+///
+/// 复用 20s 超时的 `shared_http_client` 会把耗时 >20s 的长代码补全/长生成直接判失败
+/// （网关随后回 502）。这里放宽总超时到 600s、连接超时 15s，与 Agent 端
+/// `streamIdleTimeoutMs: 600000` 对齐。
+pub fn long_running_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(600))
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 /// 统一 HTTP 状态码到 `AdapterError` 的映射（401 过期 / 403 风控 / 429 限流 / 其余网络异常）
 pub fn map_http_status(status: reqwest::StatusCode, context: &str) -> AdapterError {
     match status.as_u16() {

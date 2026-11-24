@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::adapter::common::shared_http_client;
+use crate::adapter::common::long_running_http_client;
 use crate::adapter::ToolAdapter;
 use crate::agent_wiring::{agent_id_from_token, detect_bridge_runtime, detect_global_proxy_active};
 use crate::domain::{
@@ -1268,7 +1268,7 @@ async fn call_upstream_member(
     ir_req: &IrRequest,
     upstream_model: &str,
 ) -> Result<(u16, String), String> {
-    let client = shared_http_client();
+    let client = long_running_http_client();
     let (token_opt, custom_base, extra_headers) = extract_bearer_and_base_url(cred);
     let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
 

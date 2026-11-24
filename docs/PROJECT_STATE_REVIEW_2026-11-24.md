@@ -276,10 +276,12 @@ cargo audit --file Cargo.lock            # 本机先 cargo install cargo-audit
 | `cb5a7d2` | P2-12/15 | 调度重排保留优先级、空池自动禁用 |
 | `f16e4ab` | P2-11/14 | 影子 policy upsert（可见可切）、today 统计跨日重置 |
 | `8e9e20d` | P3 | bundle 按 vendor/react 拆包消除 500KB 告警、设计文档版本口径 |
+| `513c068` | Docs | 追加修复进度追踪章节 |
+| `1596858` | P1-2/P2-18 | 真流式扩展到同协议 Anthropic；Tauri 演练不再本地双写、统一以后端刷新为真源 |
 
 ### 已知剩余项（非阻断，后续可继续）
 
-- **P1-2 跨协议流式**：当前仅 OpenAI Chat 同协议走真流式；OpenAI↔Anthropic/Responses 跨协议仍「缓冲后合成 SSE」（功能正确，仅 TTFT 非增量）。
+- **P1-2 跨协议流式（可选增强）**：同协议（OpenAI Chat、Anthropic Messages）已真流式透传；仅 OpenAI↔Anthropic/Responses **跨协议**仍「缓冲后合成 SSE」（功能正确，仅 TTFT 非增量，不影响正确性）。
 - **P2-10**：`set_pool_tool_models` 按工具统一覆盖成员模型集——与 Agent 中心「按工具选模型」语义一致，保留。
-- **P2-18**：路由演练在 Tauri 下仍本地先算 + 后端持久化（最终以 refresh 的 DB 结果为准）。
-- **P3**：`-wal/-shm` 打开后新建 sidecar 权限、部分 `let _` 吞错、Linux 平台能力等纵深项。
+- **P2-18**：已消除 Tauri 下本地双写，演练结果统一以后端 `run_pool_simulation_cmd` 落库刷新为准。
+- **P3（纵深优化）**：`-wal/-shm` 打开后新建 sidecar 权限（已在打开时收紧，边角）、个别 `let _` 吞错建议补日志、Linux 平台能力等。

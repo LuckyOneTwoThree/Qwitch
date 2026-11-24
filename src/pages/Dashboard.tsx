@@ -538,11 +538,11 @@ export function Dashboard() {
       <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200 bg-white px-3 pb-3 pt-2 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex min-h-0 flex-1 flex-col justify-between">
         <div className="overflow-y-auto pr-0.5">
-          <div data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="mb-5 flex items-center gap-2.5 px-1.5">
-            <QwitchLogo size="md" />
+          <div data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="mb-3 flex items-center gap-2 pl-[72px] pr-1 pt-0.5">
+            <QwitchLogo size="sm" />
             <div className="min-w-0">
               <div className="text-sm font-semibold tracking-tight">Qwitch</div>
-              <div className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+              <div className="truncate text-[10.5px] text-zinc-500 dark:text-zinc-400">
                 号池与多模型网关
               </div>
             </div>

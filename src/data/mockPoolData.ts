@@ -108,17 +108,17 @@ export const WIRE_PROTOCOL_META: Record<
   { label: string; badgeClass: string }
 > = {
   openai_responses: {
-    label: "OpenAI Responses",
+    label: "Responses",
     badgeClass:
       "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
   },
   anthropic_messages: {
-    label: "Anthropic Messages",
+    label: "Anthropic",
     badgeClass:
       "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300",
   },
   openai_chat: {
-    label: "OpenAI Chat",
+    label: "Chat",
     badgeClass:
       "border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
   },

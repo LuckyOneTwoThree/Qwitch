@@ -40,6 +40,12 @@ import {
 import type { AgentBinding, PoolStrategy, TargetAgentId } from "../../types/pool";
 import { AgentBrandIcon } from "../../components/AgentBrandIcon";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
+
+/** 去掉展示名里的「工具短名 · 」前缀，配合左侧品牌图标，避免模型名过长 */
+function shortModelLabel(name: string): string {
+  const parts = name.split(" · ");
+  return parts.length > 1 ? parts.slice(1).join(" · ") : name;
+}
 import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
 
 const DEFAULT_TOOL_ORDER = [
@@ -576,7 +582,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
       {/* 顶部 4 格紧凑目标 Agent 切换栏 */}
       <aside
         aria-label="目标 Agent 客户端列表"
-        className="grid grid-cols-1 gap-2 @lg:grid-cols-2 @3xl:grid-cols-4"
+        className="grid grid-cols-1 gap-2 @lg:grid-cols-2 @3xl:grid-cols-3 @6xl:grid-cols-4"
       >
         {agentBindings.map((binding) => {
           const isSelected = activeBinding?.agentId === binding.agentId;
@@ -609,7 +615,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         {binding.name}
                       </h2>
                       <span
-                        className={`mt-0.5 inline-flex rounded px-1 py-0.2 text-[10px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
+                        className={`mt-0.5 inline-flex shrink-0 whitespace-nowrap rounded px-1 py-0.2 text-[10px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
                       >
                         {WIRE_PROTOCOL_META[binding.protocol].label}
                       </span>
@@ -620,12 +626,17 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
 
                 <div className="flex items-center justify-between gap-1.5 rounded-lg bg-zinc-100/75 px-2 py-1 text-[11px] dark:bg-zinc-950/60">
                   {defModel ? (
-                    <span className="flex min-w-0 items-center gap-1 font-medium text-zinc-800 dark:text-zinc-200">
+                    <span className="flex min-w-0 items-center gap-1.5 font-medium text-zinc-800 dark:text-zinc-200">
                       <Star
                         className="h-3 w-3 shrink-0 fill-amber-500 text-amber-500"
                         aria-hidden="true"
                       />
-                      <span className="truncate font-mono">{defModel.displayName}</span>
+                      <ToolBrandIcon
+                        toolId={splitScopedModelId(defModel.modelId).toolId ?? "custom_api_key"}
+                        size="xs"
+                        decorative
+                      />
+                      <span className="truncate">{shortModelLabel(defModel.displayName)}</span>
                     </span>
                   ) : (
                     <span className="text-zinc-400">未配置模型</span>

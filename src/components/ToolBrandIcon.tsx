@@ -60,7 +60,7 @@ export const ToolBrandIcon = React.memo(function ToolBrandIcon({
       <img
         src={iconSrc}
         alt={decorative ? "" : meta.name}
-        className="h-full w-full object-cover select-none"
+        className="h-full w-full object-contain p-0.5 select-none"
         draggable={false}
         onError={() => setIconFailed(true)}
       />

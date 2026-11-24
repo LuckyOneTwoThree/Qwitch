@@ -731,16 +731,23 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     <Wrench className="h-3 w-3" aria-hidden="true" />
                     查看差异并修复
                   </button>
-                ) : activeBinding.status === "needs_restart" ? (
+                ) : (
                   <button
                     type="button"
                     onClick={() => restartAgentClient(activeBinding.agentId)}
+                    title="重启该客户端以加载最新 Qwitch 配置"
                     className="btn btn-xs btn-sky-soft gap-1"
                   >
                     <RotateCcw className="h-3 w-3" aria-hidden="true" />
-                    {activeBinding.agentId === "codex_desktop" ? "重启 ChatGPT 桌面版" : "立即重启生效"}
+                    {activeBinding.agentId === "codex_desktop"
+                      ? "重启 ChatGPT 桌面版"
+                      : activeBinding.agentId === "claude_desktop"
+                        ? "重启 Claude"
+                        : activeBinding.agentId === "dsh"
+                          ? "重启 DeepSeek Harness"
+                          : "重启 OpenCode"}
                   </button>
-                ) : null}
+                )}
 
                 {activeBinding.mountedPoolIds.length > 0 ? (
                   <button
@@ -1530,7 +1537,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                           onClick={() => restartAgentClient("codex_desktop")}
                           className="btn btn-xs btn-secondary"
                         >
-                          重启 app-server
+                          重启 ChatGPT 桌面版
                         </button>
                       )}
                     </div>

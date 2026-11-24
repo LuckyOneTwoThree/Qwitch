@@ -1551,6 +1551,8 @@ export function PoolPrototypeProvider({
       );
       if (agentId === "codex_desktop") {
         notify("已重启 ChatGPT/Codex 桌面应用以加载最新配置", "success");
+      } else if (agentId === "opencode") {
+        notify("OpenCode 为终端客户端：配置将在下次启动/新会话生效（无需重启桌面进程）", "info");
       } else {
         const agentName = rawBindings.find((b) => b.agentId === agentId)?.name ?? agentId;
         notify(`已重启 ${agentName}，最新 Qwitch 网关配置已生效`, "success");

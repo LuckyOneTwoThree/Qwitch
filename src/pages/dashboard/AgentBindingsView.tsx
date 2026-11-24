@@ -27,7 +27,6 @@ import {
   Unlink,
   Wrench,
   X,
-  Zap,
 } from "lucide-react";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
 import {
@@ -799,17 +798,9 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     全部解绑并还原
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    disabled={toolModelOptions.length === 0}
-                    onClick={() =>
-                      selectRecommendedAgentToolModels(activeBinding.agentId, activeToolId)
-                    }
-                    className="btn btn-xs btn-primary gap-1"
-                  >
-                    <Zap className="h-3 w-3" aria-hidden="true" />
-                    一键接入推荐模型
-                  </button>
+                  <span className="text-[11px] text-zinc-400">
+                    在下方勾选要开放给该 Agent 的模型即可接入
+                  </span>
                 )}
 
                 <button

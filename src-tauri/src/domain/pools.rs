@@ -66,10 +66,10 @@ impl TargetAgentId {
         [
             Self::Dsh,
             Self::Opencode,
-            Self::Mimo,
-            Self::Zcode,
             Self::CodexDesktop,
             Self::ClaudeDesktop,
+            Self::Mimo,
+            Self::Zcode,
         ]
     }
 }

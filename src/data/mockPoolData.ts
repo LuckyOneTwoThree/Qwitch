@@ -1399,10 +1399,10 @@ export function buildAgentConfigSnippets(
 export const TARGET_AGENT_ORDER: readonly TargetAgentId[] = [
   "dsh",
   "opencode",
-  "mimo",
-  "zcode",
   "codex_desktop",
   "claude_desktop",
+  "mimo",
+  "zcode",
 ];
 
 export function createInitialAgentBindings(

@@ -27,9 +27,8 @@ const AGENT_SURFACE_STYLE: Record<AgentIconKind, string> = {
   dsh: "bg-[#4D6BFE] text-white ring-[#3A56E8]/30 dark:bg-[#4D6BFE] dark:text-white dark:ring-[#7B93FF]/30",
   opencode:
     "bg-zinc-950 text-emerald-400 ring-emerald-500/30 dark:bg-zinc-900 dark:text-emerald-300 dark:ring-emerald-400/30",
-  mimo: "bg-white text-zinc-900 ring-black/10 dark:bg-zinc-100 dark:text-zinc-900 dark:ring-white/20",
-  zcode:
-    "bg-[#1E6F5C] text-white ring-emerald-700/30 dark:bg-[#1E6F5C] dark:text-white dark:ring-emerald-400/30",
+  mimo: "bg-transparent ring-black/10 dark:ring-white/10",
+  zcode: "bg-transparent ring-black/10 dark:ring-white/10",
   custom_endpoint:
     "bg-zinc-100 text-zinc-700 ring-black/8 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-white/12",
 };
@@ -80,17 +79,9 @@ export const AgentBrandIcon = React.memo(function AgentBrandIcon({
           </svg>
         );
       case "mimo":
-        return (
-          <span className={svgClass} style={{ fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>
-            M
-          </span>
-        );
+        return <img src="/icons/mimo.png" alt="" className="h-full w-full object-contain" />;
       case "zcode":
-        return (
-          <span className={svgClass} style={{ fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>
-            Z
-          </span>
-        );
+        return <img src="/icons/zcode.png" alt="" className="h-full w-full object-contain" />;
       case "custom_endpoint":
         return <TerminalSquare className={svgClass} aria-hidden="true" />;
     }

@@ -21,10 +21,10 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
     expect(cardOrder).toEqual([
       "DeepSeek Harness",
       "OpenCode",
-      "MiMo Code",
-      "ZCode",
       "Codex 桌面版",
       "Claude 桌面版",
+      "MiMo Code",
+      "ZCode",
     ]);
 
     // 切换到 Claude 桌面版测试「全选当前」「清空本工具」「仅选推荐主力」与「设为默认」

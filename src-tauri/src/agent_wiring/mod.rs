@@ -1857,6 +1857,15 @@ pub fn unbind_and_restore_agent(
 }
 
 #[cfg(target_os = "macos")]
+fn open_cmd() -> Command {
+    // 关键：dev/宿主进程可能带有 ELECTRON_RUN_AS_NODE=1，`open` 会把它传给被拉起的
+    // Electron 应用（ZCode/MiMo/Codex 等），使其以 Node 模式启动后立刻退出。这里显式清除。
+    let mut c = Command::new("open");
+    c.env_remove("ELECTRON_RUN_AS_NODE");
+    c
+}
+
+#[cfg(target_os = "macos")]
 fn restart_codex_desktop_app() {
     // 真正退出并重新打开 GPT/Codex 桌面应用，确保它加载最新的 ~/.codex/config.toml
     // （仅 pkill app-server 会被桌面 supervisor 立即重新拉起，且 open -a 对已运行应用只是
@@ -1895,7 +1904,7 @@ fn restart_codex_desktop_app() {
     }
     for app in ["/Applications/ChatGPT.app", "/Applications/Codex.app"] {
         if std::path::Path::new(app).exists() {
-            let _ = Command::new("open").arg("-a").arg(app).spawn();
+            let _ = open_cmd().arg("-a").arg(app).spawn();
             break;
         }
     }
@@ -1921,13 +1930,13 @@ fn restart_macos_app(app_name: &str, bundle_id: &str, app_path: &str) {
     let _ = Command::new("pkill").args(["-f", app_path]).output();
     std::thread::sleep(std::time::Duration::from_millis(200));
     // 优先按 bundle id 打开（对已退出/未运行都可靠），失败再用 .app 路径
-    let opened = Command::new("open")
+    let opened = open_cmd()
         .args(["-b", bundle_id])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !opened {
-        let _ = Command::new("open").arg(app_path).spawn();
+        let _ = open_cmd().arg(app_path).spawn();
     }
 }
 
@@ -1970,18 +1979,14 @@ pub fn restart_agent_process(
                 if isolated {
                     let data_dir = home_dir().join("Library/Application Support/Claude-Qwitch-3p");
                     let arg = format!("--user-data-dir={}", data_dir.display());
-                    let status = Command::new("open")
+                    let status = open_cmd()
                         .args(["-n", "-a", "/Applications/Claude.app", "--args", &arg])
                         .status();
                     if !matches!(status, Ok(s) if s.success()) {
-                        let _ = Command::new("open")
-                            .args(["-a", "/Applications/Claude.app"])
-                            .spawn();
+                        let _ = open_cmd().args(["-a", "/Applications/Claude.app"]).spawn();
                     }
                 } else {
-                    let _ = Command::new("open")
-                        .args(["-a", "/Applications/Claude.app"])
-                        .spawn();
+                    let _ = open_cmd().args(["-a", "/Applications/Claude.app"]).spawn();
                 }
             }
             TargetAgentId::Dsh => {
@@ -1989,7 +1994,7 @@ pub fn restart_agent_process(
                     .args(["-f", "DeepSeek Harness"])
                     .output();
                 std::thread::sleep(std::time::Duration::from_millis(350));
-                let _ = Command::new("open")
+                let _ = open_cmd()
                     .args(["-a", "/Applications/DeepSeek Harness.app"])
                     .spawn();
             }

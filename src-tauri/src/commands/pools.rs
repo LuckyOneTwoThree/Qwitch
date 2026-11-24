@@ -141,7 +141,7 @@ pub async fn update_gateway_port_cmd(
     let ws = build_workspace_state(&state.db, &state.master_key, &state.gateway)?;
     for b in &ws.agent_bindings {
         if !b.mounted_pool_ids.is_empty() {
-            let _ = apply_agent_wiring(
+            apply_agent_wiring(
                 &state.db,
                 &state.master_key,
                 b.agent_id,
@@ -153,7 +153,7 @@ pub async fn update_gateway_port_cmd(
                 port,
                 ws.gateway.global_proxy_detected,
                 None,
-            );
+            )?;
         }
     }
     emit_workspace_updated(&app);
@@ -234,7 +234,7 @@ pub fn delete_account_pool(
                 .into_iter()
                 .filter(|id| id != &pool_id)
                 .collect();
-            let _ = apply_agent_wiring(
+            apply_agent_wiring(
                 &state.db,
                 &state.master_key,
                 b.agent_id,
@@ -246,7 +246,7 @@ pub fn delete_account_pool(
                 gw.port,
                 gw.global_proxy_detected,
                 None,
-            );
+            )?;
         }
     }
     emit_workspace_updated(&app);

@@ -12,23 +12,71 @@ use crate::storage::QwitchDatabase;
 
 const CLAUDE_CONFIG_UUID: &str = "00000000-0000-4000-8000-717769746368";
 
-pub fn agent_token(agent_id: TargetAgentId) -> &'static str {
+/// 每装机随机网关绑定令牌后缀。由启动期以主密钥派生后注入；未注入时（单元测试/开发）
+/// 回退为 `dev`，并额外接受旧的静态常量令牌以保持测试与旧配置可用。
+static GATEWAY_TOKEN_SUFFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn init_gateway_token_suffix(suffix: String) {
+    let _ = GATEWAY_TOKEN_SUFFIX.set(suffix);
+}
+
+fn token_suffix() -> &'static str {
+    GATEWAY_TOKEN_SUFFIX
+        .get()
+        .map(String::as_str)
+        .unwrap_or("dev")
+}
+
+fn agent_slug(agent_id: TargetAgentId) -> &'static str {
     match agent_id {
-        TargetAgentId::ClaudeDesktop => "qwitch-bind-claude-desktop",
-        TargetAgentId::CodexDesktop => "qwitch-bind-codex-desktop",
-        TargetAgentId::Dsh => "qwitch-bind-dsh",
-        TargetAgentId::Opencode => "qwitch-bind-opencode",
+        TargetAgentId::ClaudeDesktop => "claude-desktop",
+        TargetAgentId::CodexDesktop => "codex-desktop",
+        TargetAgentId::Dsh => "dsh",
+        TargetAgentId::Opencode => "opencode",
     }
 }
 
-pub fn agent_id_from_token(token: &str) -> Option<TargetAgentId> {
-    match token.trim() {
-        "qwitch-bind-claude-desktop" => Some(TargetAgentId::ClaudeDesktop),
-        "qwitch-bind-codex-desktop" => Some(TargetAgentId::CodexDesktop),
-        "qwitch-bind-dsh" => Some(TargetAgentId::Dsh),
-        "qwitch-bind-opencode" => Some(TargetAgentId::Opencode),
-        _ => None,
+/// 返回该 Agent 的网关绑定令牌。生产环境为 `qwitch-bind-<slug>-<每装机随机后缀>`，
+/// 不可由公开信息猜测；开发/测试环境后缀为 `dev`。
+pub fn agent_token(agent_id: TargetAgentId) -> String {
+    format!("qwitch-bind-{}-{}", agent_slug(agent_id), token_suffix())
+}
+
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
     }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+pub fn agent_id_from_token(token: &str) -> Option<TargetAgentId> {
+    let token = token.trim();
+    for agent in [
+        TargetAgentId::ClaudeDesktop,
+        TargetAgentId::CodexDesktop,
+        TargetAgentId::Dsh,
+        TargetAgentId::Opencode,
+    ] {
+        if ct_eq(token, &agent_token(agent)) {
+            return Some(agent);
+        }
+    }
+    // 未注入后缀（单元测试/开发）时兼容旧的静态常量令牌
+    if GATEWAY_TOKEN_SUFFIX.get().is_none() {
+        return match token {
+            "qwitch-bind-claude-desktop" => Some(TargetAgentId::ClaudeDesktop),
+            "qwitch-bind-codex-desktop" => Some(TargetAgentId::CodexDesktop),
+            "qwitch-bind-dsh" => Some(TargetAgentId::Dsh),
+            "qwitch-bind-opencode" => Some(TargetAgentId::Opencode),
+            _ => None,
+        };
+    }
+    None
 }
 
 pub fn detect_bridge_runtime() -> (String, String) {
@@ -1276,7 +1324,7 @@ pub fn apply_agent_wiring(
                 .map_err(|e| e.to_string())?;
 
             let creds_text = std::fs::read_to_string(&paths.files[2]).unwrap_or_default();
-            let next_creds = upsert_dsh_credentials_yaml(&creds_text, "QWITCH_GATEWAY_KEY", token);
+            let next_creds = upsert_dsh_credentials_yaml(&creds_text, "QWITCH_GATEWAY_KEY", &token);
             write_private_file_atomic(&paths.files[2], next_creds.as_bytes())
                 .map_err(|e| e.to_string())?;
             clean_opts.dsh_dual_creds_written = Some(true);
@@ -1856,7 +1904,10 @@ mod tests {
 
         let creds = std::fs::read_to_string(home_dir.join("dsh/.credentials.yaml")).unwrap();
         assert!(!creds.contains("refs: {}"));
-        assert!(creds.contains("refs:\n  QWITCH_GATEWAY_KEY: \"qwitch-bind-dsh\""));
+        assert!(creds.contains(&format!(
+            "refs:\n  QWITCH_GATEWAY_KEY: \"{}\"",
+            agent_token(TargetAgentId::Dsh)
+        )));
         assert!(creds.contains("deepseek/default/apiKey:"));
 
         let patch = std::fs::read_to_string(home_dir.join("dsh/profiles/desktop/cordis.patch.yml"))

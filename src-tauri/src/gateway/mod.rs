@@ -1783,7 +1783,19 @@ async fn handle_http_connection(
         .get("x-openai-actor-authorization")
         .filter(|v| v.trim().eq_ignore_ascii_case("qwitch"))
         .map(|_| TargetAgentId::CodexDesktop);
-    let caller_agent = agent_id_from_token(auth_token)
+    // 强制鉴权：仅接受携带有效绑定令牌的请求，杜绝任意本机进程白嫖号池额度或本机 OAuth。
+    let token_agent = agent_id_from_token(auth_token);
+    if token_agent.is_none() {
+        return write_http_response(
+            stream,
+            "401 Unauthorized",
+            "application/json",
+            br#"{"error":"Missing or invalid gateway binding token"}"#,
+            &[],
+        )
+        .await;
+    }
+    let caller_agent = token_agent
         .or(query_agent)
         .or(actor_agent)
         .or(ua_agent)
@@ -2353,6 +2365,7 @@ mod tests {
         let models_resp = client
             .get(format!("http://127.0.0.1:{port}/v1/models"))
             .header("User-Agent", "ClaudeDesktop/2.7")
+            .bearer_auth("qwitch-bind-claude-desktop")
             .send()
             .await
             .unwrap();
@@ -2375,6 +2388,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(evil.status().as_u16(), 403);
+
+        // 1b. 缺少 / 伪造绑定令牌必须 401（防止任意本机进程白嫖）
+        let no_token = client
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_token.status().as_u16(), 401);
+        let bad_token = client
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .bearer_auth("qwitch-bind-evil")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_token.status().as_u16(), 401);
 
         // 2. Codex WebSocket 升级返回 426
         let ws = client

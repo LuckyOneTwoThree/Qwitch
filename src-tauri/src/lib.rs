@@ -82,6 +82,17 @@ pub fn run() {
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             db.verify_or_init_key_fingerprint(&data_dir, &master_key)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // 每装机网关绑定令牌后缀：以主密钥派生，随重启稳定、不可由公开信息猜测。
+            {
+                let suffix = crate::storage::crypto::compute_uid_hash_hmac(
+                    &master_key,
+                    "gateway-bind",
+                    "v1",
+                );
+                crate::agent_wiring::init_gateway_token_suffix(
+                    suffix.chars().take(16).collect::<String>(),
+                );
+            }
             // 安全迁移：失败不再静默吞掉。
             //
             // 这三项迁移对应「凭据指纹加盐」「密文 AAD 绑定」「历史 PII 脱敏」三条

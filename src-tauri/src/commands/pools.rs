@@ -1,8 +1,10 @@
+use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::agent_wiring::{
-    apply_agent_wiring, inspect_all_agent_bindings, restart_agent_process, unbind_and_restore_agent,
+    apply_agent_wiring, clear_agent_wiring, inspect_all_agent_bindings, restart_agent_process,
+    unbind_and_restore_agent,
 };
 use crate::commands::AppState;
 use crate::domain::{
@@ -11,6 +13,14 @@ use crate::domain::{
 };
 use crate::gateway::GatewayRuntime;
 use crate::storage::QwitchDatabase;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearAllAgentsResult {
+    pub workspace: PoolWorkspaceState,
+    pub cleared: Vec<String>,
+    pub failed: Vec<String>,
+}
 
 fn build_workspace_state(
     db: &QwitchDatabase,
@@ -640,6 +650,75 @@ pub fn unbind_agent_cmd(
     )?;
     emit_workspace_updated(&app);
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
+}
+
+#[tauri::command]
+pub fn clear_agent_wiring_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent_id: TargetAgentId,
+    mode: String,
+) -> Result<PoolWorkspaceState, String> {
+    let gw = state.gateway.runtime_state();
+    let pools = state
+        .db
+        .list_pools(&state.master_key, &state.gateway.cooldown_snapshot())
+        .map_err(|e| e.to_string())?;
+    clear_agent_wiring(
+        &state.db,
+        &state.master_key,
+        agent_id,
+        &pools,
+        &gw.host,
+        gw.port,
+        gw.global_proxy_detected,
+        None,
+        &mode,
+    )?;
+    emit_workspace_updated(&app);
+    build_workspace_state(&state.db, &state.master_key, &state.gateway)
+}
+
+#[tauri::command]
+pub fn clear_all_agent_wiring_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+    stop_gateway: bool,
+) -> Result<ClearAllAgentsResult, String> {
+    let gw = state.gateway.runtime_state();
+    let pools = state
+        .db
+        .list_pools(&state.master_key, &state.gateway.cooldown_snapshot())
+        .map_err(|e| e.to_string())?;
+    let mut cleared = Vec::new();
+    let mut failed = Vec::new();
+    for agent_id in TargetAgentId::all() {
+        match clear_agent_wiring(
+            &state.db,
+            &state.master_key,
+            agent_id,
+            &pools,
+            &gw.host,
+            gw.port,
+            gw.global_proxy_detected,
+            None,
+            &mode,
+        ) {
+            Ok(_) => cleared.push(agent_id.as_str().to_string()),
+            Err(e) => failed.push(format!("{}: {}", agent_id.as_str(), e)),
+        }
+    }
+    if stop_gateway {
+        state.gateway.stop_server();
+    }
+    emit_workspace_updated(&app);
+    let workspace = build_workspace_state(&state.db, &state.master_key, &state.gateway)?;
+    Ok(ClearAllAgentsResult {
+        workspace,
+        cleared,
+        failed,
+    })
 }
 
 #[tauri::command]

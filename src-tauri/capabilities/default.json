@@ -67,6 +67,8 @@
     "allow-mount-pool-to-agents-cmd",
     "allow-unmount-pool-from-agent-cmd",
     "allow-unbind-agent-cmd",
+    "allow-clear-agent-wiring-cmd",
+    "allow-clear-all-agent-wiring-cmd",
     "allow-repair-agent-drift-cmd",
     "allow-restart-agent-client-cmd",
     "allow-toggle-agent-option-cmd",

@@ -455,6 +455,8 @@ pub fn run() {
             commands::mount_pool_to_agents_cmd,
             commands::unmount_pool_from_agent_cmd,
             commands::unbind_agent_cmd,
+            commands::clear_agent_wiring_cmd,
+            commands::clear_all_agent_wiring_cmd,
             commands::repair_agent_drift_cmd,
             commands::restart_agent_client_cmd,
             commands::toggle_agent_option_cmd,

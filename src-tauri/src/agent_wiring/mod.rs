@@ -1808,6 +1808,293 @@ pub fn apply_agent_wiring(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn read_or(path: &Path, default: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|_| default.to_string())
+}
+
+fn set_deployment_mode(path: &Path, mode: &str) -> Result<(), String> {
+    let mut doc: Value = match std::fs::read_to_string(path) {
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s).map_err(|e| e.to_string())?,
+        _ => return Ok(()),
+    };
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("deploymentMode".into(), Value::String(mode.into()));
+    }
+    write_private_file_atomic(
+        path,
+        serde_json::to_string_pretty(&doc)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn remove_qwitch_from_opencode_like(path: &Path) -> Result<(), String> {
+    let raw = read_or(path, "{}");
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let mut doc: Value = parse_jsonc_lenient(&raw)?;
+    if let Some(obj) = doc.as_object_mut() {
+        for key in ["provider", "providers"] {
+            if let Some(pm) = obj.get_mut(key).and_then(|v| v.as_object_mut()) {
+                pm.remove("qwitch");
+            }
+        }
+        for key in ["model", "small_model"] {
+            if let Some(s) = obj.get(key).and_then(|v| v.as_str()) {
+                if s.starts_with("qwitch/") {
+                    obj.remove(key);
+                }
+            }
+        }
+    }
+    write_private_file_atomic(
+        path,
+        serde_json::to_string_pretty(&doc)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn remove_qwitch_from_zcode(config_path: &Path, rules_path: &Path) -> Result<(), String> {
+    if let Ok(raw) = std::fs::read_to_string(config_path) {
+        if !raw.trim().is_empty() {
+            if let Ok(mut doc) = serde_json::from_str::<Value>(&raw) {
+                if let Some(pm) = doc.get_mut("provider").and_then(|v| v.as_object_mut()) {
+                    pm.remove("qwitch");
+                }
+                write_private_file_atomic(
+                    config_path,
+                    serde_json::to_string_pretty(&doc)
+                        .map_err(|e| e.to_string())?
+                        .as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    if let Ok(raw) = std::fs::read_to_string(rules_path) {
+        if !raw.trim().is_empty() {
+            if let Ok(mut rules) = serde_json::from_str::<Value>(&raw) {
+                if let Some(cfg) = rules.get_mut("config").and_then(|v| v.as_object_mut()) {
+                    if let Some(pcr) = cfg
+                        .get_mut("providerConfigRules")
+                        .and_then(|v| v.as_object_mut())
+                    {
+                        if let Some(arr) =
+                            pcr.get_mut("providerRules").and_then(|v| v.as_array_mut())
+                        {
+                            arr.retain(|v| {
+                                v.get("providerId").and_then(Value::as_str) != Some("qwitch")
+                            });
+                        }
+                    }
+                    if let Some(mcr) = cfg
+                        .get_mut("modelConfigRules")
+                        .and_then(|v| v.as_object_mut())
+                    {
+                        for key in ["providerModelRules", "manualProviderModelRules"] {
+                            if let Some(arr) = mcr.get_mut(key).and_then(|v| v.as_array_mut()) {
+                                arr.retain(|v| {
+                                    v.get("providerId").and_then(Value::as_str) != Some("qwitch")
+                                });
+                            }
+                        }
+                    }
+                }
+                write_private_file_atomic(
+                    rules_path,
+                    serde_json::to_string_pretty(&rules)
+                        .map_err(|e| e.to_string())?
+                        .as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_qwitch_from_dsh(paths: &AgentPaths) -> Result<(), String> {
+    // .env 与 .credentials.yaml 去掉 QWITCH_GATEWAY_KEY 行
+    for idx in [1usize, 2usize] {
+        if let Some(p) = paths.files.get(idx) {
+            if let Ok(raw) = std::fs::read_to_string(p) {
+                if raw.contains("QWITCH_GATEWAY_KEY") {
+                    let kept: Vec<&str> = raw
+                        .lines()
+                        .filter(|l| !l.trim_start().starts_with("QWITCH_GATEWAY_KEY"))
+                        .collect();
+                    let mut next = kept.join("\n");
+                    if !next.is_empty() && !next.ends_with('\n') {
+                        next.push('\n');
+                    }
+                    let _ = write_private_file_atomic(p, next.as_bytes());
+                }
+            }
+        }
+    }
+    // cordis.patch.yml 去掉包含 QWITCH_GATEWAY_KEY 的 `- id: llm-pi-ai` 段落
+    if let Some(p) = paths.files.first() {
+        if let Ok(raw) = std::fs::read_to_string(p) {
+            if raw.contains("QWITCH_GATEWAY_KEY") {
+                let lines: Vec<&str> = raw.lines().collect();
+                let mut out: Vec<String> = Vec::new();
+                let mut i = 0usize;
+                while i < lines.len() {
+                    if lines[i].trim_start().starts_with("- id: llm-pi-ai") {
+                        let start = i;
+                        let mut j = i + 1;
+                        while j < lines.len() && !lines[j].starts_with("- id: ") {
+                            j += 1;
+                        }
+                        let block = lines[start..j].join("\n");
+                        if block.contains("QWITCH_GATEWAY_KEY") {
+                            i = j;
+                            continue;
+                        }
+                    }
+                    out.push(lines[i].to_string());
+                    i += 1;
+                }
+                let mut next = out.join("\n");
+                if !next.is_empty() && !next.ends_with('\n') {
+                    next.push('\n');
+                }
+                let _ = write_private_file_atomic(p, next.as_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_qwitch_from_codex(paths: &AgentPaths) -> Result<(), String> {
+    if let Some(p) = paths.files.first() {
+        if let Ok(raw) = std::fs::read_to_string(p) {
+            let stripped = strip_toml_section(&raw, "[model_providers.qwitch]");
+            let kept: Vec<&str> = stripped
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !(t.starts_with("model_provider = \"qwitch\"")
+                        || (t.starts_with("model_catalog_json") && t.contains("qwitch_models")))
+                })
+                .collect();
+            let mut next = kept.join("\n");
+            if !next.is_empty() && !next.ends_with('\n') {
+                next.push('\n');
+            }
+            let _ = write_private_file_atomic(p, next.as_bytes());
+        }
+    }
+    if let Some(catalog) = paths.files.get(1) {
+        let _ = std::fs::remove_file(catalog);
+    }
+    Ok(())
+}
+
+fn remove_qwitch_from_claude(paths: &AgentPaths) -> Result<(), String> {
+    // 删除 Qwitch 写入的 configLibrary 与 _meta 条目
+    for idx in [1usize, 2usize, 4usize, 5usize] {
+        if let Some(p) = paths.files.get(idx) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    // 主配置还原为 cloud 模式（若存在）
+    for idx in [0usize, 3usize, 6usize] {
+        if let Some(p) = paths.files.get(idx) {
+            let _ = set_deployment_mode(p, "cloud");
+        }
+    }
+    Ok(())
+}
+
+/// 强制删除某个 Agent 配置里所有 Qwitch 写入（不依赖 stash，保留用户其它配置）。
+fn remove_qwitch_writes(
+    agent_id: TargetAgentId,
+    paths: &AgentPaths,
+    _options: &AgentBindingOptions,
+) -> Result<(), String> {
+    match agent_id {
+        TargetAgentId::Opencode | TargetAgentId::Mimo => {
+            remove_qwitch_from_opencode_like(&paths.files[0])
+        }
+        TargetAgentId::Zcode => {
+            let rules = paths
+                .files
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| paths.files[0].with_file_name("provider_config.json"));
+            remove_qwitch_from_zcode(&paths.files[0], &rules)
+        }
+        TargetAgentId::Dsh => remove_qwitch_from_dsh(paths),
+        TargetAgentId::CodexDesktop => remove_qwitch_from_codex(paths),
+        TargetAgentId::ClaudeDesktop => remove_qwitch_from_claude(paths),
+    }
+}
+
+/// 清除单个 Agent 的 Qwitch 配置。
+/// - `mode == "restore"`：有 stash 则精确还原，否则回退为强制清除；
+/// - `mode == "force"`：忽略 stash，仅删除 Qwitch 写入。
+#[allow(clippy::too_many_arguments)]
+pub fn clear_agent_wiring(
+    db: &QwitchDatabase,
+    master_key: &[u8; 32],
+    agent_id: TargetAgentId,
+    all_pools: &[AccountPool],
+    host: &str,
+    port: u16,
+    global_proxy: bool,
+    base_dir_override: Option<&Path>,
+    mode: &str,
+) -> Result<AgentBinding, String> {
+    let stashes = db
+        .get_agent_stashes(master_key, agent_id)
+        .map_err(|e| e.to_string())?;
+    if mode != "force" && !stashes.is_empty() {
+        return unbind_and_restore_agent(
+            db,
+            master_key,
+            agent_id,
+            all_pools,
+            host,
+            port,
+            global_proxy,
+            base_dir_override,
+        );
+    }
+    let existing_opts = db
+        .get_stored_agent_bindings()
+        .ok()
+        .and_then(|list| list.into_iter().find(|b| b.agent_id == agent_id))
+        .map(|b| b.options)
+        .unwrap_or_else(|| default_options_for_agent(agent_id));
+    let paths = resolve_agent_paths(agent_id, &existing_opts, base_dir_override);
+    remove_qwitch_writes(agent_id, &paths, &existing_opts)?;
+    let _ = db.delete_agent_stashes(agent_id);
+    let stored = StoredAgentBinding {
+        agent_id,
+        mounted_pool_ids: Vec::new(),
+        default_model_key: None,
+        options: existing_opts,
+        status: AgentBindingStatus::Unbound,
+        last_hit_at: None,
+    };
+    db.upsert_agent_binding(&stored)
+        .map_err(|e| e.to_string())?;
+    Ok(build_agent_binding_dto(
+        &stored,
+        all_pools,
+        host,
+        port,
+        global_proxy,
+        base_dir_override,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn unbind_and_restore_agent(
     db: &QwitchDatabase,
     master_key: &[u8; 32],
@@ -2612,6 +2899,65 @@ mod tests {
             std::fs::read_to_string(home_dir.join("zcode/v2/provider_config.json")).unwrap();
         assert!(zc_rules.contains("qwitch"));
         assert!(zc_rules.contains("18425"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn force_clear_removes_qwitch_but_keeps_other_providers() {
+        let (db, key, root, home_dir, pools) = setup_wiring_env();
+        std::fs::create_dir_all(home_dir.join("mimocode")).unwrap();
+        std::fs::create_dir_all(home_dir.join("zcode/v2")).unwrap();
+        std::fs::write(
+            home_dir.join("mimocode/mimocode.jsonc"),
+            r#"{"model":"qwitch/x","provider":{"qwitch":{"npm":"@ai-sdk/openai-compatible"},"other":{"npm":"keep"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home_dir.join("zcode/v2/config.json"),
+            r#"{"provider":{"qwitch":{"kind":"anthropic"},"other":{"kind":"anthropic"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home_dir.join("zcode/v2/provider_config.json"),
+            r#"{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[{"providerId":"qwitch"},{"providerId":"other"}]},"modelConfigRules":{"providerModelRules":[{"providerId":"qwitch","modelId":"m"}],"manualProviderModelRules":[]}}}"#,
+        )
+        .unwrap();
+
+        clear_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::Mimo,
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+            "force",
+        )
+        .expect("clear mimo");
+        let mimo = std::fs::read_to_string(home_dir.join("mimocode/mimocode.jsonc")).unwrap();
+        assert!(!mimo.contains("qwitch"));
+        assert!(mimo.contains("other"));
+
+        clear_agent_wiring(
+            &db,
+            &key,
+            TargetAgentId::Zcode,
+            &pools,
+            "127.0.0.1",
+            18425,
+            false,
+            Some(&home_dir),
+            "force",
+        )
+        .expect("clear zcode");
+        let zc = std::fs::read_to_string(home_dir.join("zcode/v2/config.json")).unwrap();
+        assert!(!zc.contains("qwitch"));
+        assert!(zc.contains("other"));
+        let zr = std::fs::read_to_string(home_dir.join("zcode/v2/provider_config.json")).unwrap();
+        assert!(!zr.contains("qwitch"));
+        assert!(zr.contains("other"));
 
         let _ = std::fs::remove_dir_all(root);
     }

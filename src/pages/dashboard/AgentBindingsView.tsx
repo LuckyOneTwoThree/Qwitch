@@ -23,6 +23,7 @@ import {
   Square,
   Star,
   Terminal,
+  Trash2,
   Unlink,
   Wrench,
   X,
@@ -40,6 +41,7 @@ import {
 import type { AgentBinding, PoolStrategy, TargetAgentId } from "../../types/pool";
 import { AgentBrandIcon } from "../../components/AgentBrandIcon";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
+import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 
 /** 去掉展示名里的「工具短名 · 」前缀，配合左侧品牌图标，避免模型名过长 */
 function shortModelLabel(name: string): string {
@@ -136,6 +138,8 @@ export function AgentBindingsView({
     toggleProxySimulation,
     updateAgentMountedPools,
     unbindAgent,
+    clearAgentWiring,
+    clearAllAgentWiring,
     repairAgentDrift,
     restartAgentClient,
     refreshAgentRunning,
@@ -183,6 +187,10 @@ export function AgentBindingsView({
     defaultModelDisplay?: string | null;
     beforeText: string;
     afterText: string;
+  } | null>(null);
+  const [clearConfirm, setClearConfirm] = useState<{
+    mode: "restore" | "force";
+    agentId?: TargetAgentId;
   } | null>(null);
 
   useEffect(() => {
@@ -574,9 +582,20 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
           )}
         </div>
 
-        <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-          先选 Agent → 配置模型 → 按需在「账号调度」调整主备顺位
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+            先选 Agent → 配置模型 → 按需在「账号调度」调整主备顺位
+          </span>
+          <button
+            type="button"
+            onClick={() => setClearConfirm({ mode: "restore" })}
+            className="btn btn-xs btn-danger gap-1"
+            title="清除所有 Agent 的 Qwitch 配置：有备份则还原，无备份则强制清除 Qwitch 写入"
+          >
+            <Trash2 className="h-3 w-3" aria-hidden="true" />
+            全部清除
+          </button>
+        </div>
       </section>
 
       {/* 顶部 4 格紧凑目标 Agent 切换栏 */}
@@ -792,6 +811,18 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     一键接入推荐模型
                   </button>
                 )}
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setClearConfirm({ mode: "force", agentId: activeBinding.agentId })
+                  }
+                  title="仅删除该 Agent 配置中的 Qwitch 写入（保留其它配置），无需备份"
+                  className="btn btn-xs btn-secondary gap-1"
+                >
+                  <Trash2 className="h-3 w-3" aria-hidden="true" />
+                  强制清除
+                </button>
               </div>
             </div>
 
@@ -1681,6 +1712,33 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
           }
         />
       )}
+
+      <ConfirmDialog
+        open={clearConfirm !== null}
+        danger
+        title={
+          clearConfirm?.agentId
+            ? "强制清除该 Agent 的 Qwitch 写入"
+            : "全部清除所有 Agent 的 Qwitch 配置"
+        }
+        description={
+          clearConfirm?.agentId
+            ? "将仅删除该 Agent 配置中 Qwitch 写入的 provider / 路由 / 令牌键，保留其它配置。此操作可用「全部解绑并还原」前先备份，但强制清除不依赖备份。"
+            : "将对 6 个目标 Agent 执行清除：有备份的还原原始文件，无备份的强制删除 Qwitch 写入。不会删除账号、号池或停止网关。"
+        }
+        confirmLabel="确认清除"
+        onCancel={() => setClearConfirm(null)}
+        onConfirm={() => {
+          const target = clearConfirm;
+          setClearConfirm(null);
+          if (!target) return;
+          if (target.agentId) {
+            clearAgentWiring(target.agentId, target.mode);
+          } else {
+            clearAllAgentWiring(target.mode, false);
+          }
+        }}
+      />
     </div>
   );
 }

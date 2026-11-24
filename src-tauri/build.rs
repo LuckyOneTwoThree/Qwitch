@@ -69,6 +69,8 @@ fn main() {
         "mount_pool_to_agents_cmd",
         "unmount_pool_from_agent_cmd",
         "unbind_agent_cmd",
+        "clear_agent_wiring_cmd",
+        "clear_all_agent_wiring_cmd",
         "repair_agent_drift_cmd",
         "restart_agent_client_cmd",
         "toggle_agent_option_cmd",

@@ -105,6 +105,8 @@ export interface PoolPrototypeContextValue {
   mountPoolToAgents: (poolId: string, agentIds: TargetAgentId[]) => void;
   unmountPoolFromAgent: (agentId: TargetAgentId, poolId: string) => void;
   unbindAgent: (agentId: TargetAgentId) => void;
+  clearAgentWiring: (agentId: TargetAgentId, mode: "restore" | "force") => void;
+  clearAllAgentWiring: (mode: "restore" | "force", stopGateway: boolean) => void;
   repairAgentDrift: (agentId: TargetAgentId) => void;
   restartAgentClient: (agentId: TargetAgentId) => void;
   toggleAgentOption: (agentId: TargetAgentId, key: keyof AgentBindingOptions) => void;
@@ -211,6 +213,8 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   mountPoolToAgents: () => {},
   unmountPoolFromAgent: () => {},
   unbindAgent: () => {},
+  clearAgentWiring: () => {},
+  clearAllAgentWiring: () => {},
   repairAgentDrift: () => {},
   restartAgentClient: () => {},
   toggleAgentOption: () => {},
@@ -1524,6 +1528,57 @@ export function PoolPrototypeProvider({
     [notify, rawBindings, syncWorkspaceCommand]
   );
 
+  const clearAgentWiring = useCallback(
+    (agentId: TargetAgentId, mode: "restore" | "force") => {
+      if (!isTauriRuntime) return;
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const ws = await invoke<PoolWorkspaceState>("clear_agent_wiring_cmd", {
+            agentId,
+            mode,
+          });
+          applyWorkspaceState(ws);
+          notify(
+            mode === "force" ? "已强制清除该 Agent 的 Qwitch 写入" : "已清除并还原该 Agent 配置",
+            "success"
+          );
+        } catch (err) {
+          notify(`清除失败：${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+      })();
+    },
+    [applyWorkspaceState, isTauriRuntime, notify]
+  );
+
+  const clearAllAgentWiring = useCallback(
+    (mode: "restore" | "force", stopGateway: boolean) => {
+      if (!isTauriRuntime) return;
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const res = await invoke<{
+            workspace: PoolWorkspaceState;
+            cleared: string[];
+            failed: string[];
+          }>("clear_all_agent_wiring_cmd", { mode, stopGateway });
+          applyWorkspaceState(res.workspace);
+          if (res.failed.length > 0) {
+            notify(
+              `已清除 ${res.cleared.length} 个 Agent，失败 ${res.failed.length} 个：${res.failed.join("；")}`,
+              "error"
+            );
+          } else {
+            notify(`已清除全部 Agent 配置（${res.cleared.length} 个）`, "success");
+          }
+        } catch (err) {
+          notify(`全部清除失败：${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+      })();
+    },
+    [applyWorkspaceState, isTauriRuntime, notify]
+  );
+
   const repairAgentDrift = useCallback(
     (agentId: TargetAgentId) => {
       setRawBindings((prev) =>
@@ -2615,6 +2670,8 @@ export function PoolPrototypeProvider({
       mountPoolToAgents,
       unmountPoolFromAgent,
       unbindAgent,
+      clearAgentWiring,
+      clearAllAgentWiring,
       repairAgentDrift,
       restartAgentClient,
       toggleAgentOption,
@@ -2675,6 +2732,8 @@ export function PoolPrototypeProvider({
       mountPoolToAgents,
       unmountPoolFromAgent,
       unbindAgent,
+      clearAgentWiring,
+      clearAllAgentWiring,
       repairAgentDrift,
       restartAgentClient,
       toggleAgentOption,

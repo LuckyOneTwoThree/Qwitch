@@ -628,7 +628,7 @@ impl QwitchDatabase {
                 strategy_to_str(input.strategy),
                 affinity_to_str(input.affinity_mode),
                 input.skip_active_client_account as i64,
-                input.cooldown_seconds.max(10) as i64,
+                input.cooldown_seconds.clamp(10, 86_400) as i64,
                 input.auto_refresh_on_401 as i64,
                 input.fallback_api_key_enabled as i64,
                 now
@@ -678,7 +678,7 @@ impl QwitchDatabase {
             strategy: input.strategy,
             affinity_mode: input.affinity_mode,
             skip_active_client_account: input.skip_active_client_account,
-            cooldown_seconds: input.cooldown_seconds.max(10),
+            cooldown_seconds: input.cooldown_seconds.clamp(10, 86_400),
             auto_refresh_on_401: input.auto_refresh_on_401,
             fallback_api_key_enabled: input.fallback_api_key_enabled,
             model_policies: policies,
@@ -1174,7 +1174,7 @@ impl QwitchDatabase {
                 strategy_to_str(strategy),
                 affinity_to_str(affinity_mode),
                 skip_active as i64,
-                cooldown_seconds.max(10) as i64,
+                cooldown_seconds.clamp(10, 86_400) as i64,
                 auto_401 as i64,
                 fallback_key as i64,
                 now

@@ -412,7 +412,8 @@ pub fn inject_pool_member_cooldown(
         .iter()
         .find(|m| m.id == member_id)
         .ok_or_else(|| format!("找不到成员 {member_id}"))?;
-    let until = chrono::Utc::now().timestamp_millis() + (pool.cooldown_seconds as i64) * 1000;
+    let until = chrono::Utc::now().timestamp_millis()
+        + (pool.cooldown_seconds.clamp(10, 86_400) as i64) * 1000;
     state.gateway.set_member_cooldown(&member.account_id, until);
     emit_workspace_updated(&app);
     build_workspace_state(&state.db, &state.master_key, &state.gateway)

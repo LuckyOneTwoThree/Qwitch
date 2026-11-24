@@ -1126,7 +1126,9 @@ pub fn compute_pool_serving_accounts(
             Some("risk_paused") | Some("expired") | Some("disabled")
         );
         let readonly = m.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly);
-        if m.enabled && !paused && !readonly && !cooled && !skipped {
+        // API Key 兜底关闭时，custom_api_key 成员不计入可用（与 gateway 调度口径一致）
+        let api_key_disabled = m.tool_id == "custom_api_key" && !pool.fallback_api_key_enabled;
+        if m.enabled && !paused && !readonly && !cooled && !skipped && !api_key_disabled {
             healthy += 1;
         }
     }

@@ -1816,6 +1816,26 @@ async fn handle_http_connection(
     let cooldowns = runtime.cooldown_snapshot();
     let pools = db.list_pools(&master_key, &cooldowns).unwrap_or_default();
 
+    // 跨池隔离：仅当本次调用方 Agent 已显式挂载若干池时，才把可路由范围收敛到
+    // 这些池，避免“只挂载了池 A 的 Agent 请求到池 B 的同名模型”。
+    let stored_bindings = db.get_stored_agent_bindings().unwrap_or_default();
+    let mounted_for_caller: Option<Vec<String>> = caller_agent
+        .and_then(|a| {
+            stored_bindings
+                .iter()
+                .find(|b| b.agent_id == a)
+                .map(|b| b.mounted_pool_ids.clone())
+        })
+        .filter(|ids| !ids.is_empty());
+    let routed_pools: Vec<AccountPool> = match &mounted_for_caller {
+        Some(ids) => pools
+            .iter()
+            .filter(|p| ids.iter().any(|id| id == &p.id))
+            .cloned()
+            .collect(),
+        None => pools.clone(),
+    };
+
     if method == "GET" && path == "/v1/models" {
         let bindings = db.get_stored_agent_bindings().unwrap_or_default();
         let target_agent = caller_agent.unwrap_or(TargetAgentId::Opencode);
@@ -1951,7 +1971,7 @@ async fn handle_http_connection(
     };
 
     let (pool, requested_model) =
-        match resolve_target_pool_and_model(&pools, caller_agent, &ir_req.model) {
+        match resolve_target_pool_and_model(&routed_pools, caller_agent, &ir_req.model) {
             Some(found) => found,
             None => {
                 if matches!(path.as_str(), "/v1/responses" | "/v1/responses/compact")
@@ -2027,7 +2047,7 @@ async fn handle_http_connection(
                 }
 
                 if caller_agent == Some(TargetAgentId::CodexDesktop) {
-                    if let Some(found) = pools.iter().find(|p| p.enabled).and_then(|p| {
+                    if let Some(found) = routed_pools.iter().find(|p| p.enabled).and_then(|p| {
                         p.model_policies
                             .iter()
                             .find(|m| m.enabled)

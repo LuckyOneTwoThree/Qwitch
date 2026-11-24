@@ -247,27 +247,35 @@ export function PoolSimulationModal({
               </span>
             </div>
             <div className="flex flex-wrap gap-1.5">
-              {availableModels.map((item) => {
-                const active = effectiveModelId === item.modelId;
-                return (
-                  <button
-                    key={item.modelId}
-                    type="button"
-                    onClick={() => setModelId(item.modelId)}
-                    aria-pressed={active}
-                    className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-left font-mono text-[11px] transition ${
-                      active
-                        ? "border-brand-500 bg-brand-500/12 font-semibold text-brand-900 dark:border-brand-400/60 dark:text-brand-100"
-                        : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300"
-                    }`}
-                  >
-                    <span>{item.modelId}</span>
-                    <span className="rounded bg-zinc-100 px-1 py-0.5 font-sans text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-                      {item.serving.healthy}/{item.serving.total}号 ({item.serving.tierSummary})
-                    </span>
-                  </button>
-                );
-              })}
+              {availableModels.length === 0 ? (
+                <div className="w-full rounded-xl border border-dashed border-zinc-300/80 bg-zinc-50/70 px-3 py-2.5 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900/50 dark:text-zinc-400">
+                  {pools.length === 0
+                    ? "当前暂无可用号池，请先在「Agent 接入与调度」中勾选至少一个订阅工具模型后再测试路由。"
+                    : "该号池当前未开放任何模型，请先勾选开放模型或切换其他号池。"}
+                </div>
+              ) : (
+                availableModels.map((item) => {
+                  const active = effectiveModelId === item.modelId;
+                  return (
+                    <button
+                      key={item.modelId}
+                      type="button"
+                      onClick={() => setModelId(item.modelId)}
+                      aria-pressed={active}
+                      className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-left font-mono text-[11px] transition ${
+                        active
+                          ? "border-brand-500 bg-brand-500/12 font-semibold text-brand-900 dark:border-brand-400/60 dark:text-brand-100"
+                          : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300"
+                      }`}
+                    >
+                      <span>{item.modelId}</span>
+                      <span className="rounded bg-zinc-100 px-1 py-0.5 font-sans text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                        {item.serving.healthy}/{item.serving.total}号 ({item.serving.tierSummary})
+                      </span>
+                    </button>
+                  );
+                })
+              )}
             </div>
           </div>
 

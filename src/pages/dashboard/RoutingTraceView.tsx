@@ -9,6 +9,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  X,
   Zap,
 } from "lucide-react";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
@@ -23,13 +24,16 @@ export function RoutingTraceView({
 }) {
   const { traces, pools, agentBindings, candidates } = usePoolPrototype();
   const [agentFilter, setAgentFilter] = useState<"all" | TargetAgentId>("all");
-  const [statusFilter, setStatusFilter] = useState<"all" | "failover_success" | "success">("all");
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "failover_success" | "failed" | "success"
+  >("all");
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(traces[0]?.id ?? null);
 
   const stats = useMemo(() => {
     const total = traces.length;
     const failovers = traces.filter((t) => t.status === "failover_success").length;
+    const failedCount = traces.filter((t) => t.status === "failed").length;
     const cacheHits = traces.filter((t) => t.cacheAffinityHit).length;
     const successCount = traces.filter((t) => t.status !== "failed").length;
     const healthyUpstreams = candidates.filter(
@@ -40,6 +44,7 @@ export function RoutingTraceView({
       total,
       successRate: total > 0 ? Math.round((successCount / total) * 100) : 100,
       failovers,
+      failedCount,
       cacheHitRate: total > 0 ? Math.round((cacheHits / total) * 100) : 0,
       healthyUpstreams,
       totalUpstreams: candidates.length,
@@ -165,8 +170,18 @@ export function RoutingTraceView({
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索号池、命中账号或模型..."
               aria-label="搜索路由决策记录"
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 py-1.5 pr-3 pl-8 text-xs focus:border-brand-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-800/70"
+              className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 py-1.5 pr-7 pl-8 text-xs focus:border-brand-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-800/70"
             />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                aria-label="清除搜索"
+                className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded p-0.5 text-zinc-400 transition hover:bg-zinc-200/70 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              >
+                <X className="h-3 w-3" aria-hidden="true" />
+              </button>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-1">
@@ -191,6 +206,20 @@ export function RoutingTraceView({
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() =>
+              setStatusFilter((prev) => (prev === "failed" ? "all" : "failed"))
+            }
+            className={`chip ${
+              statusFilter === "failed"
+                ? "chip-active"
+                : "border border-zinc-200 dark:border-zinc-700"
+            }`}
+          >
+            仅看失败 {stats.failedCount > 0 ? `(${stats.failedCount})` : ""}
+          </button>
+
           <button
             type="button"
             onClick={() =>
@@ -220,6 +249,13 @@ export function RoutingTraceView({
 
       {/* 可展开的决策链路流水 */}
       <div className="space-y-2">
+        {filteredTraces.length === 0 && (
+          <div className="surface-card px-4 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
+            {traces.length === 0
+              ? "暂无路由决策记录：启动网关并让 Agent 发起请求后，这里会实时展示调度链路。"
+              : "当前筛选条件下没有匹配记录，试试清除搜索或切换筛选。"}
+          </div>
+        )}
         {filteredTraces.map((trace) => {
           const isOpen = expandedId === trace.id;
           const agentMeta = agentBindings.find((b) => b.agentId === trace.agentId);

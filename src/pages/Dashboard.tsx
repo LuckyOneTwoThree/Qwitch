@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   CheckCircle2,
@@ -495,18 +496,29 @@ export function Dashboard() {
     activeToolMeta,
   ]);
 
-  const onTitleBarDoubleClick = (e?: { target: EventTarget | null }) => {
-    const t = e?.target as HTMLElement | null;
-    if (
-      t &&
-      t.closest('button, a, input, select, textarea, [role="button"], [role="tab"]')
-    ) {
-      return;
+  const isInteractiveTarget = (target: EventTarget | null) => {
+    const el = target as HTMLElement | null;
+    return (
+      !!el &&
+      !!el.closest('button, a, input, select, textarea, [role="button"], [role="tab"]')
+    );
+  };
+  const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+  // 手动触发窗口拖动（比 data-tauri-drag-region 更可靠，且可精确排除按钮区域）
+  const onTitleBarMouseDown = (e: { button?: number; target: EventTarget | null }) => {
+    if (e.button !== 0 || isInteractiveTarget(e.target) || !isTauri()) return;
+    try {
+      void getCurrentWindow().startDragging();
+    } catch {
+      /* ignore */
     }
+  };
+
+  const onTitleBarDoubleClick = (e?: { target: EventTarget | null }) => {
+    if (isInteractiveTarget(e?.target ?? null) || !isTauri()) return;
     void (async () => {
-      if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
       try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
         if (await win.isMaximized()) {
           await win.unmaximize();
@@ -530,7 +542,7 @@ export function Dashboard() {
     <div className="relative flex h-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
 
       <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200 bg-white px-3 pb-3 pt-0 dark:border-zinc-800 dark:bg-zinc-900">
-        <div data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="h-8 shrink-0 -mx-3" />
+        <div onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="h-8 shrink-0 -mx-3" />
         <div className="flex min-h-0 flex-1 flex-col justify-between">
         <div className="overflow-y-auto pr-0.5">
           <div className="mb-5 flex items-center gap-2.5 px-1.5">
@@ -763,8 +775,8 @@ export function Dashboard() {
       </aside>
 
       <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
-          <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2.5">
+        <header onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
+          <div onMouseDown={onTitleBarMouseDown} className="flex min-w-0 flex-1 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>

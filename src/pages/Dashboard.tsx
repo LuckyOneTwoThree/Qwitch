@@ -495,7 +495,14 @@ export function Dashboard() {
     activeToolMeta,
   ]);
 
-  const onTitleBarDoubleClick = () => {
+  const onTitleBarDoubleClick = (e?: { target: EventTarget | null }) => {
+    const t = e?.target as HTMLElement | null;
+    if (
+      t &&
+      t.closest('button, a, input, select, textarea, [role="button"], [role="tab"]')
+    ) {
+      return;
+    }
     void (async () => {
       if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
       try {
@@ -756,8 +763,8 @@ export function Dashboard() {
       </aside>
 
       <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
-          <div data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="flex min-w-0 flex-1 items-center gap-2.5">
+        <header data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
+          <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>

@@ -32,6 +32,20 @@ pub enum StorageError {
     LockPoisoned,
 }
 
+/// 幂等添加列：仅吞掉「列已存在」错误，其余真实错误向上传播。
+fn exec_add_column(conn: &rusqlite::Connection, sql: &str) -> Result<(), StorageError> {
+    match conn.execute(sql, []) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if e.to_string().contains("duplicate column name") {
+                Ok(())
+            } else {
+                Err(StorageError::Sqlite(e))
+            }
+        }
+    }
+}
+
 pub struct QwitchDatabase {
     conn: Mutex<Connection>,
     db_path: std::path::PathBuf,
@@ -185,17 +199,20 @@ impl QwitchDatabase {
             CREATE INDEX IF NOT EXISTS idx_logs_created ON action_logs(created_at DESC);
             ",
         )?;
-        let _ = conn.execute(
+        exec_add_column(
+            &conn,
             "ALTER TABLE accounts ADD COLUMN has_local_snapshot INTEGER NOT NULL DEFAULT 1",
-            [],
-        );
-        let _ = conn.execute(
+        )?;
+        exec_add_column(
+            &conn,
             "ALTER TABLE accounts ADD COLUMN has_api_token INTEGER NOT NULL DEFAULT 1",
-            [],
-        );
-        let _ = conn.execute("ALTER TABLE accounts ADD COLUMN device_id_masked TEXT", []);
-        let _ = conn.execute("ALTER TABLE accounts ADD COLUMN device_type TEXT", []);
-        let _ = conn.execute("ALTER TABLE action_logs ADD COLUMN archived_at TEXT", []);
+        )?;
+        exec_add_column(
+            &conn,
+            "ALTER TABLE accounts ADD COLUMN device_id_masked TEXT",
+        )?;
+        exec_add_column(&conn, "ALTER TABLE accounts ADD COLUMN device_type TEXT")?;
+        exec_add_column(&conn, "ALTER TABLE action_logs ADD COLUMN archived_at TEXT")?;
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_archived_id ON action_logs(archived_at, id DESC)",
             [],
@@ -302,6 +319,7 @@ impl QwitchDatabase {
             );
 
             CREATE INDEX IF NOT EXISTS idx_pool_members_pool ON pool_members(pool_id, priority ASC);
+            CREATE INDEX IF NOT EXISTS idx_pool_members_account ON pool_members(account_id);
             CREATE INDEX IF NOT EXISTS idx_gateway_logs_id ON gateway_request_logs(id DESC);
             ",
         )?;

@@ -72,7 +72,7 @@ impl GatewayRuntime {
 
     pub fn runtime_state(&self) -> GatewayRuntimeState {
         let (running, host, port, proxy_ovr, bridge_ovr) = {
-            let g = self.inner.lock().expect("gateway lock");
+            let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             (
                 g.running,
                 g.host.clone(),
@@ -95,19 +95,19 @@ impl GatewayRuntime {
 
     pub fn cooldown_snapshot(&self) -> HashMap<String, i64> {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut g = self.inner.lock().expect("gateway lock");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.cooldowns.retain(|_, until| *until > now);
         g.cooldowns.clone()
     }
 
     pub fn set_member_cooldown(&self, account_id: &str, cooldown_until_ms: i64) {
-        let mut g = self.inner.lock().expect("gateway lock");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.cooldowns
             .insert(account_id.to_string(), cooldown_until_ms);
     }
 
     pub fn clear_member_cooldown(&self, account_id: &str) {
-        let mut g = self.inner.lock().expect("gateway lock");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.cooldowns.remove(account_id);
     }
 
@@ -115,7 +115,7 @@ impl GatewayRuntime {
         if port < 1024 {
             return Err("端口必须 >= 1024".into());
         }
-        let mut g = self.inner.lock().expect("gateway lock");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.port = port;
         Ok(())
     }
@@ -123,7 +123,7 @@ impl GatewayRuntime {
     pub fn toggle_proxy_simulation(&self) -> bool {
         let current = self.runtime_state().global_proxy_detected;
         let next = !current;
-        let mut g = self.inner.lock().expect("gateway lock");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.sim_proxy_override = Some(next);
         next
     }
@@ -135,7 +135,7 @@ impl GatewayRuntime {
             "node_ready" => ("missing".into(), "未检测到运行时".into()),
             _ => ("bun_ready".into(), "Bun 1.2.15".into()),
         };
-        let mut g = self.inner.lock().expect("gateway lock");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.sim_bridge_override = Some(next.clone());
         next
     }
@@ -154,7 +154,7 @@ impl GatewayRuntime {
         adapters: Arc<HashMap<String, Arc<dyn ToolAdapter>>>,
     ) -> Result<u16, String> {
         let (host, port, already_running) = {
-            let g = self.inner.lock().expect("gateway lock");
+            let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             (g.host.clone(), g.port, g.running)
         };
         if already_running {
@@ -168,7 +168,7 @@ impl GatewayRuntime {
         let (tx, mut rx) = oneshot::channel::<()>();
 
         {
-            let mut g = self.inner.lock().expect("gateway lock");
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             g.running = true;
             g.port = bound_port;
             g.shutdown_tx = Some(tx);
@@ -200,7 +200,7 @@ impl GatewayRuntime {
     }
 
     pub fn stop_server(&self) {
-        let mut g = self.inner.lock().expect("gateway lock");
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.running = false;
         if let Some(tx) = g.shutdown_tx.take() {
             let _ = tx.send(());
@@ -226,7 +226,7 @@ impl GatewayRuntime {
         let affinity_snap = {
             self.inner
                 .lock()
-                .expect("gateway lock")
+                .unwrap_or_else(|e| e.into_inner())
                 .session_affinity
                 .clone()
         };
@@ -439,10 +439,11 @@ impl GatewayRuntime {
                     effective_model,
                     input.session_key.as_deref().unwrap_or("default")
                 );
-                self.inner
-                    .lock()
-                    .expect("gateway lock")
-                    .session_affinity
+                let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if g.session_affinity.len() >= 4096 {
+                    g.session_affinity.clear();
+                }
+                g.session_affinity
                     .insert(aff_key, winner.account_id.clone());
             }
         }
@@ -2210,7 +2211,7 @@ async fn handle_http_connection(
     let affinity_snap = runtime
         .inner
         .lock()
-        .expect("gateway lock")
+        .unwrap_or_else(|e| e.into_inner())
         .session_affinity
         .clone();
     let now = chrono::Utc::now().timestamp_millis();

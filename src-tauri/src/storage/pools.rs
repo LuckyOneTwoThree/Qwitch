@@ -1770,11 +1770,10 @@ impl QwitchDatabase {
                 let agent_id =
                     TargetAgentId::from_id(&agent_raw).unwrap_or(TargetAgentId::Opencode);
                 let created_at: String = r.get(1)?;
-                let timestamp = if created_at.len() >= 19 {
-                    created_at[11..19].to_string()
-                } else {
-                    created_at
-                };
+                let timestamp = created_at
+                    .get(11..19)
+                    .map(str::to_string)
+                    .unwrap_or(created_at);
                 let status = match r.get::<_, String>(11)?.as_str() {
                     "failover_success" => RoutingTraceStatus::FailoverSuccess,
                     "failed" => RoutingTraceStatus::Failed,

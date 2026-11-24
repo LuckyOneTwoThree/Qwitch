@@ -4234,6 +4234,17 @@ mod tests {
 
         let srv = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
+            // 先读完客户端发来的 HTTP 请求头，避免 Windows (Winsock) 在接收缓冲区仍有未读数据时
+            // 关闭连接发送 TCP RST (WSAECONNRESET / 10054) 导致 reqwest 读响应失败。
+            let mut req_buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !req_buf.windows(4).any(|w| w == b"\r\n\r\n") && req_buf.len() < 8192 {
+                let n = s.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                req_buf.extend_from_slice(&chunk[..n]);
+            }
             let res = forward_codex_own_signin_request(
                 &mut s,
                 &auth_override,
@@ -4243,6 +4254,7 @@ mod tests {
             .await
             .expect("forward");
             assert_eq!(res.0, 200);
+            let _ = s.shutdown().await;
         });
 
         let client = reqwest::Client::new();

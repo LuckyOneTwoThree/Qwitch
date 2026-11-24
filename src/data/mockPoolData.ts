@@ -875,7 +875,7 @@ export function computeAgentExposedModels(
 export const INITIAL_GATEWAY_STATE: GatewayRuntimeState = {
   running: true,
   host: "127.0.0.1",
-  port: 18425,
+  port: 8187,
   bridgeRuntime: "bun_ready",
   bridgeVersion: "Bun 1.2.15",
   globalProxyDetected: true,

@@ -289,6 +289,8 @@ pub fn save_app_settings(
     // 未提供时视为空表，等价于「无票据」，由下方逐项校验拒绝。
     trusted_adapter_tickets: Option<HashMap<String, String>>,
 ) -> Result<AppSettingsDto, String> {
+    // 网关端口必须为合法非特权端口
+    settings.gateway_port = settings.gateway_port.max(1024);
     // 防风控抖动下限：不允许 0ms 连发
     settings.jitter_min_ms = settings.jitter_min_ms.max(500);
     settings.jitter_max_ms = settings.jitter_max_ms.max(settings.jitter_min_ms);

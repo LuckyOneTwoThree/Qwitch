@@ -15,6 +15,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   autoClaimDaily: false,
   trustedAdapters: [],
   trustedAdapterHashes: {},
+  gatewayPort: 8187,
 };
 
 export function sanitizeNonNegativeInt(value: unknown, fallback = 0): number {
@@ -28,6 +29,12 @@ export function normalizeAppSettings(
   raw?: Partial<AppSettings> | null,
   fallback: AppSettings = DEFAULT_APP_SETTINGS
 ): AppSettings {
+  const rawPort = raw?.gatewayPort;
+  const fallbackPort = fallback.gatewayPort ?? 8187;
+  const gatewayPort =
+    typeof rawPort === "number" && Number.isFinite(rawPort)
+      ? Math.min(65535, Math.max(1024, Math.floor(rawPort)))
+      : fallbackPort;
   return {
     jitterMinMs: sanitizeNonNegativeInt(raw?.jitterMinMs, fallback.jitterMinMs),
     jitterMaxMs: sanitizeNonNegativeInt(raw?.jitterMaxMs, fallback.jitterMaxMs),
@@ -61,6 +68,7 @@ export function normalizeAppSettings(
     trustedAdapters: raw?.trustedAdapters ?? fallback.trustedAdapters ?? [],
     trustedAdapterHashes:
       raw?.trustedAdapterHashes ?? fallback.trustedAdapterHashes ?? {},
+    gatewayPort,
   };
 }
 
@@ -83,6 +91,12 @@ export function sanitizeAppSettingsPatch(next: Partial<AppSettings>): Partial<Ap
       next.autoRefreshIntervalMinutes,
       0
     );
+  }
+  if (next.gatewayPort !== undefined) {
+    sanitized.gatewayPort =
+      typeof next.gatewayPort === "number" && Number.isFinite(next.gatewayPort)
+        ? Math.min(65535, Math.max(1024, Math.floor(next.gatewayPort)))
+        : 8187;
   }
   return sanitized;
 }

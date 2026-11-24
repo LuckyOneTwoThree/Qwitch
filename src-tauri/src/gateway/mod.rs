@@ -63,7 +63,7 @@ impl GatewayRuntime {
             inner: Mutex::new(GatewayInner {
                 running: false,
                 host: "127.0.0.1".into(),
-                port: 18425,
+                port: 8187,
                 cooldowns: HashMap::new(),
                 session_affinity: HashMap::new(),
                 sim_proxy_override: None,

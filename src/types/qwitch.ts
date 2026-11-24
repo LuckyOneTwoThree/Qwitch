@@ -127,6 +127,7 @@ export interface AppSettings {
   autoClaimDaily?: boolean;
   trustedAdapters?: string[];
   trustedAdapterHashes?: Record<string, string>;
+  gatewayPort?: number;
 }
 
 export interface ProfileInspectResult {

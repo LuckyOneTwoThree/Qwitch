@@ -156,13 +156,15 @@ pub fn run() {
                 &startup_settings.trusted_adapter_hashes,
                 Arc::clone(&host),
             ));
+            let gateway_runtime = GatewayRuntime::new();
+            let _ = gateway_runtime.set_port(startup_settings.gateway_port);
             let state = AppState {
                 db,
                 master_key,
                 host,
                 adapters,
                 scheduler: Arc::new(AntiRiskScheduler::new()),
-                gateway: Arc::new(GatewayRuntime::new()),
+                gateway: Arc::new(gateway_runtime),
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
                 consumed_oauth_nonces: Arc::new(std::sync::Mutex::new(
                     std::collections::HashSet::new(),

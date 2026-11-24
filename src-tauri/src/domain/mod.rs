@@ -135,6 +135,12 @@ pub struct AppSettingsDto {
     pub trusted_adapters: Vec<String>,
     #[serde(default)]
     pub trusted_adapter_hashes: HashMap<String, String>,
+    #[serde(default = "default_gateway_port")]
+    pub gateway_port: u16,
+}
+
+fn default_gateway_port() -> u16 {
+    8187
 }
 
 impl Default for AppSettingsDto {
@@ -154,6 +160,7 @@ impl Default for AppSettingsDto {
             auto_claim_daily: false,
             trusted_adapters: Vec::new(),
             trusted_adapter_hashes: HashMap::new(),
+            gateway_port: default_gateway_port(),
         }
     }
 }

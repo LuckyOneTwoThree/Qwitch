@@ -6,7 +6,7 @@ use crate::agent_wiring::{
     apply_agent_wiring, clear_agent_wiring, inspect_all_agent_bindings, restart_agent_process,
     unbind_and_restore_agent,
 };
-use crate::commands::AppState;
+use crate::commands::{load_app_settings, AppState, SETTINGS_KEY};
 use crate::domain::{
     AccountPool, AgentBinding, CreatePoolInput, MemberTier, PoolStrategy, PoolWorkspaceState,
     RunPoolSimulationInput, RunPoolSimulationResult, TargetAgentId, UpdatePoolPatch,
@@ -230,6 +230,14 @@ pub async fn update_gateway_port_cmd(
                 ws.gateway.global_proxy_detected,
                 None,
             )?;
+        }
+    }
+    // 持久化端口，避免下次启动回落到默认值
+    {
+        let mut settings = load_app_settings(&state.db);
+        settings.gateway_port = port;
+        if let Ok(json) = serde_json::to_string(&settings) {
+            let _ = state.db.set_setting(SETTINGS_KEY, &json);
         }
     }
     emit_workspace_updated(&app);

@@ -285,3 +285,16 @@ cargo audit --file Cargo.lock            # 本机先 cargo install cargo-audit
 - **P2-10**：`set_pool_tool_models` 按工具统一覆盖成员模型集——与 Agent 中心「按工具选模型」语义一致，保留。
 - **P2-18**：已消除 Tauri 下本地双写，演练结果统一以后端 `run_pool_simulation_cmd` 落库刷新为准。
 - **P3（纵深优化）**：`-wal/-shm` 打开后新建 sidecar 权限（已在打开时收紧，边角）、个别 `let _` 吞错建议补日志、Linux 平台能力等。
+
+### 后续优化（第二轮，goal round）
+
+| 提交 | 内容 |
+| --- | --- |
+| `8b7c543` | P2-9：RoundRobin 改用进程内原子游标，消除并发同序惊群 |
+| `01a28ef` | 回归测试：chunked 请求、create_pool 重复账号去重、Agent 配置解析失败不覆盖 |
+| `59c0abf` | 上游响应体 >64MB 拒绝（防 OOM）、refresh 锁 poison 自愈 |
+| `88a6e00` | 路由 trace 写入失败补日志、跨日统计重置回归测试 |
+| `11dd96b` | mock 号池 fixture 用 `import.meta.env.DEV` 守卫，生产构建 DCE 剔除（index 351→334KB，dist 不再含假数据） |
+| `efc4dde` | 跨协议增量真流式（OpenAI Chat ↔ Anthropic Messages，纯文本无工具场景）+ 双向回归测试 |
+
+**跨协议流式范围说明**：同协议（OpenAI Chat、Anthropic Messages）走零拷贝透传；跨协议在「无 tools 的纯文本请求」下做 SSE 事件增量翻译（已含双向测试）；**携带 tools 的请求（编码 Agent 常态）以及 OpenAI Responses 协议跨协议**仍走缓冲+合成，以保证 tool_calls/thinking/加密推理块语义正确——这是有意的正确性取舍，非缺陷。

@@ -525,16 +525,20 @@ export function Dashboard() {
       <div
         data-tauri-drag-region
         onDoubleClick={onTitleBarDoubleClick}
-        className="flex h-6 shrink-0 bg-white/85 backdrop-blur-xl dark:bg-zinc-900/70"
+        className="flex h-[10px] shrink-0 bg-white/85 backdrop-blur-xl dark:bg-zinc-900/70"
       >
-        {/* 左侧分割线贯穿到窗口顶部（与侧栏右边框对齐） */}
-        <div className="w-52 shrink-0 border-r border-zinc-200 dark:border-zinc-800" />
+        {/* 左侧分割线贯穿到窗口顶部（与侧栏右边框对齐）；同样支持双击最大化 */}
+        <div
+          data-tauri-drag-region
+          onDoubleClick={onTitleBarDoubleClick}
+          className="w-52 shrink-0 border-r border-zinc-200 dark:border-zinc-800"
+        />
       </div>
       <div className="flex min-h-0 flex-1 overflow-hidden">
       <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200 bg-white px-3 pb-3 pt-2 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex min-h-0 flex-1 flex-col justify-between">
         <div className="overflow-y-auto pr-0.5">
-          <div className="mb-5 flex items-center gap-2.5 px-1.5">
+          <div data-tauri-drag-region onDoubleClick={onTitleBarDoubleClick} className="mb-5 flex items-center gap-2.5 px-1.5">
             <QwitchLogo size="md" />
             <div className="min-w-0">
               <div className="text-sm font-semibold tracking-tight">Qwitch</div>

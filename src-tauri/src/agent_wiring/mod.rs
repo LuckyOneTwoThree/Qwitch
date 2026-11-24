@@ -2240,6 +2240,67 @@ fn restart_codex_desktop_app() {
 }
 
 #[cfg(target_os = "macos")]
+fn pgrep_exact(name: &str) -> bool {
+    Command::new("pgrep")
+        .args(["-x", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn restart_claude_desktop_app(isolated: bool) {
+    // Claude Desktop 的退出通常需要数秒（Electron 多进程）；必须等旧进程真正退出再 open，
+    // 否则 open 只会激活旧实例，看起来“没重启”。这里“优雅退出 → 轮询等待 → 强制兜底 → 重新拉起”。
+    let app_path = "/Applications/Claude.app";
+    let pattern = "/Applications/Claude.app/";
+    let running = proc_matches(pattern) || pgrep_exact("Claude");
+    if running {
+        let _ = Command::new("osascript")
+            .args([
+                "-e",
+                "tell application id \"com.anthropic.claudefordesktop\" to quit",
+            ])
+            .output();
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            if !proc_matches(pattern) && !pgrep_exact("Claude") {
+                break;
+            }
+        }
+        if proc_matches(pattern) || pgrep_exact("Claude") {
+            let _ = Command::new("pkill").args(["-x", "Claude"]).output();
+            let _ = Command::new("pkill").args(["-f", pattern]).output();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        if proc_matches(pattern) || pgrep_exact("Claude") {
+            let _ = Command::new("pkill").args(["-9", "-x", "Claude"]).output();
+            let _ = Command::new("pkill").args(["-9", "-f", pattern]).output();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+    }
+    if isolated {
+        let data_dir = home_dir().join("Library/Application Support/Claude-Qwitch-3p");
+        let arg = format!("--user-data-dir={}", data_dir.display());
+        let status = open_cmd()
+            .args(["-n", "-a", app_path, "--args", &arg])
+            .status();
+        if !matches!(status, Ok(s) if s.success()) {
+            let _ = open_cmd().args(["-n", "-a", app_path]).spawn();
+        }
+    } else {
+        let opened = open_cmd()
+            .args(["-n", "-b", "com.anthropic.claudefordesktop"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !opened {
+            let _ = open_cmd().args(["-n", "-a", app_path]).spawn();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn restart_macos_app(app_name: &str, bundle_id: &str, app_path: &str) {
     let running = proc_matches(app_path);
     if running {
@@ -2301,29 +2362,14 @@ pub fn restart_agent_process(
             }
             TargetAgentId::ClaudeDesktop => {
                 let isolated = stored.options.claude_isolated_twin.unwrap_or(false);
-                let _ = Command::new("pkill").args(["-x", "Claude"]).output();
-                std::thread::sleep(std::time::Duration::from_millis(350));
-                if isolated {
-                    let data_dir = home_dir().join("Library/Application Support/Claude-Qwitch-3p");
-                    let arg = format!("--user-data-dir={}", data_dir.display());
-                    let status = open_cmd()
-                        .args(["-n", "-a", "/Applications/Claude.app", "--args", &arg])
-                        .status();
-                    if !matches!(status, Ok(s) if s.success()) {
-                        let _ = open_cmd().args(["-a", "/Applications/Claude.app"]).spawn();
-                    }
-                } else {
-                    let _ = open_cmd().args(["-a", "/Applications/Claude.app"]).spawn();
-                }
+                restart_claude_desktop_app(isolated);
             }
             TargetAgentId::Dsh => {
-                let _ = Command::new("pkill")
-                    .args(["-f", "DeepSeek Harness"])
-                    .output();
-                std::thread::sleep(std::time::Duration::from_millis(350));
-                let _ = open_cmd()
-                    .args(["-a", "/Applications/DeepSeek Harness.app"])
-                    .spawn();
+                restart_macos_app(
+                    "DeepSeek Harness",
+                    "com.deepseek.dsh",
+                    "/Applications/DeepSeek Harness.app/",
+                );
             }
             TargetAgentId::Mimo => {
                 restart_macos_app(

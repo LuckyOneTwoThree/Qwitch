@@ -31,20 +31,29 @@
 
 ## 产品截图
 
-> 截图来自浏览器 Mock 预览模式，账号与额度均为示例数据。
->
-> **注意**：截图拍摄于本轮「本地网关 / Agent 接入与调度 / 路由观测」升级与视觉体系重构之前，界面细节与导航布局（现为 5 大功能域 + 托盘双态面板）与当前版本存在差异，核心交互风格仍具参考价值。
+> 截图来自浏览器 Mock 预览模式（v0.5.1），账号、额度、路由记录与 Agent 配置均为示例数据。
 
-| 主窗口 · 浅色 | 主窗口 · 深色 |
+| 主窗口 · 账号资产（浅色） | 主窗口 · 账号资产（深色） |
 | :---: | :---: |
-| ![Dashboard 浅色](docs/assets/screenshots/dashboard-light.png) | ![Dashboard 深色](docs/assets/screenshots/dashboard-dark.png) |
+| ![账号资产 浅色](docs/assets/screenshots/dashboard-light.png) | ![账号资产 深色](docs/assets/screenshots/dashboard-dark.png) |
 
-| 系统托盘 · 浅色 | 系统托盘 · 深色 |
+| Agent 接入与号池调度（深色） | 网关路由观测与决策链路（深色） |
 | :---: | :---: |
-| <img src="docs/assets/screenshots/tray-light.png" width="380" alt="托盘弹层 浅色" /> | <img src="docs/assets/screenshots/tray-dark.png" width="380" alt="托盘弹层 深色" /> |
+| ![Agent 接入与号池调度](docs/assets/screenshots/agents-dark.png) | ![网关路由观测](docs/assets/screenshots/routing-dark.png) |
+
+| 系统托盘 · 账号与签到（浅色） | 系统托盘 · 账号与签到（深色） |
+| :---: | :---: |
+| <img src="docs/assets/screenshots/tray-light.png" width="380" alt="托盘账号与签到 浅色" /> | <img src="docs/assets/screenshots/tray-dark.png" width="380" alt="托盘账号与签到 深色" /> |
 
 <details>
-<summary><b>设置与环境（深色）</b>：常驻偏好、自动化策略、防风控调度、日志保留、本地网关端口、适配器与客户端路径</summary>
+<summary><b>系统托盘 · 号池与指向（深色）</b>：网关启停、Agent 默认模型热切、漂移修复与号池聚合水位</summary>
+
+<img src="docs/assets/screenshots/tray-pools-dark.png" width="380" alt="托盘号池与指向 深色" />
+
+</details>
+
+<details>
+<summary><b>设置与环境（深色）</b>：常驻偏好、自动化策略、日志保留、本地网关端口与占用检测、客户端环境探测与路径覆盖</summary>
 
 ![设置页 深色](docs/assets/screenshots/settings-dark.png)
 
@@ -61,10 +70,10 @@
 
 ### 🔗 目标 Agent 一键接入与安全还原
 
-- **6 大目标 Agent + 通用标准端点**：直接在「Agent 接入与调度」3 分区工作台（模型配置 / 账号调度 / 接入设置）内按订阅工具勾选开放模型、设置 `★ 默认模型`、编排同工具主备顺位并一键同步至全部 Agent。
-- **实时模型探测与智能筛选**：支持一键拉取上游真实模型目录，提供搜索与「全部 / 已勾选 / 免费低倍率 / 主力旗舰」快捷筛选及批量勾选工具栏。
-- **Stash 加密备份与无损还原**：修改目标 Agent 配置文件前自动将原文件 AES-256-GCM 加密存入 Stash，操作前通过 `ConfigDiffModal` 透明预览 Before/After 差异；配置解析失败时直接中止写入，绝不以空文档覆盖用户原有配置；支持配置漂移检测与一键修复、无损解绑还原与强制清除。
-- **桌面客户端平滑重启**：内置优雅退出 → 轮询确认退出 → 重启机制（含 Claude 独立双开副本与 DSH），修改网关端口后可一键批量重启运行中的桌面 Agent。
+- **6 大目标 Agent + 通用标准端点**：直接在「Agent 接入与号池调度」3 分区工作台（模型配置 / 账号调度 / 接入设置）内按订阅工具勾选开放模型、设置 `★ 默认模型`、编排同工具主备顺位并一键同步至全部 Agent。
+- **实时模型探测与智能筛选**：支持一键拉取上游真实模型目录，提供搜索与「全部 / 已勾选 / 免费低倍率 / 主力旗舰」快捷筛选及批量勾选工具栏；接入卡实时显示模型数、挂载号池与 `配置漂移 / 已挂载 / 未挂载` 状态。
+- **Stash 加密备份与无损还原**：修改目标 Agent 配置文件前自动将原文件 AES-256-GCM 加密存入 Stash，操作前通过 `ConfigDiffModal` 透明预览 Before/After 差异；配置解析失败时直接中止写入，绝不以空文档覆盖用户原有配置；支持配置漂移检测与一键修复、无损解绑还原、按 Agent 或全部强制清除 Qwitch 写入。
+- **桌面客户端平滑重启与重新探测**：内置优雅退出 → 轮询确认退出 → 重启机制（含 Claude 独立双开副本与 DSH），修改网关端口后可一键批量重启运行中的桌面 Agent；未安装客户端自动禁用重启入口，并支持重新探测本机 Agent 环境。
 
 ### 📡 路由观测与连通性演练
 
@@ -109,7 +118,7 @@
 | **WorkBuddy** | 本机凭据导入 · 内置授权 · Token | 签到状态监控、一键签到与积分领取 | ✅ 一键冷切换 | ✅ 支持入池（含通道兼容清洗） |
 | **Qoder CN** | 本机导入 · 内置 PKCE 授权 · PAT | 活动 Credits 水位、一键领取 | ✅ 一键冷切换 | ✅ 支持入池 |
 | **MiniMax Code CN** | 本机导入 · 内置设备码授权 · Token | 积分水位、每日签到领取 | ✅ 一键冷切换 | ✅ 支持入池（Anthropic 原生） |
-| **LobsterAI** | 内置 OAuth 授权 · 本机导入 · Token | 积分水位监控、每日签到领取 | ✅ 一键冷切换 | ✅ 支持入池 |
+| **LobsterAI（有道龙虾）** | 内置 OAuth 授权 · 本机导入 · Token | 积分水位监控、每日签到领取 | ✅ 一键冷切换 | ✅ 支持入池 |
 | **豆包工作（DoubaoWork）** | 内置 WebView Cookie 授权 · 本机导入 · Cookie/cURL | 多维度额度与额度包监控、每日签到 | ✅ 一键冷切换 | ✅ 支持入池 |
 | **码道 CodeArts** | 本机导入（safeStorage）· Token | 积分水位监控（华为云 AK/SK 签名） | — 仅监控 | ⚠️ 需独立 OAuth 隔离授权后入池 |
 | **通用 API Key** | API Key + Base URL | — | — | ✅ 锁定 T3 兜底档 |
@@ -161,8 +170,8 @@ npm run tauri build    # 构建本地安装包
 1. **导入账号**：主窗口「账号资产 → 导入账号」→ 选择工具 → 本机导入 / 内置授权 / 粘贴 Token；
 2. **查看额度与领取**：卡片自动展示额度水位与签到状态，可单卡刷新或一键批量领取（串行 + 抖动）；
 3. **切换桌面账号**：卡片「切换」→ 确认冷切换，客户端自动重启至目标账号；
-4. **接入 Agent 与号池调度**：进入「Agent 接入与调度」→ 启动本地网关（默认 `127.0.0.1:8187`）→ 选择目标 Agent 并勾选订阅工具模型、编排主备顺位 → 重启对应桌面客户端即可使用；
-5. **路由观测与托盘速览**：在「路由观测」查看每次请求的协议转换与 Failover 明细，或通过菜单栏托盘随时切换账号、启停网关与热切默认模型。
+4. **接入 Agent 与号池调度**：进入「Agent 接入与调度」→ 启动本地网关（默认 `127.0.0.1:8187`）→ 选择目标 Agent 并勾选订阅工具模型、编排主备顺位 → 重启对应桌面客户端即可使用；端口可在「设置与环境 → 客户端环境」修改，并一键批量重启已挂载的桌面 Agent；
+5. **路由观测与托盘速览**：在「路由观测」按来源 Agent、关键词或「仅看失败 / 仅看 Failover」筛选每次请求的协议转换与逐跳尝试明细，或通过菜单栏托盘随时切换账号、启停网关与热切默认模型。
 
 ## 配置项
 
@@ -279,7 +288,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 **CI/CD**
 
-- `ci.yml`：push / PR 触发，macOS + Windows 双平台执行生产依赖审计、ESLint、前端构建与测试、`shellcheck`（Linux）、Rust `cargo audit` / fmt / clippy / test。
+- `ci.yml`：push / PR 触发，macOS + Windows 双平台执行生产依赖审计、ESLint、前端构建与测试、Tauri `--no-bundle` 构建冒烟、`shellcheck`（Linux）、Rust `cargo audit` / fmt / clippy / test。
 - `release.yml`：`v*` 标签触发，先跑验证门禁，再构建 macOS ARM64、macOS Intel 与 Windows x64 三个独立安装包并上传至 GitHub Release（自动发布 latest）。
 
 **发布前手工清单**：空数据目录首装 · 备份恢复到冲突钥匙串环境 · 慢启动客户端切号 · 托盘 / Dock 行为 · 本地网关端到端路由与目标 Agent 重启生效。
@@ -299,6 +308,9 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 | [品牌与命名规范](docs/BRAND_IDENTITY.md) | Qwitch 品牌定位、命名与视觉原则 |
 | [前端体验审计](docs/FRONTEND_UX_AUDIT.md) | 历史基线问题表与修复状态标注 |
 | [后端安全审计](docs/BACKEND_ARCH_REVIEW.md) | 历史基线问题表与修复状态标注 |
+| [全方位深度审查](docs/PROJECT_AUDIT_REPORT.md) | 2026-11-20 全项目功能、安全、性能与工程质量审查 |
+| [项目认知总结](docs/PROJECT_COGNITION_SUMMARY.md) | 二次开发基线：模块职责、关键流程与易错点 |
+| [UI 视觉质感优化报告](docs/UI_VISUAL_REFINEMENT.md) | 视觉层级、密度、动效与控件质感的设计与实现基线 |
 | [综合优化路线图](docs/OPTIMIZATION_ROADMAP.md) | 四阶段 Sprint 排期、完成度与接口变更总表 |
 | [项目理解报告](docs/PROJECT_UNDERSTANDING_REPORT.md) | 全项目深度认知基线：目标、模块、流程、实测质量基线、问题分级与待确认事项 |
 | [优化执行计划](docs/OPTIMIZATION_EXECUTION_PLAN.md) | A/B/C/D 四阶段落地记录：实现要点、回归测试与延后项依据 |
@@ -317,7 +329,10 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 - [x] 本地多协议网关（默认 `127.0.0.1:8187`，端口可配/检测/持久化）+ 统一 IR 互转 + `tools`/`tool_choice` 完整透传
 - [x] 同协议零拷贝 SSE 透传 + 跨协议文本实时增量流式（含 UTF-8 安全解码与 tool_use/tool_calls 映射）
 - [x] 6 大目标 Agent 一键挂载（Codex / Claude / DSH / OpenCode / MiMo Code / ZCode）+ Stash 加密备份/无损还原 + 漂移检测 + 桌面端优雅重启
-- [x] 路由观测面板、连通性演练弹窗（429/401 故障注入）与双态托盘热切体验
+- [x] 网关随机绑定令牌全路由鉴权、请求/响应体积上限、上游 `base_url` 白名单与 600s 长超时专用连接
+- [x] 号池写库事务化、Agent 配置解析失败中止、多文件写入 Stash 回滚、Mock 生产门禁与并发乱序保护
+- [x] 网关端口 `8187` 持久化 + 占用检测 + 已挂载 Agent 自动重写 + 运行中桌面客户端批量重启
+- [x] 路由观测面板（来源 / 关键词 / 仅看失败 / 仅看 Failover 筛选与空态）、连通性演练弹窗（429/401 故障注入）与双态托盘热切体验
 - [ ] 代码签名 / 公证与自动更新（release.yml 已接入可选 Apple 签名 secrets；**需提供 Apple Developer 证书/凭证**方可真正签名公证；Windows 自动安装已具备）
 - [ ] OpenAI Responses 跨协议增量流式默认启用（当前已实现并通过集成测试，可通过 `QWITCH_GATEWAY_RESPONSES_STREAMING=1` 启用，待真机 Codex 长对话回归后转正）
 - [ ] Context 订阅粒度拆分、`julianday` 索引重建、日志列表虚拟化（当前规模下无感，按需启动）
@@ -370,7 +385,7 @@ xattr -dr com.apple.quarantine /Applications/Qwitch.app
 <details>
 <summary><b>修改本地网关端口后，已打开的桌面 Agent 怎么生效？</b></summary>
 
-修改端口时 Qwitch 会自动检测端口占用、重启本地网关并重新同步所有已挂载 Agent 的配置文件，同时将新端口持久化到应用设置。对于 **Claude 桌面版、Codex 桌面版、MiMo Code、ZCode** 等启动时读取配置的桌面客户端，可在「系统设置 → 客户端环境」修改端口后直接确认一键批量重启，或在「Agent 接入与调度」页点击单个客户端的「重启」按钮。
+修改端口时 Qwitch 会自动检测端口占用、重启本地网关并重新同步所有已挂载 Agent 的配置文件，同时将新端口持久化到应用设置。对于 **Claude 桌面版、Codex 桌面版、MiMo Code、ZCode** 等启动时读取配置的桌面客户端，可在「设置与环境 → 客户端环境」修改端口后直接确认一键批量重启，或在「Agent 接入与调度」页点击单个客户端的「重启」按钮。
 </details>
 
 <details>

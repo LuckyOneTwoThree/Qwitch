@@ -1901,6 +1901,36 @@ fn restart_codex_desktop_app() {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn restart_macos_app(app_name: &str, bundle_id: &str, app_path: &str) {
+    // 优雅退出（若在运行）：osascript quit → 等待 → 杀掉该 bundle 的残留辅助进程（Electron helper 等）
+    let _ = Command::new("osascript")
+        .args(["-e", &format!("tell application \"{app_name}\" to quit")])
+        .output();
+    for _ in 0..24 {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let alive = Command::new("pgrep")
+            .args(["-f", app_path])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !alive {
+            break;
+        }
+    }
+    let _ = Command::new("pkill").args(["-f", app_path]).output();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // 优先按 bundle id 打开（对已退出/未运行都可靠），失败再用 .app 路径
+    let opened = Command::new("open")
+        .args(["-b", bundle_id])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !opened {
+        let _ = Command::new("open").arg(app_path).spawn();
+    }
+}
+
 pub fn restart_agent_process(
     db: &QwitchDatabase,
     agent_id: TargetAgentId,
@@ -1964,18 +1994,14 @@ pub fn restart_agent_process(
                     .spawn();
             }
             TargetAgentId::Mimo => {
-                let _ = Command::new("pkill").args(["-x", "Xiaomi MiMo"]).output();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let _ = Command::new("open")
-                    .args(["-a", "/Applications/Xiaomi MiMo.app"])
-                    .spawn();
+                restart_macos_app(
+                    "Xiaomi MiMo",
+                    "com.xiaomi.mimo.desktop",
+                    "/Applications/Xiaomi MiMo.app/",
+                );
             }
             TargetAgentId::Zcode => {
-                let _ = Command::new("pkill").args(["-x", "ZCode"]).output();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let _ = Command::new("open")
-                    .args(["-a", "/Applications/ZCode.app"])
-                    .spawn();
+                restart_macos_app("ZCode", "dev.zcode.app", "/Applications/ZCode.app/");
             }
             TargetAgentId::Opencode => {}
         }

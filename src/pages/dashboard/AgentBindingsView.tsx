@@ -731,6 +731,10 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     <Wrench className="h-3 w-3" aria-hidden="true" />
                     查看差异并修复
                   </button>
+                ) : activeBinding.agentId === "opencode" ? (
+                  <span className="text-[11px] text-zinc-400">
+                    终端客户端 · 配置在下次启动/新会话生效
+                  </span>
                 ) : (
                   <button
                     type="button"

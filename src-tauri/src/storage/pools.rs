@@ -1378,15 +1378,30 @@ impl QwitchDatabase {
         }
         tool_slots.sort_unstable();
 
-        let mut remaining_accs: Vec<String> = tool_member_by_acc.keys().cloned().collect();
-        remaining_accs.sort();
+        let mut remaining_accs: Vec<(String, i64)> = tool_member_by_acc
+            .iter()
+            .map(|(aid, mid)| {
+                let prio = conn
+                    .query_row(
+                        "SELECT priority FROM pool_members WHERE id = ?1",
+                        params![mid],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(i64::MAX);
+                (aid.clone(), prio)
+            })
+            .collect();
+        remaining_accs.sort_by_key(|(_, prio)| *prio);
         let mut final_acc_order: Vec<String> = Vec::new();
         for aid in ordered_account_ids {
             if tool_member_by_acc.contains_key(aid) && !final_acc_order.contains(aid) {
                 final_acc_order.push(aid.clone());
             }
         }
-        for aid in remaining_accs {
+        for (aid, _) in remaining_accs {
             if !final_acc_order.contains(&aid) {
                 final_acc_order.push(aid);
             }
@@ -1511,6 +1526,13 @@ impl QwitchDatabase {
             conn.execute(
                 "UPDATE pool_members SET priority = ?1 WHERE id = ?2",
                 params![(i + 1) as i64, id],
+            )?;
+        }
+        // 池内已无成员时自动禁用，避免 Agent 挂载一个永不可能成功的空池
+        if remaining.is_empty() {
+            conn.execute(
+                "UPDATE account_pools SET enabled = 0 WHERE id = ?1",
+                params![pool_id],
             )?;
         }
         Self::resync_pool_policies_locked(&conn, pool_id)?;

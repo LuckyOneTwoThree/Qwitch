@@ -1552,7 +1552,7 @@ async fn relay_openai_chat_to_anthropic(
         ..Default::default()
     };
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
         drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
     }
     drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
@@ -1709,7 +1709,7 @@ async fn relay_anthropic_to_openai_chat(
         ..Default::default()
     };
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
         drain_anthropic_events_to_openai(&mut buf, stream, &id, model, &mut st).await?;
     }
     drain_anthropic_events_to_openai(&mut buf, stream, &id, model, &mut st).await?;
@@ -2066,7 +2066,7 @@ async fn relay_openai_chat_to_responses(
     responses_emit_created(&st, model, stream).await?;
     let mut buf = String::new();
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
         drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
     }
     drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
@@ -2084,7 +2084,7 @@ async fn relay_anthropic_to_responses(
     responses_emit_created(&st, model, stream).await?;
     let mut buf = String::new();
     while let Ok(Some(bytes)) = resp.chunk().await {
-        buf.push_str(&String::from_utf8_lossy(&bytes));
+        buf.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
         drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
     }
     drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
@@ -4044,6 +4044,45 @@ mod tests {
         assert!(body.contains("function_call"), "body: {body}");
         assert!(body.contains("read_file"), "body: {body}");
         assert!(body.contains("response.completed"), "body: {body}");
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cross_protocol_parses_crlf_sse_frames() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        "event: message_start\r\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2}}}\r\n\r\nevent: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\r\n\r\nevent: message_delta\r\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+                        "text/event-stream",
+                    ),
+            )
+            .mount(&mock)
+            .await;
+        let (_db, rt, port, root, model_id) = spawn_gateway_with_custom_account(
+            "minimax_code_cn",
+            "MiniMax-M2.5",
+            mock.uri(),
+            "crlf",
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth("qwitch-bind-opencode")
+            .json(&json!({"model": model_id, "stream": true, "messages": [{"role": "user", "content": "hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains("Hi"),
+            "CRLF SSE should be parsed, body: {body}"
+        );
         rt.stop_server();
         let _ = std::fs::remove_dir_all(root);
     }

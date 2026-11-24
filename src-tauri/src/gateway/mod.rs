@@ -721,7 +721,7 @@ async fn forward_codex_own_signin_request(
         ) || k.starts_with("x-codex-")
             || k.starts_with("x-oai-")
         {
-            req = req.header(k.as_str(), v.as_str());
+            req = req.header(k, v);
         }
     }
 
@@ -1263,19 +1263,14 @@ fn is_workbuddy_channel_blocked(status: u16, body: &str) -> bool {
     status == 400 && (body.contains("11128") || body.contains("Illegal API invocation"))
 }
 
-async fn call_upstream_member(
+/// 解析账号的上游 base_url / token / 额外请求头（统一校验 base_url）。
+#[allow(clippy::type_complexity)]
+fn resolve_upstream_auth(
     member: &PoolMember,
     cred: &CredentialEnvelope,
-    ir_req: &IrRequest,
-    upstream_model: &str,
-) -> Result<(u16, String), String> {
-    let client = long_running_http_client();
+) -> Result<(String, String, Vec<(&'static str, String)>), String> {
     let (token_opt, custom_base, extra_headers) = extract_bearer_and_base_url(cred);
     let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
-
-    let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
-    let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
-    let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
     let default_base = match member.tool_id.as_str() {
         "minimax_code_cn" => "https://agent.minimax.cn/mavis/api/v1/llm".to_string(),
         "workbuddy" => "https://copilot.tencent.com".to_string(),
@@ -1283,8 +1278,6 @@ async fn call_upstream_member(
         "trae_cn" => "https://trae-api-cn.mchost.guru".to_string(),
         _ => "https://api.openai.com".to_string(),
     };
-    // base_url 校验：允许 https，或明确指向本机的 http（本地模型/测试）。
-    // 拒绝任意明文 http 远程主机，降低凭据内被篡改 endpoint 造成的外发/SSRF 风险。
     let base_url = match custom_base {
         Some(b) => {
             let is_loopback_http = b.starts_with("http://127.0.0.1")
@@ -1300,6 +1293,72 @@ async fn call_upstream_member(
         }
         None => default_base,
     };
+    Ok((base_url, token, extra_headers))
+}
+
+/// 以流式（SSE）方式向上游发起 OpenAI Chat 请求，返回未读取 body 的响应，
+/// 供调用方在首字节前完成状态判定后直接透传给客户端。
+async fn send_openai_chat_stream(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    upstream_model: &str,
+) -> Result<reqwest::Response, String> {
+    let client = long_running_http_client();
+    let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
+    let base = base_url.trim_end_matches('/');
+    let (_, bare) = crate::domain::split_scoped_model_id(upstream_model);
+    let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare);
+    let url = format!("{base}/v1/chat/completions");
+    let body = to_upstream_openai_chat_body(ir_req, &wire_model, true);
+    let mut req = client
+        .post(&url)
+        .json(&body)
+        .header("Accept", "text/event-stream");
+    if member.tool_id == "trae_cn" {
+        req = req.header("Authorization", format!("Cloud-IDE-JWT {token}"));
+    } else {
+        req = req.bearer_auth(&token);
+    }
+    for (k, v) in &extra_headers {
+        req = req.header(*k, v);
+    }
+    req.send().await.map_err(|e| format!("上游请求失败: {e}"))
+}
+
+/// 将上游 SSE 响应逐块原样透传给客户端（无 Content-Length，Connection: close）。
+async fn forward_sse_passthrough(
+    mut resp: reqwest::Response,
+    stream: &mut TcpStream,
+) -> std::io::Result<()> {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n";
+    stream.write_all(head.as_bytes()).await?;
+    stream.flush().await?;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                stream.write_all(&chunk).await?;
+                stream.flush().await?;
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+async fn call_upstream_member(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    upstream_model: &str,
+) -> Result<(u16, String), String> {
+    let client = long_running_http_client();
+    let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
+
+    let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
+    let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
+    let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
     let base = base_url.trim_end_matches('/');
 
     let (url, mut body, auth_is_x_api_key) = match protocol {
@@ -2248,6 +2307,104 @@ async fn handle_http_connection(
             continue;
         };
         let t_hop = std::time::Instant::now();
+        let upstream_proto = upstream_model_protocol(&cand.tool_id, &plan.effective_model);
+        let raw_stream = ir_req.stream
+            && ir_req.incoming_protocol == WireProtocolKind::OpenaiChat
+            && upstream_proto == WireProtocolKind::OpenaiChat
+            && cand.tool_id != "workbuddy";
+        if raw_stream {
+            match send_openai_chat_stream(cand, &cred, &ir_req, &plan.effective_model).await {
+                Ok(resp) if resp.status().is_success() => {
+                    attempts.push(RoutingAttempt {
+                        account_label: cand.label.clone(),
+                        tool_id: cand.tool_id.clone(),
+                        model: plan.effective_model.clone(),
+                        tier: Some(cand.tier),
+                        outcome: RoutingAttemptOutcome::Ok,
+                        latency_ms: t_hop.elapsed().as_millis() as u64,
+                        detail: "网关实时流式透传成功（首字节后锁定上游）".into(),
+                    });
+                    let trace = RoutingTraceItem {
+                        id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        agent_id: caller_agent.unwrap_or(TargetAgentId::Opencode),
+                        pool_id: pool.id.clone(),
+                        pool_name: pool.name.clone(),
+                        incoming_protocol: ir_req.incoming_protocol,
+                        upstream_protocol: upstream_proto,
+                        requested_model: ir_req.model.clone(),
+                        final_account_label: cand.label.clone(),
+                        final_tool_id: cand.tool_id.clone(),
+                        final_model: plan.effective_model.clone(),
+                        status: if attempts.len() > 1 {
+                            RoutingTraceStatus::FailoverSuccess
+                        } else {
+                            RoutingTraceStatus::Success
+                        },
+                        cache_affinity_hit: plan.cache_affinity_hit,
+                        ttft_ms: t_hop.elapsed().as_millis() as u64,
+                        total_tokens: 0,
+                        attempts,
+                    };
+                    let _ = db.append_routing_trace(&trace);
+                    let _ = db.increment_pool_stats(
+                        &pool.id,
+                        trace.status == RoutingTraceStatus::FailoverSuccess,
+                        plan.cache_affinity_hit,
+                    );
+                    return forward_sse_passthrough(resp, stream).await;
+                }
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    let body_txt = resp.text().await.unwrap_or_default();
+                    if code == 429 {
+                        runtime.set_member_cooldown(
+                            &cand.account_id,
+                            chrono::Utc::now().timestamp_millis()
+                                + (pool.cooldown_seconds as i64) * 1000,
+                        );
+                        attempts.push(RoutingAttempt {
+                            account_label: cand.label.clone(),
+                            tool_id: cand.tool_id.clone(),
+                            model: plan.effective_model.clone(),
+                            tier: Some(cand.tier),
+                            outcome: RoutingAttemptOutcome::Cooldown429,
+                            latency_ms: t_hop.elapsed().as_millis() as u64,
+                            detail: format!(
+                                "HTTP 429 限流，置入 {}s 冷却并切换下一账号",
+                                pool.cooldown_seconds
+                            ),
+                        });
+                    } else {
+                        attempts.push(RoutingAttempt {
+                            account_label: cand.label.clone(),
+                            tool_id: cand.tool_id.clone(),
+                            model: plan.effective_model.clone(),
+                            tier: Some(cand.tier),
+                            outcome: RoutingAttemptOutcome::Cooldown429,
+                            latency_ms: t_hop.elapsed().as_millis() as u64,
+                            detail: format!(
+                                "HTTP {code}: {}",
+                                body_txt.chars().take(80).collect::<String>()
+                            ),
+                        });
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    attempts.push(RoutingAttempt {
+                        account_label: cand.label.clone(),
+                        tool_id: cand.tool_id.clone(),
+                        model: plan.effective_model.clone(),
+                        tier: Some(cand.tier),
+                        outcome: RoutingAttemptOutcome::Cooldown429,
+                        latency_ms: t_hop.elapsed().as_millis() as u64,
+                        detail: e,
+                    });
+                    continue;
+                }
+            }
+        }
         let mut res = call_upstream_member(cand, &cred, &ir_req, &plan.effective_model).await;
 
         if let Ok((401, _)) = res {
@@ -2587,6 +2744,101 @@ mod tests {
         let traces = db.list_routing_traces(10).unwrap();
         assert_eq!(traces.len(), 1);
         assert_eq!(traces[0].final_model, "deepseek-v4-pro");
+
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn gateway_streams_openai_chat_sse_passthrough() {
+        let root = std::env::temp_dir().join(format!("qwitch-gw-stream-{}", Uuid::new_v4()));
+        let db = Arc::new(QwitchDatabase::open(&root.join("qwitch.db")).unwrap());
+        let key = [9u8; 32];
+
+        let mock_upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+                        "text/event-stream",
+                    ),
+            )
+            .mount(&mock_upstream)
+            .await;
+
+        let mut extra = HashMap::new();
+        extra.insert("base_url".into(), mock_upstream.uri());
+        let acc = db
+            .upsert_account(
+                &key,
+                Some("流式兜底"),
+                &CredentialEnvelope {
+                    tool_id: "custom_api_key".into(),
+                    uid: "sk-stream".into(),
+                    display_name: Some("流式兜底".into()),
+                    display_email: None,
+                    payload: CredentialPayload::Token {
+                        access_token: "sk-stream".into(),
+                        refresh_token: None,
+                        expires_at: None,
+                        extra,
+                    },
+                },
+            )
+            .unwrap();
+        db.create_pool(
+            &key,
+            &CreatePoolInput {
+                id: None,
+                name: "Stream Pool".into(),
+                description: "".into(),
+                scene_tag: "Coding".into(),
+                strategy: PoolStrategy::Order,
+                affinity_mode: AffinityMode::Off,
+                skip_active_client_account: false,
+                cooldown_seconds: 60,
+                auto_refresh_on_401: false,
+                fallback_api_key_enabled: true,
+                members: vec![CreatePoolMemberInput {
+                    account_id: acc.id,
+                    supported_models: vec!["deepseek-v4-pro".into()],
+                    tier: MemberTier::T3Fallback,
+                }],
+                enabled_model_ids: None,
+            },
+        )
+        .unwrap();
+
+        let rt = Arc::new(GatewayRuntime::new());
+        {
+            rt.inner.lock().unwrap().port = 0;
+        }
+        let port = rt
+            .start_server(Arc::clone(&db), key, Arc::new(HashMap::new()))
+            .await
+            .expect("start gateway");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth("qwitch-bind-opencode")
+            .json(&json!({
+                "model": "deepseek-v4-pro",
+                "stream": true,
+                "messages": [{ "role": "user", "content": "ping" }]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains("data:"),
+            "expected SSE passthrough, got: {body}"
+        );
 
         rt.stop_server();
         let _ = std::fs::remove_dir_all(root);

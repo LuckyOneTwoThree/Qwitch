@@ -213,7 +213,7 @@ export function RoutingTraceView({
             className="btn btn-xs btn-primary gap-1"
           >
             <Play className="h-3 w-3" aria-hidden="true" />
-            发起模拟打流
+            测试路由
           </button>
         </div>
       </section>

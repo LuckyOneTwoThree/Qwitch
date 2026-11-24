@@ -74,8 +74,20 @@ describe("SettingsView", () => {
     expect(saveAppSettings).toHaveBeenCalledWith({ closeToTray: false });
   });
 
+  it("switches cleanly between the 4 settings category tabs", () => {
+    renderView();
+    expect(screen.getByText("桌面常驻与启动偏好")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /自动化与日志/ }));
+    expect(screen.getByText("自动化巡检与每日签到策略")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /客户端环境/ }));
+    expect(screen.getByText("本机客户端环境探测与路径覆盖")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /插件与关于/ }));
+    expect(screen.getByText("已注册适配器（内置 + 外部扩展）")).toBeTruthy();
+  });
+
   it("requires confirmation before enabling auto daily claim", () => {
     const props = renderView();
+    fireEvent.click(screen.getByRole("tab", { name: /自动化与日志/ }));
     fireEvent.click(screen.getByRole("switch", { name: /发现待领福利时自动后台签到/ }));
     expect(saveAppSettings).not.toHaveBeenCalled();
     expect(props.setConfirmLogAction).toHaveBeenCalledTimes(1);
@@ -89,6 +101,7 @@ describe("SettingsView", () => {
   it("disables auto daily claim immediately without confirmation", () => {
     settings = { ...settings, autoClaimDaily: true };
     const props = renderView();
+    fireEvent.click(screen.getByRole("tab", { name: /自动化与日志/ }));
     fireEvent.click(screen.getByRole("switch", { name: /发现待领福利时自动后台签到/ }));
     expect(props.setConfirmLogAction).not.toHaveBeenCalled();
     expect(saveAppSettings).toHaveBeenCalledWith({ autoClaimDaily: false });
@@ -97,6 +110,7 @@ describe("SettingsView", () => {
   it("marks path drafts dirty on input and saves them then re-probes clients", async () => {
     const trae = MOCK_ADAPTERS.find((a) => a.capabilities.supportsClientSwitch)!;
     const props = renderView({ pathDrafts: { [trae.id]: "/old" } });
+    fireEvent.click(screen.getByRole("tab", { name: /客户端环境/ }));
     const input = screen.getByLabelText(`${trae.name} 自定义客户端路径`) as HTMLInputElement;
     expect(input.value).toBe("/old");
     fireEvent.change(input, { target: { value: "/new" } });
@@ -111,6 +125,7 @@ describe("SettingsView", () => {
   it("keeps drafts dirty when saving paths fails", async () => {
     saveAppSettings.mockResolvedValue(false);
     const props = renderView({ pathDrafts: { a: "/x" } });
+    fireEvent.click(screen.getByRole("tab", { name: /客户端环境/ }));
     fireEvent.click(screen.getByRole("button", { name: /保存路径覆盖/ }));
     await waitFor(() => expect(saveAppSettings).toHaveBeenCalled());
     expect(props.setPathDraftsDirty).not.toHaveBeenCalled();
@@ -124,6 +139,7 @@ describe("SettingsView", () => {
       { id: "trae_cn", name: "Reserved", version: "1.0.0", platforms: [], trusted: false, reserved: true, contentHash: "h2", hashMismatch: false },
     ];
     const props = renderView({ externalPlugins: plugins, trustedDraft: ["ext_ok"] });
+    fireEvent.click(screen.getByRole("tab", { name: /插件与关于/ }));
     expect((screen.getByRole("switch", { name: /插件 Reserved/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByRole("switch", { name: /停用插件 Ext OK/ }).getAttribute("aria-checked")).toBe("true");
 

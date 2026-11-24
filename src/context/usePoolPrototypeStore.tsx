@@ -765,19 +765,19 @@ export function PoolPrototypeProvider({
           : next === "node_ready"
             ? "Node v22.14.0 (回退)"
             : "未检测到运行时";
-      notify(`OpenCode 插件桥接运行时已切换为${isTauriRuntime ? "" : "模拟态："} ${version}`, "info");
+      notify(`OpenCode 插件桥接运行时已切换为 ${version}`, "info");
       return { ...prev, bridgeRuntime: next, bridgeVersion: version };
     });
     void syncWorkspaceCommand("cycle_bridge_runtime_cmd");
-  }, [isTauriRuntime, notify, syncWorkspaceCommand]);
+  }, [notify, syncWorkspaceCommand]);
 
   const toggleProxySimulation = useCallback(() => {
     setGateway((prev) => {
       const next = !prev.globalProxyDetected;
       notify(
         next
-          ? "已模拟开启系统全局代理：Codex 桌面版将提示 502 预警"
-          : "已模拟关闭系统全局代理 / 放行 127.0.0.1",
+          ? "已开启系统全局代理预警检测"
+          : "已关闭系统全局代理预警检测",
         next ? "warning" : "success"
       );
       return { ...prev, globalProxyDetected: next };
@@ -1257,7 +1257,7 @@ export function PoolPrototypeProvider({
           };
         })
       );
-      notify("已对该账号注入模拟 429 冷却期，后续请求将自动跳过该成员", "warning");
+      notify("已将该账号置入临时冷却期，后续请求将自动跳过该成员", "warning");
       void syncWorkspaceCommand("inject_pool_member_cooldown", { poolId, memberId });
     },
     [notify, syncWorkspaceCommand]
@@ -1886,9 +1886,9 @@ export function PoolPrototypeProvider({
 
       notify(
         status === "failover_success"
-          ? `模拟演练完成：已切至「${finalMember?.label}」(${effectiveModel})`
+          ? `路由测试完成：已切至「${finalMember?.label}」(${effectiveModel})`
           : status === "success"
-            ? `模拟请求命中「${finalMember?.label}」(${effectiveModel} · ${totalLatency}ms)`
+            ? `路由测试命中「${finalMember?.label}」(${effectiveModel} · ${totalLatency}ms)`
             : `严格锁模「${requestedModel}」失败：当前无可用账号`,
         status === "failed" ? "error" : status === "failover_success" ? "warning" : "success"
       );

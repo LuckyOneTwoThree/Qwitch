@@ -226,7 +226,7 @@ export function PoolsView({
             className="btn btn-sm btn-secondary gap-1.5"
           >
             <Play className="h-3.5 w-3.5" aria-hidden="true" />
-            模拟打流 / Failover
+            测试路由 / Failover
           </button>
           <button
             type="button"
@@ -908,11 +908,11 @@ export function PoolsView({
                                             onClick={() =>
                                               injectMemberCooldown(selectedPool.id, member.id)
                                             }
-                                            title="测试注入 429 冷却以观察同模型流量切往下一号"
+                                            title="将当前账号临时置入冷却期，观察同模型流量自动切换至下一账号"
                                             className="btn btn-xs btn-ghost text-zinc-500 hover:text-amber-700 dark:hover:text-amber-300"
                                           >
                                             <Flame className="h-3 w-3" aria-hidden="true" />
-                                            模拟 429
+                                            临时冷却
                                           </button>
                                         )}
 

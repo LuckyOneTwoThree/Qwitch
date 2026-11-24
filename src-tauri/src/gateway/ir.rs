@@ -577,6 +577,42 @@ pub fn to_upstream_anthropic_body(ir: &IrRequest, upstream_model: &str, stream: 
 }
 
 pub fn to_openai_chat_response(resp: &IrResponse) -> Value {
+    let has_tools = !resp.tool_calls.is_empty();
+    let content = if resp.text.is_empty() && has_tools {
+        Value::Null
+    } else {
+        json!(resp.text)
+    };
+    let mut message = serde_json::Map::new();
+    message.insert("role".into(), json!("assistant"));
+    message.insert("content".into(), content);
+    if let Some(thinking) = &resp.thinking {
+        if !thinking.is_empty() {
+            message.insert("reasoning_content".into(), json!(thinking));
+        }
+    }
+    if has_tools {
+        let tc_arr: Vec<Value> = resp
+            .tool_calls
+            .iter()
+            .map(|(id, name, args)| {
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args
+                    }
+                })
+            })
+            .collect();
+        message.insert("tool_calls".into(), Value::Array(tc_arr));
+    }
+    let finish_reason = if has_tools {
+        "tool_calls"
+    } else {
+        resp.finish_reason.as_str()
+    };
     json!({
         "id": format!("chatcmpl-{}", resp.id),
         "object": "chat.completion",
@@ -584,11 +620,8 @@ pub fn to_openai_chat_response(resp: &IrResponse) -> Value {
         "model": resp.model,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": resp.text
-            },
-            "finish_reason": resp.finish_reason
+            "message": Value::Object(message),
+            "finish_reason": finish_reason
         }],
         "usage": {
             "prompt_tokens": resp.usage.input_tokens,
@@ -605,18 +638,25 @@ pub fn to_anthropic_messages_response(resp: &IrResponse) -> Value {
             content.push(json!({ "type": "thinking", "thinking": thinking }));
         }
     }
-    content.push(json!({ "type": "text", "text": resp.text }));
+    if !resp.text.is_empty() || (resp.tool_calls.is_empty() && content.is_empty()) {
+        content.push(json!({ "type": "text", "text": resp.text }));
+    }
     for (id, name, args) in &resp.tool_calls {
         let input: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
         content.push(json!({ "type": "tool_use", "id": id, "name": name, "input": input }));
     }
+    let stop_reason = if resp.tool_calls.is_empty() {
+        "end_turn"
+    } else {
+        "tool_use"
+    };
     json!({
         "id": format!("msg_{}", resp.id),
         "type": "message",
         "role": "assistant",
         "model": resp.model,
         "content": content,
-        "stop_reason": "end_turn",
+        "stop_reason": stop_reason,
         "usage": {
             "input_tokens": resp.usage.input_tokens,
             "output_tokens": resp.usage.output_tokens
@@ -625,21 +665,36 @@ pub fn to_anthropic_messages_response(resp: &IrResponse) -> Value {
 }
 
 pub fn to_openai_responses_response(resp: &IrResponse) -> Value {
-    json!({
-        "id": format!("resp_{}", resp.id),
-        "object": "response",
-        "status": "completed",
-        "model": resp.model,
-        "output": [{
+    let mut output = Vec::new();
+    if !resp.text.is_empty() || resp.tool_calls.is_empty() {
+        output.push(json!({
             "id": format!("msg_{}", resp.id),
             "type": "message",
             "role": "assistant",
             "status": "completed",
             "content": [{
                 "type": "output_text",
-                "text": resp.text
+                "text": resp.text,
+                "annotations": []
             }]
-        }],
+        }));
+    }
+    for (idx, (call_id, name, args)) in resp.tool_calls.iter().enumerate() {
+        output.push(json!({
+            "id": format!("fc_{idx}_{}", resp.id),
+            "type": "function_call",
+            "status": "completed",
+            "call_id": call_id,
+            "name": name,
+            "arguments": args
+        }));
+    }
+    json!({
+        "id": format!("resp_{}", resp.id),
+        "object": "response",
+        "status": "completed",
+        "model": resp.model,
+        "output": output,
         "usage": {
             "input_tokens": resp.usage.input_tokens,
             "output_tokens": resp.usage.output_tokens,
@@ -649,30 +704,116 @@ pub fn to_openai_responses_response(resp: &IrResponse) -> Value {
 }
 
 pub fn to_openai_chat_sse(resp: &IrResponse) -> String {
-    let c1 = json!({
-        "id": format!("chatcmpl-{}", resp.id),
-        "object": "chat.completion.chunk",
-        "model": resp.model,
-        "choices": [{
-            "index": 0,
-            "delta": { "role": "assistant", "content": resp.text },
-            "finish_reason": Value::Null
-        }]
-    });
-    let c2 = json!({
-        "id": format!("chatcmpl-{}", resp.id),
+    let id = format!("chatcmpl-{}", resp.id);
+    let mut out = String::new();
+    let mut sent_role = false;
+
+    if let Some(thinking) = &resp.thinking {
+        if !thinking.is_empty() {
+            let chunk = json!({
+                "id": &id,
+                "object": "chat.completion.chunk",
+                "model": resp.model,
+                "choices": [{
+                    "index": 0,
+                    "delta": { "role": "assistant", "reasoning_content": thinking },
+                    "finish_reason": Value::Null
+                }]
+            });
+            out.push_str(&format!("data: {chunk}\n\n"));
+            sent_role = true;
+        }
+    }
+
+    if !resp.text.is_empty() || resp.tool_calls.is_empty() {
+        let mut delta = serde_json::Map::new();
+        if !sent_role {
+            delta.insert("role".into(), json!("assistant"));
+            sent_role = true;
+        }
+        delta.insert("content".into(), json!(resp.text));
+        let chunk = json!({
+            "id": &id,
+            "object": "chat.completion.chunk",
+            "model": resp.model,
+            "choices": [{
+                "index": 0,
+                "delta": Value::Object(delta),
+                "finish_reason": Value::Null
+            }]
+        });
+        out.push_str(&format!("data: {chunk}\n\n"));
+    }
+
+    if !resp.tool_calls.is_empty() {
+        let tc_arr: Vec<Value> = resp
+            .tool_calls
+            .iter()
+            .enumerate()
+            .map(|(idx, (tc_id, name, args))| {
+                json!({
+                    "index": idx,
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args
+                    }
+                })
+            })
+            .collect();
+        let mut delta = serde_json::Map::new();
+        if !sent_role {
+            delta.insert("role".into(), json!("assistant"));
+        }
+        delta.insert("tool_calls".into(), Value::Array(tc_arr));
+        let chunk = json!({
+            "id": &id,
+            "object": "chat.completion.chunk",
+            "model": resp.model,
+            "choices": [{
+                "index": 0,
+                "delta": Value::Object(delta),
+                "finish_reason": Value::Null
+            }]
+        });
+        out.push_str(&format!("data: {chunk}\n\n"));
+    }
+
+    let finish_reason = if resp.tool_calls.is_empty() {
+        resp.finish_reason.as_str()
+    } else {
+        "tool_calls"
+    };
+    let final_chunk = json!({
+        "id": &id,
         "object": "chat.completion.chunk",
         "model": resp.model,
         "choices": [{
             "index": 0,
             "delta": {},
-            "finish_reason": resp.finish_reason
-        }]
+            "finish_reason": finish_reason
+        }],
+        "usage": {
+            "prompt_tokens": resp.usage.input_tokens,
+            "completion_tokens": resp.usage.output_tokens,
+            "total_tokens": resp.usage.input_tokens + resp.usage.output_tokens
+        }
     });
-    format!("data: {c1}\n\ndata: {c2}\n\ndata: [DONE]\n\n")
+    out.push_str(&format!("data: {final_chunk}\n\ndata: [DONE]\n\n"));
+    out
+}
+
+fn push_named_sse(out: &mut String, event_name: &str, payload: Value) {
+    out.push_str("event: ");
+    out.push_str(event_name);
+    out.push_str("\ndata: ");
+    out.push_str(&payload.to_string());
+    out.push_str("\n\n");
 }
 
 pub fn to_anthropic_messages_sse(resp: &IrResponse) -> String {
+    let mut out = String::new();
     let start = json!({
         "type": "message_start",
         "message": {
@@ -684,52 +825,291 @@ pub fn to_anthropic_messages_sse(resp: &IrResponse) -> String {
             "usage": { "input_tokens": resp.usage.input_tokens, "output_tokens": 0 }
         }
     });
-    let block_start = json!({
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": { "type": "text", "text": "" }
-    });
-    let delta = json!({
-        "type": "content_block_delta",
-        "index": 0,
-        "delta": { "type": "text_delta", "text": resp.text }
-    });
-    let block_stop = json!({ "type": "content_block_stop", "index": 0 });
-    let msg_delta = json!({
-        "type": "message_delta",
-        "delta": { "stop_reason": "end_turn" },
-        "usage": { "output_tokens": resp.usage.output_tokens }
-    });
-    let msg_stop = json!({ "type": "message_stop" });
-    format!(
-        "event: message_start\ndata: {start}\n\n\
-         event: content_block_start\ndata: {block_start}\n\n\
-         event: content_block_delta\ndata: {delta}\n\n\
-         event: content_block_stop\ndata: {block_stop}\n\n\
-         event: message_delta\ndata: {msg_delta}\n\n\
-         event: message_stop\ndata: {msg_stop}\n\n"
-    )
+    push_named_sse(&mut out, "message_start", start);
+
+    let mut block_idx = 0usize;
+    if let Some(thinking) = &resp.thinking {
+        if !thinking.is_empty() {
+            push_named_sse(
+                &mut out,
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": block_idx,
+                    "content_block": { "type": "thinking", "thinking": "" }
+                }),
+            );
+            push_named_sse(
+                &mut out,
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": block_idx,
+                    "delta": { "type": "thinking_delta", "thinking": thinking }
+                }),
+            );
+            push_named_sse(
+                &mut out,
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": block_idx }),
+            );
+            block_idx += 1;
+        }
+    }
+
+    if !resp.text.is_empty() || (resp.tool_calls.is_empty() && block_idx == 0) {
+        push_named_sse(
+            &mut out,
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": block_idx,
+                "content_block": { "type": "text", "text": "" }
+            }),
+        );
+        if !resp.text.is_empty() {
+            push_named_sse(
+                &mut out,
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": block_idx,
+                    "delta": { "type": "text_delta", "text": resp.text }
+                }),
+            );
+        }
+        push_named_sse(
+            &mut out,
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": block_idx }),
+        );
+        block_idx += 1;
+    }
+
+    for (id, name, args) in &resp.tool_calls {
+        push_named_sse(
+            &mut out,
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": block_idx,
+                "content_block": { "type": "tool_use", "id": id, "name": name, "input": {} }
+            }),
+        );
+        if !args.is_empty() {
+            push_named_sse(
+                &mut out,
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": block_idx,
+                    "delta": { "type": "input_json_delta", "partial_json": args }
+                }),
+            );
+        }
+        push_named_sse(
+            &mut out,
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": block_idx }),
+        );
+        block_idx += 1;
+    }
+
+    let stop_reason = if resp.tool_calls.is_empty() {
+        "end_turn"
+    } else {
+        "tool_use"
+    };
+    push_named_sse(
+        &mut out,
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason },
+            "usage": { "output_tokens": resp.usage.output_tokens }
+        }),
+    );
+    push_named_sse(&mut out, "message_stop", json!({ "type": "message_stop" }));
+    out
 }
 
 pub fn to_openai_responses_sse(resp: &IrResponse) -> String {
     let full = to_openai_responses_response(resp);
-    let created = json!({
-        "type": "response.created",
-        "response": { "id": full["id"], "status": "in_progress", "model": resp.model }
+    let mut out = String::new();
+    let in_progress_resp = json!({
+        "id": full["id"],
+        "object": "response",
+        "status": "in_progress",
+        "model": resp.model,
+        "output": []
     });
-    let delta = json!({
-        "type": "response.output_text.delta",
-        "delta": resp.text
-    });
-    let completed = json!({
-        "type": "response.completed",
-        "response": full
-    });
-    format!(
-        "event: response.created\ndata: {created}\n\n\
-         event: response.output_text.delta\ndata: {delta}\n\n\
-         event: response.completed\ndata: {completed}\n\n"
-    )
+    push_named_sse(
+        &mut out,
+        "response.created",
+        json!({
+            "type": "response.created",
+            "response": in_progress_resp
+        }),
+    );
+    push_named_sse(
+        &mut out,
+        "response.in_progress",
+        json!({
+            "type": "response.in_progress",
+            "response": in_progress_resp
+        }),
+    );
+
+    let mut output_index = 0usize;
+    if !resp.text.is_empty() || resp.tool_calls.is_empty() {
+        let msg_id = format!("msg_{}", resp.id);
+        push_named_sse(
+            &mut out,
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {
+                    "id": &msg_id,
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": []
+                }
+            }),
+        );
+        push_named_sse(
+            &mut out,
+            "response.content_part.added",
+            json!({
+                "type": "response.content_part.added",
+                "item_id": &msg_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "part": { "type": "output_text", "text": "", "annotations": [] }
+            }),
+        );
+        if !resp.text.is_empty() {
+            push_named_sse(
+                &mut out,
+                "response.output_text.delta",
+                json!({
+                    "type": "response.output_text.delta",
+                    "item_id": &msg_id,
+                    "output_index": output_index,
+                    "content_index": 0,
+                    "delta": resp.text
+                }),
+            );
+        }
+        push_named_sse(
+            &mut out,
+            "response.output_text.done",
+            json!({
+                "type": "response.output_text.done",
+                "item_id": &msg_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "text": resp.text
+            }),
+        );
+        push_named_sse(
+            &mut out,
+            "response.content_part.done",
+            json!({
+                "type": "response.content_part.done",
+                "item_id": &msg_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "part": { "type": "output_text", "text": resp.text, "annotations": [] }
+            }),
+        );
+        push_named_sse(
+            &mut out,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": {
+                    "id": &msg_id,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": resp.text, "annotations": [] }]
+                }
+            }),
+        );
+        output_index += 1;
+    }
+
+    for (idx, (call_id, name, args)) in resp.tool_calls.iter().enumerate() {
+        let fc_id = format!("fc_{idx}_{}", resp.id);
+        push_named_sse(
+            &mut out,
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {
+                    "id": &fc_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": ""
+                }
+            }),
+        );
+        if !args.is_empty() {
+            push_named_sse(
+                &mut out,
+                "response.function_call_arguments.delta",
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": &fc_id,
+                    "output_index": output_index,
+                    "delta": args
+                }),
+            );
+        }
+        push_named_sse(
+            &mut out,
+            "response.function_call_arguments.done",
+            json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": &fc_id,
+                "output_index": output_index,
+                "arguments": args
+            }),
+        );
+        push_named_sse(
+            &mut out,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": {
+                    "id": &fc_id,
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": args
+                }
+            }),
+        );
+        output_index += 1;
+    }
+
+    push_named_sse(
+        &mut out,
+        "response.completed",
+        json!({
+            "type": "response.completed",
+            "response": full
+        }),
+    );
+    out
 }
 
 #[cfg(test)]
@@ -768,5 +1148,105 @@ mod tests {
         .unwrap();
         assert_eq!(resp_req.system_prompt.as_deref(), Some("Be brief"));
         assert_eq!(resp_req.messages.len(), 1);
+    }
+
+    #[test]
+    fn responses_sse_and_json_emit_full_lifecycle_and_function_calls() {
+        let resp = IrResponse {
+            id: "r1".into(),
+            model: "hy4flash-free".into(),
+            text: "Checking file".into(),
+            thinking: None,
+            tool_calls: vec![(
+                "call_1".into(),
+                "read_file".into(),
+                "{\"path\":\"README.md\"}".into(),
+            )],
+            finish_reason: "tool_calls".into(),
+            usage: IrUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        };
+
+        let json_out = to_openai_responses_response(&resp);
+        let output = json_out["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(output[0]["content"][0]["type"], "output_text");
+        assert_eq!(output[0]["content"][0]["text"], "Checking file");
+        assert_eq!(output[1]["type"], "function_call");
+        assert_eq!(output[1]["call_id"], "call_1");
+        assert_eq!(output[1]["name"], "read_file");
+
+        let sse = to_openai_responses_sse(&resp);
+        let p_created = sse.find("event: response.created").unwrap();
+        let p_in_prog = sse.find("event: response.in_progress").unwrap();
+        let p_item_add = sse.find("event: response.output_item.added").unwrap();
+        let p_part_add = sse.find("event: response.content_part.added").unwrap();
+        let p_txt_delta = sse.find("event: response.output_text.delta").unwrap();
+        let p_txt_done = sse.find("event: response.output_text.done").unwrap();
+        let p_part_done = sse.find("event: response.content_part.done").unwrap();
+        let p_item_done = sse.find("event: response.output_item.done").unwrap();
+        let p_fc_delta = sse
+            .find("event: response.function_call_arguments.delta")
+            .unwrap();
+        let p_fc_done = sse
+            .find("event: response.function_call_arguments.done")
+            .unwrap();
+        let p_completed = sse.find("event: response.completed").unwrap();
+
+        assert!(p_created < p_in_prog);
+        assert!(p_in_prog < p_item_add);
+        assert!(p_item_add < p_part_add);
+        assert!(p_part_add < p_txt_delta);
+        assert!(p_txt_delta < p_txt_done);
+        assert!(p_txt_done < p_part_done);
+        assert!(p_part_done < p_item_done);
+        assert!(p_item_done < p_fc_delta);
+        assert!(p_fc_delta < p_fc_done);
+        assert!(p_fc_done < p_completed);
+    }
+
+    #[test]
+    fn anthropic_and_openai_chat_preserve_thinking_and_tool_calls() {
+        let resp = IrResponse {
+            id: "a1".into(),
+            model: "deepseek-v4".into(),
+            text: "Using tool".into(),
+            thinking: Some("hmm".into()),
+            tool_calls: vec![("toolu_1".into(), "bash".into(), "{\"cmd\":\"ls\"}".into())],
+            finish_reason: "tool_calls".into(),
+            usage: IrUsage {
+                input_tokens: 12,
+                output_tokens: 8,
+            },
+        };
+
+        let anth_json = to_anthropic_messages_response(&resp);
+        assert_eq!(anth_json["stop_reason"], "tool_use");
+        assert_eq!(anth_json["content"][0]["type"], "thinking");
+        assert_eq!(anth_json["content"][1]["type"], "text");
+        assert_eq!(anth_json["content"][2]["type"], "tool_use");
+        assert_eq!(anth_json["content"][2]["id"], "toolu_1");
+
+        let anth_sse = to_anthropic_messages_sse(&resp);
+        assert!(anth_sse.contains("thinking_delta"));
+        assert!(anth_sse.contains("text_delta"));
+        assert!(anth_sse.contains("\"type\":\"tool_use\""));
+        assert!(anth_sse.contains("input_json_delta"));
+        assert!(anth_sse.contains("\"stop_reason\":\"tool_use\""));
+
+        let chat_json = to_openai_chat_response(&resp);
+        assert_eq!(chat_json["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(chat_json["choices"][0]["message"]["reasoning_content"], "hmm");
+        assert_eq!(chat_json["choices"][0]["message"]["tool_calls"][0]["id"], "toolu_1");
+
+        let chat_sse = to_openai_chat_sse(&resp);
+        assert!(chat_sse.contains("\"reasoning_content\":\"hmm\""));
+        assert!(chat_sse.contains("\"tool_calls\""));
+        assert!(chat_sse.contains("\"index\":0"));
+        assert!(chat_sse.contains("\"finish_reason\":\"tool_calls\""));
+        assert!(chat_sse.contains("\"usage\""));
     }
 }

@@ -65,9 +65,9 @@ describe("PoolsView v2", () => {
     // 切回具有同模型多账号冗余的「主力全栈 Coding 池」，测试 429 切换与同会话连续打流
     fireEvent.click(screen.getByText("主力全栈 Coding 池"));
     fireEvent.click(screen.getByRole("button", { name: /演练切号/ }));
-    expect(screen.getByText("号池打流与同模型 Failover 演练实验室")).toBeTruthy();
+    expect(screen.getByText("网关路由连通性测试")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /发送模拟请求/ }));
+    fireEvent.click(screen.getByRole("button", { name: /发送测试请求/ }));
     expect(screen.getByText(/无感切换接管成功/)).toBeTruthy();
 
     // 同会话续发一条（验证 Prompt Cache 亲和跳过冷却号）

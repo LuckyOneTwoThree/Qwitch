@@ -1311,7 +1311,7 @@ export function useAccountStore({
       await invoke("quit_app");
       return;
     }
-    showToast("Mock 模式下无需退出应用", "info");
+    showToast("浏览器预览模式下无需退出应用", "info");
   }, [isTauriRuntime, showToast]);
 
   const triggerAutoClaimAvailable = useCallback(async () => {

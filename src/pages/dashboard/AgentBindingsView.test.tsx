@@ -43,8 +43,10 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
     fireEvent.click(within(qoderModelSection).getByRole("button", { name: "清空本工具" }));
     expect(within(qoderModelSection).getByRole("button", { name: "已勾选 (0)" })).toBeTruthy();
 
-    // 切回 WorkBuddy 测试同工具多账号调度：将 #2 备用账号一键「设为主号」及批量启停
-    fireEvent.click(within(toolTabs).getByRole("tab", { name: /WorkBuddy/ }));
+    // 切换到「账号调度」子分区测试同工具多账号调度：将 #2 备用账号一键「设为主号」及批量启停
+    const subTabs = screen.getByRole("tablist", { name: "Agent 配置分区" });
+    fireEvent.click(within(subTabs).getByRole("tab", { name: /账号调度/ }));
+    fireEvent.click(within(screen.getByRole("tablist", { name: "订阅工具切换栏" })).getByRole("tab", { name: /WorkBuddy/ }));
     const schedSection = screen.getByRole("region", { name: "WorkBuddy 同工具账号调度方案" });
     const promoteBtns = within(schedSection).getAllByRole("button", { name: "设为主号" });
     expect(promoteBtns.length).toBeGreaterThan(0);
@@ -53,7 +55,12 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
     expect(within(schedSection).getByText(/1\/\d+ 启用/)).toBeTruthy();
     fireEvent.click(within(schedSection).getByRole("button", { name: "全部启用" }));
 
-    // 选中 DeepSeek Harness，验证配置漂移告警与 Diff 修复弹窗
+    // 验证「接入设置」子分区包含配置 Diff 与通用标准端点
+    fireEvent.click(within(subTabs).getByRole("tab", { name: /接入设置/ }));
+    expect(screen.getByText(/通用标准网关端点/)).toBeTruthy();
+
+    // 切回「模型配置」选中 DeepSeek Harness，验证配置漂移告警与 Diff 修复弹窗
+    fireEvent.click(within(subTabs).getByRole("tab", { name: /模型配置/ }));
     const dshCard = screen.getByRole("region", { name: "DeepSeek Harness 挂载卡片" });
     expect(within(dshCard).getByText("配置漂移")).toBeTruthy();
     fireEvent.click(within(dshCard).getByRole("button", { name: /查看差异并修复/ }));

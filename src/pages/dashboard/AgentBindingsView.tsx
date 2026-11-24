@@ -13,12 +13,12 @@ import {
   FileCode2,
   Flame,
   Layers,
-  Power,
   RefreshCw,
   RotateCcw,
   Search,
   ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Square,
   Star,
@@ -54,6 +54,29 @@ const DEFAULT_TOOL_ORDER = [
 ] as const;
 
 type ModelQuickFilter = "all" | "checked" | "low_rate" | "flagship";
+type AgentSubTab = "models" | "scheduling" | "connection";
+
+const AGENT_STRATEGY_OPTIONS: ReadonlyArray<{
+  id: PoolStrategy;
+  shortLabel: string;
+  desc: string;
+}> = [
+  {
+    id: "order",
+    shortLabel: "主号优先 · 自动切备",
+    desc: "优先固定消耗 #1 主账号（稳保 Prompt Cache）；429 限流或耗尽时自动顺延 #2 备用账号",
+  },
+  {
+    id: "quota_first",
+    shortLabel: "剩余额度优先",
+    desc: "在已启用账号中自动路由至实时剩余额度百分比最高的账号",
+  },
+  {
+    id: "drain",
+    shortLabel: "锁定消耗当前主号",
+    desc: "持续使用 #1 主账号直到耗尽，需人工切换时可随时点击「设为主号」",
+  },
+];
 
 function renderStatusBadge(status: AgentBinding["status"], compact = false) {
   const padClass = compact ? "px-1.5 py-0.5 text-[10px]" : "";
@@ -104,7 +127,6 @@ export function AgentBindingsView({
     nowMs,
     isRefreshingModels,
     refreshUpstreamModels,
-    toggleGateway,
     cycleBridgeRuntime,
     toggleProxySimulation,
     updateAgentMountedPools,
@@ -113,7 +135,6 @@ export function AgentBindingsView({
     repairAgentDrift,
     restartAgentClient,
     toggleAgentOption,
-    detectAgentEnvironment,
     injectMemberCooldown,
     clearMemberCooldown,
     authorizeCodeArtsIsolated,
@@ -137,9 +158,14 @@ export function AgentBindingsView({
     syncToolScheduleToAllAgents,
   } = usePoolPrototype();
 
+  const isTauriRuntime =
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+
   const [selectedAgentId, setSelectedAgentId] = useState<TargetAgentId>(
     highlightAgentId ?? agentBindings[0]?.agentId ?? "claude_desktop"
   );
+  const [subTab, setSubTab] = useState<AgentSubTab>("models");
   const [selectedToolId, setSelectedToolId] = useState<string>("workbuddy");
   const [modelSearch, setModelSearch] = useState<string>("");
   const [modelQuickFilter, setModelQuickFilter] = useState<ModelQuickFilter>("all");
@@ -379,12 +405,99 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
   const currentSkipActive = activeAgentPool?.skipActiveClientAccount ?? true;
   const currentCooldownSec = activeAgentPool?.cooldownSeconds ?? 60;
 
+  const activeStrategyDesc =
+    AGENT_STRATEGY_OPTIONS.find((opt) => opt.id === currentStrategy)?.desc ??
+    AGENT_STRATEGY_OPTIONS[0].desc;
+
+  const renderToolSwitcher = () => {
+    if (!activeBinding) return null;
+    return (
+      <section className="surface-card p-3">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+            <Layers className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400" aria-hidden="true" />
+            <span>订阅工具（按工具独立计费与限流）</span>
+          </div>
+          <span className="text-[11px] text-zinc-400">
+            切换不同工具配置开放模型与主备顺位
+          </span>
+        </div>
+
+        <div
+          role="tablist"
+          aria-label="订阅工具切换栏"
+          className="flex flex-wrap gap-1.5"
+        >
+          {orderedToolIds.map((toolId) => {
+            const isActive = toolId === activeToolId;
+            const toolName = TOOL_SHORT_LABELS[toolId] ?? toolId;
+            const totalToolModels = getAgentToolModelOptions(toolId).length;
+            const selectedToolCount = getAgentToolEnabledModelIds(
+              activeBinding.agentId,
+              toolId
+            ).length;
+            const toolAccs = getAgentToolAccounts(activeBinding.agentId, toolId);
+            const hasDefaultHere =
+              defaultExposedItem &&
+              splitScopedModelId(defaultExposedItem.modelId).toolId === toolId;
+
+            return (
+              <button
+                key={toolId}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                onClick={() => {
+                  setSelectedToolId(toolId);
+                  setModelSearch("");
+                  setModelQuickFilter("all");
+                }}
+                className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
+                  isActive
+                    ? "border-brand-500 bg-brand-500/10 font-semibold text-brand-900 shadow-2xs dark:border-brand-400 dark:text-brand-100"
+                    : selectedToolCount > 0
+                      ? "border-emerald-500/35 bg-emerald-500/[0.04] text-zinc-800 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                      : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400"
+                }`}
+              >
+                <ToolBrandIcon toolId={toolId} size="xs" decorative />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1">
+                    <span className="truncate">{toolName}</span>
+                    {hasDefaultHere && (
+                      <Star
+                        className="h-3 w-3 shrink-0 fill-amber-500 text-amber-500"
+                        aria-label="包含默认模型"
+                      />
+                    )}
+                    <span
+                      className={`text-[10px] font-normal tabular-nums ${
+                        selectedToolCount > 0
+                          ? "font-semibold text-brand-700 dark:text-brand-300"
+                          : "text-zinc-400"
+                      }`}
+                    >
+                      {selectedToolCount}/{totalToolModels}
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-normal text-zinc-500 dark:text-zinc-400">
+                    {toolAccs.length > 0 ? `${toolAccs.length} 账号` : "未导入"}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    );
+  };
+
   return (
-    <div className="space-y-4">
-      {/* 顶部环境与网关自检条 */}
-      <section className="surface-card flex flex-wrap items-center justify-between gap-3 px-4 py-2.5">
+    <div className="space-y-3.5">
+      {/* 顶部精简网关状态条（顶栏已提供启停/重探/测试路由主操作，此处仅作状态自检） */}
+      <section className="surface-card flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2">
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <span
               className={`h-2 w-2 rounded-full ${
                 gateway.running ? "bg-emerald-500" : "bg-zinc-400"
@@ -398,246 +511,209 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
             </code>
           </div>
 
-          <button
-            type="button"
-            onClick={cycleBridgeRuntime}
-            title="点击可模拟切换 OpenCode 插件桥运行时检测态"
-            className={`badge cursor-pointer ${
-              gateway.bridgeRuntime === "missing"
-                ? "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
-                : "border-indigo-500/25 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
-            }`}
-          >
-            插件桥：{gateway.bridgeVersion}
-          </button>
-
-          <button
-            type="button"
-            onClick={toggleProxySimulation}
-            title="点击可切换模拟系统全局代理状态（演示 Codex 502 检测）"
-            className={`badge cursor-pointer ${
-              gateway.globalProxyDetected
-                ? "border-amber-500/35 bg-amber-500/12 text-amber-800 dark:text-amber-300"
-                : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-            }`}
-          >
-            {gateway.globalProxyDetected ? "⚠️ 检测到全局代理" : "✓ 本机回环直连正常"}
-          </button>
+          {isTauriRuntime ? (
+            <>
+              <span
+                className={`badge ${
+                  gateway.bridgeRuntime === "missing"
+                    ? "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
+                    : "border-indigo-500/25 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
+                }`}
+              >
+                插件桥：{gateway.bridgeVersion}
+              </span>
+              <span
+                className={`badge ${
+                  gateway.globalProxyDetected
+                    ? "border-amber-500/35 bg-amber-500/12 text-amber-800 dark:text-amber-300"
+                    : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                }`}
+              >
+                {gateway.globalProxyDetected ? "⚠️ 检测到全局代理" : "✓ 本机回环直连正常"}
+              </span>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={cycleBridgeRuntime}
+                title="切换 OpenCode 插件桥接检测态"
+                className={`badge cursor-pointer ${
+                  gateway.bridgeRuntime === "missing"
+                    ? "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
+                    : "border-indigo-500/25 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
+                }`}
+              >
+                插件桥：{gateway.bridgeVersion}
+              </button>
+              <button
+                type="button"
+                onClick={toggleProxySimulation}
+                title="切换系统全局代理检测态"
+                className={`badge cursor-pointer ${
+                  gateway.globalProxyDetected
+                    ? "border-amber-500/35 bg-amber-500/12 text-amber-800 dark:text-amber-300"
+                    : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                }`}
+              >
+                {gateway.globalProxyDetected ? "⚠️ 检测到全局代理" : "✓ 本机回环直连正常"}
+              </button>
+            </>
+          )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="hidden text-[11px] text-zinc-500 @3xl:inline dark:text-zinc-400">
-            先选左侧目标 Agent → 选订阅工具 → 批量勾选模型与主备账号顺位
-          </span>
-          <button
-            type="button"
-            onClick={detectAgentEnvironment}
-            className="btn btn-xs btn-secondary gap-1"
-          >
-            <RefreshCw className="h-3 w-3" aria-hidden="true" />
-            重新探测环境
-          </button>
-          <button
-            type="button"
-            onClick={toggleGateway}
-            className={`btn btn-xs gap-1 ${
-              gateway.running ? "btn-secondary" : "btn-primary"
-            }`}
-          >
-            <Power className="h-3 w-3" aria-hidden="true" />
-            {gateway.running ? "停止网关" : "启动网关"}
-          </button>
-        </div>
+        <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          先选 Agent → 配置模型 → 按需在「账号调度」调整主备顺位
+        </span>
       </section>
 
-      {/* 主从工作台：左侧 4 大目标 Agent 列表 + 右侧直选工具/模型/主备账号调度工作室 */}
-      <div className="grid grid-cols-1 gap-4 @4xl:grid-cols-[296px_minmax(0,1fr)]">
-        {/* 左侧 Master：目标 Agent 列表 */}
-        <aside className="space-y-2.5" aria-label="目标 Agent 客户端列表">
-          <div className="flex items-center justify-between px-1 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-            <span>1. 选择目标 Agent</span>
-            <span className="text-[11px] font-normal text-zinc-400">
-              每个 Agent 独立策略
-            </span>
-          </div>
+      {/* 顶部 4 格紧凑目标 Agent 切换栏 */}
+      <aside
+        aria-label="目标 Agent 客户端列表"
+        className="grid grid-cols-1 gap-2 @lg:grid-cols-2 @3xl:grid-cols-4"
+      >
+        {agentBindings.map((binding) => {
+          const isSelected = activeBinding?.agentId === binding.agentId;
+          const exposed = computeAgentExposedModels(binding, pools, nowMs);
+          const defModel = exposed.find((m) => m.isDefault) ?? exposed[0];
 
-          <div className="grid grid-cols-1 gap-2 @lg:grid-cols-2 @4xl:grid-cols-1">
-            {agentBindings.map((binding) => {
-              const isSelected = activeBinding?.agentId === binding.agentId;
-              const exposed = computeAgentExposedModels(binding, pools, nowMs);
-              const defModel = exposed.find((m) => m.isDefault) ?? exposed[0];
-
-              return (
-                <section
-                  key={binding.agentId}
-                  aria-label={`${binding.name} 挂载卡片`}
-                  className={`surface-card relative flex flex-col gap-2.5 p-3 transition ${
-                    isSelected
-                      ? "border-brand-500 bg-brand-500/[0.04] ring-2 ring-brand-500/20 dark:border-brand-400 dark:bg-brand-500/[0.07]"
-                      : binding.status === "drifted"
-                        ? "border-amber-500/50 hover:border-amber-500"
-                        : "hover:border-zinc-300 dark:hover:border-zinc-700"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => setSelectedAgentId(binding.agentId)}
-                    aria-pressed={isSelected}
-                    className="flex w-full flex-col gap-2 text-left"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <AgentBrandIcon agentId={binding.agentId} size="sm" />
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <h2 className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                              {binding.name}
-                            </h2>
-                            <span className="font-mono text-[10px] text-zinc-400">
-                              v{binding.version}
-                            </span>
-                          </div>
-                          <span
-                            className={`mt-0.5 inline-flex rounded px-1 py-0.2 text-[10px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
-                          >
-                            {WIRE_PROTOCOL_META[binding.protocol].label}
-                          </span>
-                        </div>
-                      </div>
-                      {renderStatusBadge(binding.status, true)}
-                    </div>
-
-                    <div className="flex flex-wrap items-center justify-between gap-1.5 rounded-lg bg-zinc-100/75 px-2 py-1.5 text-[11px] dark:bg-zinc-950/60">
-                      {defModel ? (
-                        <span className="flex min-w-0 items-center gap-1 font-medium text-zinc-800 dark:text-zinc-200">
-                          <Star
-                            className="h-3 w-3 shrink-0 fill-amber-500 text-amber-500"
-                            aria-hidden="true"
-                          />
-                          <span className="truncate font-mono">{defModel.displayName}</span>
-                        </span>
-                      ) : (
-                        <span className="text-zinc-400">尚未勾选订阅模型</span>
-                      )}
-                      <span className="shrink-0 rounded bg-white px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                        {exposed.length} 模型
-                      </span>
-                    </div>
-                  </button>
-
-                  {binding.status === "drifted" && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedAgentId(binding.agentId);
-                        setDiffModal({
-                          binding,
-                          actionKind: "repair",
-                          nextPoolIds: binding.mountedPoolIds,
-                          mountedPoolNames: binding.mountedPoolIds
-                            .map((id) => pools.find((p) => p.id === id)?.name)
-                            .filter((n): n is string => Boolean(n)),
-                          beforeText: binding.beforeSnippet,
-                          afterText: binding.afterSnippet,
-                        });
-                      }}
-                      className="btn btn-xs btn-primary w-full justify-center gap-1"
-                    >
-                      <Wrench className="h-3 w-3" aria-hidden="true" />
-                      查看差异并修复
-                    </button>
-                  )}
-                </section>
-              );
-            })}
-          </div>
-        </aside>
-
-        {/* 右侧 Detail：所选 Agent 的直连配置工作室 */}
-        {activeBinding && (
-          <main
-            aria-label={`${activeBinding.name} 专属配置工作室`}
-            className="min-w-0 space-y-4"
-          >
-            {/* A. Agent 头部控制与写入状态栏 */}
-            <section className="surface-card space-y-3 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-3">
-                  <AgentBrandIcon agentId={activeBinding.agentId} size="md" />
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-                        {activeBinding.name}
+          return (
+            <section
+              key={binding.agentId}
+              aria-label={`${binding.name} 挂载卡片`}
+              className={`surface-card relative flex flex-col justify-between gap-2 p-2.5 transition ${
+                isSelected
+                  ? "border-brand-500 bg-brand-500/[0.05] ring-2 ring-brand-500/20 dark:border-brand-400 dark:bg-brand-500/[0.08]"
+                  : binding.status === "drifted"
+                    ? "border-amber-500/50 hover:border-amber-500"
+                    : "hover:border-zinc-300 dark:hover:border-zinc-700"
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => setSelectedAgentId(binding.agentId)}
+                aria-pressed={isSelected}
+                className="flex w-full flex-col gap-2 text-left"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <AgentBrandIcon agentId={binding.agentId} size="sm" />
+                    <div className="min-w-0">
+                      <h2 className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                        {binding.name}
                       </h2>
-                      {renderStatusBadge(activeBinding.status)}
                       <span
-                        className={`badge ${WIRE_PROTOCOL_META[activeBinding.protocol].badgeClass}`}
+                        className={`mt-0.5 inline-flex rounded px-1 py-0.2 text-[10px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
                       >
-                        {WIRE_PROTOCOL_META[activeBinding.protocol].label}
+                        {WIRE_PROTOCOL_META[binding.protocol].label}
                       </span>
-                    </div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-                      <code className="truncate font-mono">{activeBinding.configPath}</code>
-                      {activeBinding.lastHitAt && (
-                        <span>· 最近调用：{activeBinding.lastHitAt}</span>
-                      )}
                     </div>
                   </div>
+                  {renderStatusBadge(binding.status, true)}
                 </div>
 
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setDiffModal({
-                        binding: activeBinding,
-                        actionKind: "preview",
-                        mountedPoolNames: activeBinding.mountedPoolIds
-                          .map((id) => pools.find((p) => p.id === id)?.name)
-                          .filter((n): n is string => Boolean(n)),
-                        defaultModelDisplay: defaultExposedItem?.displayName ?? null,
-                        beforeText: activeBinding.beforeSnippet,
-                        afterText: activeBinding.afterSnippet,
-                      })
-                    }
-                    className="btn btn-xs btn-secondary gap-1"
-                  >
-                    <FileCode2 className="h-3.5 w-3.5" aria-hidden="true" />
-                    预览配置 Diff
-                  </button>
-
-                  {activeBinding.mountedPoolIds.length > 0 ? (
-                    <button
-                      type="button"
-                      onClick={() => openDiffForMountChange(activeBinding, [])}
-                      className="btn btn-xs btn-danger gap-1"
-                    >
-                      <Unlink className="h-3 w-3" aria-hidden="true" />
-                      全部解绑并还原
-                    </button>
+                <div className="flex items-center justify-between gap-1.5 rounded-lg bg-zinc-100/75 px-2 py-1 text-[11px] dark:bg-zinc-950/60">
+                  {defModel ? (
+                    <span className="flex min-w-0 items-center gap-1 font-medium text-zinc-800 dark:text-zinc-200">
+                      <Star
+                        className="h-3 w-3 shrink-0 fill-amber-500 text-amber-500"
+                        aria-hidden="true"
+                      />
+                      <span className="truncate font-mono">{defModel.displayName}</span>
+                    </span>
                   ) : (
-                    <button
-                      type="button"
-                      disabled={toolModelOptions.length === 0}
-                      onClick={() =>
-                        selectRecommendedAgentToolModels(activeBinding.agentId, activeToolId)
-                      }
-                      className="btn btn-xs btn-primary gap-1"
-                    >
-                      <Zap className="h-3 w-3" aria-hidden="true" />
-                      一键接入推荐模型
-                    </button>
+                    <span className="text-zinc-400">未配置模型</span>
                   )}
+                  <span className="shrink-0 rounded bg-white px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                    {exposed.length} 模型
+                  </span>
+                </div>
+              </button>
+
+              {binding.status === "drifted" && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedAgentId(binding.agentId);
+                    setDiffModal({
+                      binding,
+                      actionKind: "repair",
+                      nextPoolIds: binding.mountedPoolIds,
+                      mountedPoolNames: binding.mountedPoolIds
+                        .map((id) => pools.find((p) => p.id === id)?.name)
+                        .filter((n): n is string => Boolean(n)),
+                      beforeText: binding.beforeSnippet,
+                      afterText: binding.afterSnippet,
+                    });
+                  }}
+                  className="btn btn-xs btn-primary w-full justify-center gap-1"
+                >
+                  <Wrench className="h-3 w-3" aria-hidden="true" />
+                  查看差异并修复
+                </button>
+              )}
+            </section>
+          );
+        })}
+      </aside>
+
+      {/* 当前选中 Agent 的分标签工作区 */}
+      {activeBinding && (
+        <main
+          aria-label={`${activeBinding.name} 专属配置工作室`}
+          className="min-w-0 space-y-3.5"
+        >
+          {/* A. Agent 头部状态、主操作与 3 分区 Tab 栏 */}
+          <section className="surface-card space-y-3 p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <AgentBrandIcon agentId={activeBinding.agentId} size="md" />
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                      {activeBinding.name}
+                    </h2>
+                    <span className="font-mono text-[11px] text-zinc-400">
+                      v{activeBinding.version}
+                    </span>
+                    {renderStatusBadge(activeBinding.status)}
+                    <span
+                      className={`badge ${WIRE_PROTOCOL_META[activeBinding.protocol].badgeClass}`}
+                    >
+                      {WIRE_PROTOCOL_META[activeBinding.protocol].label}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <code className="truncate font-mono">{activeBinding.configPath}</code>
+                    {activeBinding.lastHitAt && (
+                      <span>· 最近调用：{activeBinding.lastHitAt}</span>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              {/* 告警与重启提示条 */}
-              {activeBinding.status === "drifted" && activeBinding.driftReason && (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                  <div className="flex items-start gap-2">
-                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span>{activeBinding.driftReason}</span>
-                  </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDiffModal({
+                      binding: activeBinding,
+                      actionKind: "preview",
+                      mountedPoolNames: activeBinding.mountedPoolIds
+                        .map((id) => pools.find((p) => p.id === id)?.name)
+                        .filter((n): n is string => Boolean(n)),
+                      defaultModelDisplay: defaultExposedItem?.displayName ?? null,
+                      beforeText: activeBinding.beforeSnippet,
+                      afterText: activeBinding.afterSnippet,
+                    })
+                  }
+                  className="btn btn-xs btn-secondary gap-1"
+                >
+                  <FileCode2 className="h-3.5 w-3.5" aria-hidden="true" />
+                  预览配置 Diff
+                </button>
+
+                {activeBinding.status === "drifted" ? (
                   <button
                     type="button"
                     onClick={() =>
@@ -657,200 +733,133 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     <Wrench className="h-3 w-3" aria-hidden="true" />
                     查看差异并修复
                   </button>
-                </div>
-              )}
-
-              {activeBinding.status === "needs_restart" && activeBinding.restartHint && (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-900 dark:text-sky-200">
-                  <span>{activeBinding.restartHint}</span>
+                ) : activeBinding.status === "needs_restart" ? (
                   <button
                     type="button"
                     onClick={() => restartAgentClient(activeBinding.agentId)}
-                    className="btn btn-xs btn-sky-soft shrink-0"
+                    className="btn btn-xs btn-sky-soft gap-1"
                   >
-                    {activeBinding.agentId === "codex_desktop" ? "重启 app-server" : "立即重启"}
+                    <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                    {activeBinding.agentId === "codex_desktop" ? "重启 app-server" : "立即重启生效"}
                   </button>
-                </div>
-              )}
-
-              {activeBinding.proxyWarning && (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                  <span>{activeBinding.proxyWarning}</span>
+                ) : activeBinding.mountedPoolIds.length === 0 ? (
                   <button
                     type="button"
-                    onClick={() => copyText("noproxy", noProxyCmd)}
-                    className="btn btn-xs btn-secondary shrink-0 gap-1"
+                    disabled={toolModelOptions.length === 0}
+                    onClick={() =>
+                      selectRecommendedAgentToolModels(activeBinding.agentId, activeToolId)
+                    }
+                    className="btn btn-xs btn-primary gap-1"
                   >
-                    {copiedId === "noproxy" ? (
-                      <Check className="h-3 w-3 text-emerald-500" aria-hidden="true" />
-                    ) : (
-                      <Copy className="h-3 w-3" aria-hidden="true" />
-                    )}
-                    复制 NO_PROXY
+                    <Zap className="h-3 w-3" aria-hidden="true" />
+                    一键接入推荐模型
                   </button>
-                </div>
-              )}
-
-              {/* Agent 专属技术参数开关 */}
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-zinc-50 px-3 py-2 text-[11px] text-zinc-600 dark:bg-zinc-950/55 dark:text-zinc-400">
-                {activeBinding.agentId === "claude_desktop" && (
-                  <label className="flex w-full cursor-pointer items-center justify-between gap-2">
-                    <span>
-                      macOS 独立双开隔离副本（保留官方 Claude 登录态 · 非 Anthropic 模型自动映射{" "}
-                      <code>mythos-qwitch-*</code>）
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(activeBinding.options.claudeIsolatedTwin)}
-                      onChange={() =>
-                        toggleAgentOption("claude_desktop", "claudeIsolatedTwin")
-                      }
-                      className="rounded border-zinc-300 text-brand-600 focus:ring-brand-500"
-                    />
-                  </label>
-                )}
-
-                {activeBinding.agentId === "codex_desktop" && (
-                  <div className="flex w-full flex-wrap items-center justify-between gap-2">
-                    <span className="flex items-center gap-1.5">
-                      <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-                      已写入 <code>qwitch_models.json</code> · 解绑保留 provider 表不破坏历史线程
-                    </span>
-                    {activeBinding.mountedPoolIds.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => restartAgentClient("codex_desktop")}
-                        className="btn btn-xs btn-secondary"
-                      >
-                        重启 app-server
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {activeBinding.agentId === "dsh" && (
-                  <span>
-                    双凭据校验：<code>.env</code> 已写入 · <code>.credentials.yaml</code>{" "}
-                    {activeBinding.options.dshDualCredsWritten ? (
-                      <strong className="text-emerald-600 dark:text-emerald-400">已同步</strong>
-                    ) : (
-                      <strong className="text-amber-600 dark:text-amber-400">
-                        缺失（待修复）
-                      </strong>
-                    )}
-                  </span>
-                )}
-
-                {activeBinding.agentId === "opencode" && (
-                  <div className="flex w-full items-center justify-between gap-2">
-                    <span>
-                      OpenCode JSONC 键控模型表格式（切换即时重写 <code>opencode.jsonc</code>）
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => toggleAgentOption("opencode", "opencodeSchemaVersion")}
-                      className="chip border border-zinc-200 bg-white font-mono dark:border-zinc-700 dark:bg-zinc-800"
-                    >
-                      {activeBinding.options.opencodeSchemaVersion === "v1"
-                        ? "v1 (provider)"
-                        : "v2 (providers)"}
-                    </button>
-                  </div>
-                )}
+                ) : null}
               </div>
-            </section>
+            </div>
 
-            {/* B. 步骤 1：订阅工具横排选择器 */}
-            <section className="surface-card p-3.5">
-              <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                  <Layers className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400" aria-hidden="true" />
-                  <span>2. 选择订阅工具（不同工具独立计费与限流，不跨工具混编）</span>
+            {activeBinding.status === "drifted" && activeBinding.driftReason && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                <div className="flex items-start gap-2">
+                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>{activeBinding.driftReason}</span>
                 </div>
-                <span className="text-[11px] text-zinc-400">
-                  点击工具切换该工具的模型与主备号池
-                </span>
               </div>
+            )}
 
-              <div
-                role="tablist"
-                aria-label="订阅工具切换栏"
-                className="flex flex-wrap gap-2"
+            {activeBinding.status === "needs_restart" && activeBinding.restartHint && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-900 dark:text-sky-200">
+                <span>{activeBinding.restartHint}</span>
+              </div>
+            )}
+
+            {activeBinding.proxyWarning && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                <span>{activeBinding.proxyWarning}</span>
+                <button
+                  type="button"
+                  onClick={() => copyText("noproxy", noProxyCmd)}
+                  className="btn btn-xs btn-secondary shrink-0 gap-1"
+                >
+                  {copiedId === "noproxy" ? (
+                    <Check className="h-3 w-3 text-emerald-500" aria-hidden="true" />
+                  ) : (
+                    <Copy className="h-3 w-3" aria-hidden="true" />
+                  )}
+                  复制 NO_PROXY
+                </button>
+              </div>
+            )}
+
+            {/* 3 分区二级导航 Tab */}
+            <div
+              role="tablist"
+              aria-label="Agent 配置分区"
+              className="flex flex-wrap items-center gap-1 border-t border-zinc-100 pt-2.5 dark:border-zinc-800/80"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={subTab === "models"}
+                onClick={() => setSubTab("models")}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  subTab === "models"
+                    ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                    : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80"
+                }`}
               >
-                {orderedToolIds.map((toolId) => {
-                  const isActive = toolId === activeToolId;
-                  const toolName = TOOL_SHORT_LABELS[toolId] ?? toolId;
-                  const totalToolModels = getAgentToolModelOptions(toolId).length;
-                  const selectedToolCount = getAgentToolEnabledModelIds(
-                    activeBinding.agentId,
-                    toolId
-                  ).length;
-                  const toolAccs = getAgentToolAccounts(activeBinding.agentId, toolId);
-                  const hasDefaultHere =
-                    defaultExposedItem &&
-                    splitScopedModelId(defaultExposedItem.modelId).toolId === toolId;
+                <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>模型配置</span>
+                <span className="rounded px-1 py-0.2 font-mono text-[10px] opacity-85">
+                  {activeExposedModels.length}
+                </span>
+              </button>
 
-                  return (
-                    <button
-                      key={toolId}
-                      type="button"
-                      role="tab"
-                      aria-selected={isActive}
-                      onClick={() => {
-                        setSelectedToolId(toolId);
-                        setModelSearch("");
-                        setModelQuickFilter("all");
-                      }}
-                      className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition ${
-                        isActive
-                          ? "border-brand-500 bg-brand-500/10 font-semibold text-brand-900 shadow-2xs dark:border-brand-400 dark:text-brand-100"
-                          : selectedToolCount > 0
-                            ? "border-emerald-500/35 bg-emerald-500/[0.04] text-zinc-800 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-900"
-                            : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400"
-                      }`}
-                    >
-                      <ToolBrandIcon toolId={toolId} size="xs" decorative />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1">
-                          <span className="truncate">{toolName}</span>
-                          {hasDefaultHere && (
-                            <Star
-                              className="h-3 w-3 shrink-0 fill-amber-500 text-amber-500"
-                              aria-label="包含默认模型"
-                            />
-                          )}
-                        </div>
-                        <div className="flex items-center gap-1.5 text-[10px] font-normal text-zinc-500 dark:text-zinc-400">
-                          <span
-                            className={
-                              selectedToolCount > 0
-                                ? "font-semibold text-brand-700 dark:text-brand-300"
-                                : ""
-                            }
-                          >
-                            已选 {selectedToolCount}/{totalToolModels}
-                          </span>
-                          <span>·</span>
-                          <span>
-                            {toolAccs.length > 0 ? `${toolAccs.length} 账号` : "未导入"}
-                          </span>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={subTab === "scheduling"}
+                onClick={() => setSubTab("scheduling")}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  subTab === "scheduling"
+                    ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                    : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80"
+                }`}
+              >
+                <Crown className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>账号调度</span>
+                <span className="rounded px-1 py-0.2 font-mono text-[10px] opacity-85">
+                  {toolAccounts.filter((a) => a.enabled).length}/{toolAccounts.length}
+                </span>
+              </button>
 
-            {/* C. 步骤 2 & 3：左「订阅模型批量选择」 + 右「同工具主备账号调度方案」 */}
-            <div className="grid grid-cols-1 gap-4 @3xl:grid-cols-[1.2fr_1fr]">
-              {/* 左栏：订阅模型选择（搜索、筛选、全选、主力、低倍率、反选、清空、设为默认） */}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={subTab === "connection"}
+                onClick={() => setSubTab("connection")}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  subTab === "connection"
+                    ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                    : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80"
+                }`}
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>接入设置</span>
+              </button>
+            </div>
+          </section>
+
+          {/* 分区 1：模型配置（全宽订阅模型列表 + 底部实时预览） */}
+          {subTab === "models" && (
+            <div className="space-y-3.5">
+              {renderToolSwitcher()}
+
               <section
                 aria-label={`${activeToolName} 订阅模型选择`}
                 className="surface-card flex flex-col justify-between gap-3 p-4"
               >
                 <div className="space-y-3">
-                  {/* 模型区标题与刷新 */}
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <div className="flex items-center gap-2">
@@ -873,7 +882,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                           {enabledBareModelIds.length}
                         </strong>{" "}
                         / {toolModelOptions.length} 个模型（将以{" "}
-                        <code>{activeToolId}/模型名</code> 暴露给 Agent）
+                        <code>{activeToolId}/模型名</code> 暴露给 {activeBinding.name}，勾选即实时写入配置）
                       </p>
                     </div>
 
@@ -892,8 +901,8 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   </div>
 
                   {/* 搜索与快速筛选栏 */}
-                  <div className="space-y-2">
-                    <div className="relative">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="relative min-w-[200px] flex-1">
                       <Search
                         className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400"
                         aria-hidden="true"
@@ -918,7 +927,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       )}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1">
                       {(
                         [
                           { id: "all", label: `全部 (${filterCounts.all})` },
@@ -943,7 +952,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     </div>
                   </div>
 
-                  {/* 一键批量勾选工具栏（全选 / 推荐主力 / 低倍率 / 反选 / 清空） */}
+                  {/* 一键批量勾选工具栏 */}
                   <div
                     role="toolbar"
                     aria-label="模型批量选择工具栏"
@@ -1012,10 +1021,10 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     </button>
                   </div>
 
-                  {/* 模型复选列表 */}
-                  <div className="max-h-[360px] space-y-1.5 overflow-y-auto pr-1">
+                  {/* 双列宽松模型复选列表 */}
+                  <div className="grid max-h-[380px] grid-cols-1 gap-1.5 overflow-y-auto pr-1 @2xl:grid-cols-2">
                     {filteredToolModels.length === 0 ? (
-                      <div className="rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
+                      <div className="col-span-full rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
                         当前筛选条件下无匹配模型
                       </div>
                     ) : (
@@ -1053,7 +1062,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                   : [...enabledBareModelIds, opt.id];
                                 setAgentToolModels(activeBinding.agentId, activeToolId, next);
                               }}
-                              className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                              className="flex min-w-0 flex-1 items-center gap-2 text-left"
                             >
                               <span
                                 className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
@@ -1067,7 +1076,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
 
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-1.5">
-                                  <span className="font-mono font-semibold text-zinc-900 dark:text-zinc-100">
+                                  <span className="truncate font-mono font-semibold text-zinc-900 dark:text-zinc-100">
                                     {opt.displayName}
                                   </span>
                                   <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
@@ -1088,14 +1097,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                       {opt.creditMultiplier}×
                                     </span>
                                   ) : null}
-                                  {opt.vendorWireId !== opt.id && (
-                                    <span
-                                      className="font-mono text-[10px] text-zinc-400"
-                                      title="上游实际 Wire Model ID"
-                                    >
-                                      wire:{opt.vendorWireId}
-                                    </span>
-                                  )}
                                 </div>
                               </div>
                             </button>
@@ -1127,13 +1128,13 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   </div>
                 </div>
 
-                {/* 底部跨工具已暴露清单汇总（可一眼看到整个 Agent 的下拉清单并速切默认） */}
+                {/* 底部跨工具已暴露清单汇总 */}
                 <div className="space-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50/80 p-3 dark:border-zinc-800 dark:bg-zinc-950/50">
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-semibold text-zinc-800 dark:text-zinc-200">
                       客户端下拉菜单实时预览（共 {activeExposedModels.length} 项）
                     </span>
-                    <span className="text-zinc-400">跨工具汇总 · 点击可切换 ★ 默认</span>
+                    <span className="text-zinc-400">跨工具汇总 · 点击切换 ★ 默认</span>
                   </div>
 
                   {activeExposedModels.length === 0 ? (
@@ -1201,8 +1202,14 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   )}
                 </div>
               </section>
+            </div>
+          )}
 
-              {/* 右栏：同工具多账号调度方案（主账号 → 备用账号） */}
+          {/* 分区 2：账号调度（紧凑策略分段 + 主备顺位队列） */}
+          {subTab === "scheduling" && (
+            <div className="space-y-3.5">
+              {renderToolSwitcher()}
+
               <section
                 aria-label={`${activeToolName} 同工具账号调度方案`}
                 className="surface-card flex flex-col gap-3.5 p-4"
@@ -1214,73 +1221,61 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                         {activeToolName} 主备账号调度
                       </h3>
+                      <span className="badge border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300">
+                        {toolAccounts.filter((a) => a.enabled).length}/{toolAccounts.length} 启用
+                      </span>
                     </div>
                     <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
                       同工具额度与模型口径一致 · 仅作用于 {activeBinding.name}
                     </p>
                   </div>
 
-                  <span className="badge border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300">
-                    {toolAccounts.filter((a) => a.enabled).length}/{toolAccounts.length} 启用
-                  </span>
+                  <button
+                    type="button"
+                    disabled={toolAccounts.length === 0}
+                    onClick={() =>
+                      syncToolScheduleToAllAgents(activeBinding.agentId, activeToolId)
+                    }
+                    className="btn btn-xs btn-secondary gap-1 disabled:opacity-45"
+                  >
+                    <CopyCheck className="h-3 w-3 text-brand-500" aria-hidden="true" />
+                    同步到全部 Agent
+                  </button>
                 </div>
 
-                {/* 3 选 1 同工具账号调度模式 */}
-                <div className="grid grid-cols-1 gap-1.5">
-                  {(
-                    [
-                      {
-                        id: "order",
-                        title: "主号优先 · 自动切备",
-                        desc: "优先固定消耗 #1 主账号（稳保 Prompt Cache）；429 限流或耗尽时自动顺延 #2 备用账号",
-                      },
-                      {
-                        id: "quota_first",
-                        title: "剩余额度优先",
-                        desc: "在已启用账号中自动路由至实时剩余额度百分比最高的账号",
-                      },
-                      {
-                        id: "drain",
-                        title: "锁定消耗当前主号",
-                        desc: "持续使用 #1 主账号直到耗尽，需人工切换时可随时点击「设为主号」",
-                      },
-                    ] as const
-                  ).map((mode) => {
-                    const active = currentStrategy === mode.id;
-                    return (
-                      <button
-                        key={mode.id}
-                        type="button"
-                        aria-pressed={active}
-                        onClick={() =>
-                          updateAgentToolRoutingOptions(activeBinding.agentId, activeToolId, {
-                            strategy: mode.id,
-                          })
-                        }
-                        className={`rounded-xl border px-3 py-2 text-left transition ${
-                          active
-                            ? "border-brand-500/60 bg-brand-500/[0.08] dark:border-brand-400/50"
-                            : "border-zinc-200/80 bg-zinc-50/60 hover:bg-white dark:border-zinc-800 dark:bg-zinc-950/40"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2 text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                          <span>{mode.title}</span>
-                          {active && (
-                            <span className="rounded bg-brand-600 px-1.5 py-0.5 text-[10px] text-white dark:bg-brand-500">
-                              当前方案
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-                          {mode.desc}
-                        </p>
-                      </button>
-                    );
-                  })}
+                {/* 紧凑横向分段策略选择器 + 1 行当前策略说明 */}
+                <div className="space-y-1.5">
+                  <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+                    {AGENT_STRATEGY_OPTIONS.map((mode) => {
+                      const active = currentStrategy === mode.id;
+                      return (
+                        <button
+                          key={mode.id}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() =>
+                            updateAgentToolRoutingOptions(activeBinding.agentId, activeToolId, {
+                              strategy: mode.id,
+                            })
+                          }
+                          className={`rounded-xl border px-3 py-2 text-xs font-medium transition ${
+                            active
+                              ? "border-brand-500 bg-brand-500/10 font-semibold text-brand-900 dark:border-brand-400 dark:text-brand-100"
+                              : "border-zinc-200/80 bg-zinc-50/70 text-zinc-700 hover:bg-white dark:border-zinc-800 dark:bg-zinc-950/40 dark:text-zinc-300"
+                          }`}
+                        >
+                          {mode.shortLabel}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {activeStrategyDesc}
+                  </p>
                 </div>
 
                 {/* 账号批量操作与防互踢护栏 */}
-                <div className="space-y-2 rounded-xl border border-zinc-200/80 bg-zinc-50/75 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/45">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-200/80 bg-zinc-50/75 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/45">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <button
                       type="button"
@@ -1315,20 +1310,9 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       <ArrowDownWideNarrow className="h-3 w-3 text-sky-500" aria-hidden="true" />
                       按额度排顺位
                     </button>
-                    <button
-                      type="button"
-                      disabled={toolAccounts.length === 0}
-                      onClick={() =>
-                        syncToolScheduleToAllAgents(activeBinding.agentId, activeToolId)
-                      }
-                      className="btn btn-xs btn-secondary gap-1 disabled:opacity-45"
-                    >
-                      <CopyCheck className="h-3 w-3 text-brand-500" aria-hidden="true" />
-                      同步到全部 Agent
-                    </button>
                   </div>
 
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-600 dark:text-zinc-400">
                     <label className="flex cursor-pointer items-center gap-1.5">
                       <input
                         type="checkbox"
@@ -1365,9 +1349,9 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                 </div>
 
                 {/* 有序同工具主备账号队列 */}
-                <div className="space-y-2">
+                <div className="grid grid-cols-1 gap-2 @2xl:grid-cols-2">
                   {toolAccounts.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
+                    <div className="col-span-full rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
                       当前尚未导入 {activeToolName} 账号，可在左侧「账号资产」先导入账号
                     </div>
                   ) : (
@@ -1416,7 +1400,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                 )}
                                 {cooldownRemain > 0 && (
                                   <span className="rounded bg-rose-500/15 px-1.5 py-0.5 font-medium text-rose-700 dark:text-rose-300">
-                                    429 冷却 {cooldownRemain}s
+                                    冷却中 {cooldownRemain}s
                                   </span>
                                 )}
                                 {isReadonlyCodeArts && (
@@ -1483,7 +1467,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                             </div>
                           </div>
 
-                          {/* 实时额度条与启用/演练按钮 */}
                           <div className="mt-2.5 flex items-center justify-between gap-2 text-[11px]">
                             <div className="flex min-w-0 flex-1 items-center gap-2">
                               <div className="h-1.5 w-20 shrink-0 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
@@ -1533,7 +1516,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                         }
                                         className="rounded-lg border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                                       >
-                                        模拟 429
+                                        临时冷却
                                       </button>
                                     )
                                   )}
@@ -1567,57 +1550,173 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                 </div>
               </section>
             </div>
-          </main>
-        )}
-      </div>
+          )}
 
-      {/* 通用标准端点生成卡 */}
-      <section className="surface-card p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <AgentBrandIcon agentId="custom_endpoint" size="sm" />
-            <div>
-              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                通用标准网关端点（适用于任意兼容 OpenAI / Anthropic 的客户端）
-              </h2>
-              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                选择已接入的模型后直接生成环境变量，请求将自动按当前 Agent 的同工具主备顺位路由
-              </p>
+          {/* 分区 3：接入设置与通用端点 */}
+          {subTab === "connection" && (
+            <div className="space-y-3.5">
+              <section className="surface-card space-y-3 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                      {activeBinding.name} 兼容选项与配置文件控制
+                    </h3>
+                    <p className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                      {activeBinding.configPath}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDiffModal({
+                          binding: activeBinding,
+                          actionKind: "preview",
+                          mountedPoolNames: activeBinding.mountedPoolIds
+                            .map((id) => pools.find((p) => p.id === id)?.name)
+                            .filter((n): n is string => Boolean(n)),
+                          defaultModelDisplay: defaultExposedItem?.displayName ?? null,
+                          beforeText: activeBinding.beforeSnippet,
+                          afterText: activeBinding.afterSnippet,
+                        })
+                      }
+                      className="btn btn-xs btn-secondary gap-1"
+                    >
+                      <FileCode2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      预览配置 Diff
+                    </button>
+                    {activeBinding.mountedPoolIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => openDiffForMountChange(activeBinding, [])}
+                        className="btn btn-xs btn-danger gap-1"
+                      >
+                        <Unlink className="h-3 w-3" aria-hidden="true" />
+                        全部解绑并还原
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-zinc-50 px-3 py-2.5 text-xs text-zinc-600 dark:bg-zinc-950/55 dark:text-zinc-400">
+                  {activeBinding.agentId === "claude_desktop" && (
+                    <label className="flex w-full cursor-pointer items-center justify-between gap-2">
+                      <span>
+                        macOS 独立双开隔离副本（保留官方 Claude 登录态 · 非 Anthropic 模型自动映射{" "}
+                        <code>mythos-qwitch-*</code>）
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(activeBinding.options.claudeIsolatedTwin)}
+                        onChange={() =>
+                          toggleAgentOption("claude_desktop", "claudeIsolatedTwin")
+                        }
+                        className="rounded border-zinc-300 text-brand-600 focus:ring-brand-500"
+                      />
+                    </label>
+                  )}
+
+                  {activeBinding.agentId === "codex_desktop" && (
+                    <div className="flex w-full flex-wrap items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5">
+                        <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+                        已写入 <code>qwitch_models.json</code> · 保留官方 ChatGPT 登录模型直连，解绑不破坏历史线程
+                      </span>
+                      {activeBinding.mountedPoolIds.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => restartAgentClient("codex_desktop")}
+                          className="btn btn-xs btn-secondary"
+                        >
+                          重启 app-server
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {activeBinding.agentId === "dsh" && (
+                    <span>
+                      双凭据校验：<code>.env</code> 已写入 · <code>.credentials.yaml</code>{" "}
+                      {activeBinding.options.dshDualCredsWritten ? (
+                        <strong className="text-emerald-600 dark:text-emerald-400">已同步</strong>
+                      ) : (
+                        <strong className="text-amber-600 dark:text-amber-400">
+                          缺失（待修复）
+                        </strong>
+                      )}
+                    </span>
+                  )}
+
+                  {activeBinding.agentId === "opencode" && (
+                    <div className="flex w-full items-center justify-between gap-2">
+                      <span>
+                        OpenCode JSONC 键控模型表格式（切换即时重写 <code>opencode.jsonc</code>）
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => toggleAgentOption("opencode", "opencodeSchemaVersion")}
+                        className="chip border border-zinc-200 bg-white font-mono dark:border-zinc-700 dark:bg-zinc-800"
+                      >
+                        {activeBinding.options.opencodeSchemaVersion === "v1"
+                          ? "v1 (provider)"
+                          : "v2 (providers)"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* 通用标准端点生成卡 */}
+              <section className="surface-card p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <AgentBrandIcon agentId="custom_endpoint" size="sm" />
+                    <div>
+                      <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                        通用标准网关端点（适用于任意兼容 OpenAI / Anthropic 的客户端）
+                      </h2>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        选择已接入的模型后直接生成环境变量，请求将自动按当前 Agent 的同工具主备顺位路由
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={effectiveCustomWire}
+                      onChange={(e) => setCustomModelWire(e.target.value)}
+                      aria-label="选择导出环境变量的目标模型"
+                      className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-800"
+                    >
+                      {customExportModels.map((m) => (
+                        <option key={m.wireId} value={m.wireId}>
+                          {m.label} ({m.wireId})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => copyText("customEnv", customEndpointEnv)}
+                      className="btn btn-sm btn-secondary gap-1.5"
+                    >
+                      {copiedId === "customEnv" ? (
+                        <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+                      ) : (
+                        <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
+                      {copiedId === "customEnv" ? "已复制环境变量" : "复制环境变量"}
+                    </button>
+                  </div>
+                </div>
+
+                <pre className="mt-3 overflow-x-auto rounded-xl border border-zinc-200/80 bg-zinc-50 p-3 font-mono text-[11px] leading-relaxed text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+                  {customEndpointEnv}
+                </pre>
+              </section>
             </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={effectiveCustomWire}
-              onChange={(e) => setCustomModelWire(e.target.value)}
-              aria-label="选择导出环境变量的目标模型"
-              className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-800"
-            >
-              {customExportModels.map((m) => (
-                <option key={m.wireId} value={m.wireId}>
-                  {m.label} ({m.wireId})
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() => copyText("customEnv", customEndpointEnv)}
-              className="btn btn-sm btn-secondary gap-1.5"
-            >
-              {copiedId === "customEnv" ? (
-                <Check className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-              ) : (
-                <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
-              )}
-              {copiedId === "customEnv" ? "已复制环境变量" : "复制环境变量"}
-            </button>
-          </div>
-        </div>
-
-        <pre className="mt-3 overflow-x-auto rounded-xl border border-zinc-200/80 bg-zinc-50 p-3 font-mono text-[11px] leading-relaxed text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
-          {customEndpointEnv}
-        </pre>
-      </section>
+          )}
+        </main>
+      )}
 
       {diffModal && (
         <ConfigDiffModal

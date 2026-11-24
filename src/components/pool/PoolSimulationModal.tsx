@@ -156,16 +156,16 @@ export function PoolSimulationModal({
         <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
           <div>
             <h2 id={titleId} className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-              号池打流与同模型 Failover 演练实验室
+              网关路由连通性测试
             </h2>
             <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-              请求穿过网关 ({gateway.host}:{gateway.port}) 时严格锁定选定模型，支持同会话连续发下一枪验证冷却跳过与亲和缓存
+              请求穿过网关 ({gateway.host}:{gateway.port}) 时严格锁定选定模型，支持同会话连续测试冷却跳过与亲和缓存
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            aria-label="关闭模拟打流弹窗"
+            aria-label="关闭路由连通性测试弹窗"
             className="btn btn-icon btn-ghost"
           >
             <X className="h-4 w-4" aria-hidden="true" />
@@ -176,7 +176,7 @@ export function PoolSimulationModal({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <span className="mb-1.5 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                1. 模拟请求来源 Agent
+                1. 测试请求来源 Agent
               </span>
               <div className="grid grid-cols-2 gap-1.5">
                 {agentBindings.map((b) => {
@@ -357,7 +357,7 @@ export function PoolSimulationModal({
             <section className="space-y-3 rounded-2xl border border-zinc-200 bg-zinc-50/90 p-3.5 dark:border-zinc-800 dark:bg-zinc-950/70">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                  本次模拟链路回放 · {resultTrace.id}
+                  本次测试链路回放 · {resultTrace.id}
                 </span>
                 <div className="flex items-center gap-1.5">
                   {resultTrace.cacheAffinityHit && (
@@ -460,7 +460,7 @@ export function PoolSimulationModal({
                 type="button"
                 onClick={() => setSessionSeq((s) => s + 1)}
                 className="btn btn-xs btn-ghost text-zinc-500"
-                title="重开全新对话上下文（清除当前模拟会话亲和记忆）"
+                title="重开全新对话上下文（清除当前测试会话亲和记忆）"
               >
                 <RotateCcw className="h-3 w-3" aria-hidden="true" />
                 新会话
@@ -492,7 +492,7 @@ export function PoolSimulationModal({
               className="btn btn-md btn-primary gap-1.5"
             >
               <Play className="h-3.5 w-3.5" aria-hidden="true" />
-              发送模拟请求
+              发送测试请求
             </button>
           </div>
         </div>

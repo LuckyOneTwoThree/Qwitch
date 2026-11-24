@@ -235,7 +235,7 @@ export function useSettingsStore({
             if (touchesJitter) jitterDirtyRef.current = false;
             if (touchesRetention) logRetentionDirtyRef.current = false;
             applyIncomingSettings(payload);
-            if (!silent) showToast("设置已保存（Mock 模式）", "success");
+            if (!silent) showToast("设置已保存", "success");
             return true;
           }
         });

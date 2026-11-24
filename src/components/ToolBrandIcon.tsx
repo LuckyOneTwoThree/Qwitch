@@ -10,10 +10,10 @@ export { getToolBrandMeta, TOOL_BRAND_META, type ToolBrandMeta } from "../domain
  * 圆角随尺寸递增，避免小尺寸出现过尖的 4px 圆角（这是「廉价感」的常见来源）。
  */
 const SIZE_CLASSES: Record<"xs" | "sm" | "md" | "lg", string> = {
-  xs: "h-4 w-4 rounded-[6px]",
-  sm: "h-6 w-6 rounded-lg",
-  md: "h-9 w-9 rounded-xl",
-  lg: "h-11 w-11 rounded-2xl",
+  xs: "h-4 w-4 rounded-[5px]",
+  sm: "h-6 w-6 rounded-[7px]",
+  md: "h-9 w-9 rounded-[10px]",
+  lg: "h-11 w-11 rounded-[12px]",
 };
 
 export const ToolBrandIcon = React.memo(function ToolBrandIcon({
@@ -60,7 +60,7 @@ export const ToolBrandIcon = React.memo(function ToolBrandIcon({
       <img
         src={iconSrc}
         alt={decorative ? "" : meta.name}
-        className="h-full w-full object-contain p-0.5 select-none"
+        className="h-full w-full object-cover select-none"
         draggable={false}
         onError={() => setIconFailed(true)}
       />

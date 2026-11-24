@@ -4,10 +4,10 @@ import type { TargetAgentId } from "../types/pool";
 import { ToolBrandIcon } from "./ToolBrandIcon";
 
 const SIZE_CLASSES: Record<"xs" | "sm" | "md" | "lg", string> = {
-  xs: "h-4 w-4 rounded-[6px]",
-  sm: "h-6 w-6 rounded-lg",
-  md: "h-9 w-9 rounded-xl",
-  lg: "h-11 w-11 rounded-2xl",
+  xs: "h-4 w-4 rounded-[5px]",
+  sm: "h-6 w-6 rounded-[7px]",
+  md: "h-9 w-9 rounded-[10px]",
+  lg: "h-11 w-11 rounded-[12px]",
 };
 
 export type AgentIconKind = TargetAgentId | "custom_endpoint";
@@ -57,7 +57,7 @@ export const AgentBrandIcon = React.memo(function AgentBrandIcon({
   return (
     <div
       aria-hidden={decorative || undefined}
-      className={`inline-flex shrink-0 items-center justify-center ring-1 shadow-2xs ${boxClass} ${surfaceClass} ${className}`}
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden ring-1 shadow-2xs ${boxClass} ${surfaceClass} ${className}`}
     >
       {renderMark()}
     </div>

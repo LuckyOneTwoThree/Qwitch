@@ -27,6 +27,8 @@
   <img src="docs/assets/screenshots/dashboard-light.png" width="900" alt="Qwitch 主窗口：账号额度、签到状态与桌面登录切换">
 </picture>
 
+<p align="center"><sub>截图使用浏览器 Mock 预览，账号与额度为示例数据。</sub></p>
+
 ## Qwitch 适合你吗？
 
 同一个 AI 工具开了多个账号，额度、签到和登录状态分散在不同地方；Codex、Claude、OpenCode 又各自需要一套配置。Qwitch 把这些事情放到一个桌面应用里：
@@ -37,15 +39,15 @@
 - 在本机启动一个模型网关，把已有订阅账号接到不同的 Agent。
 - 修改 Agent 配置前先备份，随时可以还原。
 
-它适合同时使用多个工具、多个账号，或者多个 Agent 的人。如果你只有一个账号、只用一个官方客户端，Qwitch 不会带来太多帮助。它也不提供云端同步、团队共享、远程访问网关或自动批量注册账号。
+它适合同时使用多个工具、多个账号，或者多个 Agent 的人。如果你只有一个账号、只用一个官方客户端，Qwitch 不会带来太多帮助。它也不提供云端同步、团队共享、远程访问网关或自动批量注册账号，不会绕过平台的计费或限制，也不会在后台无人值守地操作账号。
 
 这里的 Agent 指 Codex 桌面版、Claude 桌面版、OpenCode、DeepSeek Harness、MiMo Code、ZCode 这类会调用模型的应用。
 
 ## 快速开始
 
-**1. 安装。** 从 [Releases](https://github.com/LuckyOneTwoThree/Qwitch/releases/latest) 下载对应平台的安装包。macOS 选 Apple Silicon 或 Intel 版本，Windows 选 x64。
+**1. 安装。** 从 [Releases](https://github.com/LuckyOneTwoThree/Qwitch/releases/latest) 下载对应平台的安装包。macOS 选 Apple Silicon（11+）或 Intel（10.15+）版本，Windows 选 x64（10+）。
 
-**2. 导入账号。** 打开「账号资产 → 导入账号」，选择工具。可以按提示用浏览器登录，也可以读取本机已登录的客户端，或直接粘贴登录令牌（Token）。
+**2. 导入账号。** 打开「账号资产 → 导入账号」，选择工具。可以按提示完成内置登录，也可以读取本机已登录的客户端，或直接粘贴登录令牌（Token）。
 
 **3. 查看额度和签到。** 账号卡片会显示当前额度、套餐周期和今日签到状态。需要时点「领取」，或用顶部按钮批量查额、批量领取。
 
@@ -55,7 +57,7 @@
 
 > macOS 安装包目前没有 Apple Developer 签名。首次打开如果被 Gatekeeper 拦截，按 [FAQ](#常见问题) 里的步骤放行。Windows 首次安装时 SmartScreen 可能提示，选择「更多信息 → 仍要运行」。
 
-软件更新会在启动后查询 GitHub Releases。Windows 会下载 NSIS 安装包并校验 SHA256 后自动升级；macOS 会按架构下载 DMG，并给出 Gatekeeper 放行步骤。
+软件更新会在启动后查询 GitHub Releases。Windows 会下载安装包并校验 SHA256 后自动升级；macOS 会下载对应架构的安装包，并给出 Gatekeeper 放行步骤。
 
 ## 支持的账号与 Agent
 
@@ -63,20 +65,20 @@
 
 Qwitch 目前内置 7 个账号适配器，另支持一个通用 API Key 作为最后兜底。
 
-| 工具 | 额度与签到 | 导入方式 | 加入号池 |
-| --- | --- | --- | --- |
-| **Trae CN** | 额度与套餐；每日签到 Credits | 内置网页登录 / 本机读取 / Token | 支持 |
-| **WorkBuddy** | 签到状态；每日签到与积分领取 | 内置登录 / 本机凭据 / Token | 支持 |
-| **Qoder CN** | 活动 Credits；一键领取 | 本机读取 / 内置 PKCE 授权 / PAT | 支持 |
-| **MiniMax Code CN** | 积分水位；每日签到 | 本机读取 / 内置设备码授权 / Token | 支持 |
-| **LobsterAI（有道龙虾）** | 积分水位；每日签到 | 内置 OAuth 授权 / 本机读取 / Token | 支持 |
-| **豆包工作** | 多类额度与额度包；每日签到 | 内置网页登录（Cookie） / 本机读取 / Cookie 或 cURL | 支持 |
-| **码道 CodeArts** | 积分水位（华为云 AK/SK 签名） | 本机读取 / Token | 需单独授权 |
-| **通用 API Key** | 不提供额度和签到 | 手动填写 Key 与 Base URL | 作为最后兜底 |
+| 工具 | 额度与签到 | 导入方式 | 切换桌面登录 | 加入号池 |
+| --- | --- | --- | --- | --- |
+| **Trae CN** | 额度与套餐；每日签到 Credits | 内置网页登录 / 本机读取 / Token | 支持 | 支持 |
+| **WorkBuddy** | 签到状态；每日签到与积分领取 | 内置登录 / 本机凭据 / Token | 支持 | 支持 |
+| **Qoder CN** | 活动 Credits；一键领取 | 本机读取 / 内置 OAuth（PKCE）授权 / PAT | 支持 | 支持 |
+| **MiniMax Code CN** | 积分水位；每日签到 | 本机读取 / 内置设备码授权 / Token | 支持 | 支持 |
+| **LobsterAI（有道龙虾）** | 积分水位；每日签到 | 内置 OAuth 授权 / 本机读取 / Token | 支持 | 支持 |
+| **豆包工作** | 多类额度与额度包；每日签到 | 内置网页登录（Cookie） / 本机读取 / Cookie 或 cURL | 支持 | 支持 |
+| **码道 CodeArts** | 积分水位（华为云 AK/SK 签名） | 本机读取 / Token | 不支持 | 需单独授权 |
+| **通用 API Key** | 不提供额度和签到 | 手动填写 Key 与 Base URL | — | 作为最后兜底 |
 
 说明：
 
-- 所有工具都支持一键切换桌面登录，码道 CodeArts 除外，它目前只做额度监控。
+- 码道 CodeArts 目前只做额度监控，不支持切换桌面登录。
 - Trae 和 Qoder 的国际版没有每日签到，暂未内置适配器。
 - 码道 CodeArts 的 refreshToken 是一次性轮换的。Qwitch 默认只读，避免和官方 IDE 互相踢下线；要让它参与网关调度，需要在号池里单独完成一次 OAuth 授权。
 
@@ -116,7 +118,7 @@ Qwitch 由三部分组成。
 
 **账号库。** 导入的账号、加密后的凭据、额度快照和操作日志保存在本机 SQLite 数据库。主密钥优先放在系统钥匙串，同时保留一份权限受限的备份，方便重装或迁移。
 
-**本地网关。** 一个只监听 `127.0.0.1:8187` 的小服务，支持 OpenAI Chat、OpenAI Responses 和 Anthropic Messages 三种接口，并能在它们之间转换。Agent 把请求发给它，它按模型和号池规则选择一个账号，再转发到对应工具的上游。
+**本地网关。** 一个只监听 `127.0.0.1:8187` 的小服务，支持 OpenAI Chat、OpenAI Responses 和 Anthropic Messages 三种主流接口格式，并能在它们之间转换。Agent 把请求发给它，它按模型和号池规则选择一个账号，再转发到对应工具的上游。号池就是同一个工具的一组账号。
 
 **Agent 接入。** Qwitch 直接修改 Codex、Claude、DSH、OpenCode、MiMo、ZCode 的配置文件，把网关地址、令牌和模型清单写进去。修改前会备份，解绑时会还原。
 
@@ -148,7 +150,7 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 
 ### 切换桌面账号
 
-切换过程是事务式的：关闭客户端，备份当前会话，写入目标账号，重新打开并确认存活。中途失败会恢复原来的会话。批量切号会串行执行，并加入随机等待，避免短时间内连续请求。
+切换过程是事务式的：要么成功，要么恢复原样。具体是关闭客户端，备份当前会话，写入目标账号，重新打开并确认存活；中途失败会恢复原来的会话。批量切号会串行执行，并加入随机等待，避免短时间内连续请求。
 
 ### 本地网关与号池
 
@@ -161,14 +163,15 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 
 - 按工具勾选要开放的模型，设置 `★` 默认模型和主备顺序，一次同步到所有已挂载的 Agent。
 - 可以拉取上游真实模型目录，按「已勾选 / 免费低倍率 / 主力旗舰」筛选。
-- 修改前显示配置差异，原文件加密备份；支持漂移检测、一键修复、解绑还原、按 Agent 或全部强制清除 Qwitch 写入。
+- 修改前显示配置差异，原文件加密备份；支持配置漂移检测（配置文件被其他程序改动）、一键修复、解绑还原、按 Agent 或全部强制清除 Qwitch 写入。
 - 修改网关端口后，可以一键重启 Claude、Codex、MiMo Code、ZCode 等正在运行的客户端。
+- 可以重新探测本机 Agent 的安装路径和运行状态；未安装的客户端不会显示重启按钮。
 
 ![Agent 接入与号池调度](docs/assets/screenshots/agents-dark.png)
 
 ### 路由观测
 
-每次请求都会记录来源 Agent、请求模型、最终账号、协议转换、每一跳的尝试结果、耗时和 token 用量。可以按来源、关键词、「只看失败」或「只看 Failover」筛选，点开任意一条查看完整链路。
+每次经过网关的请求都会记录来源 Agent、请求模型、最终账号、协议转换、每一跳的尝试结果、耗时和 token 用量。可以按来源、关键词、「只看失败」或「只看 Failover」筛选，点开任意一条查看完整链路。
 
 内置一个连通性测试：正常直连、注入首号 429、注入 401 刷新，以及同一会话连续发包，用来确认冷却跳过和缓存亲和是否符合预期。
 
@@ -176,19 +179,23 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 
 ### 托盘
 
-关闭主窗口后默认收进系统托盘。托盘有两个页签：
+关闭主窗口后默认收进系统托盘。左键打开弹层，右键打开原生菜单。
+
+托盘弹层有两个页签：
 
 - 「账号与签到」：查额、领取、切换账号。
-- 「号池与指向」：启停网关、切换各 Agent 的默认模型、修复漂移、查看号池剩余额度。
+- 「Agent 接入」：查看网关状态和各 Agent 的接入情况，启停网关、重新探测环境、热切默认模型、修复漂移、启动或重启客户端、解绑，也可以跳到主面板继续配置。
+
+右键菜单提供打开主面板、Agent 接入与调度、启动或停止本地网关、退出。点击「去接入」或「配置」会打开主面板并定位到对应 Agent；底部的近期路由采样可以直接跳到路由观测。
 
 | 账号与签到（浅色） | 账号与签到（深色） |
 | :---: | :---: |
 | <img src="docs/assets/screenshots/tray-light.png" width="340" alt="托盘账号与签到 浅色" /> | <img src="docs/assets/screenshots/tray-dark.png" width="340" alt="托盘账号与签到 深色" /> |
 
 <details>
-<summary>号池与指向（深色）</summary>
+<summary>Agent 接入（深色）</summary>
 
-<img src="docs/assets/screenshots/tray-pools-dark.png" width="340" alt="托盘号池与指向 深色" />
+<img src="docs/assets/screenshots/tray-agents-dark.png" width="340" alt="托盘 Agent 接入 深色" />
 
 </details>
 
@@ -229,7 +236,7 @@ Qwitch 默认不自动操作。查询、领取、切号和启动网关都由你�
 
 可选的后台能力默认关闭：启动时刷新一次额度、主窗口可见时按间隔刷新、自动后台签到。自动签到属于无人值守动作，开启前会二次确认。
 
-批量操作严格串行，带随机抖动，遇到 401、403、429 或连续 5xx 会熔断对应工具，避免平台异常时逐个账号硬打。
+批量操作严格串行，带随机抖动。遇到 401 会标记凭据过期；403 或 429 会暂停并熔断对应工具（暂时停用）；连续 3 次 5xx 也会熔断，避免平台异常时逐个账号硬打。
 
 ## 安全与隐私
 
@@ -238,14 +245,14 @@ Qwitch 没有云端账号，也不收集使用统计。账号、凭据、会话�
 **离开本机的内容**
 
 - 查额度、签到、切号或通过网关发起模型请求时，Qwitch 会访问对应工具的服务器，使用的就是该账号的登录凭据。
-- 接入 Agent 后，Agent 的模型请求会经过本机网关转发到上游。Qwitch 只记录路由信息，例如模型、账号、耗时和 token 用量，不保存 Prompt 或模型回复。
+- 接入 Agent 后，Agent 的模型请求会经过本机网关转发到上游。Qwitch 只记录路由信息，例如模型、账号、耗时和 token 用量，不保存提示词（Prompt）或模型回复。
 - 启动后会在后台查询一次 GitHub Releases 新版本。这个请求不包含账号、凭据或使用数据，也可以在设置里手动检查。
 
 **保存在本机的内容**
 
 - 业务凭据和 Agent 原文件备份使用 AES-256-GCM 加密。
 - 主密钥优先存放在 macOS Keychain / Windows Credential Manager，同时在数据目录保留一份权限为 `0600` 的 `master.key` 备份，方便重装或迁移。
-- 数据库和导出文件权限为 `0600`，数据目录为 `0700`，SQLite 开启 WAL。
+- 数据库和导出文件默认只有当前用户可读，数据目录同理；在 macOS 上对应权限位为 `0600` / `0700`。SQLite 开启 WAL。
 - 默认日志会脱敏邮箱、手机号、UID、Cookie 和 Token 片段。
 
 **网关和配置文件的保护**
@@ -313,7 +320,7 @@ npm run dev          # 浏览器 Mock 预览
 npm run tauri dev    # 桌面应用开发模式
 npm run build        # 类型检查 + 生产构建
 npm run lint         # ESLint，--max-warnings=0
-npm test             # 前端测试，23 个文件 / 130 个用例
+npm test             # 前端测试，23 个文件 / 132 个用例
 cd src-tauri && cargo test   # 后端测试，206 个用例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
@@ -355,14 +362,9 @@ Qwitch/
 └─ .github/workflows/        # CI 双平台门禁 + Release 流水线
 ```
 
-后端注册了 73 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停和默认模型热切所需的最小命令集。
+后端注册了 73 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停、Agent 环境探测与热切/修复/重启、日志读取和更新检查所需的最小命令集。
 
-<details>
-<summary>发布前手工检查</summary>
-
-空数据目录首装；备份恢复到冲突钥匙串环境；慢启动客户端切号；托盘和 Dock 行为；本地网关端到端路由与目标 Agent 重启生效。
-
-</details>
+发布前手工检查：空数据目录首装；备份恢复到冲突钥匙串环境；慢启动客户端切号；托盘和 Dock 行为；本地网关端到端路由与目标 Agent 重启生效。
 
 </details>
 
@@ -385,13 +387,15 @@ Qwitch/
 ## 当前限制
 
 - macOS 安装包尚未签名和公证，首次打开需要手动放行。Windows 安装包也没有代码签名。
-- OpenAI Responses 的跨协议增量流式默认关闭。需要时设置 `QWITCH_GATEWAY_RESPONSES_STREAMING=1`；关闭时走缓冲后合成，功能不受影响，只是首字节更慢。
+- OpenAI Responses 的跨协议增量流式默认关闭。需要时设置 `QWITCH_GATEWAY_RESPONSES_STREAMING=1`；关闭时会把完整回复收完再返回，功能不受影响，只是首字节更慢。
 - 暂不支持云端同步、团队共享、远程访问网关或无人值守批量注册。
 - 码道 CodeArts 默认只读监控，需要单独授权后才能参与号池调度。
 
 ## 贡献
 
 欢迎 Issue 和 PR。提交前请确保 `npm test`、`cargo test` 和 `cargo clippy --all-targets -- -D warnings` 通过。提交信息使用 `feat:`、`fix:`、`docs:` 等前缀，并在 PR 里说明改动和验证方式。
+
+遇到问题、发现某个工具或 Agent 不工作，或者想讨论新功能，请到 [Issues](https://github.com/LuckyOneTwoThree/Qwitch/issues) 反馈。
 
 ## 许可证与免责声明
 

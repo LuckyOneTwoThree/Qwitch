@@ -1,5 +1,18 @@
-import { useMemo, useState } from "react";
-import { RefreshCw, ShieldCheck, Puzzle, FolderSearch, Save, Archive, AppWindow, Timer } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  RefreshCw,
+  ShieldCheck,
+  Puzzle,
+  FolderSearch,
+  Save,
+  Archive,
+  AppWindow,
+  Timer,
+  Network,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+} from "lucide-react";
 
 type SettingsTabId = "general" | "automation" | "clients" | "plugins";
 
@@ -15,6 +28,8 @@ const SETTINGS_TABS: ReadonlyArray<{
 ];
 import { useQwitch } from "../../context/QwitchContext";
 import { UpdateCard } from "../../components/UpdateCard";
+import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
+import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
 import { getToolBrandMeta, getVisibleTools } from "../../domain/toolRegistry";
 import type { Dispatch, SetStateAction } from "react";
@@ -103,6 +118,34 @@ export function SettingsView({
     showToast,
   } = useQwitch();
   const [activeTab, setActiveTab] = useState<SettingsTabId>("general");
+  const {
+    gateway,
+    agentBindings,
+    updateGatewayPort,
+    checkGatewayPort,
+    restartRunningDesktopAgents,
+  } = usePoolPrototype();
+  const [portInput, setPortInput] = useState(String(gateway.port));
+  const [portChecking, setPortChecking] = useState(false);
+  const [portApplying, setPortApplying] = useState(false);
+  const [portCheck, setPortCheck] = useState<{
+    available: boolean;
+    inUseBySelf: boolean;
+    message: string;
+  } | null>(null);
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const runningDesktopAgents = useMemo(
+    () =>
+      agentBindings.filter(
+        (b) =>
+          ["claude_desktop", "codex_desktop", "mimo", "zcode"].includes(b.agentId) &&
+          b.running
+      ),
+    [agentBindings]
+  );
+  useEffect(() => {
+    setPortInput(String(gateway.port));
+  }, [gateway.port]);
   const orderedAdapters = useMemo(() => {
     if (adapters.length === 0) return [];
     const byId = new Map(adapters.map((ad) => [ad.id, ad] as const));
@@ -511,6 +554,100 @@ export function SettingsView({
             </div>
           </div>
 
+          <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 dark:border-zinc-800 dark:bg-zinc-800/40">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <Network className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+                本地网关端口与占用检测
+              </div>
+              <code className="rounded bg-white px-2 py-1 font-mono text-[11px] tabular-nums text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+                {gateway.host}:{gateway.port}
+              </code>
+            </div>
+            <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+              监听地址固定 127.0.0.1，端口范围 1024–65535。修改会自动重启网关并重新同步所有已挂载
+              Agent 的 baseURL；桌面客户端需重启后生效。
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <input
+                type="number"
+                min={1024}
+                max={65535}
+                value={portInput}
+                onChange={(e) => {
+                  setPortInput(e.target.value);
+                  setPortCheck(null);
+                }}
+                aria-label="网关监听端口"
+                className="w-40 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-900 focus:border-brand-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              />
+              <button
+                type="button"
+                disabled={portChecking}
+                onClick={async () => {
+                  setPortChecking(true);
+                  try {
+                    setPortCheck(await checkGatewayPort(Number.parseInt(portInput, 10)));
+                  } finally {
+                    setPortChecking(false);
+                  }
+                }}
+                className="btn btn-sm btn-secondary gap-1"
+              >
+                {portChecking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                检测占用
+              </button>
+              <button
+                type="button"
+                disabled={portApplying}
+                onClick={async () => {
+                  setPortApplying(true);
+                  try {
+                    const res = await updateGatewayPort(Number.parseInt(portInput, 10));
+                    if (res.ok) {
+                      if (runningDesktopAgents.length > 0) {
+                        setRestartConfirmOpen(true);
+                      } else {
+                        showToast("端口已更新；当前没有运行中的桌面 Agent", "info");
+                      }
+                    } else {
+                      setPortCheck({
+                        available: false,
+                        inUseBySelf: false,
+                        message: res.message ?? "更新失败",
+                      });
+                    }
+                  } finally {
+                    setPortApplying(false);
+                  }
+                }}
+                className="btn btn-sm btn-primary gap-1"
+              >
+                {portApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                应用端口
+              </button>
+            </div>
+            {portCheck && (
+              <div
+                className={`mt-2.5 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
+                  portCheck.available
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300"
+                    : "border-rose-500/30 bg-rose-500/10 text-rose-800 dark:text-rose-300"
+                }`}
+              >
+                {portCheck.available ? (
+                  <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                )}
+                <span>
+                  {portCheck.message}
+                  {portCheck.inUseBySelf ? "（当前网关自身）" : ""}
+                </span>
+              </div>
+            )}
+          </div>
+
           <div className="mt-4 space-y-3">
             {orderedAdapters
               .filter((ad) => ad.capabilities.supportsClientSwitch)
@@ -718,6 +855,20 @@ export function SettingsView({
           <UpdateCard />
         </div>
       )}
+
+      <ConfirmDialog
+        open={restartConfirmOpen}
+        title="重启运行中的桌面 Agent？"
+        description={`网关端口已更新，是否立即重启以下 ${runningDesktopAgents.length} 个运行中的桌面 Agent 以加载新地址：${runningDesktopAgents
+          .map((b) => b.name)
+          .join("、")}。重启会关闭并重新打开对应应用。`}
+        confirmLabel="立即重启"
+        onCancel={() => setRestartConfirmOpen(false)}
+        onConfirm={async () => {
+          setRestartConfirmOpen(false);
+          await restartRunningDesktopAgents();
+        }}
+      />
     </div>
   );
 }

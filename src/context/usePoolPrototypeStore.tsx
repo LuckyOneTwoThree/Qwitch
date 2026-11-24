@@ -84,6 +84,11 @@ export interface PoolPrototypeContextValue {
     inUseBySelf: boolean;
     message: string;
   }>;
+  restartRunningDesktopAgents: () => Promise<{
+    restarted: string[];
+    failed: string[];
+    count: number;
+  }>;
   cycleBridgeRuntime: () => void;
   toggleProxySimulation: () => void;
   createPool: (input: CreatePoolInput) => AccountPool;
@@ -200,6 +205,7 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
     inUseBySelf: false,
     message: "浏览器预览：跳过检测",
   }),
+  restartRunningDesktopAgents: async () => ({ restarted: [], failed: [], count: 0 }),
   cycleBridgeRuntime: () => {},
   toggleProxySimulation: () => {},
   createPool: () => INITIAL_POOLS[0],
@@ -811,6 +817,50 @@ export function PoolPrototypeProvider({
     },
     [isTauriRuntime]
   );
+
+  const restartRunningDesktopAgents = useCallback(async () => {
+    if (!isTauriRuntime) {
+      return { restarted: [], failed: [], count: 0 };
+    }
+    const desktopIds: TargetAgentId[] = [
+      "claude_desktop",
+      "codex_desktop",
+      "mimo",
+      "zcode",
+    ];
+    const targets = rawBindingsRef.current.filter(
+      (b) => desktopIds.includes(b.agentId) && b.running
+    );
+    if (targets.length === 0) {
+      notify("当前没有运行中的桌面 Agent，无需重启", "info");
+      return { restarted: [], failed: [], count: 0 };
+    }
+    const restarted: string[] = [];
+    const failed: string[] = [];
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      for (const b of targets) {
+        try {
+          await invoke("restart_agent_client_cmd", { agentId: b.agentId });
+          restarted.push(b.name);
+        } catch (err) {
+          failed.push(`${b.name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    } catch (err) {
+      notify(`批量重启失败：${err instanceof Error ? err.message : String(err)}`, "error");
+      return { restarted, failed, count: targets.length };
+    }
+    if (failed.length > 0) {
+      notify(
+        `已重启 ${restarted.length} 个桌面 Agent，失败 ${failed.length} 个：${failed.join("；")}`,
+        "error"
+      );
+    } else {
+      notify(`已重启 ${restarted.length} 个运行中的桌面 Agent`, "success");
+    }
+    return { restarted, failed, count: targets.length };
+  }, [isTauriRuntime, notify]);
 
   const cycleBridgeRuntime = useCallback(() => {
     setGateway((prev) => {
@@ -2671,6 +2721,7 @@ export function PoolPrototypeProvider({
       toggleGateway,
       updateGatewayPort,
       checkGatewayPort,
+      restartRunningDesktopAgents,
       cycleBridgeRuntime,
       toggleProxySimulation,
       createPool,
@@ -2733,6 +2784,7 @@ export function PoolPrototypeProvider({
       toggleGateway,
       updateGatewayPort,
       checkGatewayPort,
+      restartRunningDesktopAgents,
       cycleBridgeRuntime,
       toggleProxySimulation,
       createPool,

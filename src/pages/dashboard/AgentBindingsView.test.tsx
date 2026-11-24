@@ -27,7 +27,7 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
       "ZCode",
     ]);
 
-    // 切换到 Claude 桌面版测试「全选当前」「清空本工具」「仅选推荐主力」与「设为默认」
+    // 切换到 Claude 桌面版测试「全选当前」「清空本工具」与「设为默认」
     const claudeCard = screen.getByRole("region", { name: "Claude 桌面版 挂载卡片" });
     fireEvent.click(within(claudeCard).getByRole("button", { name: /Claude 桌面版/ }));
     const modelSection = screen.getByRole("region", { name: "WorkBuddy 订阅模型选择" });
@@ -76,11 +76,11 @@ describe("AgentBindingsView (Agent-centric tool/model & same-tool account schedu
     fireEvent.click(screen.getByRole("button", { name: "确认修复漂移" }));
     expect(within(dshCard).getByText("已挂载并同步")).toBeTruthy();
 
-    // 选中尚未挂载的 Codex 桌面版，直接勾选 WorkBuddy 推荐主力模型，状态进入待重启生效
+    // 选中尚未挂载的 Codex 桌面版，全选 WorkBuddy 模型，状态进入待重启生效
     const codexCard = screen.getByRole("region", { name: "Codex 桌面版 挂载卡片" });
     fireEvent.click(within(codexCard).getByRole("button", { name: /Codex 桌面版/ }));
     const codexWbSection = screen.getByRole("region", { name: "WorkBuddy 订阅模型选择" });
-    fireEvent.click(within(codexWbSection).getByRole("button", { name: "仅选推荐主力" }));
+    fireEvent.click(within(codexWbSection).getByRole("button", { name: "全选当前" }));
     expect(within(codexCard).getByText("待重启生效")).toBeTruthy();
   });
 });

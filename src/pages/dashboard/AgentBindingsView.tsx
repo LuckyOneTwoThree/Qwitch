@@ -152,7 +152,6 @@ export function AgentBindingsView({
     getAgentPrimaryPool,
     setAgentToolModels,
     selectAllAgentToolModels,
-    selectRecommendedAgentToolModels,
     selectLowRateAgentToolModels,
     invertAgentToolModels,
     clearAgentToolModels,
@@ -797,11 +796,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     <Unlink className="h-3 w-3" aria-hidden="true" />
                     全部解绑并还原
                   </button>
-                ) : (
-                  <span className="text-[11px] text-zinc-400">
-                    在下方勾选要开放给该 Agent 的模型即可接入
-                  </span>
-                )}
+                ) : null}
 
                 <button
                   type="button"
@@ -1032,16 +1027,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     >
                       <CheckSquare className="h-3 w-3 text-brand-600 dark:text-brand-400" aria-hidden="true" />
                       全选当前
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        selectRecommendedAgentToolModels(activeBinding.agentId, activeToolId)
-                      }
-                      className="btn btn-xs btn-secondary gap-1"
-                    >
-                      <Sparkles className="h-3 w-3 text-amber-500" aria-hidden="true" />
-                      仅选推荐主力
                     </button>
                     <button
                       type="button"

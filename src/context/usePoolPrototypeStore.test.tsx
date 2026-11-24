@@ -272,7 +272,7 @@ describe("usePoolPrototypeStore v2", () => {
       wrapper: createWrapper(),
     });
 
-    // 为 Codex 桌面版一键全选 WorkBuddy 模型并清空后仅选推荐主力
+    // 为 Codex 桌面版一键全选 WorkBuddy 模型并清空后重新全选
     act(() => {
       result.current.selectAllAgentToolModels("codex_desktop", "workbuddy");
     });
@@ -288,10 +288,10 @@ describe("usePoolPrototypeStore v2", () => {
     ).toEqual([]);
 
     act(() => {
-      result.current.selectRecommendedAgentToolModels("codex_desktop", "workbuddy");
+      result.current.selectAllAgentToolModels("codex_desktop", "workbuddy");
     });
     const recModels = result.current.getAgentToolEnabledModelIds("codex_desktop", "workbuddy");
-    expect(recModels).toContain("deepseek-v4-pro");
+    expect(recModels.length).toBeGreaterThanOrEqual(10);
 
     // 调整同工具主备顺位：禁用跳过活跃号护栏，把低额度副号提为主号，并按额度重新排顺位
     act(() => {

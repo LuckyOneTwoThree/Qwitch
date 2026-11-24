@@ -123,7 +123,6 @@ export interface PoolPrototypeContextValue {
     toolId: string,
     filterModelIds?: string[]
   ) => void;
-  selectRecommendedAgentToolModels: (agentId: TargetAgentId, toolId: string) => void;
   selectLowRateAgentToolModels: (agentId: TargetAgentId, toolId: string) => void;
   invertAgentToolModels: (
     agentId: TargetAgentId,
@@ -230,7 +229,6 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   getAgentPrimaryPool: () => null,
   setAgentToolModels: () => {},
   selectAllAgentToolModels: () => {},
-  selectRecommendedAgentToolModels: () => {},
   selectLowRateAgentToolModels: () => {},
   invertAgentToolModels: () => {},
   clearAgentToolModels: () => {},
@@ -340,17 +338,6 @@ function sortMembersInTier(
 
   return byPriority;
 }
-
-const RECOMMENDED_FLAGSHIP_IDS = new Set([
-  "deepseek-v4-pro",
-  "glm-5.3",
-  "kimi-k3.1-pro",
-  "qwen4-max",
-  "minimax-m3.1-flash",
-  "doubao-seed-2.1-pro",
-  "openpangu-coder-pro",
-  "claude-sonnet-4.6",
-]);
 
 function materializeDedicatedPoolForAgent(
   prevPools: AccountPool[],
@@ -2256,23 +2243,6 @@ export function PoolPrototypeProvider({
     [candidates, getAgentToolEnabledModelIds, setAgentToolModels]
   );
 
-  const selectRecommendedAgentToolModels = useCallback(
-    (agentId: TargetAgentId, toolId: string) => {
-      const options = getCatalogModelsForTool(toolId, candidates);
-      const flagship = options
-        .filter(
-          (o) =>
-            RECOMMENDED_FLAGSHIP_IDS.has(o.id) ||
-            (typeof o.creditMultiplier === "number" && o.creditMultiplier >= 0.45)
-        )
-        .map((o) => o.id);
-      const chosen =
-        flagship.length > 0 ? flagship.slice(0, 4) : options.slice(0, 3).map((o) => o.id);
-      setAgentToolModels(agentId, toolId, chosen);
-    },
-    [candidates, setAgentToolModels]
-  );
-
   const selectLowRateAgentToolModels = useCallback(
     (agentId: TargetAgentId, toolId: string) => {
       const options = getCatalogModelsForTool(toolId, candidates);
@@ -2684,7 +2654,6 @@ export function PoolPrototypeProvider({
       getAgentPrimaryPool,
       setAgentToolModels,
       selectAllAgentToolModels,
-      selectRecommendedAgentToolModels,
       selectLowRateAgentToolModels,
       invertAgentToolModels,
       clearAgentToolModels,
@@ -2746,7 +2715,6 @@ export function PoolPrototypeProvider({
       getAgentPrimaryPool,
       setAgentToolModels,
       selectAllAgentToolModels,
-      selectRecommendedAgentToolModels,
       selectLowRateAgentToolModels,
       invertAgentToolModels,
       clearAgentToolModels,

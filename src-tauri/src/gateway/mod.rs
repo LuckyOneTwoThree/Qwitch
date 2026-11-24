@@ -1447,12 +1447,12 @@ fn parse_upstream_response_body(body_txt: &str, model: &str) -> IrResponse {
                     .pointer("/usage/prompt_tokens")
                     .or_else(|| parsed.pointer("/usage/input_tokens"))
                     .and_then(Value::as_u64)
-                    .unwrap_or(100),
+                    .unwrap_or(0),
                 output_tokens: parsed
                     .pointer("/usage/completion_tokens")
                     .or_else(|| parsed.pointer("/usage/output_tokens"))
                     .and_then(Value::as_u64)
-                    .unwrap_or(64),
+                    .unwrap_or(0),
             };
             return IrResponse {
                 id: Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -1614,6 +1614,12 @@ fn parse_upstream_response_body(body_txt: &str, model: &str) -> IrResponse {
                 if let Some(sr) = chunk.pointer("/delta/stop_reason").and_then(Value::as_str) {
                     finish_reason = Some(sr.to_string());
                 }
+                if let Some(v) = chunk
+                    .pointer("/usage/output_tokens")
+                    .and_then(Value::as_u64)
+                {
+                    output_tokens = Some(v);
+                }
             }
             _ => {}
         }
@@ -1647,8 +1653,8 @@ fn parse_upstream_response_body(body_txt: &str, model: &str) -> IrResponse {
         tool_calls,
         finish_reason: final_finish,
         usage: IrUsage {
-            input_tokens: input_tokens.unwrap_or(100),
-            output_tokens: output_tokens.unwrap_or(64),
+            input_tokens: input_tokens.unwrap_or(0),
+            output_tokens: output_tokens.unwrap_or(0),
         },
     }
 }

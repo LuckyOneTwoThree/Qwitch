@@ -79,6 +79,27 @@ pub fn normalize_tool_call_id(id: &str) -> String {
     format!("call_{hash:016x}")
 }
 
+/// 将任意来源的结束原因映射为 Anthropic `stop_reason`。
+fn map_finish_to_anthropic_stop(finish: &str, has_tools: bool) -> &'static str {
+    if has_tools {
+        return "tool_use";
+    }
+    match finish {
+        "tool_calls" | "tool_use" => "tool_use",
+        "length" | "max_tokens" => "max_tokens",
+        _ => "end_turn",
+    }
+}
+
+/// 将任意来源的结束原因映射为 OpenAI `finish_reason`。
+fn map_stop_to_openai_finish(stop: &str) -> &'static str {
+    match stop {
+        "tool_calls" | "tool_use" => "tool_calls",
+        "length" | "max_tokens" => "length",
+        _ => "stop",
+    }
+}
+
 pub fn parse_openai_chat_request(body: &Value) -> Result<IrRequest, String> {
     let model = body
         .get("model")
@@ -756,7 +777,7 @@ pub fn to_openai_chat_response(resp: &IrResponse) -> Value {
     let finish_reason = if has_tools {
         "tool_calls"
     } else {
-        resp.finish_reason.as_str()
+        map_stop_to_openai_finish(&resp.finish_reason)
     };
     json!({
         "id": format!("chatcmpl-{}", resp.id),
@@ -790,11 +811,8 @@ pub fn to_anthropic_messages_response(resp: &IrResponse) -> Value {
         let input: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
         content.push(json!({ "type": "tool_use", "id": id, "name": name, "input": input }));
     }
-    let stop_reason = if resp.tool_calls.is_empty() {
-        "end_turn"
-    } else {
-        "tool_use"
-    };
+    let stop_reason =
+        map_finish_to_anthropic_stop(&resp.finish_reason, !resp.tool_calls.is_empty());
     json!({
         "id": format!("msg_{}", resp.id),
         "type": "message",
@@ -926,7 +944,7 @@ pub fn to_openai_chat_sse(resp: &IrResponse) -> String {
     }
 
     let finish_reason = if resp.tool_calls.is_empty() {
-        resp.finish_reason.as_str()
+        map_stop_to_openai_finish(&resp.finish_reason)
     } else {
         "tool_calls"
     };
@@ -1060,11 +1078,8 @@ pub fn to_anthropic_messages_sse(resp: &IrResponse) -> String {
         block_idx += 1;
     }
 
-    let stop_reason = if resp.tool_calls.is_empty() {
-        "end_turn"
-    } else {
-        "tool_use"
-    };
+    let stop_reason =
+        map_finish_to_anthropic_stop(&resp.finish_reason, !resp.tool_calls.is_empty());
     push_named_sse(
         &mut out,
         "message_delta",
@@ -1352,6 +1367,30 @@ mod tests {
             .expect("tool message present");
         assert_eq!(tool_msg["tool_call_id"], "call_1");
         assert_eq!(tool_msg["content"], "file body");
+    }
+
+    #[test]
+    fn maps_finish_reasons_across_protocols() {
+        let resp = IrResponse {
+            id: "r".into(),
+            model: "m".into(),
+            text: "partial".into(),
+            thinking: None,
+            tool_calls: Vec::new(),
+            finish_reason: "max_tokens".into(),
+            usage: IrUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+            },
+        };
+        assert_eq!(
+            to_anthropic_messages_response(&resp)["stop_reason"],
+            "max_tokens"
+        );
+        assert_eq!(
+            to_openai_chat_response(&resp)["choices"][0]["finish_reason"],
+            "length"
+        );
     }
 
     #[test]

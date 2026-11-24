@@ -504,7 +504,7 @@ impl GatewayRuntime {
             attempts,
         };
 
-        let _ = db.append_routing_trace(&trace);
+        log_db_result("append_routing_trace", db.append_routing_trace(&trace));
         let _ = db.increment_pool_stats(
             &pool.id,
             status == RoutingTraceStatus::FailoverSuccess,
@@ -515,6 +515,13 @@ impl GatewayRuntime {
             trace,
             cooled_member_id,
         })
+    }
+}
+
+/// 记录 best-effort 持久化失败（路由 trace / 统计），避免 `let _` 完全吞错。
+fn log_db_result<T, E: std::fmt::Display>(ctx: &str, r: Result<T, E>) {
+    if let Err(e) = r {
+        eprintln!("[qwitch][gateway] {ctx} 写入失败: {e}");
     }
 }
 
@@ -2258,7 +2265,10 @@ async fn handle_http_connection(
                                         detail: format!("HTTP {code} -> {}", own_auth.upstream_url),
                                     }],
                                 };
-                                let _ = db.append_routing_trace(&trace);
+                                log_db_result(
+                                    "append_routing_trace",
+                                    db.append_routing_trace(&trace),
+                                );
                                 return Ok(());
                             }
                             Err(msg) => {
@@ -2395,7 +2405,7 @@ async fn handle_http_connection(
                         total_tokens: 0,
                         attempts,
                     };
-                    let _ = db.append_routing_trace(&trace);
+                    log_db_result("append_routing_trace", db.append_routing_trace(&trace));
                     let _ = db.increment_pool_stats(
                         &pool.id,
                         trace.status == RoutingTraceStatus::FailoverSuccess,
@@ -2564,7 +2574,7 @@ async fn handle_http_connection(
             total_tokens: 0,
             attempts,
         };
-        let _ = db.append_routing_trace(&trace);
+        log_db_result("append_routing_trace", db.append_routing_trace(&trace));
         return write_http_response(
             stream,
             "502 Bad Gateway",
@@ -2597,7 +2607,7 @@ async fn handle_http_connection(
         total_tokens: ir_resp.usage.input_tokens + ir_resp.usage.output_tokens,
         attempts,
     };
-    let _ = db.append_routing_trace(&trace);
+    log_db_result("append_routing_trace", db.append_routing_trace(&trace));
     let _ = db.increment_pool_stats(
         &pool.id,
         trace.status == RoutingTraceStatus::FailoverSuccess,

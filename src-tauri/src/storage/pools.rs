@@ -2147,4 +2147,50 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn increment_pool_stats_resets_on_new_day() {
+        let (db, key, dir) = temp_db("statsday");
+        let wb = seed_account(&db, &key, "workbuddy", "wb_stats", "WB");
+        let pool = db
+            .create_pool(
+                &key,
+                &CreatePoolInput {
+                    id: None,
+                    name: "Stats Pool".into(),
+                    description: String::new(),
+                    scene_tag: "Coding".into(),
+                    strategy: PoolStrategy::Order,
+                    affinity_mode: AffinityMode::AutoCache,
+                    skip_active_client_account: false,
+                    cooldown_seconds: 60,
+                    auto_refresh_on_401: false,
+                    fallback_api_key_enabled: false,
+                    members: vec![CreatePoolMemberInput {
+                        account_id: wb,
+                        supported_models: vec!["deepseek-v4-pro".into()],
+                        tier: MemberTier::T1Primary,
+                    }],
+                    enabled_model_ids: None,
+                },
+            )
+            .unwrap();
+        // 模拟「昨天」已累计 99 次
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE account_pools SET today_requests = 99, stats_date = '2000-01-01' WHERE id = ?1",
+                params![pool.id],
+            )
+            .unwrap();
+        }
+        db.increment_pool_stats(&pool.id, false, true).unwrap();
+        let pools = db.list_pools(&key, &HashMap::new()).unwrap();
+        let p = pools.iter().find(|p| p.id == pool.id).unwrap();
+        assert_eq!(
+            p.today_requests, 1,
+            "stale stats_date must reset before increment"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

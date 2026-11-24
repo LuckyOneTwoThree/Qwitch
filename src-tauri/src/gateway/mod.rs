@@ -2883,6 +2883,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_chunked_request_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = std::env::temp_dir().join(format!("qwitch-gw-chunked-{}", Uuid::new_v4()));
+        let db = Arc::new(QwitchDatabase::open(&root.join("qwitch.db")).unwrap());
+        let key = [11u8; 32];
+        let rt = Arc::new(GatewayRuntime::new());
+        {
+            rt.inner.lock().unwrap().port = 0;
+        }
+        let port = rt
+            .start_server(Arc::clone(&db), key, Arc::new(HashMap::new()))
+            .await
+            .expect("start gateway");
+
+        // 用一个足够大的请求体，验证 chunked 解析（若被忽略则估算会退化为最小值 16）
+        let body = format!("{{\"model\":\"x\",\"padding\":\"{}\"}}", "a".repeat(300));
+        let chunked = format!("{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body);
+        let req = format!(
+            "POST /v1/messages/count_tokens HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer qwitch-bind-opencode\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{chunked}"
+        );
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).await.unwrap();
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 200"), "resp: {text}");
+        assert!(
+            !text.contains("\"input_tokens\":16"),
+            "chunked body should be parsed (est > 16), resp: {text}"
+        );
+
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn codex_unmatched_model_resolves_own_signin_and_forwards_upstream() {
         assert!(resolve_target_pool_and_model(
             &[],

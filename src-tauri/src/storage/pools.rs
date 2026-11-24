@@ -2101,4 +2101,50 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn create_pool_dedupes_duplicate_members_without_partial_rows() {
+        let (db, key, dir) = temp_db("dedupe");
+        let wb = seed_account(&db, &key, "workbuddy", "wb_dedupe", "WB");
+        let input = CreatePoolInput {
+            id: None,
+            name: "Dedupe Pool".into(),
+            description: String::new(),
+            scene_tag: "Coding".into(),
+            strategy: PoolStrategy::Order,
+            affinity_mode: AffinityMode::AutoCache,
+            skip_active_client_account: false,
+            cooldown_seconds: 60,
+            auto_refresh_on_401: false,
+            fallback_api_key_enabled: false,
+            members: vec![
+                CreatePoolMemberInput {
+                    account_id: wb.clone(),
+                    supported_models: vec!["deepseek-v4-pro".into()],
+                    tier: MemberTier::T1Primary,
+                },
+                CreatePoolMemberInput {
+                    account_id: wb.clone(),
+                    supported_models: vec!["deepseek-v4-pro".into()],
+                    tier: MemberTier::T1Primary,
+                },
+            ],
+            enabled_model_ids: None,
+        };
+        let pool = db
+            .create_pool(&key, &input)
+            .expect("create pool with duplicate member");
+        assert_eq!(pool.members.len(), 1, "duplicate account must be deduped");
+        let pools = db.list_pools(&key, &HashMap::new()).expect("list pools");
+        let stored = pools
+            .iter()
+            .find(|p| p.id == pool.id)
+            .expect("pool present");
+        assert_eq!(
+            stored.members.len(),
+            1,
+            "no partial duplicate row persisted"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

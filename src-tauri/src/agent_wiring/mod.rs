@@ -2102,4 +2102,21 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn config_parse_failure_does_not_overwrite_user_file() {
+        let dir = std::env::temp_dir().join(format!("qwitch-cfg-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude_desktop_config.json");
+        let original = "{ /* not valid json */ broken ";
+        std::fs::write(&path, original).unwrap();
+        let res = write_json_deployment_mode_3p(&path);
+        assert!(
+            res.is_err(),
+            "invalid config must be rejected, not overwritten"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, original, "user config must be preserved verbatim");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

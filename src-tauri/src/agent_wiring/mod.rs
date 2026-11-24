@@ -1163,59 +1163,63 @@ pub fn apply_agent_wiring(
     let base_url = format!("http://{host}:{port}");
     let token = agent_token(agent_id);
 
-    match agent_id {
-        TargetAgentId::ClaudeDesktop => {
-            write_json_deployment_mode_3p(&paths.files[0])?;
+    // 将整套多文件写入包成一次逻辑事务：任一文件失败即按 stash 回滚已写文件，
+    // 避免留下“半新半旧”的 Agent 配置。
+    let write_result: Result<(), String> = (|| {
+        match agent_id {
+            TargetAgentId::ClaudeDesktop => {
+                write_json_deployment_mode_3p(&paths.files[0])?;
 
-            let lib_cfg = json!({
-                "inferenceProvider": "gateway",
-                "inferenceGatewayBaseUrl": base_url,
-                "inferenceGatewayApiKey": token,
-                "inferenceGatewayAuthScheme": "bearer",
-                "disableDeploymentModeChooser": true,
-                "coworkEgressAllowedHosts": ["*"],
-                "toolSearchEnabled": true
-            });
-            let lib_bytes = serde_json::to_string_pretty(&lib_cfg).map_err(|e| e.to_string())?;
-            let meta_bytes =
-                serde_json::to_string_pretty(&json!({ "appliedId": CLAUDE_CONFIG_UUID }))
+                let lib_cfg = json!({
+                    "inferenceProvider": "gateway",
+                    "inferenceGatewayBaseUrl": base_url,
+                    "inferenceGatewayApiKey": token,
+                    "inferenceGatewayAuthScheme": "bearer",
+                    "disableDeploymentModeChooser": true,
+                    "coworkEgressAllowedHosts": ["*"],
+                    "toolSearchEnabled": true
+                });
+                let lib_bytes =
+                    serde_json::to_string_pretty(&lib_cfg).map_err(|e| e.to_string())?;
+                let meta_bytes =
+                    serde_json::to_string_pretty(&json!({ "appliedId": CLAUDE_CONFIG_UUID }))
+                        .map_err(|e| e.to_string())?;
+
+                write_private_file_atomic(&paths.files[1], lib_bytes.as_bytes())
+                    .map_err(|e| e.to_string())?;
+                write_private_file_atomic(&paths.files[2], meta_bytes.as_bytes())
                     .map_err(|e| e.to_string())?;
 
-            write_private_file_atomic(&paths.files[1], lib_bytes.as_bytes())
-                .map_err(|e| e.to_string())?;
-            write_private_file_atomic(&paths.files[2], meta_bytes.as_bytes())
-                .map_err(|e| e.to_string())?;
-
-            if let Some(official_3p_cfg) = paths.files.get(3) {
-                write_json_deployment_mode_3p(official_3p_cfg)?;
+                if let Some(official_3p_cfg) = paths.files.get(3) {
+                    write_json_deployment_mode_3p(official_3p_cfg)?;
+                }
+                if let Some(official_3p_lib) = paths.files.get(4) {
+                    write_private_file_atomic(official_3p_lib, lib_bytes.as_bytes())
+                        .map_err(|e| e.to_string())?;
+                }
+                if let Some(official_3p_meta) = paths.files.get(5) {
+                    write_private_file_atomic(official_3p_meta, meta_bytes.as_bytes())
+                        .map_err(|e| e.to_string())?;
+                }
+                if let Some(twin_cfg) = paths.files.get(6) {
+                    write_json_deployment_mode_3p(twin_cfg)?;
+                }
             }
-            if let Some(official_3p_lib) = paths.files.get(4) {
-                write_private_file_atomic(official_3p_lib, lib_bytes.as_bytes())
-                    .map_err(|e| e.to_string())?;
-            }
-            if let Some(official_3p_meta) = paths.files.get(5) {
-                write_private_file_atomic(official_3p_meta, meta_bytes.as_bytes())
-                    .map_err(|e| e.to_string())?;
-            }
-            if let Some(twin_cfg) = paths.files.get(6) {
-                write_json_deployment_mode_3p(twin_cfg)?;
-            }
-        }
-        TargetAgentId::Opencode => {
-            let mut doc: Value = match std::fs::read_to_string(&paths.files[0]) {
-                Ok(s) if !s.trim().is_empty() => parse_jsonc_lenient(&s)?,
-                _ => json!({}),
-            };
-            let is_v1 = clean_opts.opencode_schema_version.as_deref() == Some("v1");
-            if let Some(obj) = doc.as_object_mut() {
-                obj.insert(
-                    "model".into(),
-                    Value::String(format!("qwitch/{default_wire}")),
-                );
-                if is_v1 {
-                    let mut models_map = serde_json::Map::new();
-                    for m in &exposed {
-                        models_map.insert(
+            TargetAgentId::Opencode => {
+                let mut doc: Value = match std::fs::read_to_string(&paths.files[0]) {
+                    Ok(s) if !s.trim().is_empty() => parse_jsonc_lenient(&s)?,
+                    _ => json!({}),
+                };
+                let is_v1 = clean_opts.opencode_schema_version.as_deref() == Some("v1");
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert(
+                        "model".into(),
+                        Value::String(format!("qwitch/{default_wire}")),
+                    );
+                    if is_v1 {
+                        let mut models_map = serde_json::Map::new();
+                        for m in &exposed {
+                            models_map.insert(
                             m.wire_model_id.clone(),
                             json!({
                                 "name": m.display_name,
@@ -1224,76 +1228,76 @@ pub fn apply_agent_wiring(
                                 "tool_call": true
                             }),
                         );
-                    }
-                    let provider_map = obj
-                        .entry("provider")
-                        .or_insert_with(|| json!({}))
-                        .as_object_mut();
-                    if let Some(pm) = provider_map {
-                        pm.insert(
-                            "qwitch".into(),
-                            json!({
-                                "npm": "@ai-sdk/openai-compatible",
-                                "name": "Qwitch 号池网关",
-                                "options": {
-                                    "baseURL": format!("{base_url}/v1"),
-                                    "apiKey": token
-                                },
-                                "models": models_map
-                            }),
-                        );
-                    }
-                } else {
-                    let mut models_map = serde_json::Map::new();
-                    for m in &exposed {
-                        models_map.insert(
-                            m.wire_model_id.clone(),
-                            json!({
-                                "name": m.display_name,
-                                "capabilities": {
-                                    "tools": true,
-                                    "input": ["text", "image"],
-                                    "output": ["text"]
-                                },
-                                "limit": { "context": 200000, "output": 64000 }
-                            }),
-                        );
-                    }
-                    let providers_map = obj
-                        .entry("providers")
-                        .or_insert_with(|| json!({}))
-                        .as_object_mut();
-                    if let Some(pm) = providers_map {
-                        pm.insert(
-                            "qwitch".into(),
-                            json!({
-                                "name": "Qwitch 号池网关",
-                                "package": "aisdk:@ai-sdk/openai-compatible",
-                                "settings": {
-                                    "baseURL": format!("{base_url}/v1"),
-                                    "apiKey": token
-                                },
-                                "models": models_map
-                            }),
-                        );
+                        }
+                        let provider_map = obj
+                            .entry("provider")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut();
+                        if let Some(pm) = provider_map {
+                            pm.insert(
+                                "qwitch".into(),
+                                json!({
+                                    "npm": "@ai-sdk/openai-compatible",
+                                    "name": "Qwitch 号池网关",
+                                    "options": {
+                                        "baseURL": format!("{base_url}/v1"),
+                                        "apiKey": token
+                                    },
+                                    "models": models_map
+                                }),
+                            );
+                        }
+                    } else {
+                        let mut models_map = serde_json::Map::new();
+                        for m in &exposed {
+                            models_map.insert(
+                                m.wire_model_id.clone(),
+                                json!({
+                                    "name": m.display_name,
+                                    "capabilities": {
+                                        "tools": true,
+                                        "input": ["text", "image"],
+                                        "output": ["text"]
+                                    },
+                                    "limit": { "context": 200000, "output": 64000 }
+                                }),
+                            );
+                        }
+                        let providers_map = obj
+                            .entry("providers")
+                            .or_insert_with(|| json!({}))
+                            .as_object_mut();
+                        if let Some(pm) = providers_map {
+                            pm.insert(
+                                "qwitch".into(),
+                                json!({
+                                    "name": "Qwitch 号池网关",
+                                    "package": "aisdk:@ai-sdk/openai-compatible",
+                                    "settings": {
+                                        "baseURL": format!("{base_url}/v1"),
+                                        "apiKey": token
+                                    },
+                                    "models": models_map
+                                }),
+                            );
+                        }
                     }
                 }
+                write_private_file_atomic(
+                    &paths.files[0],
+                    serde_json::to_string_pretty(&doc)
+                        .map_err(|e| e.to_string())?
+                        .as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
             }
-            write_private_file_atomic(
-                &paths.files[0],
-                serde_json::to_string_pretty(&doc)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        TargetAgentId::Dsh => {
-            let models_yaml = if exposed.is_empty() {
-                format!(
+            TargetAgentId::Dsh => {
+                let models_yaml = if exposed.is_empty() {
+                    format!(
                     "          - id: \"{default_wire}\"\n            name: \"Qwitch Default\"\n            contextWindow: 200000\n            maxTokens: 64000\n            input: [text, image]"
                 )
-            } else {
-                exposed
+                } else {
+                    exposed
                     .iter()
                     .map(|m| {
                         format!(
@@ -1303,34 +1307,35 @@ pub fn apply_agent_wiring(
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-            };
-            let existing_patch = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
-            let qwitch_entry = format!(
+                };
+                let existing_patch = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
+                let qwitch_entry = format!(
                 "- id: llm-pi-ai\n  name: \"@deepseek-ai/dsh-llm-pi-ai\"\n  config:\n    providers:\n      qwitch:\n        displayName: Qwitch\n        apiKeyEnv: QWITCH_GATEWAY_KEY\n        api: openai-completions\n        baseURL: \"{base_url}/v1\"\n        models:\n{models_yaml}\n        streamIdleTimeoutMs: 600000\n"
             );
-            let patch_content = merge_dsh_cordis_patch(&existing_patch, &qwitch_entry);
-            write_private_file_atomic(&paths.files[0], patch_content.as_bytes())
-                .map_err(|e| e.to_string())?;
+                let patch_content = merge_dsh_cordis_patch(&existing_patch, &qwitch_entry);
+                write_private_file_atomic(&paths.files[0], patch_content.as_bytes())
+                    .map_err(|e| e.to_string())?;
 
-            // 双写 .env 与 .credentials.yaml（dsh 桌面版强依赖 .credentials.yaml）
-            let mut env_text = std::fs::read_to_string(&paths.files[1]).unwrap_or_default();
-            if !env_text.contains("QWITCH_GATEWAY_KEY=") {
-                if !env_text.is_empty() && !env_text.ends_with('\n') {
-                    env_text.push('\n');
+                // 双写 .env 与 .credentials.yaml（dsh 桌面版强依赖 .credentials.yaml）
+                let mut env_text = std::fs::read_to_string(&paths.files[1]).unwrap_or_default();
+                if !env_text.contains("QWITCH_GATEWAY_KEY=") {
+                    if !env_text.is_empty() && !env_text.ends_with('\n') {
+                        env_text.push('\n');
+                    }
+                    env_text.push_str(&format!("QWITCH_GATEWAY_KEY={token}\n"));
                 }
-                env_text.push_str(&format!("QWITCH_GATEWAY_KEY={token}\n"));
-            }
-            write_private_file_atomic(&paths.files[1], env_text.as_bytes())
-                .map_err(|e| e.to_string())?;
+                write_private_file_atomic(&paths.files[1], env_text.as_bytes())
+                    .map_err(|e| e.to_string())?;
 
-            let creds_text = std::fs::read_to_string(&paths.files[2]).unwrap_or_default();
-            let next_creds = upsert_dsh_credentials_yaml(&creds_text, "QWITCH_GATEWAY_KEY", &token);
-            write_private_file_atomic(&paths.files[2], next_creds.as_bytes())
-                .map_err(|e| e.to_string())?;
-            clean_opts.dsh_dual_creds_written = Some(true);
-        }
-        TargetAgentId::CodexDesktop => {
-            let catalog_entries: Vec<Value> = exposed
+                let creds_text = std::fs::read_to_string(&paths.files[2]).unwrap_or_default();
+                let next_creds =
+                    upsert_dsh_credentials_yaml(&creds_text, "QWITCH_GATEWAY_KEY", &token);
+                write_private_file_atomic(&paths.files[2], next_creds.as_bytes())
+                    .map_err(|e| e.to_string())?;
+                clean_opts.dsh_dual_creds_written = Some(true);
+            }
+            TargetAgentId::CodexDesktop => {
+                let catalog_entries: Vec<Value> = exposed
                 .iter()
                 .enumerate()
                 .map(|(idx, m)| {
@@ -1365,45 +1370,65 @@ pub fn apply_agent_wiring(
                     })
                 })
                 .collect();
-            let codex_dir = paths.files[0].parent().unwrap_or_else(|| Path::new("."));
-            let builtin_models = load_codex_builtin_models(codex_dir);
-            let merged_entries = merge_codex_model_catalog(builtin_models, catalog_entries);
-            let catalog = json!({ "models": merged_entries });
-            write_private_file_atomic(
-                &paths.files[1],
-                serde_json::to_string_pretty(&catalog)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
+                let codex_dir = paths.files[0].parent().unwrap_or_else(|| Path::new("."));
+                let builtin_models = load_codex_builtin_models(codex_dir);
+                let merged_entries = merge_codex_model_catalog(builtin_models, catalog_entries);
+                let catalog = json!({ "models": merged_entries });
+                write_private_file_atomic(
+                    &paths.files[1],
+                    serde_json::to_string_pretty(&catalog)
+                        .map_err(|e| e.to_string())?
+                        .as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
 
-            let catalog_path_escaped = paths.files[1]
-                .to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
-            let existing = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
-            let stripped = strip_toml_section(&existing, "[model_providers.qwitch]");
-            let with_provider =
-                upsert_toml_key_line(&stripped, "model_provider", "model_provider = \"qwitch\"");
-            let with_catalog = upsert_toml_key_line(
-                &with_provider,
-                "model_catalog_json",
-                &format!("model_catalog_json = \"{catalog_path_escaped}\""),
-            );
-            let mut with_model = upsert_toml_key_line(
-                &with_catalog,
-                "model",
-                &format!("model = \"{default_wire}\""),
-            );
-            if !with_model.ends_with('\n') {
-                with_model.push('\n');
-            }
-            with_model.push_str(&format!(
+                let catalog_path_escaped = paths.files[1]
+                    .to_string_lossy()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
+                let existing = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
+                let stripped = strip_toml_section(&existing, "[model_providers.qwitch]");
+                let with_provider = upsert_toml_key_line(
+                    &stripped,
+                    "model_provider",
+                    "model_provider = \"qwitch\"",
+                );
+                let with_catalog = upsert_toml_key_line(
+                    &with_provider,
+                    "model_catalog_json",
+                    &format!("model_catalog_json = \"{catalog_path_escaped}\""),
+                );
+                let mut with_model = upsert_toml_key_line(
+                    &with_catalog,
+                    "model",
+                    &format!("model = \"{default_wire}\""),
+                );
+                if !with_model.ends_with('\n') {
+                    with_model.push('\n');
+                }
+                with_model.push_str(&format!(
                 "\n[model_providers.qwitch]\nname = \"Qwitch Multi-Pool Gateway\"\nbase_url = \"{base_url}/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"{token}\"\nhttp_headers = {{ \"x-openai-actor-authorization\" = \"qwitch\" }}\nrequires_openai_auth = true\n"
             ));
-            write_private_file_atomic(&paths.files[0], with_model.as_bytes())
-                .map_err(|e| e.to_string())?;
+                write_private_file_atomic(&paths.files[0], with_model.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
         }
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        if let Ok(stashes) = db.get_agent_stashes(master_key, agent_id) {
+            for item in &stashes {
+                let p = PathBuf::from(&item.file_path);
+                if item.original_existed {
+                    if let Some(bytes) = &item.original_content {
+                        let _ = write_private_file_atomic(&p, bytes);
+                    }
+                } else {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+        return Err(format!("写入 Agent 配置失败，已回滚原有配置：{e}"));
     }
 
     let next_status = if matches!(

@@ -207,6 +207,8 @@ pub struct AgentBinding {
     pub protocol: WireProtocolKind,
     pub config_path: String,
     pub installed: bool,
+    /// 目标应用当前是否在运行（用于 UI 显示「启动 / 重启」）
+    pub running: bool,
     pub version: String,
     pub status: AgentBindingStatus,
     pub mounted_pool_ids: Vec<String>,

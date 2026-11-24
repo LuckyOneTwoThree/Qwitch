@@ -132,6 +132,7 @@ export function AgentBindingsView({
     unbindAgent,
     repairAgentDrift,
     restartAgentClient,
+    refreshAgentRunning,
     toggleAgentOption,
     injectMemberCooldown,
     clearMemberCooldown,
@@ -183,6 +184,13 @@ export function AgentBindingsView({
       setSelectedAgentId(highlightAgentId);
     }
   }, [highlightAgentId]);
+
+  // 每 6s 轻量刷新各目标应用运行状态，使按钮在「启动 / 重启」间自动切换
+  useEffect(() => {
+    refreshAgentRunning();
+    const timer = window.setInterval(() => refreshAgentRunning(), 6000);
+    return () => window.clearInterval(timer);
+  }, [refreshAgentRunning]);
 
   const activeBinding = useMemo(
     () =>
@@ -739,12 +747,12 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   <button
                     type="button"
                     onClick={() => restartAgentClient(activeBinding.agentId)}
-                    title={`重启 ${activeBinding.name} 以加载最新 Qwitch 配置`}
-                    aria-label={`重启 ${activeBinding.name}`}
+                    title={`${activeBinding.running ? "重启" : "启动"} ${activeBinding.name} 以加载最新 Qwitch 配置`}
+                    aria-label={`${activeBinding.running ? "重启" : "启动"} ${activeBinding.name}`}
                     className="btn btn-xs btn-sky-soft gap-1"
                   >
                     <RotateCcw className="h-3 w-3" aria-hidden="true" />
-                    重启
+                    {activeBinding.running ? "重启" : "启动"}
                   </button>
                 )}
 

@@ -79,6 +79,8 @@ export interface AgentBinding {
   protocol: WireProtocolKind;
   configPath: string;
   installed: boolean;
+  /** 目标桌面应用当前是否在运行（决定按钮显示「启动」还是「重启」） */
+  running: boolean;
   version: string;
   status: AgentBindingStatus;
   /** 1 个 Agent 支持同时挂载多个组合号池（如 Coding 池 + 推理池） */

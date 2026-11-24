@@ -109,6 +109,7 @@ export interface PoolPrototypeContextValue {
   restartAgentClient: (agentId: TargetAgentId) => void;
   toggleAgentOption: (agentId: TargetAgentId, key: keyof AgentBindingOptions) => void;
   detectAgentEnvironment: () => void;
+  refreshAgentRunning: () => void;
   runPoolSimulation: (input: RunPoolSimulationInput) => RunPoolSimulationResult;
   getAgentToolModelOptions: (toolId: string) => CatalogModelEntry[];
   getAgentToolEnabledModelIds: (agentId: TargetAgentId, toolId: string) => string[];
@@ -214,6 +215,7 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   restartAgentClient: () => {},
   toggleAgentOption: () => {},
   detectAgentEnvironment: () => {},
+  refreshAgentRunning: () => {},
   runPoolSimulation: () => ({
     trace: INITIAL_ROUTING_TRACES[0],
   }),
@@ -1559,13 +1561,15 @@ export function PoolPrototypeProvider({
           };
         })
       );
+      const wasRunning = rawBindings.find((b) => b.agentId === agentId)?.running ?? false;
+      const verb = wasRunning ? "已重启" : "已启动";
       if (agentId === "codex_desktop") {
-        notify("已重启 ChatGPT/Codex 桌面应用以加载最新配置", "success");
+        notify(`${verb} ChatGPT/Codex 桌面应用以加载最新配置`, "success");
       } else if (agentId === "opencode") {
         notify("OpenCode 为终端客户端：配置将在下次启动/新会话生效（无需重启桌面进程）", "info");
       } else {
         const agentName = rawBindings.find((b) => b.agentId === agentId)?.name ?? agentId;
-        notify(`已重启 ${agentName}，最新 Qwitch 网关配置已生效`, "success");
+        notify(`${verb} ${agentName}，最新 Qwitch 网关配置已生效`, "success");
       }
       void syncWorkspaceCommand("restart_agent_client_cmd", { agentId });
     },
@@ -1608,6 +1612,25 @@ export function PoolPrototypeProvider({
     notify("已完成 4 个目标 Agent 安装路径、Schema 版本与本机代理状态重新探测", "success");
     void syncWorkspaceCommand("detect_agent_environment_cmd");
   }, [notify, syncWorkspaceCommand]);
+
+  // 轻量刷新各目标应用「运行中/未运行」状态（仅合并 running 字段，不整包覆盖，避免打断交互）
+  const refreshAgentRunning = useCallback(() => {
+    if (!isTauriRuntime) return;
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const ws = await invoke<PoolWorkspaceState>("get_pool_workspace_state");
+        setRawBindings((prev) =>
+          prev.map((b) => {
+            const found = ws.agentBindings.find((x) => x.agentId === b.agentId);
+            return found ? { ...b, running: found.running } : b;
+          })
+        );
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [isTauriRuntime]);
 
   const runPoolSimulation = useCallback(
     (input: RunPoolSimulationInput): RunPoolSimulationResult => {
@@ -2596,6 +2619,7 @@ export function PoolPrototypeProvider({
       restartAgentClient,
       toggleAgentOption,
       detectAgentEnvironment,
+      refreshAgentRunning,
       runPoolSimulation,
       getAgentToolModelOptions,
       getAgentToolEnabledModelIds,
@@ -2655,6 +2679,7 @@ export function PoolPrototypeProvider({
       restartAgentClient,
       toggleAgentOption,
       detectAgentEnvironment,
+      refreshAgentRunning,
       runPoolSimulation,
       getAgentToolModelOptions,
       getAgentToolEnabledModelIds,

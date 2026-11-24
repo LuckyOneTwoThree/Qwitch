@@ -715,6 +715,47 @@ fn default_options_for_agent(agent_id: TargetAgentId) -> AgentBindingOptions {
     }
 }
 
+fn proc_matches(pattern: &str) -> bool {
+    Command::new("pgrep")
+        .args(["-f", pattern])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn is_agent_app_running(agent_id: TargetAgentId) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let patterns: &[&str] = match agent_id {
+            TargetAgentId::CodexDesktop => {
+                &["/Applications/ChatGPT.app/", "/Applications/Codex.app/"]
+            }
+            TargetAgentId::ClaudeDesktop => &["/Applications/Claude.app/"],
+            TargetAgentId::Dsh => &["/Applications/DeepSeek Harness.app/"],
+            TargetAgentId::Mimo => &["/Applications/Xiaomi MiMo.app/"],
+            TargetAgentId::Zcode => &["/Applications/ZCode.app/"],
+            TargetAgentId::Opencode => &["/opencode"],
+        };
+        patterns.iter().any(|p| proc_matches(p))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let exe = match agent_id {
+            TargetAgentId::CodexDesktop => "ChatGPT.exe",
+            TargetAgentId::ClaudeDesktop => "Claude.exe",
+            TargetAgentId::Dsh => "DeepSeek Harness.exe",
+            TargetAgentId::Mimo => "Xiaomi MiMo.exe",
+            TargetAgentId::Zcode => "ZCode.exe",
+            TargetAgentId::Opencode => "opencode.exe",
+        };
+        Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {exe}"), "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(exe))
+            .unwrap_or(false)
+    }
+}
+
 fn agent_meta(agent_id: TargetAgentId) -> (&'static str, &'static str, WireProtocolKind) {
     match agent_id {
         TargetAgentId::ClaudeDesktop => (
@@ -828,6 +869,7 @@ pub fn build_agent_binding_dto(
         protocol,
         config_path: paths.primary_display,
         installed: paths.installed,
+        running: is_agent_app_running(stored.agent_id),
         version: paths.version,
         status,
         mounted_pool_ids: stored.mounted_pool_ids.clone(),
@@ -851,7 +893,7 @@ pub fn inspect_all_agent_bindings(
     base_dir_override: Option<&Path>,
 ) -> Result<Vec<AgentBinding>, String> {
     let stored_list = db.get_stored_agent_bindings().map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(4);
+    let mut out = Vec::with_capacity(6);
     for agent_id in TargetAgentId::all() {
         let stored = stored_list
             .iter()
@@ -1904,7 +1946,7 @@ fn restart_codex_desktop_app() {
     }
     for app in ["/Applications/ChatGPT.app", "/Applications/Codex.app"] {
         if std::path::Path::new(app).exists() {
-            let _ = open_cmd().arg("-a").arg(app).spawn();
+            let _ = open_cmd().arg(app).spawn();
             break;
         }
     }
@@ -1912,23 +1954,21 @@ fn restart_codex_desktop_app() {
 
 #[cfg(target_os = "macos")]
 fn restart_macos_app(app_name: &str, bundle_id: &str, app_path: &str) {
-    // 优雅退出（若在运行）：osascript quit → 等待 → 杀掉该 bundle 的残留辅助进程（Electron helper 等）
-    let _ = Command::new("osascript")
-        .args(["-e", &format!("tell application \"{app_name}\" to quit")])
-        .output();
-    for _ in 0..24 {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        let alive = Command::new("pgrep")
-            .args(["-f", app_path])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !alive {
-            break;
+    let running = proc_matches(app_path);
+    if running {
+        // 优雅退出（若在运行）：osascript quit → 等待 → 杀掉该 bundle 的残留辅助进程
+        let _ = Command::new("osascript")
+            .args(["-e", &format!("tell application \"{app_name}\" to quit")])
+            .output();
+        for _ in 0..24 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if !proc_matches(app_path) {
+                break;
+            }
         }
+        let _ = Command::new("pkill").args(["-f", app_path]).output();
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    let _ = Command::new("pkill").args(["-f", app_path]).output();
-    std::thread::sleep(std::time::Duration::from_millis(200));
     // 优先按 bundle id 打开（对已退出/未运行都可靠），失败再用 .app 路径
     let opened = open_cmd()
         .args(["-b", bundle_id])

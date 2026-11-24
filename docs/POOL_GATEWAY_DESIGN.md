@@ -25,7 +25,7 @@
 沿用 [ARCHITECTURE.md](ARCHITECTURE.md#L17-L21) 与安全基线：
 1. **Local-First & Human-in-the-Loop**：本地网关**默认关闭**，必须由用户主动开启服务、主动创建号池并确认挂载某 Agent；不静默扫描或劫持未授权配置文件。
 2. **零明文插件落盘**：严禁外部插件在磁盘写入 `plugin-auth.json` 等明文凭据；所有 Token 均由 Rust 主进程按需从 AES-256-GCM SQLite 解密后经内存通道单次注入，刷新后由 Rust 单飞加密落盘。
-3. **Loopback 隔离与反重绑定**：网关仅绑定 `127.0.0.1:<port>`（默认 `18425`），强校验 `Host` 头与绑定专属 Token（`qwitch-bind-<token>`），拦截浏览器 `Origin` / `Sec-Fetch-*` 跨域与 DNS Rebinding 请求（`403`）。
+3. **Loopback 隔离与反重绑定**：网关仅绑定 `127.0.0.1:<port>`（默认 `8187`），强校验 `Host` 头与绑定专属 Token（`qwitch-bind-<token>`），拦截浏览器 `Origin` / `Sec-Fetch-*` 跨域与 DNS Rebinding 请求（`403`）。
 4. **IPC 最小权限延续**：前端永远不传递任意配置文件写入路径；目标 Agent 的探测、读写、备份与还原均由 Rust 后端硬编码白名单目录或受控环境变量解析完成，并按 `main` / `tray` 窗口拆分 capability。
 
 ---
@@ -38,7 +38,7 @@
 │     Codex 桌面版 · Claude 桌面版 · DeepSeek Harness · OpenCode · 标准端点  │
 │     职责：配置探测 · Stash 原值备份 · 最小键注入 · Drift 漂移检测 · 还原   │
 └───────────────────────────────────▲────────────────────────────────────────┘
-                                    │ HTTP 127.0.0.1:18425 (Loopback + Token)
+                                    │ HTTP 127.0.0.1:8187 (Loopback + Token)
 ┌───────────────────────────────────▼────────────────────────────────────────┐
 │  2. 本地多协议网关与号池引擎（纯 Rust / axum: src-tauri/src/gateway/）     │
 │     ├─ 协议解析 & IR 互转：OpenAI Chat ↔ Anthropic Messages ↔ OpenAI Resp. │

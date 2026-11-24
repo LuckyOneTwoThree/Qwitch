@@ -506,13 +506,34 @@ export function Dashboard() {
   const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
   // 手动触发窗口拖动（比 data-tauri-drag-region 更可靠，且可精确排除按钮区域）
-  const onTitleBarMouseDown = (e: { button?: number; target: EventTarget | null }) => {
+  // 仅在鼠标真正移动超过阈值后才进入系统拖拽，避免“按下即拖”吞掉单击/双击
+  const onTitleBarMouseDown = (e: {
+    button?: number;
+    clientX?: number;
+    clientY?: number;
+    target: EventTarget | null;
+  }) => {
     if (e.button !== 0 || isInteractiveTarget(e.target) || !isTauri()) return;
-    try {
-      void getCurrentWindow().startDragging();
-    } catch {
-      /* ignore */
-    }
+    const startX = e.clientX ?? 0;
+    const startY = e.clientY ?? 0;
+    let moved = false;
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", cleanup);
+    };
+    const onMove = (ev: MouseEvent) => {
+      if (moved) return;
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
+      moved = true;
+      cleanup();
+      try {
+        void getCurrentWindow().startDragging();
+      } catch {
+        /* ignore */
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", cleanup);
   };
 
   const onTitleBarDoubleClick = (e?: { target: EventTarget | null }) => {

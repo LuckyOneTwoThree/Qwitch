@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,18 +9,49 @@ use crate::domain::{
     CredentialEnvelope, CredentialPayload, UpstreamModelOption,
 };
 
+/// 探测超时。
+///
+/// 历史实现为 4s，海外/中转上游（OpenRouter、Anthropic 兼容站、火山方舟等）
+/// 在冷链路上经常超过该阈值，导致「探测失败 → 回退静态表 → 缓存锁死旧模型」。
+const DISCOVERY_TIMEOUT_SECS: u64 = 10;
+
+/// 各适配器写入 LocalSnapshot 时使用的键名。
+/// 必须与 adapter/*.rs 中的常量保持一致，否则本机导入账号一律探测失败。
+const WORKBUDDY_AUTH_FILENAME: &str = "workbuddy-desktop.info";
+const WORKBUDDY_SESSION_FILENAME: &str = "session.json";
+const TRAE_AUTH_ENTRIES_KEY: &str = "icube_auth_entries.json";
+const TRAE_DEVICE_KEY: &str = "trae_device.json";
+const QODER_MACHINE_ID_FILE: &str = "auth.machine-id";
+const MINIMAX_AUTH_JSON: &str = "auth.json";
+const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
+
+/// WorkBuddy 上游版本号（与 gateway 实际发起的请求保持一致）。
+/// 网关侧已升级到 5.9.3，探测侧停留在 5.5.6 会被服务端版本门控拒绝。
+const WORKBUDDY_USER_AGENT: &str = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0";
+/// Trae CN 客户端版本号（与 adapter 中的 DEFAULT_TRAE_APP_VERSION 对齐）。
+const TRAE_APP_VERSION: &str = "3.4.22";
+
 fn discovery_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(DISCOVERY_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("构造模型探测 HTTP 客户端失败: {e}"))
 }
 
+/// 判断是否为应被过滤的噪声变体。
+///
+/// 历史实现包含 `lower.ends_with("-max")`，把 `qwen4-max`、`qwen3.8-max`、
+/// `gpt-4-max` 等**正常主力模型**一并过滤掉。静态目录里这些模型是明确存在的
+/// （见 domain/pools.rs 的 qoder_cn / trae_cn 目录），一旦实时探测把它们滤掉，
+/// 实时结果反而比静态兜底更差 —— 这正是「部分工具模型不完整」的直接原因之一。
+/// 现已移除该规则；噪声过滤只保留自动路由、搜索/子智能体等确实不应作为
+/// 手动可选模型的伪条目。
 fn is_noise_variant_id(raw_id: &str) -> bool {
     let lower = raw_id.to_ascii_lowercase();
     lower.is_empty()
         || lower == "default"
-        || lower.ends_with("-max")
+        // 纯自动路由入口（不是可选模型）
+        || lower == "auto"
         || lower.contains("_advisor")
         || lower.ends_with("-auto")
         || lower.contains("subagent")
@@ -30,8 +61,50 @@ fn is_noise_variant_id(raw_id: &str) -> bool {
         || lower == "aquila"
         || lower == "doubao-for-auto"
         || lower == "minimax-image"
-        || lower.starts_with("minimax-h3")
         || lower.starts_with("minimax-hailuo")
+}
+
+/// 一次账号模型探测的结果。
+///
+/// 关键点：必须区分「实时探测成功」与「回退到静态目录」。
+/// 历史实现把两者混为一谈，导致回退出来的静态表被当作探测成功写入缓存，
+/// 并向前端弹出绿色的「已完成全部上游账号真实模型目录探测」——
+/// 用户看到的是一次**并不存在**的成功。
+#[derive(Debug, Clone)]
+pub struct ProbeOutcome {
+    /// 最终可用的模型列表（实时或回退）。
+    pub models: Vec<UpstreamModelOption>,
+    /// 数据来源："live"（本次实时探测）/ "cache"（本机二级目录缓存）/ "catalog"（静态兜底目录）。
+    pub source: &'static str,
+    /// 实时探测失败时的原因，用于向用户如实反馈。
+    pub error: Option<String>,
+}
+
+impl ProbeOutcome {
+    fn live(models: Vec<UpstreamModelOption>) -> Self {
+        Self {
+            models,
+            source: "live",
+            error: None,
+        }
+    }
+
+    fn fallback(
+        models: Vec<UpstreamModelOption>,
+        source: &'static str,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            models,
+            source,
+            error,
+        }
+    }
+
+    /// 是否为本次实时探测的真实结果（只有它才允许写入 live 缓存）。
+    pub fn is_live(&self) -> bool {
+        self.source == "live"
+    }
 }
 
 fn as_opt_f64(v: Option<&Value>) -> Option<f64> {
@@ -90,37 +163,47 @@ pub fn load_magpie_provider_models(tool_id: &str) -> Option<Vec<UpstreamModelOpt
     }
 }
 
-/// 解析 WorkBuddy `/v3/config` 真实响应中的 CLI 可用模型列表
+/// 解析 WorkBuddy `/v3/config` 真实响应中的可用模型列表。
+///
+/// 历史实现只要在 `data.agents` 中命中名为 `cli` 的 agent，就**只输出该 agent
+/// 的模型**并丢弃 `data.models` 中的其余条目 —— 服务端按 agent 维度下发模型时，
+/// `data.models` 往往包含其它 agent/端（web、ide 等）之外的完整目录，于是实时
+/// 探测结果天然少于静态兜底。现改为：**合并 `data.models` 全量条目**，并把
+/// `cli` agent 声明的模型排到最前（CLI 场景优先），不再丢弃任何条目。
 pub fn parse_workbuddy_v3_config(body: &Value) -> Vec<UpstreamModelOption> {
     let data = body.get("data").unwrap_or(body);
     let mut cli_model_ids: Vec<String> = Vec::new();
+    let mut fallback_agent_ids: Vec<String> = Vec::new();
     if let Some(agents) = data.get("agents").and_then(|v| v.as_array()) {
         for ag in agents {
             let name = ag.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if name.eq_ignore_ascii_case("cli") || cli_model_ids.is_empty() {
-                if let Some(arr) = ag.get("models").and_then(|v| v.as_array()) {
-                    let ids: Vec<String> = arr
-                        .iter()
-                        .filter_map(|v| {
-                            v.as_str().map(ToOwned::to_owned).or_else(|| {
-                                v.get("id").and_then(|x| x.as_str()).map(ToOwned::to_owned)
-                            })
-                        })
-                        .collect();
-                    if name.eq_ignore_ascii_case("cli") {
-                        cli_model_ids = ids;
-                        break;
-                    } else if !ids.is_empty() {
-                        cli_model_ids = ids;
-                    }
-                }
+            let Some(arr) = ag.get("models").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let ids: Vec<String> = arr
+                .iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(ToOwned::to_owned)
+                        .or_else(|| v.get("id").and_then(|x| x.as_str()).map(ToOwned::to_owned))
+                })
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            if name.eq_ignore_ascii_case("cli") {
+                cli_model_ids = ids;
+            } else {
+                fallback_agent_ids.extend(ids);
             }
         }
     }
 
     let mut details_by_id: HashMap<String, &Value> = HashMap::new();
     let mut ordered_models: Vec<(String, Option<&Value>)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
+    // 先收全量 `data.models`（数组或对象两种形态都支持）
     match data.get("models") {
         Some(Value::Array(arr)) => {
             for item in arr {
@@ -130,7 +213,7 @@ pub fn parse_workbuddy_v3_config(body: &Value) -> Vec<UpstreamModelOption> {
                     .and_then(|v| v.as_str())
                 {
                     details_by_id.insert(id.to_string(), item);
-                    if cli_model_ids.is_empty() {
+                    if seen.insert(id.to_string()) {
                         ordered_models.push((id.to_string(), Some(item)));
                     }
                 }
@@ -139,7 +222,7 @@ pub fn parse_workbuddy_v3_config(body: &Value) -> Vec<UpstreamModelOption> {
         Some(Value::Object(map)) => {
             for (k, item) in map {
                 details_by_id.insert(k.clone(), item);
-                if cli_model_ids.is_empty() {
+                if seen.insert(k.clone()) {
                     ordered_models.push((k.clone(), Some(item)));
                 }
             }
@@ -147,15 +230,23 @@ pub fn parse_workbuddy_v3_config(body: &Value) -> Vec<UpstreamModelOption> {
         _ => {}
     }
 
-    if !cli_model_ids.is_empty() {
-        for id in cli_model_ids {
-            let detail = details_by_id.get(&id).copied();
-            ordered_models.push((id, detail));
+    // CLI agent 声明的模型排前（CLI 场景优先），已存在的不重复插入
+    let mut ordered: Vec<(String, Option<&Value>)> = Vec::with_capacity(ordered_models.len());
+    let mut ordered_seen: HashSet<String> = HashSet::new();
+    for id in cli_model_ids.iter().chain(fallback_agent_ids.iter()) {
+        if ordered_seen.insert(id.clone()) {
+            let detail = details_by_id.get(id).copied();
+            ordered.push((id.clone(), detail));
+        }
+    }
+    for (id, detail) in ordered_models {
+        if ordered_seen.insert(id.clone()) {
+            ordered.push((id, detail));
         }
     }
 
     let mut out = Vec::new();
-    for (raw_id, detail_opt) in ordered_models {
+    for (raw_id, detail_opt) in ordered {
         if raw_id.trim().is_empty() {
             continue;
         }
@@ -198,24 +289,59 @@ pub fn parse_workbuddy_v3_config(body: &Value) -> Vec<UpstreamModelOption> {
     dedup_model_options(out)
 }
 
-/// 解析 Qoder CN `/algo/api/v2/model/list?Encode=1` 真实响应
+/// 解析 Qoder CN `/algo/api/v2/model/list?Encode=1` 真实响应。
+///
+/// 历史实现只遍历 `["app", "chat"]` 两个写死的场景桶，`code` / `agent` / `quest` /
+/// `cli` 等桶里的模型全部被丢弃。现改为遍历 `data` 下**所有**值为数组的场景桶。
 pub fn parse_qoder_model_list(body: &Value) -> Vec<UpstreamModelOption> {
     let listing = body.get("data").unwrap_or(body);
     let mut combined: Vec<&Value> = Vec::new();
     let mut seen_keys = HashSet::new();
 
-    for scene in ["app", "chat"] {
-        if let Some(arr) = listing.get(scene).and_then(|v| v.as_array()) {
-            for item in arr {
-                let Some(key) = item.get("key").and_then(|v| v.as_str()).map(str::trim) else {
-                    continue;
-                };
-                if key.is_empty() || key == "auto" || key == "default" {
-                    continue;
+    // `data` 既可能是「场景名 -> 模型数组」的对象，也可能直接是模型数组。
+    let mut scenes: Vec<(&str, &Value)> = Vec::new();
+    match listing {
+        Value::Object(map) => {
+            for (scene, value) in map {
+                if value.is_array() {
+                    scenes.push((scene.as_str(), value));
                 }
-                if seen_keys.insert(key.to_string()) {
-                    combined.push(item);
-                }
+            }
+        }
+        Value::Array(arr) => {
+            scenes.push(("", listing));
+            let _ = arr;
+        }
+        _ => {}
+    }
+
+    // 场景顺序决定模型展示顺序：优先「对话/应用」场景（用户日常主用），
+    // 其次编码场景，最后是 agent / quest 等附加场景。
+    // 不排序的话 serde_json 的 BTreeMap 会按字母序把 `agent` 排在 `chat` 前面，
+    // 导致对话主力模型被挤到列表末尾。
+    scenes.sort_by_key(|(scene, _)| match *scene {
+        "chat" => 0,
+        "app" => 1,
+        "code" => 2,
+        "agent" => 3,
+        "cli" => 4,
+        "quest" => 5,
+        _ => 6,
+    });
+
+    for (_scene, arr) in scenes {
+        let Some(items) = arr.as_array() else {
+            continue;
+        };
+        for item in items {
+            let Some(key) = item.get("key").and_then(|v| v.as_str()).map(str::trim) else {
+                continue;
+            };
+            if key.is_empty() || key == "auto" || key == "default" {
+                continue;
+            }
+            if seen_keys.insert(key.to_string()) {
+                combined.push(item);
             }
         }
     }
@@ -329,60 +455,81 @@ pub fn parse_trae_detail_param(body: &Value) -> Vec<UpstreamModelOption> {
     dedup_model_options(raw)
 }
 
-/// 解析 MiniMax Code CN `/mavis/api/v1/models` 响应
+/// 解析 MiniMax Code CN `/mavis/api/v1/models` 响应。
+///
+/// 历史实现要求 `provider.name` 必须为空或等于 `minimax`，且只接受
+/// `data.providers[].config.models` 这一种嵌套结构；上游一旦返回其它 provider
+/// 名或扁平 `data.models`，全部模型被丢弃。现改为：接受任意 provider，
+/// 并同时支持「provider.config.models」与「data.models」两种结构。
 pub fn parse_minimax_models(body: &Value) -> Vec<UpstreamModelOption> {
     let root = body.get("data").unwrap_or(body);
-    let providers = root
-        .get("providers")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
     let mut out = Vec::new();
-    for prov in providers {
-        let pname = prov.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if !pname.is_empty() && pname != "minimax" {
-            continue;
+
+    let push_models = |models: &Value, out: &mut Vec<UpstreamModelOption>| {
+        let Some(arr) = models.as_array() else {
+            return;
+        };
+        for m in arr {
+            let Some(raw_id) = m.get("id").and_then(|v| v.as_str()).map(str::trim) else {
+                continue;
+            };
+            if is_noise_variant_id(raw_id) {
+                continue;
+            }
+            let kind = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if matches!(kind, "image" | "video" | "speech" | "audio") {
+                continue;
+            }
+            let display = m.get("name").and_then(|v| v.as_str());
+            out.push(normalize_upstream_model(
+                "minimax_code_cn",
+                raw_id,
+                display,
+                Some(0.0),
+                false,
+                "live",
+            ));
         }
-        if let Some(models) = prov.pointer("/config/models").and_then(|v| v.as_array()) {
-            for m in models {
-                let Some(raw_id) = m.get("id").and_then(|v| v.as_str()).map(str::trim) else {
-                    continue;
-                };
-                if is_noise_variant_id(raw_id) {
-                    continue;
-                }
-                let kind = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if matches!(kind, "image" | "video" | "speech" | "audio") {
-                    continue;
-                }
-                let display = m.get("name").and_then(|v| v.as_str());
-                out.push(normalize_upstream_model(
-                    "minimax_code_cn",
-                    raw_id,
-                    display,
-                    Some(0.0),
-                    false,
-                    "live",
-                ));
+    };
+
+    if let Some(providers) = root.get("providers").and_then(|v| v.as_array()) {
+        for prov in providers {
+            if let Some(models) = prov.pointer("/config/models") {
+                push_models(models, &mut out);
             }
         }
     }
+    // 扁平结构：`data.models` / 根级 `models`
+    for key in ["models", "model_list"] {
+        if let Some(models) = root.get(key) {
+            push_models(models, &mut out);
+        }
+    }
+
     dedup_model_options(out)
 }
 
-/// 解析通用 OpenAI / Anthropic `/v1/models` 响应
+/// 从常见响应结构中提取模型数组。
+///
+/// 兼容 `data` / `models` / `items` / `list` 以及根级数组，
+/// 单条模型的 id 支持 `id` / `model` / `name`。
 pub fn parse_openai_models_list(tool_id: &str, body: &Value) -> Vec<UpstreamModelOption> {
-    let arr = body
-        .get("data")
-        .and_then(|v| v.as_array())
+    let arr = ["data", "models", "items", "list"]
+        .iter()
+        .find_map(|k| body.get(*k).and_then(|v| v.as_array()))
         .or_else(|| body.as_array())
         .cloned()
         .unwrap_or_default();
 
     let mut out = Vec::new();
     for m in arr {
-        let Some(raw_id) = m.get("id").and_then(|v| v.as_str()).map(str::trim) else {
+        let Some(raw_id) = m
+            .get("id")
+            .or_else(|| m.get("model"))
+            .or_else(|| m.get("name"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+        else {
             continue;
         };
         if raw_id.is_empty() {
@@ -391,12 +538,37 @@ pub fn parse_openai_models_list(tool_id: &str, body: &Value) -> Vec<UpstreamMode
         let display = m
             .get("display_name")
             .or_else(|| m.get("name"))
+            .or_else(|| m.get("displayName"))
             .and_then(|v| v.as_str());
         out.push(normalize_upstream_model(
             tool_id, raw_id, display, None, false, "live",
         ));
     }
     dedup_model_options(out)
+}
+
+/// 拼接 OpenAI 兼容的 `/models` 端点。
+///
+/// 历史实现只在 `base_url` 以 `/v1` 结尾时才避免重复拼接，导致智谱
+/// `/api/paas/v4`、火山方舟 `/api/v3`、Gemini `/v1beta/openai` 被拼成
+/// `/v4/v1/models` 之类的非法路径并 404。现改为：路径中**任一段**已是版本号
+/// （`v1` / `v3` / `v4` / `v1beta` …）时直接追加 `/models`。
+pub fn build_models_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let has_version = trimmed.split('/').any(|seg| {
+        let s = seg.to_ascii_lowercase();
+        s.len() > 1 && s.starts_with('v') && s[1..].starts_with(|c: char| c.is_ascii_digit())
+    });
+    if has_version {
+        format!("{trimmed}/models")
+    } else {
+        format!("{trimmed}/v1/models")
+    }
+}
+
+/// 判断自定义网关是否使用 Anthropic 风格鉴权（`x-api-key` + `anthropic-version`）。
+fn is_anthropic_style_base(base_url: &str) -> bool {
+    base_url.to_ascii_lowercase().contains("anthropic")
 }
 
 fn extract_snapshot_file_json(files: &HashMap<String, String>, key: &str) -> Option<Value> {
@@ -416,9 +588,23 @@ fn extract_snapshot_plain_string(files: &HashMap<String, String>, key: &str) -> 
     }
 }
 
-fn extract_workbuddy_probe_params(
-    cred: &CredentialEnvelope,
-) -> Option<(String, String, String, Option<String>)> {
+/// WorkBuddy 探测所需参数。
+#[derive(Debug, Clone)]
+struct WorkBuddyProbeParams {
+    endpoint: String,
+    token: String,
+    uid: String,
+    domain: Option<String>,
+    enterprise_id: Option<String>,
+}
+
+/// WorkBuddy 探测所需参数：`(endpoint, token, uid, domain, enterprise_id)`。
+///
+/// 历史实现只认 `session.json`，而适配器实际写入的是 `workbuddy-desktop.info`，
+/// 导致**所有本机导入的 WorkBuddy 账号**探测必然返回 `None`。
+/// 现按适配器的真实键名读取，并用 `decrypted_token.txt`（适配器解密后落盘）
+/// 作为 token 来源（`auth.accessToken` 在磁盘上是 sym-v1 密文对象，不可直读）。
+fn extract_workbuddy_probe_params(cred: &CredentialEnvelope) -> Option<WorkBuddyProbeParams> {
     match &cred.payload {
         CredentialPayload::Token {
             access_token,
@@ -435,43 +621,120 @@ fn extract_workbuddy_probe_params(
                 .cloned()
                 .unwrap_or_else(|| "https://copilot.tencent.com".into());
             let domain = extra.get("domain").cloned();
-            Some((
-                base.trim_end_matches('/').to_string(),
-                access_token.clone(),
-                cred.uid.clone(),
+            let enterprise_id = extra
+                .get("enterprise_id")
+                .cloned()
+                .filter(|s| !s.trim().is_empty());
+            Some(WorkBuddyProbeParams {
+                endpoint: base.trim_end_matches('/').to_string(),
+                token: access_token.clone(),
+                uid: cred.uid.clone(),
                 domain,
-            ))
+                enterprise_id,
+            })
         }
         CredentialPayload::LocalSnapshot { files } => {
-            let sess = extract_snapshot_file_json(files, "session.json")?;
-            let token = sess
-                .pointer("/auth/accessToken")
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned)
-                .or_else(|| extract_snapshot_plain_string(files, "decrypted_token.txt"))?;
+            let sess = extract_snapshot_file_json(files, WORKBUDDY_AUTH_FILENAME)
+                .or_else(|| extract_snapshot_file_json(files, WORKBUDDY_SESSION_FILENAME));
+            let token =
+                extract_snapshot_plain_string(files, DECRYPTED_TOKEN_FILE).or_else(|| {
+                    sess.as_ref()
+                        .and_then(|s| s.pointer("/auth/accessToken"))
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned)
+                })?;
+            if token.trim().is_empty() {
+                return None;
+            }
             let base = sess
-                .pointer("/auth/endpoint")
+                .as_ref()
+                .and_then(|s| s.pointer("/auth/endpoint"))
                 .and_then(|v| v.as_str())
                 .filter(|s| s.starts_with("http"))
                 .unwrap_or("https://copilot.tencent.com")
                 .trim_end_matches('/')
                 .to_string();
             let uid = sess
-                .pointer("/account/uid")
-                .or_else(|| sess.pointer("/account/id"))
+                .as_ref()
+                .and_then(|s| s.pointer("/account/uid"))
                 .and_then(|v| v.as_str())
                 .unwrap_or(&cred.uid)
                 .to_string();
             let domain = sess
-                .pointer("/auth/domain")
+                .as_ref()
+                .and_then(|s| s.pointer("/auth/domain"))
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned);
-            Some((base, token, uid, domain))
+            let enterprise_id = sess
+                .as_ref()
+                .and_then(|s| s.pointer("/account/enterpriseId"))
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+                .filter(|s| !s.trim().is_empty());
+            Some(WorkBuddyProbeParams {
+                endpoint: base,
+                token,
+                uid,
+                domain,
+                enterprise_id,
+            })
         }
         CredentialPayload::Cookies { .. } => None,
     }
 }
 
+/// 从 Trae 的 `icube_auth_entries.json` 快照中尽力提取明文 token。
+///
+/// 该文件中的值可能是加密串（需客户端二进制解密），此处只处理可直接解析的
+/// JSON 明文形态；取不到时由调用方回退到 `decrypted_token.txt`。
+fn extract_trae_token_from_auth_entries(files: &HashMap<String, String>) -> Option<String> {
+    let raw = files.get(TRAE_AUTH_ENTRIES_KEY)?;
+    let bytes = BASE64.decode(raw).ok()?;
+    let entries: Map<String, Value> = serde_json::from_slice(&bytes).ok()?;
+    let primary = entries
+        .get("iCubeAuthInfo://icube.cloudide")
+        .or_else(|| entries.values().next())?;
+    let parsed = match primary {
+        Value::String(s) if s.trim_start().starts_with('{') => {
+            serde_json::from_str::<Value>(s).ok()?
+        }
+        other => other.clone(),
+    };
+    parsed
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Trae 账号级设备身份（`trae_device.json`），用于补齐服务端版本门控所需的设备头。
+fn extract_trae_device_headers(files: &HashMap<String, String>) -> Vec<(&'static str, String)> {
+    let Some(dev) = extract_snapshot_file_json(files, TRAE_DEVICE_KEY) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut push = |name: &'static str, value: Option<&Value>| {
+        if let Some(v) = value
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            out.push((name, v.to_string()));
+        }
+    };
+    push("x-device-id", dev.get("device_id"));
+    push("x-device-brand", dev.get("device_brand"));
+    push("x-device-type", dev.get("device_type"));
+    push("x-os-version", dev.get("os_version"));
+    push("x-app-version", dev.get("app_version"));
+    out
+}
+
+/// 通用凭据提取：`(token, base_url, machine_id)`。
+///
+/// 各工具的快照键名互不相同，历史实现只认 `decrypted_token.txt` / `machine_id`，
+/// 导致 Trae 的 `icube_auth_entries.json`、Qoder 的 `auth.machine-id` 读不到。
 fn extract_token_and_extra(
     cred: &CredentialEnvelope,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -486,34 +749,81 @@ fn extract_token_and_extra(
             extra.get("machine_id").cloned(),
         ),
         CredentialPayload::LocalSnapshot { files } => {
-            let tok = extract_snapshot_plain_string(files, "decrypted_token.txt")
-                .or_else(|| extract_snapshot_plain_string(files, "access_token.txt"));
-            let mid = extract_snapshot_plain_string(files, "machine_id");
+            let tok = extract_snapshot_plain_string(files, DECRYPTED_TOKEN_FILE)
+                .or_else(|| extract_snapshot_plain_string(files, "access_token.txt"))
+                .or_else(|| extract_trae_token_from_auth_entries(files))
+                .or_else(|| extract_minimax_token_from_auth_json(files));
+            let mid = extract_snapshot_plain_string(files, QODER_MACHINE_ID_FILE)
+                .or_else(|| extract_snapshot_plain_string(files, "machine_id"));
             (tok, None, mid)
         }
         CredentialPayload::Cookies { .. } => (None, None, None),
     }
 }
 
-/// 按单个账号凭据在线探测其真实的可用模型列表；探测失败或离线时优雅回退到本地在线缓存 / 内置真实协议目录
-pub async fn probe_models_for_account(cred: &CredentialEnvelope) -> Vec<UpstreamModelOption> {
-    let live_res = try_probe_live_models(cred).await;
-    if let Some(models) = live_res {
-        if !models.is_empty() {
-            return models;
-        }
-    }
-    if let Some(cached) = load_magpie_provider_models(&cred.tool_id) {
-        return cached;
-    }
-    default_model_options_for_tool(&cred.tool_id)
+/// 从 MiniMax `auth.json` 快照的 records 中提取 access token（离线兜底）。
+fn extract_minimax_token_from_auth_json(files: &HashMap<String, String>) -> Option<String> {
+    let auth = extract_snapshot_file_json(files, MINIMAX_AUTH_JSON)?;
+    let records = auth.get("records")?.as_object()?;
+    records
+        .values()
+        .filter_map(|v| v.as_object())
+        .filter_map(|rec| rec.get("accessToken").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .max_by_key(|s| s.len())
+        .map(ToOwned::to_owned)
 }
 
-async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<UpstreamModelOption>> {
-    let client = discovery_http_client().ok()?;
+/// 按单个账号凭据在线探测其真实的可用模型列表。
+///
+/// 返回值显式区分实时探测与回退来源，调用方据此决定是否写入 live 缓存、
+/// 以及如何向用户反馈真实结果（而不是一律报成功）。
+pub async fn probe_models_for_account(cred: &CredentialEnvelope) -> ProbeOutcome {
+    match try_probe_live_models(cred).await {
+        Ok(models) if !models.is_empty() => {
+            // 实时结果登记到 wire-id 注册表：静态映射表未收录的模型，
+            // 只有这里能拿到上游真实 ID（大小写敏感的 wire id）。
+            crate::domain::register_live_wire_ids(&cred.tool_id, &models);
+            ProbeOutcome::live(models)
+        }
+        Ok(_) => {
+            let err = Some("上游返回了空模型列表".to_string());
+            let (models, source) = fallback_models(cred);
+            ProbeOutcome::fallback(models, source, err)
+        }
+        Err(e) => {
+            let (models, source) = fallback_models(cred);
+            ProbeOutcome::fallback(models, source, Some(e))
+        }
+    }
+}
+
+/// 实时探测失败时的回退顺序：本机二级目录缓存 → 静态兜底目录。
+///
+/// 返回值同时携带来源标记：`cache` 表示来自本机二级目录，`catalog` 表示静态兜底。
+/// 二者都**不是**实时探测结果，因此都不允许写入 live 缓存。
+fn fallback_models(cred: &CredentialEnvelope) -> (Vec<UpstreamModelOption>, &'static str) {
+    if let Some(cached) = load_magpie_provider_models(&cred.tool_id) {
+        return (cached, "cache");
+    }
+    (default_model_options_for_tool(&cred.tool_id), "catalog")
+}
+
+async fn try_probe_live_models(
+    cred: &CredentialEnvelope,
+) -> Result<Vec<UpstreamModelOption>, String> {
+    let client = discovery_http_client()?;
     match cred.tool_id.as_str() {
         "workbuddy" => {
-            let (base, token, uid, domain) = extract_workbuddy_probe_params(cred)?;
+            let params = extract_workbuddy_probe_params(cred).ok_or_else(|| {
+                "WorkBuddy 凭据缺少可用的 access token（需先完成一次在线授权）".to_string()
+            })?;
+            let base = params.endpoint;
+            let token = params.token;
+            let uid = params.uid;
+            let domain = params.domain;
+            let enterprise_id = params.enterprise_id;
             let url = format!("{base}/v3/config");
             let mut req = client
                 .get(&url)
@@ -521,7 +831,9 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
                 .header("Accept", "application/json")
                 .header("X-Product", "SaaS")
                 .header("X-IDE-Type", "WorkBuddy")
-                .header("User-Agent", "CLI/2.0.0 WorkBuddy/5.5.6")
+                .header("X-IDE-Name", "WorkBuddy")
+                .header("X-IDE-Version", "5.9.3")
+                .header("User-Agent", WORKBUDDY_USER_AGENT)
                 .header("X-Requested-With", "XMLHttpRequest");
             if !uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(&uid) {
                 req = req.header("X-User-Id", uid);
@@ -529,21 +841,32 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
             if let Some(dom) = domain.filter(|s| !s.trim().is_empty()) {
                 req = req.header("X-Domain", dom);
             }
-            let resp = req.send().await.ok()?;
-            if !resp.status().is_success() {
-                return None;
+            // 企业版账号必须携带企业/租户标识，否则拿不到企业模型或直接被拒
+            if let Some(eid) = enterprise_id.filter(|s| !s.trim().is_empty()) {
+                req = req.header("X-Enterprise-Id", eid.clone());
+                req = req.header("X-Tenant-Id", eid);
             }
-            let json: Value = resp.json().await.ok()?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| format!("请求 WorkBuddy 模型目录失败: {}", e.without_url()))?;
+            if !resp.status().is_success() {
+                return Err(format!("WorkBuddy 模型目录返回 HTTP {}", resp.status()));
+            }
+            let json: Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("解析 WorkBuddy 模型目录失败: {e}"))?;
             let parsed = parse_workbuddy_v3_config(&json);
             if parsed.is_empty() {
-                None
+                Err("WorkBuddy 模型目录解析结果为空".into())
             } else {
-                Some(parsed)
+                Ok(parsed)
             }
         }
         "qoder_cn" => {
             let (token_opt, _, mid_opt) = extract_token_and_extra(cred);
-            let token = token_opt?;
+            let token = token_opt.ok_or_else(|| "Qoder 凭据缺少 access token".to_string())?;
             let url = "https://gateway.qoder.com.cn/algo/api/v2/model/list?Encode=1";
             let mut req = client
                 .get(url)
@@ -554,103 +877,194 @@ async fn try_probe_live_models(cred: &CredentialEnvelope) -> Option<Vec<Upstream
             if let Some(mid) = mid_opt.filter(|s| !s.trim().is_empty()) {
                 req = req.header("Cosy-MachineId", mid);
             }
-            let resp = req.send().await.ok()?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| format!("请求 Qoder 模型目录失败: {}", e.without_url()))?;
             if !resp.status().is_success() {
-                return None;
+                return Err(format!("Qoder 模型目录返回 HTTP {}", resp.status()));
             }
-            let json: Value = resp.json().await.ok()?;
+            let json: Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("解析 Qoder 模型目录失败: {e}"))?;
             let parsed = parse_qoder_model_list(&json);
             if parsed.is_empty() {
-                None
+                Err("Qoder 模型目录解析结果为空".into())
             } else {
-                Some(parsed)
+                Ok(parsed)
             }
         }
         "trae_cn" => {
             let (token_opt, _, _) = extract_token_and_extra(cred);
-            let token = token_opt?;
+            let token = token_opt.ok_or_else(|| "Trae CN 凭据缺少 access token".to_string())?;
             let url = "https://trae-api-cn.mchost.guru/api/ide/v1/batch_get_detail_param";
-            let resp = client
+            let mut req = client
                 .post(url)
                 .header("Authorization", format!("Cloud-IDE-JWT {token}"))
                 .header("Accept", "application/json")
-                .header("X-User-Region", "CN")
+                .header("X-User-Region", "CN");
+            // 服务端按客户端版本隐藏新模型，版本号需与 adapter 对齐
+            req = req.header("x-app-version", TRAE_APP_VERSION);
+            if let CredentialPayload::LocalSnapshot { files } = &cred.payload {
+                for (name, value) in extract_trae_device_headers(files) {
+                    req = req.header(name, value);
+                }
+            }
+            let resp = req
                 .json(&json!({
-                    "ide_version": "2.0.15",
+                    "ide_version": TRAE_APP_VERSION,
                     "function_names": ["IDE", "SOLO"]
                 }))
                 .send()
                 .await
-                .ok()?;
+                .map_err(|e| format!("请求 Trae CN 模型目录失败: {}", e.without_url()))?;
             if !resp.status().is_success() {
-                return None;
+                return Err(format!("Trae CN 模型目录返回 HTTP {}", resp.status()));
             }
-            let json: Value = resp.json().await.ok()?;
+            let json: Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("解析 Trae CN 模型目录失败: {e}"))?;
             let parsed = parse_trae_detail_param(&json);
             if parsed.is_empty() {
-                None
+                Err("Trae CN 模型目录解析结果为空".into())
             } else {
-                Some(parsed)
+                Ok(parsed)
             }
         }
         "minimax_code_cn" => {
             let (token_opt, _, _) = extract_token_and_extra(cred);
             let url = "https://agent.minimax.cn/mavis/api/v1/models";
-            let mut req = client.get(url).header("Accept", "application/json");
-            if let Some(tok) = token_opt {
-                req = req.bearer_auth(tok);
-            }
-            let resp = req.send().await.ok()?;
+            let mut req = client
+                .get(url)
+                .header("Accept", "application/json")
+                .header("User-Agent", "MiniMaxAgent")
+                .header("X-Mavis-Agent-Id", "main")
+                .header("X-Mavis-Timezone-Offset", "28800");
+            // 缺少 token 时不再发匿名请求：匿名只会拿到缩减后的公开列表，
+            // 反而造成「模型不完整」的假象。
+            let token = token_opt.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+                "MiniMax 凭据缺少 access token（需先完成一次在线授权）".to_string()
+            })?;
+            req = req.bearer_auth(token);
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| format!("请求 MiniMax 模型目录失败: {}", e.without_url()))?;
             if !resp.status().is_success() {
-                return None;
+                return Err(format!("MiniMax 模型目录返回 HTTP {}", resp.status()));
             }
-            let json: Value = resp.json().await.ok()?;
+            let json: Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("解析 MiniMax 模型目录失败: {e}"))?;
             let parsed = parse_minimax_models(&json);
             if parsed.is_empty() {
-                None
+                Err("MiniMax 模型目录解析结果为空".into())
             } else {
-                Some(parsed)
+                Ok(parsed)
             }
         }
         "custom_api_key" => {
             let (token_opt, base_opt, _) = extract_token_and_extra(cred);
-            let token = token_opt?;
+            let token = token_opt.ok_or_else(|| "自定义 API Key 缺少密钥".to_string())?;
             let base = base_opt
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "https://api.openai.com".into());
-            let trimmed = base.trim_end_matches('/');
-            let url = if trimmed.ends_with("/v1") {
-                format!("{trimmed}/models")
-            } else {
-                format!("{trimmed}/v1/models")
-            };
-            let resp = client
-                .get(&url)
-                .bearer_auth(&token)
-                .header("x-api-key", &token)
-                .header("anthropic-version", "2023-06-01")
-                .header("Accept", "application/json")
-                .send()
-                .await
-                .ok()?;
-            if !resp.status().is_success() {
-                return None;
+            let anthropic_style = is_anthropic_style_base(&base);
+            let mut all: Vec<UpstreamModelOption> = Vec::new();
+            let mut next_after: Option<String> = None;
+            for _page in 0..10 {
+                let url = build_models_endpoint(&base);
+                let mut req = client.get(&url).header("Accept", "application/json");
+                // 鉴权头按协议分开发送：同时发送 Bearer 与 x-api-key 会被部分严格
+                // 中转站直接 400/403 拒收。
+                if anthropic_style {
+                    req = req
+                        .header("x-api-key", &token)
+                        .header("anthropic-version", "2023-06-01");
+                } else {
+                    req = req.bearer_auth(&token);
+                }
+                if let Some(after) = next_after.as_deref() {
+                    req = req.query(&[("limit", "100"), ("after_id", after)]);
+                }
+                let resp = req
+                    .send()
+                    .await
+                    .map_err(|e| format!("请求自定义网关模型目录失败: {}", e.without_url()))?;
+                if !resp.status().is_success() {
+                    return Err(format!("自定义网关模型目录返回 HTTP {}", resp.status()));
+                }
+                let json: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("解析自定义网关模型目录失败: {e}"))?;
+                all.extend(parse_openai_models_list("custom_api_key", &json));
+                // Anthropic 兼容分页
+                let has_more = json
+                    .get("has_more")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let last_id = json
+                    .get("last_id")
+                    .or_else(|| json.get("after_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned);
+                if !has_more {
+                    break;
+                }
+                match last_id {
+                    Some(id) => next_after = Some(id),
+                    None => break,
+                }
             }
-            let json: Value = resp.json().await.ok()?;
-            let parsed = parse_openai_models_list("custom_api_key", &json);
-            if parsed.is_empty() {
-                None
+            let deduped = dedup_model_options(all);
+            if deduped.is_empty() {
+                Err("自定义网关模型目录解析结果为空".into())
             } else {
-                Some(parsed)
+                Ok(deduped)
             }
         }
-        _ => None,
+        other => Err(format!("工具 {other} 暂不支持实时模型目录探测")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noise_filter_keeps_legitimate_max_models() {
+        // 回归：`-max` 后缀是正常主力模型（Qwen-Max / DeepSeek-Max 等），
+        // 历史实现把它们当作噪声滤掉，导致实时结果反而少于静态目录。
+        for keep in [
+            "qwen4-max",
+            "qwen3.8-max",
+            "Qwen3-Max",
+            "deepseek-v4-max",
+            "glm-5.3-max",
+            "gpt-4-max",
+        ] {
+            assert!(
+                !is_noise_variant_id(keep),
+                "{keep} 是正常模型，不应被噪声过滤"
+            );
+        }
+        for drop in [
+            "auto",
+            "default",
+            "doubao-for-auto",
+            "minimax-image",
+            "search_agent_v2",
+            "sub_agent",
+        ] {
+            assert!(is_noise_variant_id(drop), "{drop} 应被噪声过滤");
+        }
+    }
 
     #[test]
     fn parses_workbuddy_qoder_minimax_and_openai_model_payloads() {
@@ -661,16 +1075,20 @@ mod tests {
                     { "id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro", "rate": 0.51, "free": false },
                     { "id": "hy4flash-free", "name": "Hy4 flash", "rate": 0, "free": true },
                     { "id": "glm-5.3", "name": "GLM-5.3", "rate": 0.69, "free": false },
+                    { "id": "qwen4-max", "name": "Qwen4 Max", "rate": 0.4, "free": false },
                     { "id": "unused-web-only", "name": "Unused", "rate": 1.0 }
                 ]
             }
         });
         let wb = parse_workbuddy_v3_config(&wb_json);
-        assert_eq!(wb.len(), 3);
+        // 回归：命中 cli agent 后仍必须保留 data.models 中的**全部**模型
+        // （含未被任何 agent 声明的 qwen4-max），不得再丢弃其余条目。
+        assert_eq!(wb.len(), 5);
         assert_eq!(wb[0].id, "deepseek-v4-pro");
         assert_eq!(wb[0].credit_multiplier, Some(0.51));
         assert!(wb[1].is_free);
         assert_eq!(wb[1].id, "hy4flash-free");
+        assert!(wb.iter().any(|m| m.id == "qwen4-max"));
 
         let qoder_json = json!({
             "data": {
@@ -679,16 +1097,25 @@ mod tests {
                     { "key": "gmodel", "display_name": "GLM-5.3", "enable": true, "price_factor": 0.8 },
                     { "key": "kmodel_latest", "display_name": "Kimi-K3.1-Pro", "enable": false, "price_factor": 1.0 },
                     { "key": "auto", "display_name": "Auto", "enable": true, "price_factor": 0 }
+                ],
+                "code": [
+                    { "key": "kmodel", "display_name": "Kimi-K2.8", "enable": true, "price_factor": 0.8 }
+                ],
+                "agent": [
+                    { "key": "qmodel_38max", "display_name": "Qwen3.8 Max", "enable": true, "price_factor": 0.5 }
                 ]
             }
         });
         let qd = parse_qoder_model_list(&qoder_json);
-        assert_eq!(qd.len(), 2);
+        // 回归：必须遍历全部场景桶（chat / code / agent），而非写死的 app+chat。
+        assert_eq!(qd.len(), 4);
         assert_eq!(qd[0].id, "deepseek-v4-pro");
         assert_eq!(qd[0].vendor_wire_id, "dmodel");
         assert_eq!(qd[0].credit_multiplier, Some(0.5));
         assert_eq!(qd[1].id, "glm-5.3");
         assert_eq!(qd[1].vendor_wire_id, "gmodel");
+        assert!(qd.iter().any(|m| m.vendor_wire_id == "kmodel"));
+        assert!(qd.iter().any(|m| m.vendor_wire_id == "qmodel_38max"));
 
         let mm_json = json!({
             "providers": [{
@@ -705,5 +1132,149 @@ mod tests {
         assert_eq!(mm.len(), 1);
         assert_eq!(mm[0].id, "minimax-m3.1-flash");
         assert_eq!(mm[0].vendor_wire_id, "MiniMax-M3.1-Flash-Preview");
+
+        // 回归：非 minimax provider 名与扁平 data.models 也必须被接受。
+        let mm_flat = json!({
+            "data": { "models": [
+                { "id": "MiniMax-M3", "name": "M3", "type": "chat" },
+                { "id": "MiniMax-Video", "name": "Video", "type": "video" }
+            ] }
+        });
+        let mmf = parse_minimax_models(&mm_flat);
+        assert_eq!(mmf.len(), 1);
+        assert_eq!(mmf[0].id, "minimax-m3");
+    }
+
+    #[test]
+    fn openai_parser_accepts_multiple_payload_shapes() {
+        let data_shape = json!({ "data": [{ "id": "gpt-4o" }] });
+        assert_eq!(
+            parse_openai_models_list("custom_api_key", &data_shape).len(),
+            1
+        );
+
+        let models_shape = json!({ "models": [{ "model": "glm-4" }] });
+        assert_eq!(
+            parse_openai_models_list("custom_api_key", &models_shape).len(),
+            1
+        );
+
+        let items_shape = json!({ "items": [{ "name": "kimi-k2" }] });
+        assert_eq!(
+            parse_openai_models_list("custom_api_key", &items_shape).len(),
+            1
+        );
+
+        let root_array = json!([{ "id": "deepseek-v3" }]);
+        assert_eq!(
+            parse_openai_models_list("custom_api_key", &root_array).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn models_endpoint_respects_versioned_base_urls() {
+        assert_eq!(
+            build_models_endpoint("https://api.openai.com"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            build_models_endpoint("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/models"
+        );
+        // 回归：智谱 / 火山 / Gemini 的版本化路径不得被拼成 `/v4/v1/models`。
+        assert_eq!(
+            build_models_endpoint("https://open.bigmodel.cn/api/paas/v4"),
+            "https://open.bigmodel.cn/api/paas/v4/models"
+        );
+        assert_eq!(
+            build_models_endpoint("https://ark.cn-beijing.volces.com/api/v3"),
+            "https://ark.cn-beijing.volces.com/api/v3/models"
+        );
+        assert_eq!(
+            build_models_endpoint("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "https://generativelanguage.googleapis.com/v1beta/openai/models"
+        );
+    }
+
+    #[test]
+    fn qoder_snapshot_reads_real_machine_id_key() {
+        // 回归：适配器写入的键名是 `auth.machine-id`，历史实现读 `machine_id`。
+        let mut files = HashMap::new();
+        files.insert(
+            DECRYPTED_TOKEN_FILE.to_string(),
+            BASE64.encode("qk-token".as_bytes()),
+        );
+        files.insert(
+            QODER_MACHINE_ID_FILE.to_string(),
+            BASE64.encode("machine-123".as_bytes()),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "qoder_cn".into(),
+            uid: "u1".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+        let (token, _, machine_id) = extract_token_and_extra(&cred);
+        assert_eq!(token.as_deref(), Some("qk-token"));
+        assert_eq!(machine_id.as_deref(), Some("machine-123"));
+    }
+
+    #[test]
+    fn workbuddy_snapshot_reads_real_auth_filename_and_enterprise_id() {
+        // 回归：适配器写入 `workbuddy-desktop.info`，历史实现只认 `session.json`。
+        let sess = json!({
+            "auth": { "accessToken": "wb-token", "endpoint": "https://copilot.tencent.com", "domain": "copilot.tencent.com" },
+            "account": { "uid": "42", "enterpriseId": "ent-99" }
+        });
+        let mut files = HashMap::new();
+        files.insert(
+            WORKBUDDY_AUTH_FILENAME.to_string(),
+            BASE64.encode(serde_json::to_vec(&sess).unwrap()),
+        );
+        files.insert(
+            DECRYPTED_TOKEN_FILE.to_string(),
+            BASE64.encode("wb-plain-token".as_bytes()),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "workbuddy".into(),
+            uid: "42".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+        let params = extract_workbuddy_probe_params(&cred).unwrap();
+        let base = params.endpoint;
+        let token = params.token;
+        let uid = params.uid;
+        let domain = params.domain;
+        let enterprise_id = params.enterprise_id;
+        assert_eq!(base, "https://copilot.tencent.com");
+        assert_eq!(token, "wb-plain-token");
+        assert_eq!(uid, "42");
+        assert_eq!(domain.as_deref(), Some("copilot.tencent.com"));
+        assert_eq!(enterprise_id.as_deref(), Some("ent-99"));
+    }
+
+    #[test]
+    fn trae_snapshot_reads_auth_entries_token() {
+        let entries = json!({
+            "iCubeAuthInfo://icube.cloudide": "{\"token\":\"trae-jwt\",\"userId\":\"7\"}"
+        });
+        let mut files = HashMap::new();
+        files.insert(
+            TRAE_AUTH_ENTRIES_KEY.to_string(),
+            BASE64.encode(serde_json::to_vec(&entries).unwrap()),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "trae_cn".into(),
+            uid: "7".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+        let (token, _, _) = extract_token_and_extra(&cred);
+        assert_eq!(token.as_deref(), Some("trae-jwt"));
     }
 }

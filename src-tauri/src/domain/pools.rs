@@ -1,5 +1,56 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::RwLock;
+
+/// 实时探测得到的 `标准模型 ID -> 上游真实 wire ID` 注册表。
+///
+/// 背景：上游真实模型 ID 往往是大小写敏感的（如 `DeepSeek-V4-Pro`），
+/// 而网关内部以归一化后的标准 ID（`deepseek-v4-pro`）做调度。
+/// 静态映射表只覆盖已知模型，静态目录之外的实时模型一旦被归一化，
+/// 还原出来的 wire ID 就与上游不一致 —— 请求会被上游拒绝或静默降级。
+///
+/// 这里用进程内注册表承接实时探测结果：探测成功即登记，
+/// 网关解析 wire ID 时「静态表优先、未命中再查注册表」。
+static LIVE_WIRE_IDS: RwLock<Option<HashMap<(String, String), String>>> = RwLock::new(None);
+
+/// 工具 ID 别名归一：注册与查询使用同一套 key 规则。
+fn wire_registry_tool_key(tool_id: &str) -> &str {
+    match tool_id {
+        "qoder" => "qoder_cn",
+        other => other,
+    }
+}
+
+/// 登记一次实时探测得到的模型 wire ID。
+///
+/// 仅登记 `source == "live"` 的条目：静态兜底目录里的 wire ID 是猜测值，
+/// 登记进去反而会让网关优先使用猜测值而不是上游真实值。
+pub fn register_live_wire_ids(tool_id: &str, models: &[UpstreamModelOption]) {
+    let key = wire_registry_tool_key(tool_id).to_string();
+    let mut guard = match LIVE_WIRE_IDS.write() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let map = guard.get_or_insert_with(HashMap::new);
+    for model in models {
+        if model.source != "live" {
+            continue;
+        }
+        let wire = model.vendor_wire_id.trim();
+        if wire.is_empty() {
+            continue;
+        }
+        map.insert((key.clone(), model.id.clone()), wire.to_string());
+    }
+}
+
+/// 查询实时探测登记的 wire ID（不存在则返回 `None`）。
+pub fn live_wire_model_id(tool_id: &str, canonical_model_id: &str) -> Option<String> {
+    let key = wire_registry_tool_key(tool_id).to_string();
+    let guard = LIVE_WIRE_IDS.read().ok()?;
+    let map = guard.as_ref()?;
+    map.get(&(key, canonical_model_id.to_string())).cloned()
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -868,35 +919,35 @@ pub fn resolve_vendor_wire_model_id(tool_id: &str, canonical_or_raw_model_id: &s
 
     match tool_id {
         "qoder_cn" | "qoder" => match cid {
-            "deepseek-v4-pro" => "dmodel".into(),
-            "deepseek-v4.1-flash" => "dfmodel".into(),
-            "glm-5.3" => "gmodel".into(),
-            "glm-5.3-flash" => "gfmodel".into(),
-            "kimi-k3.1-pro" => "kmodel_latest".into(),
-            "kimi-k2.8-preview" => "kmodel".into(),
-            "minimax-m3.1-flash" => "mmodel".into(),
-            "qwen4-max" => "qmodel_latest".into(),
-            "qwen3.8-max" => "qmodel_38max".into(),
-            "qwen3.8-flash" => "qfmodel".into(),
-            "step-5-preview" => "jmodel".into(),
-            "fast" => "fast".into(),
-            _ => trimmed.to_string(),
+            "deepseek-v4-pro" => Some("dmodel".into()),
+            "deepseek-v4.1-flash" => Some("dfmodel".into()),
+            "glm-5.3" => Some("gmodel".into()),
+            "glm-5.3-flash" => Some("gfmodel".into()),
+            "kimi-k3.1-pro" => Some("kmodel_latest".into()),
+            "kimi-k2.8-preview" => Some("kmodel".into()),
+            "minimax-m3.1-flash" => Some("mmodel".into()),
+            "qwen4-max" => Some("qmodel_latest".into()),
+            "qwen3.8-max" => Some("qmodel_38max".into()),
+            "qwen3.8-flash" => Some("qfmodel".into()),
+            "step-5-preview" => Some("jmodel".into()),
+            "fast" => Some("fast".into()),
+            _ => None,
         },
         "workbuddy" => match cid {
-            "kimi-k3" => "kimi-k3-1".into(),
+            "kimi-k3" => Some("kimi-k3-1".into()),
             _ => {
                 if CANONICAL_MODEL_SPECS.iter().any(|s| s.canonical_id == cid) {
-                    cid.to_string()
+                    Some(cid.to_string())
                 } else {
-                    trimmed.to_string()
+                    None
                 }
             }
         },
         "trae_cn" => match cid {
-            "deepseek-v4-pro" => "DeepSeek-V4-Pro".into(),
-            "doubao-seed-2.1-pro" => "Doubao-Seed-2.1-Pro".into(),
-            "doubao-seed-2.1-turbo" => "Doubao-Seed-2.1-Turbo".into(),
-            "doubao-seed-code" => "Doubao-Seed-Code".into(),
+            "deepseek-v4-pro" => Some("DeepSeek-V4-Pro".into()),
+            "doubao-seed-2.1-pro" => Some("Doubao-Seed-2.1-Pro".into()),
+            "doubao-seed-2.1-turbo" => Some("Doubao-Seed-2.1-Turbo".into()),
+            "doubao-seed-code" => Some("Doubao-Seed-Code".into()),
             "glm-5.3"
             | "glm-5.3-flash"
             | "glm-5.2"
@@ -912,25 +963,30 @@ pub fn resolve_vendor_wire_model_id(tool_id: &str, canonical_or_raw_model_id: &s
             | "step-5-preview"
             | "qwen4-max"
             | "qwen3.8-max"
-            | "qwen3.8-flash" => cid.to_string(),
-            _ => trimmed.to_string(),
+            | "qwen3.8-flash" => Some(cid.to_string()),
+            _ => None,
         },
         "minimax_code_cn" => match cid {
-            "minimax-m3.1-flash" => "MiniMax-M3.1-Flash-Preview".into(),
-            "minimax-m3" => "MiniMax-M3".into(),
-            "minimax-m2.7" => "MiniMax-M2.7".into(),
-            "minimax-m2.7-highspeed" => "MiniMax-M2.7-highspeed".into(),
-            _ => trimmed.to_string(),
+            "minimax-m3.1-flash" => Some("MiniMax-M3.1-Flash-Preview".into()),
+            "minimax-m3" => Some("MiniMax-M3".into()),
+            "minimax-m2.7" => Some("MiniMax-M2.7".into()),
+            "minimax-m2.7-highspeed" => Some("MiniMax-M2.7-highspeed".into()),
+            _ => None,
         },
         "codearts" => match cid {
-            "openpangu-coder-pro" => "openPangu-Coder-Pro".into(),
-            "glm-5.3" => "glm-5.3".into(),
-            "glm-5.2" => "glm-5.2".into(),
-            "deepseek-v4-pro" => "deepseek-v4-pro".into(),
-            _ => trimmed.to_string(),
+            "openpangu-coder-pro" => Some("openPangu-Coder-Pro".into()),
+            "glm-5.3" => Some("glm-5.3".into()),
+            "glm-5.2" => Some("glm-5.2".into()),
+            "deepseek-v4-pro" => Some("deepseek-v4-pro".into()),
+            _ => None,
         },
-        _ => trimmed.to_string(),
+        _ => None,
     }
+    // 静态映射表未命中时，退回实时探测登记的 wire ID：
+    // 静态目录之外的实时模型（如 Trae 新增的 `Qwen3.8-Max`）大小写敏感，
+    // 沿用归一化后的 ID 会被上游拒收。
+    .or_else(|| live_wire_model_id(tool_id, cid))
+    .unwrap_or_else(|| trimmed.to_string())
 }
 
 fn catalog_opt(
@@ -1465,5 +1521,52 @@ mod tests {
         assert_eq!(exposed[1].wire_model_id, "qoder_cn/deepseek-v4-pro");
         assert_eq!(exposed[1].display_name, "Qoder CN · DeepSeek-V4-Pro");
         assert_eq!(exposed[1].account_count, 1);
+    }
+
+    #[test]
+    fn live_wire_registry_restores_probed_wire_id_for_unknown_models() {
+        // 静态映射表未收录的实时模型：归一化后的标准 ID 往往不是上游真实 ID，
+        // 实时探测登记后必须能还原出大小写敏感的真实 ID。
+        let live = UpstreamModelOption {
+            id: "kimi-k4-preview".into(),
+            display_name: "Kimi K4 Preview".into(),
+            vendor_wire_id: "Kimi-K4-Preview".into(),
+            credit_multiplier: None,
+            is_free: false,
+            family: "Kimi".into(),
+            source: "live".into(),
+        };
+        register_live_wire_ids("trae_cn", std::slice::from_ref(&live));
+        assert_eq!(
+            resolve_vendor_wire_model_id("trae_cn", "kimi-k4-preview"),
+            "Kimi-K4-Preview"
+        );
+
+        // 工具别名（qoder ↔ qoder_cn）共用同一份注册表
+        register_live_wire_ids("qoder_cn", std::slice::from_ref(&live));
+        assert_eq!(
+            resolve_vendor_wire_model_id("qoder", "kimi-k4-preview"),
+            "Kimi-K4-Preview"
+        );
+    }
+
+    #[test]
+    fn live_wire_registry_ignores_catalog_entries_and_keeps_static_priority() {
+        // 静态兜底目录里的 wire ID 是猜测值，不得覆盖静态映射表
+        let catalog = UpstreamModelOption {
+            id: "deepseek-v4-pro".into(),
+            display_name: "DeepSeek-V4-Pro".into(),
+            vendor_wire_id: "deepseek-v4-pro".into(),
+            credit_multiplier: None,
+            is_free: false,
+            family: "DeepSeek".into(),
+            source: "catalog".into(),
+        };
+        register_live_wire_ids("trae_cn", std::slice::from_ref(&catalog));
+        // 静态表命中优先：仍返回静态映射的 `DeepSeek-V4-Pro`
+        assert_eq!(
+            resolve_vendor_wire_model_id("trae_cn", "deepseek-v4-pro"),
+            "DeepSeek-V4-Pro"
+        );
     }
 }

@@ -796,10 +796,35 @@ export function makeDefaultModelKey(poolId: string, modelId: string): string {
   return `${poolId}::${modelId}`;
 }
 
+/**
+ * 汇总「实时探测到的模型展示名」，key 为 `工具/模型ID`。
+ *
+ * 静态目录里的展示名是人工维护的兜底值，可能与上游当前下发的名称不一致
+ * （例如上游把 `kimi-k3` 改名为 `Kimi K3.1`）。实时探测结果优先。
+ */
+export function buildLiveModelLabels(
+  candidates: UpstreamAccountCandidate[] = []
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const cand of candidates) {
+    for (const opt of cand.modelOptions ?? []) {
+      const name = opt.displayName?.trim();
+      if (!name) continue;
+      const key = `${cand.toolId}/${opt.id}`;
+      const existing = map.get(key);
+      if (!existing || opt.source === "live") {
+        map.set(key, name);
+      }
+    }
+  }
+  return map;
+}
+
 export function computeAgentExposedModels(
   binding: Pick<AgentBinding, "agentId" | "mountedPoolIds" | "defaultModelKey">,
   allPools: AccountPool[],
-  nowMs = Date.now()
+  nowMs = Date.now(),
+  liveModelLabels?: Map<string, string>
 ): AgentExposedModel[] {
   const mountedPools = binding.mountedPoolIds
     .map((id) => allPools.find((p) => p.id === id))
@@ -834,7 +859,8 @@ export function computeAgentExposedModels(
     const collision = (modelCount.get(policy.modelId) ?? 0) > 1;
     const { toolId: scopedTid, modelId: bareModel } = splitScopedModelId(policy.modelId);
     const humanLabel = scopedTid
-      ? (UPSTREAM_MODEL_OPTIONS[scopedTid]?.find((o) => o.id === bareModel)?.displayName ??
+      ? (liveModelLabels?.get(`${scopedTid}/${bareModel}`) ??
+        UPSTREAM_MODEL_OPTIONS[scopedTid]?.find((o) => o.id === bareModel)?.displayName ??
         bareModel)
       : policy.modelId;
     const displayName = scopedTid

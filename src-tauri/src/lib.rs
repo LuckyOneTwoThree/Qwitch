@@ -654,6 +654,7 @@ pub fn run() {
             commands::export_action_logs,
             commands::get_pool_workspace_state,
             commands::refresh_upstream_models_cmd,
+            commands::ensure_upstream_models_cmd,
             commands::toggle_gateway_server,
             commands::update_gateway_port_cmd,
             commands::check_gateway_port_available_cmd,

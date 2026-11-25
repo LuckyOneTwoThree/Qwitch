@@ -33,6 +33,7 @@ import {
   TOOL_SHORT_LABELS,
   WIRE_PROTOCOL_META,
   buildAgentConfigSnippets,
+  buildLiveModelLabels,
   computeAgentExposedModels,
   formatScopedModelId,
   splitScopedModelId,
@@ -263,10 +264,13 @@ export function AgentBindingsView({
     [orderedToolIds, selectedToolId]
   );
 
+  // 实时探测到的模型展示名优先于静态兜底目录
+  const liveModelLabels = useMemo(() => buildLiveModelLabels(candidates), [candidates]);
+
   const activeExposedModels = useMemo(() => {
     if (!activeBinding) return [];
-    return computeAgentExposedModels(activeBinding, pools, nowMs);
-  }, [activeBinding, pools, nowMs]);
+    return computeAgentExposedModels(activeBinding, pools, nowMs, liveModelLabels);
+  }, [activeBinding, pools, nowMs, liveModelLabels]);
 
   const defaultExposedItem = useMemo(
     () => activeExposedModels.find((m) => m.isDefault) ?? activeExposedModels[0] ?? null,
@@ -395,7 +399,8 @@ export function AgentBindingsView({
         defaultModelKey: binding.defaultModelKey,
       },
       pools,
-      nowMs
+      nowMs,
+      liveModelLabels
     );
     const defaultItem = exposed.find((e) => e.isDefault) ?? exposed[0] ?? null;
     setDiffModal({

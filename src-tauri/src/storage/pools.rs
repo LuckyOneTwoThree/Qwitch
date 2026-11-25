@@ -17,6 +17,22 @@ use crate::domain::{
 use crate::storage::model_discovery::load_magpie_provider_models;
 use crate::storage::{crypto, QwitchDatabase, StorageError};
 
+/// 实时模型目录缓存的有效期（小时）。
+///
+/// 超过该时长的缓存视为过期并丢弃：上游模型目录会随版本发布而增删，
+/// 长期沿用旧缓存会让用户始终看到一份「不完整且已过期」的模型列表。
+const MODEL_CACHE_TTL_HOURS: i64 = 12;
+
+/// 判断缓存条目是否仍在有效期内。
+fn is_model_cache_fresh(updated_at: &str) -> bool {
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        // 时间戳不可解析的历史条目按过期处理，避免脏数据长期生效
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(ts.with_timezone(&Utc));
+    age.num_hours() < MODEL_CACHE_TTL_HOURS
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredAgentBinding {
     pub agent_id: TargetAgentId,
@@ -242,12 +258,24 @@ impl QwitchDatabase {
         Ok(())
     }
 
+    /// 写入账号的**实时探测**模型缓存。
+    ///
+    /// 只允许写入 `source == "live"` 的结果：回退到静态目录的兜底列表一旦入库，
+    /// 就会把「探测失败」固化成「探测成功」，导致模型目录被永久锁死在旧版本。
     pub fn save_cached_account_models(
         &self,
         account_id: &str,
         tool_id: &str,
         models: &[UpstreamModelOption],
     ) -> Result<(), StorageError> {
+        if models.is_empty() {
+            return Ok(());
+        }
+        if !models.iter().all(|m| m.source == "live") {
+            return Err(StorageError::Validation(
+                "拒绝写入非实时探测的模型目录（source 必须为 live）".into(),
+            ));
+        }
         let now = Utc::now().to_rfc3339();
         let json = serde_json::to_string(models)?;
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
@@ -263,19 +291,34 @@ impl QwitchDatabase {
         Ok(())
     }
 
+    /// 读取账号的实时模型缓存。
+    ///
+    /// 两道过滤：
+    /// 1. `source == "live"` —— 排除历史上误写入的静态兜底条目；
+    /// 2. TTL —— 超过 `MODEL_CACHE_TTL_HOURS` 的缓存视为过期并丢弃，
+    ///    避免一次失败探测把旧模型目录永久锁死。
     pub fn load_cached_models_map(
         &self,
     ) -> Result<HashMap<String, Vec<UpstreamModelOption>>, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let mut stmt =
-            conn.prepare("SELECT account_id, models_json FROM account_discovered_models")?;
+        let mut stmt = conn
+            .prepare("SELECT account_id, models_json, updated_at FROM account_discovered_models")?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut map = HashMap::new();
-        for (aid, raw_json) in rows {
+        for (aid, raw_json, updated_at) in rows {
+            if !is_model_cache_fresh(&updated_at) {
+                continue;
+            }
             if let Ok(list) = serde_json::from_str::<Vec<UpstreamModelOption>>(&raw_json) {
-                if !list.is_empty() {
+                if !list.is_empty() && list.iter().all(|m| m.source == "live") {
                     map.insert(aid, list);
                 }
             }
@@ -2194,5 +2237,53 @@ mod tests {
             "stale stats_date must reset before increment"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn model_cache_accepts_only_live_and_expires_after_ttl() {
+        let (db, key, dir) = temp_db("modelcache");
+        let acc = seed_account(&db, &key, "workbuddy", "wb_uid_cache", "WB缓存号");
+
+        let catalog = vec![crate::domain::normalize_upstream_model(
+            "workbuddy",
+            "deepseek-v4-pro",
+            None,
+            Some(0.51),
+            false,
+            "catalog",
+        )];
+        // 回退到静态目录的结果不得入库
+        assert!(db
+            .save_cached_account_models(&acc, "workbuddy", &catalog)
+            .is_err());
+
+        let live = vec![crate::domain::normalize_upstream_model(
+            "workbuddy",
+            "deepseek-v4-pro",
+            None,
+            Some(0.51),
+            false,
+            "live",
+        )];
+        db.save_cached_account_models(&acc, "workbuddy", &live)
+            .expect("save live cache");
+
+        let map = db.load_cached_models_map().expect("load map");
+        assert_eq!(map.get(&acc).map(|m| m.len()), Some(1));
+
+        // 超过 TTL 后视为过期，直接丢弃
+        {
+            let conn = db.conn.lock().expect("lock");
+            let stale = (Utc::now() - chrono::Duration::hours(13)).to_rfc3339();
+            conn.execute(
+                "UPDATE account_discovered_models SET updated_at = ?1 WHERE account_id = ?2",
+                rusqlite::params![stale, acc],
+            )
+            .expect("age cache");
+        }
+        let map = db.load_cached_models_map().expect("load map");
+        assert!(!map.contains_key(&acc));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

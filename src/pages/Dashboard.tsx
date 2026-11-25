@@ -175,12 +175,14 @@ export function Dashboard({
     gatewayBusy,
     detectAgentEnvironment,
     detectingAgents,
+    ensureUpstreamModels,
   } = usePoolPrototype();
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [nav, setNav] = useState<NavSection>("all");
   const prevNavRef = useRef<NavSection>(nav);
+  const ensuredAgentsRef = useRef(false);
   const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
   const [confirmQuitOpen, setConfirmQuitOpen] = useState(false);
   const [simModalOpen, setSimModalOpen] = useState(false);
@@ -216,6 +218,14 @@ export function Dashboard({
     }
     setHighlightAgentId(externalNavTarget.agentId ?? null);
   }, [externalNavTarget]);
+
+  // 首次进入 Agent 调度页时补一次 TTL 感知的模型探测：
+  // 该页是「模型目录」的主要消费场景，若此时缓存已过期，用户会看到不完整的模型列表。
+  useEffect(() => {
+    if (nav !== "agents" || ensuredAgentsRef.current) return;
+    ensuredAgentsRef.current = true;
+    void ensureUpstreamModels();
+  }, [ensureUpstreamModels, nav]);
 
   useEffect(() => {
     if (!isTauriRuntime) return;

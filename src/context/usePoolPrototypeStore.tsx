@@ -77,6 +77,8 @@ export interface PoolPrototypeContextValue {
   nowMs: number;
   isRefreshingModels: boolean;
   refreshUpstreamModels: (accountId?: string) => Promise<void>;
+  /** TTL 感知的自动探测：只探测缓存已过期/缺失的账号，静默失败 */
+  ensureUpstreamModels: (accountId?: string) => Promise<void>;
   toggleGateway: () => Promise<void>;
   gatewayBusy: boolean;
   updateGatewayPort: (port: number) => Promise<{
@@ -190,6 +192,76 @@ interface PoolWorkspaceState {
   traces: RoutingTraceItem[];
 }
 
+/** 单个账号的模型探测结果（后端如实上报，区分实时/回退/失败） */
+interface UpstreamModelProbeItem {
+  accountId: string;
+  toolId: string;
+  /** live = 本次实时探测成功；cache = 本机二级目录；catalog = 静态兜底 */
+  source: string;
+  modelCount: number;
+  error?: string | null;
+}
+
+/** 「刷新真实模型」返回体：必须能区分「真探测到了」与「回退到静态目录」 */
+interface RefreshUpstreamModelsResult {
+  workspace: PoolWorkspaceState;
+  probedCount: number;
+  liveCount: number;
+  fallbackCount: number;
+  failedCount: number;
+  items: UpstreamModelProbeItem[];
+}
+
+/** TTL 感知的自动探测返回体 */
+interface EnsureUpstreamModelsResult {
+  probedCount: number;
+  /** 因 live 缓存仍然新鲜而跳过探测的账号数 */
+  skippedCount: number;
+  /** 缺少可用凭据、无法探测的账号数 */
+  noCredentialCount: number;
+  liveCount: number;
+  fallbackCount: number;
+  failedCount: number;
+}
+
+/**
+ * 把探测结果翻译成一句**如实**的话。
+ *
+ * 历史实现无论探测成功与否都弹「已完成全部上游账号真实模型目录探测」
+ * 的绿色成功提示——回退到静态目录也会被说成「真实模型目录」，
+ * 用户据此以为目录已与上游对齐，实际上拿到的是本地兜底表。
+ */
+function describeProbeResult(result: RefreshUpstreamModelsResult, accountId?: string): string {
+  const scope = accountId ? "该账号" : "全部上游账号";
+  const { probedCount, liveCount, failedCount, items } = result;
+  if (probedCount === 0) {
+    return `未探测到${scope}的模型目录：账号缺少可用的访问凭据`;
+  }
+
+  const cacheCount = items.filter((i) => i.source === "cache").length;
+  const catalogCount = items.filter((i) => i.source === "catalog").length;
+  const parts: string[] = [];
+  if (liveCount > 0) parts.push(`实时探测成功 ${liveCount} 个`);
+  if (cacheCount > 0) parts.push(`回退本地目录 ${cacheCount} 个`);
+  if (catalogCount > 0) parts.push(`回退内置目录 ${catalogCount} 个`);
+  if (failedCount > 0) parts.push(`失败 ${failedCount} 个`);
+
+  const reasons = items
+    .filter((i) => i.error)
+    .slice(0, 3)
+    .map((i) => `${i.toolId}：${i.error}`);
+  const detail = reasons.length > 0 ? `（${reasons.join("；")}）` : "";
+  return `${scope}模型目录：${parts.join("，")}${detail}`;
+}
+
+/** 探测结果的提示色调：全部成功才给绿色，部分回退/失败一律降级。 */
+function probeTone(result: RefreshUpstreamModelsResult): ToastTone {
+  if (result.probedCount === 0) return "warning";
+  if (result.failedCount === result.probedCount) return "error";
+  if (result.liveCount === result.probedCount) return "success";
+  return "warning";
+}
+
 const detectTauriRuntime = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -205,6 +277,7 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   nowMs: Date.now(),
   isRefreshingModels: false,
   refreshUpstreamModels: async () => {},
+  ensureUpstreamModels: async () => {},
   toggleGateway: async () => {},
   gatewayBusy: false,
   updateGatewayPort: async () => ({ ok: false, message: "浏览器预览不支持" }),
@@ -365,6 +438,29 @@ function sortMembersInTier(
   return byPriority;
 }
 
+/**
+ * 候选账号可用的模型 ID（已按工具前缀作用域化）。
+ *
+ * 历史实现给「按候选账号新建的成员」写死 `supportedModels: []`：
+ * 该账号明明已被实时探测到可用模型，进入专属号池后却不贡献任何模型，
+ * Agent 侧看到的就是一份**比实际更少**的模型目录。
+ * 这里继承候选账号的真实模型列表（实时探测结果优先，回退到默认模型）。
+ */
+function candidateScopedModels(cand: UpstreamAccountCandidate): string[] {
+  const discovered = (cand.modelOptions ?? [])
+    .map((opt) => opt.id?.trim())
+    .filter((id): id is string => Boolean(id));
+  const raw = discovered.length > 0 ? discovered : (cand.defaultModels ?? []);
+  return Array.from(
+    new Set(
+      raw
+        .map((mid) => mid.trim())
+        .filter(Boolean)
+        .map((mid) => formatScopedModelId(cand.toolId, mid))
+    )
+  );
+}
+
 function materializeDedicatedPoolForAgent(
   prevPools: AccountPool[],
   prevBindings: AgentBinding[],
@@ -394,7 +490,7 @@ function materializeDedicatedPoolForAgent(
         toolId: cand.toolId,
         label: cand.label,
         uidMasked: cand.uidMasked,
-        supportedModels: [],
+        supportedModels: candidateScopedModels(cand),
         tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
         channel: cand.channel,
         enabled: true,
@@ -466,7 +562,7 @@ function materializeDedicatedPoolForAgent(
       toolId: cand.toolId,
       label: cand.label,
       uidMasked: cand.uidMasked,
-      supportedModels: [],
+      supportedModels: candidateScopedModels(cand),
       tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
       channel: cand.channel,
       enabled: true,
@@ -638,13 +734,14 @@ export function PoolPrototypeProvider({
           return;
         }
         const { invoke } = await import("@tauri-apps/api/core");
-        const ws = await invoke<PoolWorkspaceState>("refresh_upstream_models_cmd", {
-          accountId: accountId ?? null,
-        });
-        applyWorkspaceState(ws);
+        const result = await invoke<RefreshUpstreamModelsResult>(
+          "refresh_upstream_models_cmd",
+          { accountId: accountId ?? null }
+        );
+        applyWorkspaceState(result.workspace);
         notify(
-          accountId ? "已完成该账号实时模型探测与缓存刷新" : "已完成全部上游账号真实模型目录探测",
-          "success"
+          describeProbeResult(result, accountId),
+          probeTone(result)
         );
       } catch (err) {
         notify(
@@ -656,6 +753,33 @@ export function PoolPrototypeProvider({
       }
     },
     [applyWorkspaceState, isTauriRuntime, notify]
+  );
+
+  /**
+   * TTL 感知的自动探测：只探测「缓存已过期或缺失」的账号。
+   *
+   * 触发点：账号导入/OAuth 完成后（`qwitch://account-updated` 事件）、
+   * 首次进入 Agent 调度页。静默执行：失败只记日志，不打扰用户；
+   * 探测结果通过 `qwitch://pool-workspace-updated` 事件回流刷新。
+   */
+  const ensureUpstreamModels = useCallback(
+    async (accountId?: string) => {
+      if (!isTauriRuntime) return;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<EnsureUpstreamModelsResult>(
+          "ensure_upstream_models_cmd",
+          { accountId: accountId ?? null }
+        );
+        if (result.probedCount > 0) {
+          await refreshWorkspace();
+        }
+      } catch (err) {
+        // 自动探测失败不应打断用户操作：保留静态兜底目录即可。
+        console.warn("[Qwitch] 自动模型探测失败：", err);
+      }
+    },
+    [isTauriRuntime, refreshWorkspace]
   );
 
   const syncWorkspaceCommand = useCallback(
@@ -692,20 +816,26 @@ export function PoolPrototypeProvider({
     };
 
     void refreshWorkspace();
+    // 启动时补一次 TTL 感知的探测：缓存缺失或已过期的账号在这里被拉齐，
+    // 用户不必先点一次「刷新真实模型」才能看到完整目录。
+    void ensureUpstreamModels();
 
     void (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const register = async (eventName: string) => {
+        const register = async (eventName: string, onEvent?: () => void) => {
           const fn = await listen(eventName, () => {
-            if (!disposed) scheduleRefresh();
+            if (disposed) return;
+            scheduleRefresh();
+            onEvent?.();
           });
           if (disposed) fn();
           else unlisteners.push(fn);
         };
         await Promise.all([
           register("qwitch://pool-workspace-updated"),
-          register("qwitch://account-updated"),
+          // 账号导入 / OAuth 授权完成 → 立刻探测该账号的真实模型目录
+          register("qwitch://account-updated", () => void ensureUpstreamModels()),
         ]);
       } catch {
         // Ignore event subscription errors in non-Tauri environments.
@@ -717,7 +847,7 @@ export function PoolPrototypeProvider({
       if (debounceTimer !== null) window.clearTimeout(debounceTimer);
       for (const unlisten of unlisteners) unlisten();
     };
-  }, [isTauriRuntime, refreshWorkspace]);
+  }, [ensureUpstreamModels, isTauriRuntime, refreshWorkspace]);
 
   // 实时同步每个 Agent 的多号池配置 Diff 与代理预警（Tauri 模式优先保留 Rust 磁盘探测结果）
   const agentBindings = useMemo<AgentBinding[]>(() => {
@@ -2304,7 +2434,7 @@ export function PoolPrototypeProvider({
           toolId: cand.toolId,
           label: cand.label,
           uidMasked: cand.uidMasked,
-          supportedModels: [],
+          supportedModels: candidateScopedModels(cand),
           tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
           channel: cand.channel,
           enabled: result.length === 0 && cand.codeArtsMode !== "client_readonly",
@@ -2820,6 +2950,7 @@ export function PoolPrototypeProvider({
       nowMs,
       isRefreshingModels,
       refreshUpstreamModels,
+      ensureUpstreamModels,
       toggleGateway,
       gatewayBusy,
       updateGatewayPort,
@@ -2886,6 +3017,7 @@ export function PoolPrototypeProvider({
       nowMs,
       isRefreshingModels,
       refreshUpstreamModels,
+      ensureUpstreamModels,
       toggleGateway,
       gatewayBusy,
       updateGatewayPort,

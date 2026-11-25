@@ -12,7 +12,11 @@ use crate::domain::{
     RunPoolSimulationInput, RunPoolSimulationResult, TargetAgentId, UpdatePoolPatch,
 };
 use crate::gateway::GatewayRuntime;
+use crate::storage::model_discovery::ProbeOutcome;
 use crate::storage::QwitchDatabase;
+
+/// 单个账号的探测结果三元组：`(账号 ID, 工具 ID, 探测结果)`。
+type AccountProbeResults = Vec<(String, String, ProbeOutcome)>;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +32,48 @@ pub struct GatewayPortCheck {
     pub available: bool,
     pub in_use_by_self: bool,
     pub message: String,
+}
+
+/// 单个账号的模型探测结果明细。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamModelProbeItem {
+    pub account_id: String,
+    pub tool_id: String,
+    /// "live"（本次实时探测成功）/ "cache"（本机二级目录）/ "catalog"（静态兜底）
+    pub source: String,
+    pub model_count: usize,
+    /// 探测失败原因（回退时也会带上，便于向用户如实说明）
+    pub error: Option<String>,
+}
+
+/// 「刷新真实模型」命令的返回体。
+///
+/// 不再只返回工作区快照：必须能区分「真的探测到了」与「回退到静态目录」，
+/// 否则前端只能弹一个无条件成功的绿色提示。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshUpstreamModelsResult {
+    pub workspace: PoolWorkspaceState,
+    pub probed_count: usize,
+    pub live_count: usize,
+    pub fallback_count: usize,
+    pub failed_count: usize,
+    pub items: Vec<UpstreamModelProbeItem>,
+}
+
+/// TTL 感知的自动探测结果（导入 / OAuth 完成 / 首次进入 Agent 调度页时触发）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureUpstreamModelsResult {
+    pub probed_count: usize,
+    /// 因 live 缓存仍然新鲜而跳过探测的账号数
+    pub skipped_count: usize,
+    /// 缺少可用凭据、无法探测的账号数
+    pub no_credential_count: usize,
+    pub live_count: usize,
+    pub fallback_count: usize,
+    pub failed_count: usize,
 }
 
 fn build_workspace_state(
@@ -71,26 +117,49 @@ pub fn get_pool_workspace_state(state: State<'_, AppState>) -> Result<PoolWorksp
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }
 
-#[tauri::command]
-pub async fn refresh_upstream_models_cmd(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    account_id: Option<String>,
-) -> Result<PoolWorkspaceState, String> {
-    let target_accounts = state.db.list_accounts(None).map_err(|e| e.to_string())?;
-    let filter_id = account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+/// 一轮模型探测的执行摘要。
+struct ProbeRun {
+    /// 实际发起探测并拿到结果的账号
+    results: AccountProbeResults,
+    /// 因 live 缓存仍然新鲜而跳过探测的账号
+    fresh_skipped: usize,
+    /// 缺少可用凭据、无法探测的账号
+    no_credential: usize,
+}
+
+/// 对指定账号集合发起实时模型探测。
+///
+/// `stale_only = true` 时只探测「没有新鲜 live 缓存」的账号（TTL 由存储层判定），
+/// 用于自动触发场景，避免每次进入页面都打一轮上游请求。
+async fn probe_account_models(
+    state: &AppState,
+    account_id: Option<&str>,
+    stale_only: bool,
+) -> ProbeRun {
+    let Ok(target_accounts) = state.db.list_accounts(None) else {
+        return ProbeRun {
+            results: Vec::new(),
+            fresh_skipped: 0,
+            no_credential: 0,
+        };
+    };
+    let cached = state.db.load_cached_models_map().unwrap_or_default();
 
     let mut handles = Vec::new();
+    let mut fresh_skipped = 0usize;
+    let mut no_credential = 0usize;
     for acc in target_accounts {
-        if let Some(fid) = filter_id {
+        if let Some(fid) = account_id {
             if acc.id != fid {
                 continue;
             }
         }
+        if stale_only && cached.contains_key(&acc.id) {
+            fresh_skipped += 1;
+            continue;
+        }
         let Ok((_, cred)) = state.db.get_account_credential(&state.master_key, &acc.id) else {
+            no_credential += 1;
             continue;
         };
         let aid = acc.id.clone();
@@ -101,16 +170,125 @@ pub async fn refresh_upstream_models_cmd(
         }));
     }
 
+    let mut results = Vec::with_capacity(handles.len());
     for h in handles {
-        if let Ok((aid, tid, discovered)) = h.await {
-            if !discovered.is_empty() {
-                let _ = state.db.save_cached_account_models(&aid, &tid, &discovered);
-            }
+        if let Ok(item) = h.await {
+            results.push(item);
         }
     }
+    ProbeRun {
+        results,
+        fresh_skipped,
+        no_credential,
+    }
+}
+
+/// 把探测结果落库（**只落 live**）并统计真实结果。
+///
+/// 回退到静态目录 / 本机二级目录的结果一律不入库：
+/// 一旦入库，「探测失败」会被固化成「探测成功」，模型目录从此锁死在旧版本。
+fn persist_probe_results(
+    state: &AppState,
+    results: &AccountProbeResults,
+) -> (usize, usize, usize, Vec<UpstreamModelProbeItem>) {
+    let mut live_count = 0usize;
+    let mut fallback_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut items = Vec::with_capacity(results.len());
+
+    for (account_id, tool_id, outcome) in results {
+        if outcome.is_live() && !outcome.models.is_empty() {
+            live_count += 1;
+            if let Err(err) =
+                state
+                    .db
+                    .save_cached_account_models(account_id, tool_id, &outcome.models)
+            {
+                // 落库失败不改变探测事实，但必须让调用方知道缓存没写进去。
+                items.push(UpstreamModelProbeItem {
+                    account_id: account_id.clone(),
+                    tool_id: tool_id.clone(),
+                    source: outcome.source.to_string(),
+                    model_count: outcome.models.len(),
+                    error: Some(format!("写入模型缓存失败: {err}")),
+                });
+                continue;
+            }
+        } else if outcome.models.is_empty() {
+            failed_count += 1;
+        } else {
+            fallback_count += 1;
+        }
+
+        items.push(UpstreamModelProbeItem {
+            account_id: account_id.clone(),
+            tool_id: tool_id.clone(),
+            source: outcome.source.to_string(),
+            model_count: outcome.models.len(),
+            error: outcome.error.clone(),
+        });
+    }
+
+    (live_count, fallback_count, failed_count, items)
+}
+
+#[tauri::command]
+pub async fn refresh_upstream_models_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<RefreshUpstreamModelsResult, String> {
+    let filter_id = account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let run = probe_account_models(&state, filter_id, false).await;
+    let (live_count, fallback_count, failed_count, items) =
+        persist_probe_results(&state, &run.results);
 
     emit_workspace_updated(&app);
-    build_workspace_state(&state.db, &state.master_key, &state.gateway)
+    let workspace = build_workspace_state(&state.db, &state.master_key, &state.gateway)?;
+    Ok(RefreshUpstreamModelsResult {
+        workspace,
+        probed_count: run.results.len(),
+        live_count,
+        fallback_count,
+        failed_count,
+        items,
+    })
+}
+
+/// TTL 感知的自动探测：只探测「缓存已过期或缺失」的账号。
+///
+/// 触发点：账号导入完成、OAuth 授权完成、首次进入 Agent 调度页。
+/// 目的是让用户不必手动点「刷新真实模型」也能拿到完整目录，
+/// 同时避免每次进入页面都打一轮上游请求。
+#[tauri::command]
+pub async fn ensure_upstream_models_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<EnsureUpstreamModelsResult, String> {
+    let filter_id = account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let run = probe_account_models(&state, filter_id, true).await;
+    let (live_count, fallback_count, failed_count, _items) =
+        persist_probe_results(&state, &run.results);
+
+    if !run.results.is_empty() {
+        emit_workspace_updated(&app);
+    }
+
+    Ok(EnsureUpstreamModelsResult {
+        probed_count: run.results.len(),
+        skipped_count: run.fresh_skipped,
+        no_credential_count: run.no_credential,
+        live_count,
+        fallback_count,
+        failed_count,
+    })
 }
 
 #[tauri::command]

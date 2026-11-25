@@ -1,0 +1,200 @@
+{
+ "_comment": "模型元数据快照（上下文窗口 / 最大输出）。来源：models.dev（经 magpie 本地缓存生成于 2026-11-25）。仅在 id 命中时补全，缺失不猜。",
+ "models": {
+  "DeepSeek-V4-Pro": {
+   "name": "DeepSeek V4 Pro",
+   "context": 1048576,
+   "output": 384000
+  },
+  "Doubao-Seed-2.1-Pro": {
+   "name": "Seed 2.1 Pro",
+   "context": 1024000,
+   "output": 256000
+  },
+  "GLM-5.3": {
+   "name": "GLM-5.3",
+   "context": 1000000,
+   "output": 131072
+  },
+  "Kimi-K3.1-Pro": {
+   "name": "Kimi K3.1 Pro",
+   "context": 1048576,
+   "output": 1048576
+  },
+  "auto": {
+   "name": "Auto (account strategy)",
+   "context": 262144,
+   "output": 64000
+  },
+  "claude-sonnet-4.6": {
+   "name": "Claude Sonnet 4.6",
+   "context": 200000,
+   "output": 32000
+  },
+  "deepseek-chat": {
+   "name": "DeepSeek V3/Deepseek Chat",
+   "context": 128000,
+   "output": 8192
+  },
+  "deepseek-r1-0528": {
+   "name": "DeepSeek R1 0528",
+   "context": 131072,
+   "output": 16384
+  },
+  "deepseek-v3-0324": {
+   "name": "DeepSeek Chat 0324",
+   "context": 128000,
+   "output": 8192
+  },
+  "deepseek-v3-1": {
+   "name": "DeepSeek V3.1",
+   "context": 131072,
+   "output": 65536
+  },
+  "deepseek-v4-flash-vision-exp": {
+   "name": "DeepSeek V4 Flash Vision Exp",
+   "context": 1048576,
+   "output": 393216
+  },
+  "deepseek-v4-pro": {
+   "name": "DeepSeek V4 Pro",
+   "context": 1048576,
+   "output": 393216
+  },
+  "deepseek-v4.1-flash": {
+   "name": "DeepSeek V4.1 Flash 1017",
+   "context": 1000000,
+   "output": 384000
+  },
+  "deepseek-v4.1-flash-1017": {
+   "name": "DeepSeek V4.1 Flash 1017",
+   "context": 1048576,
+   "output": 65536
+  },
+  "glm-4.6": {
+   "name": "GLM-4.6",
+   "context": 204800,
+   "output": 131072
+  },
+  "glm-4.6v": {
+   "name": "GLM-4.6V",
+   "context": 128000,
+   "output": 32768
+  },
+  "glm-5.2": {
+   "name": "GLM-5.2",
+   "context": 1000000,
+   "output": 131072
+  },
+  "glm-5.3": {
+   "name": "GLM-5.3",
+   "context": 1000000,
+   "output": 131072
+  },
+  "glm-5.3-flash": {
+   "name": "GLM-5.3-Flash",
+   "context": 1000000,
+   "output": 131072
+  },
+  "glm-5.3-flashx": {
+   "name": "GLM-5.3-FlashX",
+   "context": 1000000,
+   "output": 131072
+  },
+  "hunyuan-2.0-instruct": {
+   "name": "Tencent HY 2.0 Instruct",
+   "context": 131072,
+   "output": 16384
+  },
+  "kimi-k2-thinking": {
+   "name": "Kimi K2 Thinking",
+   "context": 262144,
+   "output": 262144
+  },
+  "kimi-k2.5": {
+   "name": "Kimi K2.5",
+   "context": 262144,
+   "output": 65536
+  },
+  "kimi-k2.8-preview": {
+   "name": "Kimi K2.8 Preview",
+   "context": 1048576,
+   "output": 32768
+  },
+  "kimi-k3": {
+   "name": "Kimi K3",
+   "context": 1048576,
+   "output": 1048576
+  },
+  "kimi-k3.1-pro": {
+   "name": "Kimi K3.1 Pro",
+   "context": 1048576,
+   "output": 1048576
+  },
+  "mimo-v2.6-pro": {
+   "name": "MiMo-V2.6-Pro",
+   "context": 1048576,
+   "output": 131072
+  },
+  "minimax-m2.5": {
+   "name": "MiniMax-M2.5",
+   "context": 204800,
+   "output": 131072
+  },
+  "minimax-m2.7": {
+   "name": "MiniMax-M2.7",
+   "context": 204800,
+   "output": 131072
+  },
+  "minimax-m3": {
+   "name": "MiniMax-M3",
+   "context": 1048576,
+   "output": 512000
+  },
+  "minimax-m3.1-flash": {
+   "name": "MiniMax M3.1-Flash",
+   "context": 1048576,
+   "output": 1048576
+  },
+  "qwen3.7-max": {
+   "name": "Qwen3.7 Max",
+   "context": 1000000,
+   "output": 131072
+  },
+  "qwen3.7-plus": {
+   "name": "Qwen3.7 Plus",
+   "context": 1000000,
+   "output": 131072
+  },
+  "qwen3.8-flash": {
+   "name": "Qwen3.8 Flash",
+   "context": 1000000,
+   "output": 131072
+  },
+  "qwen3.8-max": {
+   "name": "Qwen3.8 Max",
+   "context": 1000000,
+   "output": 131072
+  },
+  "qwen3.8-omni-flash": {
+   "name": "Qwen3.8 Omni Flash",
+   "context": 1000000,
+   "output": 131072
+  },
+  "qwen4-max": {
+   "name": "Qwen4 Max",
+   "context": 983616,
+   "output": 262144
+  },
+  "space-bunny": {
+   "name": "Space Bunny",
+   "context": 1048576,
+   "output": 524288
+  },
+  "step-5-preview": {
+   "name": "Step 5 Preview",
+   "context": 1024000,
+   "output": 131072
+  }
+ }
+}

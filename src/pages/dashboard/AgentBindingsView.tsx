@@ -47,6 +47,7 @@ import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
 import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
 import { ManualModelModal } from "../../components/pool/ManualModelModal";
 import { isToolGatewayRoutable, isToolScopeReadonly } from "../../domain/toolScope";
+import { formatModelSpec } from "../../domain/modelMeta";
 
 type ModelLike = { id: string; isFree?: boolean; creditMultiplier?: number };
 
@@ -1321,6 +1322,17 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                   <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                                     {opt.family}
                                   </span>
+                                  {(() => {
+                                    const spec = formatModelSpec(opt);
+                                    return spec ? (
+                                      <span
+                                        className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] tabular-nums text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                                        title={spec}
+                                      >
+                                        {spec}
+                                      </span>
+                                    ) : null;
+                                  })()}
                                   {opt.source === "manual" ? (
                                     <span
                                       className="rounded bg-sky-500/12 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300"

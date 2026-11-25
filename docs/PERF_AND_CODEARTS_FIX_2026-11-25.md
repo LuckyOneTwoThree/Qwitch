@@ -313,3 +313,55 @@ _ => "https://api.openai.com",
 这是一个功能开发，不是修 bug，需要单独排期与真机验证。
 
 门禁：前端 187 / 31 files（新增 gateway 可调度性测试）；Rust 246 + ACL 2。
+
+---
+
+## 十二、参考 magpie：模型目录的「三层来源」与元数据补全
+
+### 12.1 magpie 到底怎么做的（实测）
+
+本机 `~/.config/magpie/plugin-providers.json` 共 12 个 provider：zcode / trae-cn / trae-global /
+workbuddy / workbuddy-ai / qoder / qoder-cn / qwenwork / qwenwork-enterprise / minimax-code /
+minimax-code-global / cursor。已安装的登录插件只有 6 个（workbuddy/qoder/trae/minimax/zcode/cursor）。
+
+**没有码道、没有有道龙虾、没有豆包工作**（全仓库 `lobster` 零命中，`doubao` 只存在于 models.dev
+的火山方舟 provider，`codearts` 只出现在签到/积分统计的 id 列表里）。所以这三家没有现成实现可抄。
+
+它的模型来源是三层（`internal/catalog/live.go` 注释写得很直白）：
+
+| 层 | 来源 | 我们的对应 |
+| --- | --- | --- |
+| ① 厂商 `/models` 实时探测 | 有 key 就请求，缓存到 `~/.cache/magpie/models/<provider>.json` | 已实现 |
+| ② models.dev 元数据 | 显示名、价格、上下文、reasoning 等级 | **本轮补齐** |
+| ③ 无接口的订阅工具 | 插件里硬编码精选表（`CN_MODELS`: id/name/context/efforts/output） | 预设（本轮数据化） |
+
+接入 agent 的方式：插件导出 `loader(getAuth) → {baseURL, apiKey, fetch}`，用自定义 `fetch`
+注入该工具的鉴权头；provider 以 OpenAI 兼容形式写进 agent 配置
+（`npm: @ai-sdk/openai-compatible` + `api.url` + `models` 表 + `variants`）。
+
+### 12.2 我们落地的两件事
+
+1. **元数据补全**：新增 `resources/model_meta.json`（models.dev 快照，39 条，4KB）+
+   `domain/model_meta.rs`。补全点在 `normalize_upstream_model`——实时探测、本机客户端目录、
+   内置预设、静态兜底共用这一个构造入口，所以一处补齐全链路生效。
+   `UpstreamModelOption` 新增 `context_window` / `max_output_tokens`（可选，缺失不序列化）。
+   **只补不猜**：id 未命中就留空，UI 不显示。
+2. **预设数据化**：`resources/model_presets.json` 承载码道/龙虾/豆包三家的推荐目录，
+   `recommended_model_options_for_tool` 改为读它。加模型、改输出上限不必重新编译。
+
+界面：模型行新增规格徽章（`1M 上下文 · 输出 128K`），由 `domain/modelMeta.ts` 格式化，
+缺失时整块不渲染。
+
+### 12.3 龙虾与豆包同步完成
+
+- 有道龙虾：实时探测（18 个模型）已生效，元数据自动补全；预设也进了 JSON，探测失败时兜底。
+- 豆包工作：客户端没有模型接口（`public_config.json` 只有 text_picker），走预设；
+  预设同样带元数据。
+
+### 12.4 仍未做
+
+码道的网关上游（AK/SK 签名直连 inferhub `POST {base}/api/v2/chat/completions`）。
+magpie 的 `loader` 模式给了形态参考（注入签名 fetch），但协议细节需要真机验证，
+且现有凭据没有存该接口要的 `accessToken`。属功能开发，未在本轮实施。
+
+门禁：Rust 248 + ACL 2；前端 189 / 31 files。

@@ -155,6 +155,10 @@ export interface UpstreamModelOption {
   vendorWireId: string;
   creditMultiplier?: number;
   isFree?: boolean;
+  /** 上下文窗口（tokens）；null/undefined 表示未知（不猜） */
+  contextWindow?: number;
+  /** 单次最大输出 tokens；未知则不显示 */
+  maxOutputTokens?: number;
   family: string;
   source: string;
 }

@@ -369,6 +369,12 @@ pub struct UpstreamModelOption {
     /// 是否为 0 积分免费模型
     #[serde(default)]
     pub is_free: bool,
+    /// 上下文窗口（tokens）；未知为 None（不猜）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// 单次最大输出 tokens；未知为 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     /// 模型家族分类（"DeepSeek" | "GLM" | "Kimi" | "Qwen" | "MiniMax" | "Doubao" | "Hunyuan" | "Step" | "MiMo" | "Pangu" | "Claude" | "GPT" | "Other"）
     pub family: String,
     /// 数据来源（"live" 表示实时接口探测，"catalog" 表示真实协议目录兜底）
@@ -845,15 +851,17 @@ pub fn normalize_upstream_model(
     let canonical = map_raw_to_canonical_id(tool_id, &wire, raw_display_name);
     if let Some(cid) = canonical {
         if let Some(spec) = CANONICAL_MODEL_SPECS.iter().find(|s| s.canonical_id == cid) {
-            return UpstreamModelOption {
+            return enrich_meta(UpstreamModelOption {
                 id: spec.canonical_id.to_string(),
                 display_name: spec.display_name.to_string(),
                 vendor_wire_id: wire,
                 credit_multiplier,
                 is_free,
+                context_window: None,
+                max_output_tokens: None,
                 family: spec.family.to_string(),
                 source: source.to_string(),
-            };
+            });
         }
     }
 
@@ -863,15 +871,30 @@ pub fn normalize_upstream_model(
         .filter(|s| !s.is_empty() && *s != "-")
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| wire.clone());
-    UpstreamModelOption {
+    enrich_meta(UpstreamModelOption {
         id: normalized_id.clone(),
         display_name,
         vendor_wire_id: wire,
         credit_multiplier,
         is_free,
+        context_window: None,
+        max_output_tokens: None,
         family: infer_model_family(&normalized_id),
         source: source.to_string(),
+    })
+}
+
+/// 用内嵌的 models.dev 快照补齐上下文窗口 / 最大输出。
+///
+/// 只在 id 命中时补：未命中保持 None，UI 不显示，避免把猜的数字当成上游事实。
+fn enrich_meta(mut model: UpstreamModelOption) -> UpstreamModelOption {
+    if let Some(meta) = crate::domain::model_meta::lookup(&model.id) {
+        if meta.context > 0 {
+            model.context_window = Some(meta.context);
+        }
+        model.max_output_tokens = meta.output;
     }
+    model
 }
 
 pub fn normalize_canonical_model_id(tool_id: &str, raw_or_canonical: &str) -> String {
@@ -1105,29 +1128,28 @@ pub fn default_models_for_tool(tool_id: &str) -> Vec<String> {
 /// - 推荐目录必须由用户显式点一次「套用」，来源标记 `preset`，UI 标「内置预设」，
 ///   语义是「我认可这组模型可用」，可随时改成手工维护。
 pub fn recommended_model_options_for_tool(tool_id: &str) -> Vec<UpstreamModelOption> {
-    match tool_id {
-        // 经真实码道账号核验的一组模型（取自客户端内核下发的 multimodalModels），
-        // 不同账号/套餐可能略有差异，套用后仍可编辑。
-        "codearts" => [
-            "deepseek-v4.1-flash",
-            "deepseek-v4.1-flash-1017",
-            "glm-5.3-flash",
-            "kimi-k3.1-pro",
-            "kimi-k3",
-        ]
+    // 目录来自 resources/model_presets.json：加模型、改输出上限都不必重新编译
+    crate::domain::model_meta::preset_entries(tool_id)
         .iter()
-        .map(|id| normalize_upstream_model(tool_id, id, None, None, false, "preset"))
-        .collect(),
-        // 这两个工具目前只沿用既有目录，改标 preset 以免冒充实时探测
-        "lobsterai" | "doubaowork" => default_model_options_for_tool(tool_id)
-            .into_iter()
-            .map(|mut m| {
-                m.source = "preset".into();
-                m
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+        .map(|entry| {
+            let mut m = normalize_upstream_model(
+                tool_id,
+                &entry.id,
+                entry.name.as_deref(),
+                None,
+                false,
+                "preset",
+            );
+            // 预设里的 context/output 优先于元数据快照：这些数字来自上游官方配置
+            if let Some(ctx) = entry.context {
+                m.context_window = Some(ctx);
+            }
+            if let Some(out) = entry.output {
+                m.max_output_tokens = Some(out);
+            }
+            m
+        })
+        .collect()
 }
 
 pub fn upstream_model_protocol(tool_id: &str, model_id: &str) -> WireProtocolKind {
@@ -1565,6 +1587,8 @@ mod tests {
             vendor_wire_id: "Kimi-K4-Preview".into(),
             credit_multiplier: None,
             is_free: false,
+            context_window: None,
+            max_output_tokens: None,
             family: "Kimi".into(),
             source: "live".into(),
         };
@@ -1591,6 +1615,8 @@ mod tests {
             vendor_wire_id: "deepseek-v4-pro".into(),
             credit_multiplier: None,
             is_free: false,
+            context_window: None,
+            max_output_tokens: None,
             family: "DeepSeek".into(),
             source: "catalog".into(),
         };
@@ -1600,5 +1626,59 @@ mod tests {
             resolve_vendor_wire_model_id("trae_cn", "deepseek-v4-pro"),
             "DeepSeek-V4-Pro"
         );
+    }
+
+    #[test]
+    fn model_metadata_fills_context_and_output_only_when_known() {
+        use crate::domain::normalize_upstream_model;
+        // 命中：上下文/输出上限来自 models.dev 快照
+        let known = normalize_upstream_model(
+            "codearts",
+            "deepseek-v4.1-flash",
+            None,
+            None,
+            false,
+            "client",
+        );
+        assert_eq!(known.context_window, Some(1_000_000));
+        assert_eq!(known.max_output_tokens, Some(384_000));
+
+        // 未命中：保持 None，绝不猜
+        let unknown = normalize_upstream_model(
+            "trae_cn",
+            "codewise-nes-a4-027-aide",
+            None,
+            None,
+            false,
+            "live",
+        );
+        assert_eq!(unknown.context_window, None);
+        assert_eq!(unknown.max_output_tokens, None);
+
+        // 大小写不敏感（豆包静态表用展示名当 id）
+        let upper = normalize_upstream_model(
+            "doubaowork",
+            "Doubao-Seed-2.1-Pro",
+            None,
+            None,
+            false,
+            "preset",
+        );
+        assert!(upper.context_window.is_some());
+    }
+
+    #[test]
+    fn presets_come_from_data_file_and_cover_all_three_tools() {
+        for tool in ["codearts", "lobsterai", "doubaowork"] {
+            let preset = recommended_model_options_for_tool(tool);
+            assert!(!preset.is_empty(), "{tool} 应有内置推荐目录");
+            assert!(
+                preset.iter().all(|m| m.source == "preset"),
+                "{tool} 的推荐目录来源必须标成 preset"
+            );
+        }
+        // 没有预设的工具返回空，UI 会退到静态兜底
+        assert!(recommended_model_options_for_tool("workbuddy").is_empty());
+        assert!(crate::domain::model_meta::known_model_count() > 20);
     }
 }

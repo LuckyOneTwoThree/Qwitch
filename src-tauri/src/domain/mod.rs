@@ -1,3 +1,4 @@
+pub mod model_meta;
 pub mod pools;
 pub use pools::*;
 

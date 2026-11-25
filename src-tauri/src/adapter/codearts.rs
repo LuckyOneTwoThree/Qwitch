@@ -103,6 +103,38 @@ const EXPIRED_HINT: &str =
     "CodeArts 凭据已过期。请打开「码道 CodeArts」客户端，它会自动刷新登录态；\
      刷新完成后回到 Qwitch 重新导入该账号即可";
 
+/// 把外部时间戳统一成**毫秒**。
+///
+/// 码道客户端不同版本对 `expiresAt` 的单位并不统一（秒 / 毫秒 / ISO 字符串），
+/// 历史实现直接 `as_i64()` 当毫秒用：秒级时间戳会被判成 1970 年，从而在导入时
+/// 误报「凭据已过期」，即使客户端明明处于登录状态。
+fn normalize_epoch_ms(v: &Value) -> Option<i64> {
+    const SECONDS_CUTOFF: i64 = 10_000_000_000;
+    let from_num = |n: i64| {
+        Some(if n > 0 && n < SECONDS_CUTOFF {
+            n * 1000
+        } else {
+            n
+        })
+    };
+    match v {
+        Value::Number(n) => n.as_i64().and_then(from_num),
+        Value::String(raw) => {
+            let t = raw.trim();
+            if t.is_empty() {
+                return None;
+            }
+            if let Ok(n) = t.parse::<i64>() {
+                return from_num(n);
+            }
+            chrono::DateTime::parse_from_rfc3339(t)
+                .ok()
+                .map(|dt| dt.timestamp_millis())
+        }
+        _ => None,
+    }
+}
+
 /// 华为云临时凭据（AK/SK/STS）。
 #[derive(Debug, Clone)]
 struct HuaweiCreds {
@@ -373,7 +405,10 @@ impl CodeArtsAdapter {
             .or_else(|| non_empty(s, "userName"))
             .unwrap_or_else(|| hash_fallback_uid("codearts", access_key.as_bytes()));
         let display_name = non_empty(s, "userName");
-        let expires_at = s.get("expiresAt").and_then(|v| v.as_i64());
+        let expires_at = s
+            .get("expiresAt")
+            .or_else(|| s.get("expires_at"))
+            .and_then(normalize_epoch_ms);
         let refresh_token = non_empty(s, "refreshToken");
         let domain_id = non_empty(s, "domainId");
 
@@ -640,10 +675,29 @@ impl CodeArtsAdapter {
             return Ok(());
         };
         let now = Utc::now().timestamp_millis();
-        if *expires_at - now <= EXPIRY_SKEW_MS {
+        // 防御：即便上层漏了归一化，秒级时间戳也不能直接当毫秒比较
+        let expires_at_ms = if *expires_at > 0 && *expires_at < 10_000_000_000 {
+            expires_at.saturating_mul(1000)
+        } else {
+            *expires_at
+        };
+        if expires_at_ms - now <= EXPIRY_SKEW_MS {
+            let fmt = |ms: i64| {
+                chrono::DateTime::from_timestamp_millis(ms)
+                    .map(|dt| {
+                        dt.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| ms.to_string())
+            };
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::AuthExpired,
-                message: EXPIRED_HINT.to_string(),
+                message: format!(
+                    "{EXPIRED_HINT}（本地记录有效期 {}，当前 {}）",
+                    fmt(expires_at_ms),
+                    fmt(now)
+                ),
             });
         }
         Ok(())
@@ -1814,6 +1868,84 @@ mod tests {
         env2.uid = "codearts_x".into();
         CodeArtsAdapter::apply_identity(&mut env2, &serde_json::json!({"principal_id": "p-9"}));
         assert_eq!(env2.uid, "p-9");
+    }
+
+    #[test]
+    fn epoch_normalization_accepts_seconds_millis_and_iso() {
+        let future_secs = (Utc::now() + chrono::Duration::hours(1)).timestamp();
+        let future_ms = future_secs * 1000;
+        assert_eq!(
+            normalize_epoch_ms(&serde_json::json!(future_secs)),
+            Some(future_ms),
+            "秒级时间戳必须换算成毫秒"
+        );
+        assert_eq!(
+            normalize_epoch_ms(&serde_json::json!(future_ms)),
+            Some(future_ms),
+            "毫秒级时间戳保持不变"
+        );
+        let iso = "2026-11-25T07:00:00Z";
+        assert_eq!(
+            normalize_epoch_ms(&serde_json::json!(iso)),
+            Some(
+                chrono::DateTime::parse_from_rfc3339(iso)
+                    .unwrap()
+                    .timestamp_millis()
+            )
+        );
+        assert_eq!(normalize_epoch_ms(&serde_json::json!("")), None);
+        assert_eq!(normalize_epoch_ms(&serde_json::json!(null)), None);
+    }
+
+    /// 回归：客户端把 `expiresAt` 写成秒时，历史实现会算成 1970 年，
+    /// 于是在「明明处于登录状态」时误报「凭据已过期」。
+    #[test]
+    fn local_session_expiry_in_seconds_is_not_reported_as_expired() {
+        let future_secs = (Utc::now() + chrono::Duration::hours(2)).timestamp();
+        let session = serde_json::json!({
+            "session": {
+                "accessKey": "AK",
+                "secretKey": "SK",
+                "securityToken": "ST",
+                "userId": "u-1",
+                "userName": "GT-HeQiLucky",
+                "expiresAt": future_secs
+            }
+        });
+        let env = CodeArtsAdapter::envelope_from_session(&session).expect("envelope");
+        let expires_at = match &env.payload {
+            CredentialPayload::Token { expires_at, .. } => *expires_at,
+            _ => panic!("expected token payload"),
+        };
+        assert!(
+            expires_at.expect("expires_at") > 1_000_000_000_000,
+            "秒级时间戳必须归一化为毫秒后再存储"
+        );
+        assert!(
+            CodeArtsAdapter::ensure_not_expired(&env).is_ok(),
+            "有效期内的凭据不得被判过期"
+        );
+    }
+
+    #[test]
+    fn local_session_really_expired_is_still_rejected_with_timestamp_hint() {
+        let past_secs = (Utc::now() - chrono::Duration::hours(3)).timestamp();
+        let session = serde_json::json!({
+            "session": {
+                "accessKey": "AK",
+                "secretKey": "SK",
+                "securityToken": "ST",
+                "userId": "u-1",
+                "expiresAt": past_secs
+            }
+        });
+        let env = CodeArtsAdapter::envelope_from_session(&session).expect("envelope");
+        let err = CodeArtsAdapter::ensure_not_expired(&env).expect_err("should be expired");
+        let message = format!("{err}");
+        assert!(
+            message.contains("本地记录有效期"),
+            "报错需带真实有效期: {message}"
+        );
     }
 
     #[tokio::test]

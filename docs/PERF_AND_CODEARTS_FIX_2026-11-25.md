@@ -365,3 +365,61 @@ magpie 的 `loader` 模式给了形态参考（注入签名 fetch），但协议
 且现有凭据没有存该接口要的 `accessToken`。属功能开发，未在本轮实施。
 
 门禁：Rust 248 + ACL 2；前端 189 / 31 files。
+
+---
+
+## 十三、magpie 插件仓库的实测结论（这三家各自的「解法」）
+
+用户给出的 `magpie-community/plugins` 里确实有解法，但三家的形态完全不同：
+
+### 13.1 豆包工作：CDP 驱动桌面端，不是 API
+
+`packages/doubao-work/README.md` 开门见山：**"This is not a model API. Doubao Work has no model
+interface for other clients."** 它的做法是：
+
+1. 用独立 profile 启动桌面端并开 Chrome DevTools 端口（`~/Library/Application Support/magpie-doubao-work`）；
+2. 每个请求新建一个「工作任务」，切到**云电脑**，选模型，把整段请求（system + tools + 全部轮次）
+   塞进输入框当一条消息发出去；
+3. 从页面上流式读回 markdown 与 `reasoning_content`，工具的 `tool_calls` 从文本里反解；
+4. **模型列表**读的是客户端自己 `brief_list` 请求的结果，缓存在 `magpie-doubao-work/<app>/models.json`。
+
+限制写得很清楚：一次只能一个请求、纯文本、每请求新建任务、比 API 慢得多、非官方。
+
+**我们做了什么**：不启动、不驱动客户端，只读那份 `models.json`（本机已有 14 个真实模型）。
+`probe_doubao_work_models()` 把它作为 `client` 来源落库，预设也换成了这批真实 id。
+
+### 13.2 码道 CodeArts：有真实协议，可以接网关
+
+`packages/codearts/README.md` 补上了我们缺的那块：
+
+| 项 | 结论 |
+| --- | --- |
+| 对话接口 | `POST {snap-access host}/api/v2/chat/completions`，国内 `snap-access.cn-north-4.myhuaweicloud.com`，国际站 `ap-southeast-1` |
+| 鉴权 | **SDK-HMAC-SHA256** 签名（临时 AK/SK + security token），只签给码道自有主机；改过 host 的请求直接拒绝 |
+| 协议 | 上游始终流式（码道只计费流式），对下游折叠成 OpenAI `chat.completion` |
+| 会话头 | `x-ot-session-id`，每账号最多 3 个并发会话；`TM.00001041` 退避重试；`429 + queue-status` 排队 |
+| 思考 | 默认发 `thinking: {type: "enabled"}`，思考落 `reasoning_content` |
+| 模型 | 取账号主智能体（`build`）的模型列表 + 当日免费权益（`POST /api/v1/benefit/claim`），带消耗系数 |
+| 尾巴 | 输出预算钳制到 65536；工具名 > 64 字符要截断+哈希再换回 |
+
+### 13.3 有道龙虾：只有第三方 hub 渠道，我们还更直接
+
+注册表里没有独立的 lobster 包，只在 `magpie-providers-hub` 的 `hub-lobsterai` 渠道里出现。
+我们的 `/api/models/available` 实时探测（18 个模型）已经比它直接。
+
+### 13.4 本轮落地
+
+- 豆包工作：真实模型清单（14 个，来自 magpie 缓存），`source = client`，实测启动即落库。
+- 预设同步换成真实 id（`auto` / `doubao-2.1-pro` / `deepseek-v4.1-flash` / `kimi-k3.1-pro-fast` …），
+  并注意 `auto` 是「自动」这一项，不能被 `is_noise_variant_id` 当噪声过滤掉。
+
+### 13.5 码道接网关的实施方案（下一步）
+
+1. `adapter/codearts.rs::sign_headers` 目前把 payload 哈希写死为空串（`sha256("")`），只能用于 GET；
+   需扩展为对请求体计算哈希，并 `pub(crate)` 暴露。
+2. 网关 `send_upstream_stream` 增加 codearts 分支：构造 `/api/v2/chat/completions` 的 body
+   （OpenAI 兼容 + `thinking`），带 `x-ot-session-id`，用签名头发送，SSE 原样透传。
+3. 放开 `client_readonly` 的入池限制（签名路径不消费 refresh token，不会与 IDE 互踢）。
+4. 真机验证一次：签名串、`maas_type` 是否需要、流内错误映射。
+
+门禁：Rust 249 + ACL 2；前端 189 / 31 files。

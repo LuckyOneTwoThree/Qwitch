@@ -2,25 +2,95 @@
   "_comment": "内置推荐目录：没有实时模型接口的工具，用户可一键套用。id 为上游真实模型 ID；context/output 可选，用于覆盖元数据快照（例如 WorkBuddy 官方配置里的输出上限与 models.dev 不同）。",
   "presets": {
     "codearts": [
-      { "id": "deepseek-v4.1-flash" },
-      { "id": "deepseek-v4.1-flash-1017" },
-      { "id": "glm-5.3-flash" },
-      { "id": "kimi-k3.1-pro" },
-      { "id": "kimi-k3" }
+      {
+        "id": "deepseek-v4.1-flash"
+      },
+      {
+        "id": "deepseek-v4.1-flash-1017"
+      },
+      {
+        "id": "glm-5.3-flash"
+      },
+      {
+        "id": "kimi-k3.1-pro"
+      },
+      {
+        "id": "kimi-k3"
+      }
     ],
     "lobsterai": [
-      { "id": "deepseek-v4-pro" },
-      { "id": "deepseek-v4.1-flash" },
-      { "id": "glm-5.3" },
-      { "id": "kimi-k3.1-pro" },
-      { "id": "qwen4-max" }
+      {
+        "id": "deepseek-v4-pro"
+      },
+      {
+        "id": "deepseek-v4.1-flash"
+      },
+      {
+        "id": "glm-5.3"
+      },
+      {
+        "id": "kimi-k3.1-pro"
+      },
+      {
+        "id": "qwen4-max"
+      }
     ],
     "doubaowork": [
-      { "id": "Doubao-Seed-2.1-Pro" },
-      { "id": "Doubao-Seed-Code" },
-      { "id": "DeepSeek-V4-Pro" },
-      { "id": "GLM-5.3" },
-      { "id": "Kimi-K3.1-Pro" }
+      {
+        "id": "auto"
+      },
+      {
+        "id": "doubao-2.1-pro",
+        "name": "豆包 2.1 Pro"
+      },
+      {
+        "id": "doubao-2.1-lite",
+        "name": "豆包 2.1 Lite"
+      },
+      {
+        "id": "deepseek-v4.1-flash",
+        "name": "DeepSeek V4.1 Flash"
+      },
+      {
+        "id": "deepseek-v4-pro",
+        "name": "DeepSeek V4 Pro"
+      },
+      {
+        "id": "glm-5.4",
+        "name": "GLM 5.4"
+      },
+      {
+        "id": "glm-5.3",
+        "name": "GLM 5.3"
+      },
+      {
+        "id": "glm-5.3-flash",
+        "name": "GLM 5.3 Flash"
+      },
+      {
+        "id": "kimi-k3.1-pro",
+        "name": "Kimi K3.1 Pro"
+      },
+      {
+        "id": "kimi-k3.1-pro-fast",
+        "name": "Kimi K3.1 Pro 高速"
+      },
+      {
+        "id": "kimi-k3",
+        "name": "Kimi K3"
+      },
+      {
+        "id": "qwen-4-max",
+        "name": "Qwen 4 Max"
+      },
+      {
+        "id": "qwen-3.8-max",
+        "name": "Qwen 3.8 Max"
+      },
+      {
+        "id": "qwen-3.8-flash",
+        "name": "Qwen 3.8 Flash"
+      }
     ]
   }
 }

@@ -914,6 +914,85 @@ fn parse_lobsterai_models(json: &Value) -> Vec<UpstreamModelOption> {
     out
 }
 
+/// 豆包工作（DoubaoWork）的模型清单：读 magpie 插件缓存。
+///
+/// 豆包工作**没有给第三方用的模型接口**（magpie 也是靠 CDP 驱动桌面端），
+/// 但它自己的「工作任务」模型菜单是真实存在的：magpie 的 doubao-work 插件
+/// 会把 `brief_list` 的结果缓存到 `magpie-doubao-work/<app>/models.json`。
+/// 我们只读这份缓存（不启动、不驱动客户端），拿到的是该账号菜单里真实可选的模型。
+fn probe_doubao_work_models() -> Result<Vec<UpstreamModelOption>, String> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(home).join("Library/Application Support/magpie-doubao-work"));
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local).join("magpie-doubao-work"));
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        for app in ["doubaowork", "doubao"] {
+            let p = root.join(app).join("models.json");
+            if p.is_file() {
+                candidates.push(p);
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Err("未找到豆包工作的模型缓存（需先用 magpie 的 doubao-work 插件登录一次）".into());
+    }
+    // 新缓存优先（文件名固定，按修改时间排序）
+    candidates.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(std::cmp::Reverse)
+    });
+    for path in candidates {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(models) = doubao_models_from_cache(&raw) {
+            return Ok(models);
+        }
+    }
+    Err("豆包工作的模型缓存为空或格式已变".into())
+}
+
+/// 解析 magpie 的 `models.json`：`{ "models": { "<id>": { "label"|"name" } } }`。
+fn doubao_models_from_cache(raw: &str) -> Option<Vec<UpstreamModelOption>> {
+    let root: Value = serde_json::from_str(raw).ok()?;
+    let map = root.get("models")?.as_object()?;
+    let mut out = Vec::new();
+    for (id, item) in map {
+        // 注意：不能用 is_noise_variant_id 过滤——豆包工作的「自动」就是 id `auto`，
+        // 是菜单里真实存在的一项，不是噪声变体。
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let label = item
+            .get("label")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("name").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        out.push(normalize_upstream_model(
+            "doubaowork",
+            id,
+            label,
+            None,
+            false,
+            "client",
+        ));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    // JSON 对象在 serde 里是 BTreeMap，顺序不稳定；按展示名排序保证列表可复现
+    out.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    Some(out)
+}
+
 /// 码道 CodeArts 的模型清单：从本机客户端内核日志里读取。
 ///
 /// 码道没有对外可用的模型目录接口（本地内核 `/cag/model` 需要 IDE 私有的
@@ -1243,6 +1322,8 @@ async fn try_probe_live_models(
         // 码道没有可调用的模型接口，改从本机客户端读取真实清单
         "codearts" => probe_codearts_client_models(),
         "lobsterai" => probe_lobsterai_models(&client, cred).await,
+        // 豆包工作没有模型接口：读 magpie 插件缓存里该账号真实的「工作任务」菜单
+        "doubaowork" => probe_doubao_work_models(),
         other => Err(format!("工具 {other} 暂不支持实时模型目录探测")),
     }
 }
@@ -1250,6 +1331,36 @@ async fn try_probe_live_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doubao_work_models_parsed_from_magpie_cache() {
+        // 结构取自 magpie 插件真实缓存（magpie-doubao-work/<app>/models.json）
+        let raw = r#"{"v":2,"at":1795590825420,"models":{
+            "auto":{"label":"自动","name":"自动","key":"9","efforts":["低","中","高"]},
+            "doubao-2.1-pro":{"label":"豆包 2.1 Pro","key":"5"},
+            "deepseek-v4.1-flash":{"label":"DeepSeek V4.1 Flash","key":"person-deepseek-v4-1-flash-261017"}
+        }}"#;
+        let models = doubao_models_from_cache(raw).expect("models");
+        let mut ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["auto", "deepseek-v4.1-flash", "doubao-2.1-pro"]);
+        assert!(models.iter().all(|m| m.source == "client"));
+        let doubao_pro = models.iter().find(|m| m.id == "doubao-2.1-pro").unwrap();
+        assert_eq!(doubao_pro.display_name, "豆包 2.1 Pro");
+        // 上下文来自 models.dev 快照（如果有）
+        let ds = models
+            .iter()
+            .find(|m| m.id == "deepseek-v4.1-flash")
+            .unwrap();
+        assert!(
+            ds.context_window.is_some(),
+            "DeepSeek V4.1 Flash 应有上下文窗口"
+        );
+
+        // 空 / 坏结构 → None，交给上层回退预设
+        assert!(doubao_models_from_cache("{}").is_none());
+        assert!(doubao_models_from_cache("not json").is_none());
+    }
 
     #[test]
     fn lobsterai_models_parsed_from_available_endpoint() {

@@ -2,11 +2,16 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL, Engine as _};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::adapter::{AdapterManifest, ToolAdapter};
-use crate::domain::{AppSettingsDto, AuthMethod};
+use crate::domain::{
+    AccountStatus, AppSettingsDto, AuthMethod, CredentialEnvelope, CredentialPayload,
+};
+use crate::platform::PlatformHost;
+use crate::storage::QwitchDatabase;
 
 use super::{load_app_settings, resolve_client_executable, AppState, SETTINGS_KEY};
 
@@ -455,6 +460,22 @@ pub async fn reconcile_active_accounts(
                 {
                     let _ = app.emit("qwitch://account-updated", &id);
                 }
+                if let Some(adapter) = state.adapters.get(&tool_id) {
+                    let lock = state.gateway.refresh_lock_for(&id);
+                    let _guard = lock.lock().await;
+                    if sync_active_local_credential_if_fresher(
+                        &state.db,
+                        &state.master_key,
+                        &state.host,
+                        adapter,
+                        &id,
+                    )
+                    .await
+                    {
+                        let _ = app.emit("qwitch://account-updated", &id);
+                        let _ = app.emit("qwitch://logs-updated", ());
+                    }
+                }
             }
             Ok(None) => {
                 if let Ok(cleared) = state.db.clear_active_on_client(&tool_id) {
@@ -467,6 +488,125 @@ pub async fn reconcile_active_accounts(
         }
     }
     Ok(())
+}
+
+fn decode_jwt_exp_ms(token: &str) -> Option<i64> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = BASE64_URL.decode(payload_b64.as_bytes()).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = v.get("exp").and_then(|x| x.as_i64())?;
+    Some(if exp < 10_000_000_000 {
+        exp.saturating_mul(1000)
+    } else {
+        exp
+    })
+}
+
+fn credential_expires_at_ms(cred: &CredentialEnvelope) -> Option<i64> {
+    match &cred.payload {
+        CredentialPayload::Token {
+            access_token,
+            expires_at,
+            ..
+        } => expires_at
+            .map(|e| {
+                if e < 10_000_000_000 {
+                    e.saturating_mul(1000)
+                } else {
+                    e
+                }
+            })
+            .or_else(|| decode_jwt_exp_ms(access_token)),
+        CredentialPayload::LocalSnapshot { files } => {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            let raw = files.get("decrypted_token.txt")?;
+            let bytes = BASE64.decode(raw).ok()?;
+            let tok = std::str::from_utf8(&bytes).ok()?;
+            decode_jwt_exp_ms(tok)
+        }
+        CredentialPayload::Cookies { .. } => None,
+    }
+}
+
+fn access_token_hint(cred: &CredentialEnvelope) -> Option<String> {
+    match &cred.payload {
+        CredentialPayload::Token { access_token, .. } => {
+            (!access_token.trim().is_empty()).then(|| access_token.clone())
+        }
+        CredentialPayload::LocalSnapshot { files } => files.get("decrypted_token.txt").cloned(),
+        CredentialPayload::Cookies { .. } => None,
+    }
+}
+
+/// 当本机活跃客户端里的凭据比 Qwitch 库中记录更新（或账号已标过期）时，
+/// 静默将最新凭据回吸写入加密库，避免 CodeArts / 桌面客户端自刷新后 Qwitch 仍误报过期。
+pub(crate) async fn sync_active_local_credential_if_fresher(
+    db: &QwitchDatabase,
+    master_key: &[u8; 32],
+    host: &Arc<dyn PlatformHost>,
+    adapter: &Arc<dyn ToolAdapter>,
+    account_id: &str,
+) -> bool {
+    let Ok((summary, stored_cred)) = db.get_account_credential(master_key, account_id) else {
+        return false;
+    };
+    if summary.status == AccountStatus::Disabled {
+        return false;
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let stored_exp = credential_expires_at_ms(&stored_cred);
+    let near_expiry = stored_exp.is_some_and(|exp| exp - now_ms <= 65 * 60 * 1000);
+    if summary.status != AccountStatus::Expired && !near_expiry {
+        return false;
+    }
+
+    let Ok(incoming) = adapter.import_from_local(host.as_ref()).await else {
+        return false;
+    };
+    let stored_real = !stored_cred.uid.trim().is_empty()
+        && !CredentialEnvelope::is_fallback_uid(&stored_cred.uid);
+    let incoming_real =
+        !incoming.uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(&incoming.uid);
+    if stored_real && incoming_real && stored_cred.uid != incoming.uid {
+        return false;
+    }
+
+    let incoming_exp = credential_expires_at_ms(&incoming);
+    let fresher_exp = match (stored_exp, incoming_exp) {
+        (Some(old_e), Some(new_e)) => new_e > old_e + 60_000,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let token_changed = match (
+        access_token_hint(&stored_cred),
+        access_token_hint(&incoming),
+    ) {
+        (Some(old_t), Some(new_t)) => old_t != new_t,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let still_valid_for_expired = summary.status == AccountStatus::Expired
+        && incoming_exp.is_some_and(|e| e > now_ms + 60_000);
+    if !fresher_exp && !token_changed && !still_valid_for_expired {
+        return false;
+    }
+
+    if db
+        .bind_account_credential(master_key, account_id, None, &incoming)
+        .is_ok()
+    {
+        let _ = db.append_action_log(
+            Some(account_id),
+            &summary.tool_id,
+            "keepalive",
+            "success",
+            None,
+            &format!("已从本机活跃客户端同步 {} 的最新凭据", summary.label),
+        );
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]

@@ -262,6 +262,15 @@ pub trait ToolAdapter: Send + Sync {
         Ok(None)
     }
 
+    /// 强制刷新凭据（例如上游已返回 401 时跳过本地 `expires_at` 提前量判断）。
+    /// 默认退回 `refresh_credential`；支持 OAuth 刷新的适配器应重写此方法以绕过本地缓存判断。
+    async fn force_refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential(cred).await
+    }
+
     async fn apply_session(
         &self,
         host: &dyn PlatformHost,

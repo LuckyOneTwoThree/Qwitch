@@ -548,6 +548,19 @@ impl DoubaoWorkAdapter {
         cookie: &str,
         context: &str,
     ) -> Result<Value, AdapterError> {
+        let (body, _) = self
+            .get_with_cookie_and_set_cookies(base, path_and_query, cookie, context)
+            .await?;
+        Ok(body)
+    }
+
+    async fn get_with_cookie_and_set_cookies(
+        &self,
+        base: &str,
+        path_and_query: &str,
+        cookie: &str,
+        context: &str,
+    ) -> Result<(Value, Vec<String>), AdapterError> {
         let url = format!("{base}{path_and_query}");
         let resp = self
             .http
@@ -566,12 +579,20 @@ impl DoubaoWorkAdapter {
         if !status.is_success() {
             return Err(map_http_status(status, context));
         }
-        resp.json::<Value>()
+        let set_cookies: Vec<String> = resp
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(str::to_string))
+            .collect();
+        let body = resp
+            .json::<Value>()
             .await
             .map_err(|e| AdapterError::Unified {
                 code: UnifiedErrorCode::NetworkError,
                 message: format!("解析{context}响应失败: {}", e.without_url()),
-            })
+            })?;
+        Ok((body, set_cookies))
     }
 
     async fn post_with_cookie(
@@ -1421,6 +1442,70 @@ fn int_field(v: &Value) -> Option<i64> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
 }
 
+/// 将服务端响应中的 `Set-Cookie` 增量合并进现有 Cookie 串。
+/// 仅当键值有实际变更或新增时返回 `Some(merged)`，无变化则返回 `None`。
+fn merge_set_cookies(existing: &str, set_cookies: &[String]) -> Option<String> {
+    if set_cookies.is_empty() {
+        return None;
+    }
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for part in existing.split(';') {
+        if let Some((k, v)) = part.trim().split_once('=') {
+            let key = k.trim();
+            if !key.is_empty() {
+                pairs.push((key.to_string(), v.trim().to_string()));
+            }
+        }
+    }
+    let before = pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let mut changed = false;
+    for raw_sc in set_cookies {
+        let lower = raw_sc.to_ascii_lowercase();
+        if lower.contains("max-age=0") {
+            continue;
+        }
+        let Some(first_seg) = raw_sc.split(';').next() else {
+            continue;
+        };
+        let Some((k, v)) = first_seg.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        if key.is_empty()
+            || val.is_empty()
+            || key.chars().any(|c| matches!(c, '\r' | '\n' | '\0'))
+            || val.chars().any(|c| matches!(c, '\r' | '\n' | '\0'))
+        {
+            continue;
+        }
+        if let Some(pos) = pairs.iter().position(|(ek, _)| ek == key) {
+            if pairs[pos].1 != val {
+                pairs[pos].1 = val.to_string();
+                changed = true;
+            }
+        } else {
+            pairs.push((key.to_string(), val.to_string()));
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+    let merged = pairs
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    (merged != before).then_some(merged)
+}
+
 fn opt_amount_field(v: Option<&Value>) -> Option<f64> {
     let v = v?;
     let val = v
@@ -1696,6 +1781,86 @@ impl ToolAdapter for DoubaoWorkAdapter {
         // 之前以为它已废弃是误判——它在超限账号上恒报 710010702，在正常账号上可用。
         self.post_landing_checkin_claim(&cookie, cred, precheck, current_days)
             .await
+    }
+
+    /// 豆包工作 Cookie 轻量保活与 `Set-Cookie` 续期回写：
+    /// 定期触达 `/passport/account/info/v2/` 维持服务端滑动会话，并把响应 `Set-Cookie`
+    /// 中续期/轮换的 Cookie 合并回本地凭据；缺少在线 Cookie（纯本地切号快照）时静默跳过。
+    async fn refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let cookie = match Self::extract_cookie(cred) {
+            Ok(c) => c,
+            Err(_) => return Ok(None),
+        };
+        let query_path = format!("/passport/account/info/v2/?aid={AID}&account_sdk_source=web");
+        let (body, set_cookies) = match self
+            .get_with_cookie_and_set_cookies(
+                &self.web_base,
+                &query_path,
+                &cookie,
+                "保活豆包工作登录态",
+            )
+            .await
+        {
+            Ok(pair) => pair,
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                ..
+            }) => {
+                self.get_with_cookie_and_set_cookies(
+                    &self.accounts_base,
+                    &query_path,
+                    &cookie,
+                    "保活豆包工作登录态",
+                )
+                .await?
+            }
+            Err(err) => return Err(err),
+        };
+
+        let message = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::to_ascii_lowercase);
+        let data = body.get("data").unwrap_or(&Value::Null);
+        let passport_err = data.get("error_code").and_then(int_field).unwrap_or(0);
+        if message.as_deref() == Some("error") || passport_err != 0 {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: "豆包工作 Cookie 已失效，请重新登录或粘贴最新 Cookie".into(),
+            });
+        }
+
+        let Some(merged_cookie) = merge_set_cookies(&cookie, &set_cookies) else {
+            return Ok(None);
+        };
+
+        let mut updated = cred.clone();
+        match &mut updated.payload {
+            CredentialPayload::Token { access_token, .. } => {
+                *access_token = merged_cookie;
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                files.insert(
+                    SNAPSHOT_TOKEN_FILE.to_string(),
+                    BASE64.encode(merged_cookie.as_bytes()),
+                );
+            }
+            CredentialPayload::Cookies { cookies, .. } => {
+                cookies.clear();
+                for pair in merged_cookie.split(';') {
+                    if let Some((k, v)) = pair.split_once('=') {
+                        let key = k.trim();
+                        if !key.is_empty() {
+                            cookies.insert(key.to_string(), v.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Some(updated))
     }
 
     async fn apply_session(
@@ -2768,6 +2933,110 @@ mod tests {
             rate_err,
             AdapterError::Unified {
                 code: UnifiedErrorCode::RateLimited,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn merge_set_cookies_updates_adds_and_skips_unchanged() {
+        let base = "sessionid=old_s; sid_tt=old_s; extra=keep";
+        assert!(merge_set_cookies(base, &[]).is_none());
+        assert!(merge_set_cookies(base, &["sessionid=old_s; Path=/; HttpOnly".into()]).is_none());
+
+        // Max-Age=0 清退头不应误删现有有效会话
+        assert!(merge_set_cookies(base, &["sessionid=; Max-Age=0; Path=/".into()]).is_none());
+
+        let merged = merge_set_cookies(
+            base,
+            &[
+                "sessionid=new_s; Path=/; HttpOnly".into(),
+                "uid_tt=u123; Path=/; Secure".into(),
+            ],
+        )
+        .expect("should merge rotated and new cookies");
+        assert_eq!(
+            merged,
+            "sessionid=new_s; sid_tt=old_s; extra=keep; uid_tt=u123"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_credential_merges_set_cookie_and_detects_expired() {
+        let server = MockServer::start().await;
+        let adapter = DoubaoWorkAdapter::with_base_urls(server.uri(), server.uri());
+        let cred = CredentialEnvelope {
+            tool_id: "doubaowork".to_string(),
+            uid: "u_db_1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "sessionid=old_sid; sid_tt=old_sid".to_string(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+
+        // 1. 服务端下发 Set-Cookie 轮换 -> 返回更新后的 CredentialEnvelope
+        Mock::given(method("GET"))
+            .and(path("/passport/account/info/v2/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("set-cookie", "sessionid=new_sid; Path=/; HttpOnly")
+                    .set_body_json(serde_json::json!({
+                        "message": "success",
+                        "data": { "user_id_str": "u_db_1", "error_code": 0 }
+                    })),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let updated = adapter
+            .refresh_credential(&cred)
+            .await
+            .expect("keepalive ok")
+            .expect("should return updated cookie");
+        match &updated.payload {
+            CredentialPayload::Token { access_token, .. } => {
+                assert!(access_token.contains("sessionid=new_sid"));
+                assert!(access_token.contains("sid_tt=old_sid"));
+            }
+            _ => panic!("expected Token"),
+        }
+
+        // 2. 无 Set-Cookie 变更 -> Ok(None)
+        Mock::given(method("GET"))
+            .and(path("/passport/account/info/v2/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": "success",
+                "data": { "user_id_str": "u_db_1", "error_code": 0 }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        assert!(adapter
+            .refresh_credential(&updated)
+            .await
+            .expect("keepalive ok")
+            .is_none());
+
+        // 3. error_code != 0 -> AuthExpired
+        Mock::given(method("GET"))
+            .and(path("/passport/account/info/v2/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": "error",
+                "data": { "error_code": 10008 }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let err = adapter.refresh_credential(&updated).await.unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
                 ..
             }
         ));

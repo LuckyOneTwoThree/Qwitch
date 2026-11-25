@@ -3331,8 +3331,13 @@ async fn handle_http_connection(
                     {
                         cred = fresh;
                     }
-                    if let Ok(Some(refreshed)) = adapter.refresh_credential(&cred).await {
-                        let _ = db.upsert_account(&master_key, None, &refreshed);
+                    if let Ok(Some(refreshed)) = adapter.force_refresh_credential(&cred).await {
+                        let _ = db.bind_account_credential(
+                            &master_key,
+                            &cand.account_id,
+                            None,
+                            &refreshed,
+                        );
                         cred = refreshed;
                         attempts.push(RoutingAttempt {
                             account_label: cand.label.clone(),
@@ -3341,7 +3346,7 @@ async fn handle_http_connection(
                             tier: Some(cand.tier),
                             outcome: RoutingAttemptOutcome::Refreshed401,
                             latency_ms: t_hop.elapsed().as_millis() as u64,
-                            detail: "401 单飞刷新凭据并回写加密库".into(),
+                            detail: "401 单飞强制刷新凭据并回写加密库".into(),
                         });
                         res =
                             call_upstream_member(cand, &cred, &ir_req, &plan.effective_model).await;

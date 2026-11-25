@@ -753,6 +753,52 @@ impl LobsterAiAdapter {
             _ => base,
         }
     }
+
+    async fn refresh_credential_inner(
+        &self,
+        cred: &CredentialEnvelope,
+        force: bool,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let tokens = match Self::extract_tokens(cred) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let Some(rt) = tokens.refresh_token.clone().filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+
+        if !force {
+            let exp_secs = tokens
+                .expires_at
+                .or_else(|| Self::jwt_exp_secs(&tokens.access_token));
+            let now_secs = Utc::now().timestamp();
+            if let Some(exp) = exp_secs {
+                if exp - now_secs > REFRESH_SKEW_SECS {
+                    return Ok(None);
+                }
+            } else {
+                // 无 exp 时不盲目提前刷新
+                return Ok(None);
+            }
+        }
+
+        let (next_access, rotated_refresh) = self.request_token_refresh(&rt).await?;
+        let next_refresh = rotated_refresh.unwrap_or(rt);
+        let next_expires_at = Self::jwt_exp_secs(&next_access);
+
+        Ok(Some(CredentialEnvelope {
+            tool_id: "lobsterai".to_string(),
+            uid: cred.uid.clone(),
+            display_name: cred.display_name.clone(),
+            display_email: cred.display_email.clone(),
+            payload: CredentialPayload::Token {
+                access_token: next_access,
+                refresh_token: Some(next_refresh),
+                expires_at: next_expires_at,
+                extra: tokens.extra,
+            },
+        }))
+    }
 }
 
 impl Default for LobsterAiAdapter {
@@ -1207,43 +1253,14 @@ impl ToolAdapter for LobsterAiAdapter {
         &self,
         cred: &CredentialEnvelope,
     ) -> Result<Option<CredentialEnvelope>, AdapterError> {
-        let tokens = match Self::extract_tokens(cred) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        };
-        let Some(rt) = tokens.refresh_token.clone().filter(|s| !s.is_empty()) else {
-            return Ok(None);
-        };
+        self.refresh_credential_inner(cred, false).await
+    }
 
-        let exp_secs = tokens
-            .expires_at
-            .or_else(|| Self::jwt_exp_secs(&tokens.access_token));
-        let now_secs = Utc::now().timestamp();
-        if let Some(exp) = exp_secs {
-            if exp - now_secs > REFRESH_SKEW_SECS {
-                return Ok(None);
-            }
-        } else {
-            // 无 exp 时不盲目提前刷新
-            return Ok(None);
-        }
-
-        let (next_access, rotated_refresh) = self.request_token_refresh(&rt).await?;
-        let next_refresh = rotated_refresh.unwrap_or(rt);
-        let next_expires_at = Self::jwt_exp_secs(&next_access);
-
-        Ok(Some(CredentialEnvelope {
-            tool_id: "lobsterai".to_string(),
-            uid: cred.uid.clone(),
-            display_name: cred.display_name.clone(),
-            display_email: cred.display_email.clone(),
-            payload: CredentialPayload::Token {
-                access_token: next_access,
-                refresh_token: Some(next_refresh),
-                expires_at: next_expires_at,
-                extra: tokens.extra,
-            },
-        }))
+    async fn force_refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, true).await
     }
 
     async fn apply_session(
@@ -1975,6 +1992,38 @@ mod tests {
             .await
             .expect("fresh")
             .is_none());
+
+        // 1b. Force refresh bypasses fresh exp (e.g. 401 retry)
+        let force_exp = Utc::now().timestamp() + 7200;
+        let force_at = make_jwt(serde_json::json!({ "sub": "7001", "exp": force_exp }));
+        Mock::given(method("POST"))
+            .and(path("/api/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "accessToken": force_at,
+                    "refreshToken": "rt-forced"
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let forced = adapter
+            .force_refresh_credential(&fresh_cred)
+            .await
+            .expect("force refresh ok")
+            .expect("force refresh returns updated");
+        match &forced.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                ..
+            } => {
+                assert_eq!(access_token, &force_at);
+                assert_eq!(refresh_token.as_deref(), Some("rt-forced"));
+            }
+            _ => panic!("expected Token"),
+        }
 
         // 2. Near-expiry token -> refreshes and preserves auth_user_json
         let soon_exp = Utc::now().timestamp() + 60;

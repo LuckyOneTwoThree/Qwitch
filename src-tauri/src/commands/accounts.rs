@@ -461,7 +461,38 @@ pub async fn refresh_account_quota(
         }
     };
 
-    match adapter.inspect_quota(&cred).await {
+    let inspect_result = match adapter.inspect_quota(&cred).await {
+        Err(
+            orig_err @ AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            },
+        ) => {
+            let lock = state.gateway.refresh_lock_for(&summary.id);
+            let _guard = lock.lock().await;
+            let latest_cred = state
+                .db
+                .get_account_credential(&state.master_key, &summary.id)
+                .map(|(_, c)| c)
+                .unwrap_or(cred);
+            match adapter.force_refresh_credential(&latest_cred).await {
+                Ok(Some(refreshed)) => {
+                    let _ = state.db.bind_account_credential(
+                        &state.master_key,
+                        &summary.id,
+                        None,
+                        &refreshed,
+                    );
+                    adapter.inspect_quota(&refreshed).await
+                }
+                Ok(None) => Err(orig_err),
+                Err(err) => Err(err),
+            }
+        }
+        other => other,
+    };
+
+    match inspect_result {
         Ok(snapshot) => {
             state
                 .db

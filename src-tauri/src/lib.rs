@@ -237,6 +237,130 @@ pub fn run() {
                 });
             }
 
+            // 后台凭据保活循环（TokenKeepaliveWorker）：
+            // 启动 45s 后开始，每 20 分钟巡检一次所有非停用/非风控且含在线凭据的账号：
+            // 1) 本机活跃客户端优先尝试静默回吸客户端自刷新的最新凭据；
+            // 2) 其余或无需回吸的账号调用 adapter.refresh_credential（OAuth 临期续期 + 豆包 Cookie 保活）；
+            // 全程复用 GatewayRuntime::refresh_lock_for 单飞锁，防止与网关 401 刷新并发冲突。
+            {
+                let st = match app.try_state::<AppState>() {
+                    Some(st) => st,
+                    None => return Err("AppState 未就绪".into()),
+                };
+                let db_ka = Arc::clone(&st.db);
+                let master_key_ka = st.master_key;
+                let host_ka = Arc::clone(&st.host);
+                let adapters_ka = Arc::clone(&st.adapters);
+                let gateway_ka = Arc::clone(&st.gateway);
+                let app_ka = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                    loop {
+                        if let Ok(accounts) = db_ka.list_accounts(None) {
+                            for acc in accounts {
+                                if matches!(
+                                    acc.status,
+                                    domain::AccountStatus::Disabled
+                                        | domain::AccountStatus::RiskPaused
+                                ) || !acc.has_api_token
+                                {
+                                    continue;
+                                }
+                                let Some(adapter) = adapters_ka.get(&acc.tool_id) else {
+                                    continue;
+                                };
+                                let lock = gateway_ka.refresh_lock_for(&acc.id);
+                                let _guard = lock.lock().await;
+
+                                if acc.is_active_on_client
+                                    && adapter
+                                        .manifest()
+                                        .capabilities
+                                        .auth_methods
+                                        .contains(&domain::AuthMethod::LocalImport)
+                                    && commands::sync_active_local_credential_if_fresher(
+                                        &db_ka,
+                                        &master_key_ka,
+                                        &host_ka,
+                                        adapter,
+                                        &acc.id,
+                                    )
+                                    .await
+                                {
+                                    let _ = app_ka.emit("qwitch://account-updated", &acc.id);
+                                    let _ = app_ka.emit("qwitch://logs-updated", ());
+                                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                                    continue;
+                                }
+
+                                let Ok((summary, cred)) =
+                                    db_ka.get_account_credential(&master_key_ka, &acc.id)
+                                else {
+                                    continue;
+                                };
+                                match adapter.refresh_credential(&cred).await {
+                                    Ok(Some(updated)) => {
+                                        if db_ka
+                                            .bind_account_credential(
+                                                &master_key_ka,
+                                                &acc.id,
+                                                None,
+                                                &updated,
+                                            )
+                                            .is_ok()
+                                        {
+                                            let _ = db_ka.append_action_log(
+                                                Some(&acc.id),
+                                                &summary.tool_id,
+                                                "keepalive",
+                                                "success",
+                                                None,
+                                                &format!(
+                                                    "后台已自动续期 {} 的登录态",
+                                                    summary.label
+                                                ),
+                                            );
+                                            let _ =
+                                                app_ka.emit("qwitch://account-updated", &acc.id);
+                                            let _ = app_ka.emit("qwitch://logs-updated", ());
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(adapter::AdapterError::Unified {
+                                        code: domain::UnifiedErrorCode::AuthExpired,
+                                        message,
+                                    }) => {
+                                        if summary.status != domain::AccountStatus::Expired {
+                                            let _ = db_ka.update_account_status(
+                                                &acc.id,
+                                                domain::AccountStatus::Expired,
+                                            );
+                                            let _ = db_ka.append_action_log(
+                                                Some(&acc.id),
+                                                &summary.tool_id,
+                                                "keepalive",
+                                                "failed",
+                                                Some(&domain::UnifiedErrorCode::AuthExpired),
+                                                &format!(
+                                                    "{} 后台保活检测到凭据已失效：{message}",
+                                                    summary.label
+                                                ),
+                                            );
+                                            let _ =
+                                                app_ka.emit("qwitch://account-updated", &acc.id);
+                                            let _ = app_ka.emit("qwitch://logs-updated", ());
+                                        }
+                                    }
+                                    Err(_) => {}
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(1200)).await;
+                    }
+                });
+            }
+
             let show_main =
                 MenuItem::with_id(app, "show_main", "打开 Qwitch 主面板", true, None::<&str>)?;
             let open_agents =

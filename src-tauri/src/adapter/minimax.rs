@@ -913,6 +913,117 @@ impl MiniMaxAdapter {
 
         Ok(())
     }
+
+    async fn refresh_credential_inner(
+        &self,
+        cred: &CredentialEnvelope,
+        force: bool,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let Some(tokens) = Self::tokens_from_cred(cred) else {
+            return Ok(None);
+        };
+        let now_ms = Utc::now().timestamp_millis();
+        if !force {
+            let Some(expires_at_ms) = tokens.expires_at_ms else {
+                // 无过期时间（纯手工粘贴）无法判断，避免盲目刷新
+                return Ok(None);
+            };
+            if expires_at_ms - now_ms >= REFRESH_SKEW_MS {
+                return Ok(None);
+            }
+        }
+
+        let Some(refresh_token) = tokens.refresh_token.filter(|s| !s.is_empty()) else {
+            if force || tokens.expires_at_ms.is_some_and(|e| now_ms >= e) {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::AuthExpired,
+                    message: "MiniMax 登录态已过期且缺少刷新令牌，请重新导入本机登录态".into(),
+                });
+            }
+            return Ok(None);
+        };
+
+        let resp = self
+            .http
+            .post(ACCOUNT_TOKEN_URL)
+            .header(ACCEPT, "application/json")
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token.as_str()),
+                ("client_id", CLIENT_ID),
+            ])
+            .send()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("刷新 MiniMax 登录态失败: {}", e.without_url()),
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_text = resp.text().await.unwrap_or_default();
+            if status.as_u16() == 400
+                || status.as_u16() == 401
+                || err_text.contains("invalid_grant")
+            {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::AuthExpired,
+                    message: "MiniMax 刷新令牌已失效，请重新导入本机登录态".into(),
+                });
+            }
+            return Err(map_http_status(status, "刷新 MiniMax 登录态"));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("解析 MiniMax 刷新响应失败: {e}"),
+        })?;
+        let access_token = body
+            .get("access_token")
+            .and_then(non_empty_str)
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "MiniMax 刷新响应缺少 access_token".into(),
+            })?;
+        let new_refresh = body
+            .get("refresh_token")
+            .and_then(non_empty_str)
+            .unwrap_or(refresh_token);
+        let expires_in = body
+            .get("expires_in")
+            .and_then(int_field)
+            .filter(|s| *s > 0)
+            .unwrap_or(3600);
+        let new_expires_at_ms = now_ms.saturating_add(expires_in.saturating_mul(1000));
+
+        let mut updated = cred.clone();
+        match &mut updated.payload {
+            CredentialPayload::Token {
+                access_token: at,
+                refresh_token: rt,
+                expires_at,
+                ..
+            } => {
+                *at = access_token.clone();
+                *rt = Some(new_refresh.clone());
+                *expires_at = Some(new_expires_at_ms);
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                Self::rewrite_auth_files(files, &access_token, &new_refresh, new_expires_at_ms)?;
+                files.insert(
+                    SNAPSHOT_TOKEN_FILE.to_string(),
+                    BASE64.encode(access_token.as_bytes()),
+                );
+                files.insert(
+                    SNAPSHOT_REFRESH_FILE.to_string(),
+                    BASE64.encode(new_refresh.as_bytes()),
+                );
+            }
+            CredentialPayload::Cookies { .. } => return Ok(None),
+        }
+
+        Ok(Some(updated))
+    }
 }
 
 impl Default for MiniMaxAdapter {
@@ -1328,108 +1439,14 @@ impl ToolAdapter for MiniMaxAdapter {
         &self,
         cred: &CredentialEnvelope,
     ) -> Result<Option<CredentialEnvelope>, AdapterError> {
-        let Some(tokens) = Self::tokens_from_cred(cred) else {
-            return Ok(None);
-        };
-        let now_ms = Utc::now().timestamp_millis();
-        let Some(expires_at_ms) = tokens.expires_at_ms else {
-            // 无过期时间（纯手工粘贴）无法判断，避免盲目刷新
-            return Ok(None);
-        };
-        if expires_at_ms - now_ms >= REFRESH_SKEW_MS {
-            return Ok(None);
-        }
+        self.refresh_credential_inner(cred, false).await
+    }
 
-        let Some(refresh_token) = tokens.refresh_token.filter(|s| !s.is_empty()) else {
-            if now_ms >= expires_at_ms {
-                return Err(AdapterError::Unified {
-                    code: UnifiedErrorCode::AuthExpired,
-                    message: "MiniMax 登录态已过期且缺少刷新令牌，请重新导入本机登录态".into(),
-                });
-            }
-            return Ok(None);
-        };
-
-        let resp = self
-            .http
-            .post(ACCOUNT_TOKEN_URL)
-            .header(ACCEPT, "application/json")
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token.as_str()),
-                ("client_id", CLIENT_ID),
-            ])
-            .send()
-            .await
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::NetworkError,
-                message: format!("刷新 MiniMax 登录态失败: {}", e.without_url()),
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let err_text = resp.text().await.unwrap_or_default();
-            if status.as_u16() == 400
-                || status.as_u16() == 401
-                || err_text.contains("invalid_grant")
-            {
-                return Err(AdapterError::Unified {
-                    code: UnifiedErrorCode::AuthExpired,
-                    message: "MiniMax 刷新令牌已失效，请重新导入本机登录态".into(),
-                });
-            }
-            return Err(map_http_status(status, "刷新 MiniMax 登录态"));
-        }
-
-        let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::NetworkError,
-            message: format!("解析 MiniMax 刷新响应失败: {e}"),
-        })?;
-        let access_token = body
-            .get("access_token")
-            .and_then(non_empty_str)
-            .ok_or_else(|| AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: "MiniMax 刷新响应缺少 access_token".into(),
-            })?;
-        let new_refresh = body
-            .get("refresh_token")
-            .and_then(non_empty_str)
-            .unwrap_or(refresh_token);
-        let expires_in = body
-            .get("expires_in")
-            .and_then(int_field)
-            .filter(|s| *s > 0)
-            .unwrap_or(3600);
-        let new_expires_at_ms = now_ms.saturating_add(expires_in.saturating_mul(1000));
-
-        let mut updated = cred.clone();
-        match &mut updated.payload {
-            CredentialPayload::Token {
-                access_token: at,
-                refresh_token: rt,
-                expires_at,
-                ..
-            } => {
-                *at = access_token.clone();
-                *rt = Some(new_refresh.clone());
-                *expires_at = Some(new_expires_at_ms);
-            }
-            CredentialPayload::LocalSnapshot { files } => {
-                Self::rewrite_auth_files(files, &access_token, &new_refresh, new_expires_at_ms)?;
-                files.insert(
-                    SNAPSHOT_TOKEN_FILE.to_string(),
-                    BASE64.encode(access_token.as_bytes()),
-                );
-                files.insert(
-                    SNAPSHOT_REFRESH_FILE.to_string(),
-                    BASE64.encode(new_refresh.as_bytes()),
-                );
-            }
-            CredentialPayload::Cookies { .. } => return Ok(None),
-        }
-
-        Ok(Some(updated))
+    async fn force_refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, true).await
     }
 }
 
@@ -1816,5 +1833,38 @@ mod tests {
         let upgraded =
             MiniMaxAdapter::merge_post_claim_quota(Some(unk), Some(&pre), true).expect("upgraded");
         assert_eq!(upgraded.claim_status, ClaimStatus::Claimed);
+    }
+
+    #[tokio::test]
+    async fn force_refresh_without_refresh_token_returns_auth_expired() {
+        let adapter = MiniMaxAdapter::new();
+        let fresh_exp = Utc::now().timestamp_millis() + 3_600_000;
+        let cred = CredentialEnvelope {
+            tool_id: "minimax_code_cn".to_string(),
+            uid: "u_mm_force".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "mm-tok".to_string(),
+                refresh_token: None,
+                expires_at: Some(fresh_exp),
+                extra: HashMap::new(),
+            },
+        };
+        // 普通刷新看到未临期直接跳过
+        assert!(adapter
+            .refresh_credential(&cred)
+            .await
+            .expect("skip fresh")
+            .is_none());
+        // 强制刷新（401 场景）无 refresh_token 时明确返回 AuthExpired
+        let err = adapter.force_refresh_credential(&cred).await.unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
     }
 }

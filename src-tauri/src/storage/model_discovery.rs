@@ -30,6 +30,9 @@ const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
 const WORKBUDDY_USER_AGENT: &str = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0";
 /// Trae CN 客户端版本号（与 adapter 中的 DEFAULT_TRAE_APP_VERSION 对齐）。
 const TRAE_APP_VERSION: &str = "3.4.22";
+/// 有道龙虾服务端（与 adapter/lobsterai.rs 保持一致）
+const LOBSTERAI_SERVER_BASE: &str = "https://lobsterai-server.youdao.com";
+const LOBSTERAI_USER_AGENT: &str = "LobsterAI/2026.11.20";
 
 fn discovery_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -830,6 +833,87 @@ fn fallback_models(cred: &CredentialEnvelope) -> (Vec<UpstreamModelOption>, &'st
     (default_model_options_for_tool(&cred.tool_id), "catalog")
 }
 
+/// 有道龙虾：`GET /api/models/available`（桌面端模型选择器用的同一个接口）。
+///
+/// 返回的是「模型预设」列表，逐项可能带 `modelId` / `id`；不可用的预设
+/// （`accessible == false`）要排除——它们在下拉框里也是灰的。
+async fn probe_lobsterai_models(
+    client: &reqwest::Client,
+    cred: &CredentialEnvelope,
+) -> Result<Vec<UpstreamModelOption>, String> {
+    let (token_opt, base_opt, _) = extract_token_and_extra(cred);
+    let token = token_opt.ok_or_else(|| "有道龙虾凭据缺少访问令牌".to_string())?;
+    let base = base_opt
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| LOBSTERAI_SERVER_BASE.to_string());
+    let resp = client
+        .get(format!("{base}/api/models/available"))
+        .bearer_auth(&token)
+        .header("Accept", "application/json")
+        .header("User-Agent", LOBSTERAI_USER_AGENT)
+        .header("Cache-Control", "no-store")
+        .send()
+        .await
+        .map_err(|e| format!("请求有道龙虾模型目录失败: {}", e.without_url()))?;
+    if !resp.status().is_success() {
+        return Err(format!("有道龙虾模型目录返回 HTTP {}", resp.status()));
+    }
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析有道龙虾模型目录失败: {e}"))?;
+    let models = parse_lobsterai_models(&json);
+    if models.is_empty() {
+        Err("有道龙虾模型目录解析结果为空".into())
+    } else {
+        Ok(models)
+    }
+}
+
+/// 解析龙虾 `/api/models/available`：`{ code: 0, data: [ { modelId|id, displayName|name } ] }`。
+fn parse_lobsterai_models(json: &Value) -> Vec<UpstreamModelOption> {
+    if json.get("code").and_then(Value::as_i64).unwrap_or(0) != 0 {
+        return Vec::new();
+    }
+    let list = json.get("data").and_then(|d| {
+        d.as_array()
+            .or_else(|| d.get("list").and_then(Value::as_array))
+    });
+    let Some(items) = list else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if item.get("accessible").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let id = ["modelId", "id", "model_id", "name"]
+            .iter()
+            .find_map(|k| item.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(id) = id else { continue };
+        if is_noise_variant_id(id) || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let display = ["displayName", "display_name", "label", "name"]
+            .iter()
+            .find_map(|k| item.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        out.push(normalize_upstream_model(
+            "lobsterai",
+            id,
+            display,
+            None,
+            false,
+            "live",
+        ));
+    }
+    out
+}
+
 /// 码道 CodeArts 的模型清单：从本机客户端内核日志里读取。
 ///
 /// 码道没有对外可用的模型目录接口（本地内核 `/cag/model` 需要 IDE 私有的
@@ -1158,6 +1242,7 @@ async fn try_probe_live_models(
         }
         // 码道没有可调用的模型接口，改从本机客户端读取真实清单
         "codearts" => probe_codearts_client_models(),
+        "lobsterai" => probe_lobsterai_models(&client, cred).await,
         other => Err(format!("工具 {other} 暂不支持实时模型目录探测")),
     }
 }
@@ -1165,6 +1250,32 @@ async fn try_probe_live_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lobsterai_models_parsed_from_available_endpoint() {
+        let json = json!({
+            "code": 0,
+            "data": [
+                { "presetId": "p1", "modelId": "glm-5.3", "displayName": "GLM-5.3" },
+                { "presetId": "p2", "modelId": "kimi-k3.1-pro", "accessible": false },
+                { "modelId": "deepseek-v4-pro" },
+                { "modelId": "glm-5.3" },
+                { "modelId": "auto" }
+            ]
+        });
+        let models = parse_lobsterai_models(&json);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["glm-5.3", "deepseek-v4-pro"],
+            "不可用预设与噪声变体都要剔除，重复项去重"
+        );
+        assert!(models.iter().all(|m| m.source == "live"));
+        assert_eq!(models[0].display_name, "GLM-5.3");
+
+        // 业务错误码 / 空数据 → 空结果，交给上层回退
+        assert!(parse_lobsterai_models(&json!({"code": 401, "data": []})).is_empty());
+        assert!(parse_lobsterai_models(&json!({})).is_empty());
+    }
 
     #[test]
     fn codearts_models_parsed_from_kernel_init_config() {

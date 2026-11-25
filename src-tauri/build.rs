@@ -48,6 +48,7 @@ fn main() {
         "set_account_manual_models_cmd",
         "apply_account_preset_models_cmd",
         "refresh_upstream_models_cmd",
+        "ensure_upstream_models_cmd",
         "toggle_gateway_server",
         "update_gateway_port_cmd",
         "check_gateway_port_available_cmd",

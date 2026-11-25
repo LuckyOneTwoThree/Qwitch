@@ -321,7 +321,7 @@ npm run tauri dev    # 桌面应用开发模式
 npm run build        # 类型检查 + 生产构建
 npm run lint         # ESLint，--max-warnings=0
 npm test             # 前端测试，30 个文件 / 185 个用例
-cd src-tauri && cargo test   # 后端测试，238 个用例
+cd src-tauri && cargo test   # 后端测试，245 个用例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 

@@ -224,3 +224,49 @@ npm run build                             ✅
   （同一账号不新增第二条 + 快照补回标记 + 模式升级为 isolated_oauth）
 
 `cargo test` 全量 **242 通过**。
+
+---
+
+## 十、自动探测长期失效的真凶：ACL 漏登记（比模型问题严重得多）
+
+### 10.1 现象
+
+「本机导入码道后拿不到订阅模型」——界面直接是空目录。而在本机直接跑探测函数一切正常：
+
+```
+source=client count=5 error=None
+deepseek-v4.1-flash-1017 | glm-5.3-flash | deepseek-v4.1-flash | kimi-k3.1-pro | kimi-k3
+```
+
+### 10.2 根因
+
+`ensure_upstream_models_cmd`（导入后/启动时的自动探测）在 `lib.rs` 注册了，
+但**没有**登记进 `build.rs::APP_COMMANDS`，也没有 `allow-ensure-upstream-models-cmd`。
+本项目在 build.rs 里声明了 `AppManifest::commands`，Tauri 会对**所有**自定义命令强制 ACL 校验，
+于是这个调用被直接拒绝；前端又把它 catch 成 `console.warn`，表现就是「静默不工作」。
+
+影响面比码道大得多：这是**全工具自动探测**的统一入口。
+
+### 10.3 修复后的实测（启动 12 秒后自动落库）
+
+| 工具 | 来源 | 模型数 |
+| --- | --- | --- |
+| codearts | `client`（本机客户端） | 5 |
+| lobsterai | `live`（实时接口） | 18 |
+| workbuddy ×3 | `live` | 56 / 56 / 56 |
+
+之前 `account_discovered_models` 长期是 0 行，根因就在这里。
+
+### 10.4 顺带完成
+
+1. **有道龙虾实时探测**：`GET {server}/api/models/available`（桌面端模型选择器同一接口，
+   Bearer 鉴权），解析 `{code:0, data:[{modelId, displayName, accessible}]}`，
+   跳过 `accessible == false` 与噪声变体；带单测。
+2. **豆包工作**：客户端没有可用的模型接口（`public_config.json` 只有 text_picker），
+   仍按预设处理。
+3. **回退顺序**：本机 provider → **内置推荐目录（preset）** → 静态兜底（catalog）。
+   这样没有探测能力的工具默认显示「内置预设」而不是刺眼的「未探测」。
+4. **ACL 守护测试** `tests/command_acl.rs`：解析三份清单做集合比对，
+   漏登记任意一处直接测试失败。这类坑已经踩过两次，必须钉死。
+
+门禁：`cargo test` 243 + ACL 2，前端 185 / 30 files。

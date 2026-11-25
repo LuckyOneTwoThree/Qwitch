@@ -51,6 +51,7 @@
     "allow-set-account-manual-models-cmd",
     "allow-apply-account-preset-models-cmd",
     "allow-refresh-upstream-models-cmd",
+    "allow-ensure-upstream-models-cmd",
     "allow-toggle-gateway-server",
     "allow-update-gateway-port-cmd",
     "allow-check-gateway-port-available-cmd",

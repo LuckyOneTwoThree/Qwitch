@@ -766,6 +766,9 @@ export function TrayPopover({
             {displayedGroups.map((group) => {
               const adapter = adapters.find((a) => a.id === group.id);
               const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : false;
+              const supportsSwitch = adapter
+                ? adapter.capabilities.supportsClientSwitch
+                : group.id !== "codearts";
 
               return (
                 <section key={group.id} className="space-y-1.5">
@@ -797,7 +800,7 @@ export function TrayPopover({
                     {group.accounts.map((acc) => {
                       const effectiveClaim = getEffectiveClaimStatus(acc);
                       const missingApiToken = acc.hasApiToken === false;
-                      const missingLocal = acc.hasLocalSnapshot === false;
+                      const missingLocal = supportsSwitch && acc.hasLocalSnapshot === false;
                       const isDisabled = acc.status === "disabled";
                       const firstBucket = acc.latestQuota?.buckets[0];
                       const isQoderClaimBucket =

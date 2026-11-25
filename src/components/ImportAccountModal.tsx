@@ -101,7 +101,11 @@ export function ImportAccountModal({  open,
         setMethod(defaultMethod);
       } else if (targetAccount.hasApiToken === false && methods.includes("webview_oauth")) {
         setMethod("webview_oauth");
-      } else if (targetAccount.hasLocalSnapshot === false && methods.includes("local_import")) {
+      } else if (
+        targetAccount.hasLocalSnapshot === false &&
+        methods.includes("local_import") &&
+        adapters.find((a) => a.id === targetAccount.toolId)?.capabilities.supportsClientSwitch === true
+      ) {
         setMethod("local_import");
       } else {
         setMethod(methods[0] ?? "local_import");
@@ -123,7 +127,7 @@ export function ImportAccountModal({  open,
     } else {
       setMethod(methods[0] ?? "webview_oauth");
     }
-  }, [open, targetAccount, defaultToolId, defaultMethod, visibleTools, getSupportedMethods]);
+  }, [open, targetAccount, defaultToolId, defaultMethod, visibleTools, getSupportedMethods, adapters]);
 
   // 若后台适配器列表更新导致当前选中方式不再受支持，仅校正导入方式，不清空用户输入的别名或 Token
   useEffect(() => {

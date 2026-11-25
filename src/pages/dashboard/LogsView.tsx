@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { Sparkles, ScrollText, Search, X, Archive, ArchiveRestore, Trash2, Download, Clock, CheckSquare, Square } from "lucide-react";
 import { useQwitch } from "../../context/QwitchContext";
-import { BatchClaimBanner } from "../../components/BatchClaimBanner";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
 import { getToolBrandMeta } from "../../domain/toolRegistry";
 import type { Dispatch, SetStateAction } from "react";
@@ -46,8 +45,6 @@ export function LogsToolbar({
   const { logStats, logScope, setLogScope, archiveLogs, unarchiveLogs, deleteLogs, exportLogs } = useQwitch();
   return (
     <div className="shrink-0 space-y-2.5 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
-      <BatchClaimBanner />
-
       <div className="surface-card flex flex-wrap items-center justify-between gap-3 p-3">
         <div className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/60">
           <button

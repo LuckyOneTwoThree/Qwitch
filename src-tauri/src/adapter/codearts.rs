@@ -209,7 +209,7 @@ impl CodeArtsAdapter {
                     supports_quota_query: true,
                     // CodeArts 无每日签到机制，见模块文档
                     supports_daily_claim: false,
-                    supports_client_switch: true,
+                    supports_client_switch: false,
                     supports_multi_instance: false,
                 },
             },
@@ -1388,6 +1388,10 @@ mod tests {
         assert!(
             !m.capabilities.supports_daily_claim,
             "CodeArts 无每日签到机制，capability 必须为 false"
+        );
+        assert!(
+            !m.capabilities.supports_client_switch,
+            "CodeArts 不支持桌面端切号，supports_client_switch 必须为 false"
         );
     }
 

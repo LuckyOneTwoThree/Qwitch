@@ -94,7 +94,7 @@ export const AccountCard = React.memo(function AccountCard({
   const clientManagedCredential =
     account.toolId === "codearts" && account.renewalMode !== "auto_refresh";
   const missingApiToken = account.hasApiToken === false;
-  const missingLocalSnapshot = account.hasLocalSnapshot === false;
+  const missingLocalSnapshot = canSwitch && account.hasLocalSnapshot === false;
   const isBatchRunning = Boolean(batchProgress?.running);
   const effectiveClaimStatus = getEffectiveClaimStatus(account);
 

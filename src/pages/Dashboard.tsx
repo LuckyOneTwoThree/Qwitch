@@ -404,7 +404,7 @@ export function Dashboard({
       if (statusFilter === "claimable" && !isAccountClaimable(acc, adapters)) {
         return false;
       }
-      if (statusFilter === "attention" && !isAccountNeedingAttention(acc)) {
+      if (statusFilter === "attention" && !isAccountNeedingAttention(acc, adapters)) {
         return false;
       }
       if (!q) return true;
@@ -934,6 +934,7 @@ export function Dashboard({
           </div>
 
           <div className="flex flex-wrap items-center justify-end gap-1.5">
+            <BatchClaimBanner inline />
             {isAccountSection && (
               <>
                 {scopeAccounts.length > 0 && (
@@ -1129,12 +1130,6 @@ export function Dashboard({
             setConfirmLogAction={setConfirmLogAction}
             toggleSelectAllVisibleLogs={toggleSelectAllVisibleLogs}
           />
-        )}
-
-        {nav === "settings" && batchProgress && (
-          <div className="shrink-0 px-5 pt-3.5">
-            <BatchClaimBanner />
-          </div>
         )}
 
         <main

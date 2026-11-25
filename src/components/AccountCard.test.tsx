@@ -178,4 +178,22 @@ describe("AccountCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "恢复原用户名" }));
     expect(ctx.renameAccount).toHaveBeenCalledWith(account.id, "");
   });
+
+  it("不支持桌面切号的工具（如 CodeArts）缺本地快照时不显示「待关联」或「关联本机」", () => {
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          toolId: "codearts",
+          hasApiToken: true,
+          hasLocalSnapshot: false,
+          renewalMode: "auto_refresh",
+        }}
+      />
+    );
+
+    expect(screen.getByText("正常")).toBeTruthy();
+    expect(screen.queryByText("待关联")).toBeNull();
+    expect(screen.queryByRole("button", { name: /关联本机/ })).toBeNull();
+  });
 });

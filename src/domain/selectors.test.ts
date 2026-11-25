@@ -3,6 +3,8 @@ import type { AccountSummary, AdapterManifest } from "../types/qwitch";
 import {
   getEffectiveClaimStatus,
   isAccountClaimable,
+  isAccountHealthyReady,
+  isAccountNeedingAttention,
   isSameCstDay,
   selectClaimCandidates,
   selectScopedStats,
@@ -334,5 +336,17 @@ describe("sortAccountsForFlatView", () => {
 
   it("空输入返回空数组且不抛错", () => {
     expect(sortAccountsForFlatView([], adapters)).toEqual([]);
+  });
+
+  it("不支持切号的工具（如 CodeArts）缺本地快照时不计入待处理", () => {
+    const codeartsAcc = makeAcc({
+      id: "ca-1",
+      toolId: "codearts",
+      label: "CodeArts",
+      hasApiToken: true,
+      hasLocalSnapshot: false,
+    });
+    expect(isAccountNeedingAttention(codeartsAcc, adapters)).toBe(false);
+    expect(isAccountHealthyReady(codeartsAcc, adapters)).toBe(true);
   });
 });

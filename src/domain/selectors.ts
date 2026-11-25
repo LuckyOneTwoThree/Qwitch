@@ -65,21 +65,37 @@ export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
   return "unknown";
 }
 
-export function isAccountNeedingAttention(acc: AccountSummary): boolean {
+export function isAccountMissingLocalSnapshot(
+  acc: AccountSummary,
+  adapters?: AdapterManifest[]
+): boolean {
+  if (acc.hasLocalSnapshot !== false) return false;
+  const adapter = adapters?.find((a) => a.id === acc.toolId);
+  if (adapter) return adapter.capabilities.supportsClientSwitch === true;
+  return acc.toolId !== "codearts";
+}
+
+export function isAccountNeedingAttention(
+  acc: AccountSummary,
+  adapters?: AdapterManifest[]
+): boolean {
   if (acc.status === "disabled") return false;
   return (
     acc.status === "expired" ||
     acc.status === "risk_paused" ||
     acc.hasApiToken === false ||
-    acc.hasLocalSnapshot === false
+    isAccountMissingLocalSnapshot(acc, adapters)
   );
 }
 
-export function isAccountHealthyReady(acc: AccountSummary): boolean {
+export function isAccountHealthyReady(
+  acc: AccountSummary,
+  adapters?: AdapterManifest[]
+): boolean {
   return (
     acc.status === "active" &&
     acc.hasApiToken !== false &&
-    acc.hasLocalSnapshot !== false
+    !isAccountMissingLocalSnapshot(acc, adapters)
   );
 }
 
@@ -188,7 +204,7 @@ export function selectScopedStats(
 
     if (acc.status === "disabled") {
       disabledCount += 1;
-    } else if (isAccountNeedingAttention(acc)) {
+    } else if (isAccountNeedingAttention(acc, adapters)) {
       attentionCount += 1;
     } else {
       healthyCount += 1;
@@ -342,7 +358,7 @@ export function sortAccountsForFlatView(
 
   const tierOf = (acc: AccountSummary): number => {
     // 已停用是用户主动关闭的，不需要提醒处理，归入 normal
-    if (acc.status !== "disabled" && isAccountNeedingAttention(acc)) {
+    if (acc.status !== "disabled" && isAccountNeedingAttention(acc, adapters)) {
       return FLAT_SORT_TIER.attention;
     }
     // 同一账号的 claimable 判定在本次排序内只算一次

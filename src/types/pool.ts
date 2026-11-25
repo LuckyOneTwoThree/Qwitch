@@ -116,7 +116,7 @@ export interface RoutingAttempt {
   toolId: string;
   model: string;
   tier?: MemberTier;
-  outcome: "ok" | "429_cooldown" | "401_refreshed" | "skipped_active";
+  outcome: "ok" | "429_cooldown" | "401_refreshed" | "auth_expired" | "skipped_active" | "http_error";
   latencyMs: number;
   detail: string;
 }

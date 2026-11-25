@@ -436,7 +436,11 @@ export function RoutingTraceView({
                                     ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                                     : att.outcome === "401_refreshed"
                                       ? "border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300"
-                                      : "border-amber-500/30 bg-amber-500/12 text-amber-800 dark:text-amber-300"
+                                      : att.outcome === "auth_expired"
+                                        ? "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
+                                        : att.outcome === "http_error"
+                                          ? "border-rose-500/25 bg-rose-500/8 text-rose-700 dark:text-rose-300"
+                                          : "border-amber-500/30 bg-amber-500/12 text-amber-800 dark:text-amber-300"
                                 }`}
                               >
                                 {att.outcome === "ok"
@@ -445,7 +449,11 @@ export function RoutingTraceView({
                                     ? "429 冷却切换"
                                     : att.outcome === "401_refreshed"
                                       ? "401 单飞刷新"
-                                      : "活跃避让跳过"}
+                                      : att.outcome === "auth_expired"
+                                        ? "凭据失效(需重登)"
+                                        : att.outcome === "http_error"
+                                          ? "上游错误(非限流)"
+                                          : "活跃避让跳过"}
                               </span>
                               <span className="font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
                                 {att.latencyMs}ms

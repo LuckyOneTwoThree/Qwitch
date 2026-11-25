@@ -1471,6 +1471,142 @@ impl QwitchDatabase {
         Ok(())
     }
 
+    /// 一次性修复历史遗留：早期构建的 Agent 专属池在上游尚无可探测模型时被创建，
+    /// 成员 `supported_models_json` 落成 `"[]"`，导致 qoder_cn / trae_cn / minimax_code_cn
+    /// 等后加入的订阅工具虽已有实时模型目录，却因为没有成员模型、没有开放策略，
+    /// 永远不出现在 `/v1/models`，客户端选不到、走不通。
+    ///
+    /// 语义与安全边界：
+    /// - 仅当成员 `supported_models_json == "[]"`，且该 (pool, tool) 尚无任何策略行
+    ///   （即从未被用户配置过），且上游实时探测存在模型时才回填；
+    /// - 回填使用实时模型目录（真实可路由模型），随后 resync 生成 enabled=1 的策略；
+    /// - 以 `app_settings.storage.backfill_tool_models_v1` 打标保证只执行一次，
+    ///   之后用户显式「清空」某工具的模型（同样表现为无策略行）不会被二次“复活”。
+    pub fn backfill_empty_tool_members(&self, master_key: &[u8; 32]) -> Result<(), StorageError> {
+        const FLAG: &str = "storage.backfill_tool_models_v1";
+        const MARK: &str = "done";
+        if self.get_setting(FLAG)?.as_deref() == Some(MARK) {
+            return Ok(());
+        }
+
+        let candidates = self.list_upstream_candidates(master_key)?;
+        let cand_map: HashMap<String, &UpstreamAccountCandidate> =
+            candidates.iter().map(|c| (c.account_id.clone(), c)).collect();
+
+        // (member_id, pool_id, tool_id, 需要回填的 scoped 模型)
+        let mut plan: Vec<(String, String, String, Vec<String>)> = Vec::new();
+        {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            // 每个 (pool, tool) 现有的策略行数量，用于区分「从未配置」与「用户显式清空」。
+            let mut policy_stmt = conn.prepare(
+                "SELECT pool_id, model_id FROM pool_model_policies",
+            )?;
+            let policy_rows: Vec<(String, String)> = policy_stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(policy_stmt);
+            let mut tools_with_policies: HashSet<(String, String)> = HashSet::new();
+            for (pid, mid) in policy_rows {
+                let (scoped_tid, _) = split_scoped_model_id(&mid);
+                if let Some(tid) = scoped_tid {
+                    tools_with_policies.insert((pid, tid.to_string()));
+                }
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT pm.id, pm.pool_id, pm.supported_models_json, a.tool_id, pm.account_id
+                 FROM pool_members pm JOIN accounts a ON a.id = pm.account_id
+                 WHERE pm.supported_models_json IS NULL OR pm.supported_models_json = '[]'",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (mid, pid, raw, tid, acc_id) = row?;
+                let empty = raw
+                    .as_deref()
+                    .map(|s| s.trim().is_empty() || s.trim() == "[]")
+                    .unwrap_or(true);
+                if !empty {
+                    continue;
+                }
+                // 用户已配置过该工具（存在策略行）→ 不复活。
+                if tools_with_policies.contains(&(pid.clone(), tid.clone())) {
+                    continue;
+                }
+                let Some(cand) = cand_map.get(&acc_id) else {
+                    continue;
+                };
+                // 实时模型来源：优先探测到的 model_options，退化到 default_models。
+                let mut raw_models: Vec<String> = cand
+                    .model_options
+                    .iter()
+                    .map(|o| o.id.clone())
+                    .filter(|s| !s.trim().is_empty())
+                    .collect();
+                if raw_models.is_empty() {
+                    raw_models = cand.default_models.clone();
+                }
+                if raw_models.is_empty() {
+                    continue;
+                }
+                let mut seen = HashSet::new();
+                let scoped: Vec<String> = raw_models
+                    .into_iter()
+                    .map(|m| {
+                        let (_, bare) = split_scoped_model_id(&m);
+                        format_scoped_model_id(
+                            &tid,
+                            &normalize_canonical_model_id(&tid, bare),
+                        )
+                    })
+                    .filter(|s| seen.insert(s.clone()))
+                    .collect();
+                if scoped.is_empty() {
+                    continue;
+                }
+                plan.push((mid, pid, tid, scoped));
+            }
+        }
+
+        if !plan.is_empty() {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let mut touched_pools: HashSet<String> = HashSet::new();
+            for (mid, pid, _tid, scoped) in &plan {
+                let models_json = serde_json::to_string(scoped)?;
+                conn.execute(
+                    "UPDATE pool_members SET supported_models_json = ?1 WHERE id = ?2",
+                    params![models_json, mid],
+                )?;
+                touched_pools.insert(pid.clone());
+            }
+            for pid in &touched_pools {
+                Self::resync_pool_policies_locked(&conn, pid)?;
+            }
+            // 显式把回填出的策略置为 enabled=1（resync 新建的已是 1，这里兜底幂等）。
+            for (_mid, pid, tid, scoped) in &plan {
+                for mid_model in scoped {
+                    if split_scoped_model_id(mid_model).0 == Some(tid.as_str()) {
+                        conn.execute(
+                            "UPDATE pool_model_policies SET enabled = 1
+                             WHERE pool_id = ?1 AND model_id = ?2",
+                            params![pid, mid_model],
+                        )?;
+                    }
+                }
+            }
+        }
+
+        self.set_setting(FLAG, MARK)?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn update_pool_tool_account_schedule(
         &self,

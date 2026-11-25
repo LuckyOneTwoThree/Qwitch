@@ -52,6 +52,13 @@ struct TraeDeviceHeaders {
     app_version: String,
 }
 
+/// 网关对话（`/api/agent/v3/llm_utils_chat`）所需的账号级身份信息。
+pub struct TraeChatIdentity {
+    pub device_id: String,
+    pub uid: String,
+    pub app_version: String,
+}
+
 impl TraeDeviceHeaders {
     /// 与 Trae CN 客户端 `ob()` 完全对齐的设备请求头。
     /// 服务端签到下单强依赖 `x-device-id`，缺失时返回业务码 9004。
@@ -311,6 +318,45 @@ impl TraeAdapter {
         let bytes = BASE64.decode(b64).ok()?;
         let identity: TraeDeviceIdentity = serde_json::from_slice(&bytes).ok()?;
         identity.to_headers().map(Arc::new)
+    }
+
+    /// 供网关 `send_trae_stream` 使用的对话身份：设备 id、uid、app 版本。
+    /// 从账号快照 `trae_device.json` 取 device_id / app_version，从 Cloud-IDE-JWT
+    /// 的 `data.id` 取 uid。任缺失则由调用方回退到默认值。
+    pub fn chat_request_identity(
+        cred: &CredentialEnvelope,
+        token: &str,
+    ) -> TraeChatIdentity {
+        let mut id = TraeChatIdentity {
+            device_id: String::new(),
+            uid: String::new(),
+            app_version: DEFAULT_TRAE_APP_VERSION.to_string(),
+        };
+        if let CredentialPayload::LocalSnapshot { files } = &cred.payload {
+            if let Some(b64) = files.get(DEVICE_SNAPSHOT_KEY) {
+                if let Ok(bytes) = BASE64.decode(b64) {
+                    if let Ok(identity) = serde_json::from_slice::<TraeDeviceIdentity>(&bytes) {
+                        id.device_id = identity.device_id.clone();
+                        if let Some(v) = identity.app_version {
+                            if !v.trim().is_empty() {
+                                id.app_version = v;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(claims) = Self::extract_jwt_claims(token) {
+            if let Some(uid) = claims
+                .pointer("/data/id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| claims.get("id").and_then(Value::as_str).map(str::to_string))
+            {
+                id.uid = uid;
+            }
+        }
+        id
     }
 
     fn extract_jwt_claims(token: &str) -> Option<Value> {

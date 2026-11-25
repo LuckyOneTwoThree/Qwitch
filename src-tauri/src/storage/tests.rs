@@ -1619,3 +1619,79 @@ fn codearts_oauth_reauth_marks_existing_local_snapshot_as_isolated() {
         crate::domain::CodeArtsAuthMode::IsolatedOauth
     );
 }
+
+/// 回归：早期建池时上游无模型导致后加入订阅工具成员为空、永不暴露的问题。
+/// 一次性迁移应回填实时模型目录并开放策略；且用户显式清空后不得被复活。
+#[test]
+fn backfill_empty_tool_members_repairs_stale_and_respects_clear() {
+    let db = QwitchDatabase::open(&temp_db_path("backfill")).expect("open db");
+    let mk = [7u8; 32];
+    let env = |tool: &str, uid: &str| CredentialEnvelope {
+        tool_id: tool.to_string(),
+        uid: uid.to_string(),
+        display_name: None,
+        display_email: None,
+        payload: CredentialPayload::Token {
+            access_token: "t".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            extra: HashMap::new(),
+        },
+    };
+    // 一个「已有模型」的老工具 + 一个「成员被落成 []」的新订阅工具
+    let old = db.upsert_account(&mk, None, &env("workbuddy", "u_old")).expect("old");
+    let qoder = db.upsert_account(&mk, None, &env("qoder_cn", "u_qoder")).expect("qoder");
+
+    let now = Utc::now().to_rfc3339();
+    {
+        let conn = db.conn.lock().expect("lock");
+        conn.execute(
+            "INSERT INTO account_pools (id, slug, name, description, scene_tag, strategy, affinity_mode, skip_active_client_account, cooldown_seconds, auto_refresh_on_401, fallback_api_key_enabled, enabled, today_requests, today_failovers, cache_hit_rate, created_at, updated_at)
+             VALUES ('pool-agent-dsh','dsh','dsh','','','order','auto_cache',1,60,1,1,1,0,0,0,?1,?1)",
+            rusqlite::params![now],
+        ).expect("pool");
+        // 老工具成员带模型 + 策略
+        conn.execute(
+            "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled) VALUES ('m-old','pool-agent-dsh',?1,'[\"workbuddy/deepseek-v4-pro\"]','t1_primary',1,1)",
+            rusqlite::params![old.id],
+        ).expect("m-old");
+        conn.execute(
+            "INSERT INTO pool_model_policies (pool_id, model_id, enabled) VALUES ('pool-agent-dsh','workbuddy/deepseek-v4-pro',1)",
+            [],
+        ).expect("pol-old");
+        // 新工具成员：空模型、无策略（历史遗留形态）
+        conn.execute(
+            "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled) VALUES ('m-qoder','pool-agent-dsh',?1,'[]','t1_primary',2,1)",
+            rusqlite::params![qoder.id],
+        ).expect("m-qoder");
+    }
+
+    let exposed_tools = |db: &QwitchDatabase| -> std::collections::BTreeSet<String> {
+        let cands = db.list_upstream_candidates(&mk).expect("cands");
+        let pools = db.list_pools_with_candidates(&cands, &HashMap::new()).expect("pools");
+        let p = pools.iter().find(|p| p.id == "pool-agent-dsh").expect("pool");
+        crate::domain::compute_agent_exposed_models(
+            crate::domain::TargetAgentId::Dsh,
+            &[p.id.clone()],
+            None,
+            &pools,
+            0,
+        )
+        .iter()
+        .map(|e| crate::domain::split_scoped_model_id(&e.model_id).0.unwrap_or("").to_string())
+        .collect()
+    };
+
+    assert!(!exposed_tools(&db).contains("qoder_cn"), "迁移前 qoder 不应暴露");
+    db.backfill_empty_tool_members(&mk).expect("migrate");
+    assert!(exposed_tools(&db).contains("qoder_cn"), "迁移后 qoder 应暴露");
+    // 幂等
+    db.backfill_empty_tool_members(&mk).expect("migrate2");
+    assert!(exposed_tools(&db).contains("qoder_cn"));
+
+    // 用户显式清空 qoder → 再迁移不得复活
+    db.set_pool_tool_models(&mk, "pool-agent-dsh", "qoder_cn", &[]).expect("clear");
+    assert!(!exposed_tools(&db).contains("qoder_cn"), "清空后不应暴露");
+    db.backfill_empty_tool_members(&mk).expect("migrate3");
+    assert!(!exposed_tools(&db).contains("qoder_cn"), "清空后重跑迁移不得复活");
+}

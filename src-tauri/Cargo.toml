@@ -37,9 +37,13 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# Trae/Qoder 私有协议需要把上游原生 SSE 转换为 OpenAI SSE，再合成一个 Response 交给下游
+http = "1"
 base64 = "0.22"
 rfd = "0.15"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+md-5 = "0.11.0"
+rsa = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

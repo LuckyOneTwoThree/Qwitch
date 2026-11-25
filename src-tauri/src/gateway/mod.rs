@@ -548,6 +548,61 @@ fn log_db_result<T, E: std::fmt::Display>(ctx: &str, r: Result<T, E>) {
     }
 }
 
+/// 判定一次上游响应是否为「永久性鉴权失败」——这类失败重试无意义，
+/// 应立即标记账号过期并返回可操作提示，而不是当作限流反复空转。
+///
+/// 覆盖：
+/// - HTTP 401（所有工具的通用语义）
+/// - 华为云 APIG.0301 `verify ak sk signature fail` / `the access key ... is not found`
+/// - 华为云 STS 错误码（STS.0601 / 5_1806 token 过期）
+fn is_auth_expired_response(code: u16, body: &str) -> bool {
+    if code == 401 {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("apig.0301")
+        || lower.contains("verify ak sk signature")
+        || lower.contains("access key") && lower.contains("not found")
+        || lower.contains("sts.0601")
+        || lower.contains("5_1806")
+        || lower.contains("incorrect iam authentication")
+}
+
+/// 从上游错误体里提炼一段人类可读的凭据失效原因（尽量含 error_code/error_msg）。
+fn auth_expired_reason(tool_id: &str, body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let msg = v
+            .get("error_msg")
+            .or_else(|| v.get("message"))
+            .or_else(|| v.get("error_description"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let code = v
+            .get("error_code")
+            .or_else(|| v.get("code"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if !msg.is_empty() || !code.is_empty() {
+            let base = if code.is_empty() {
+                msg.to_string()
+            } else if msg.is_empty() {
+                code.to_string()
+            } else {
+                format!("{code}: {msg}")
+            };
+            if tool_id == "codearts" {
+                return format!(
+                    "{base}（AK/SK 临时凭据已失效/不存在，请在码道客户端重新登录后重新导入）"
+                );
+            }
+            return base;
+        }
+    }
+    let snippet: String = body.chars().take(120).collect();
+    snippet
+}
+
+
 fn is_valid_loopback_host(host: &str) -> bool {
     let bare = host.split(':').next().unwrap_or("");
     matches!(bare, "127.0.0.1" | "localhost" | "[::1]" | "::1")
@@ -856,6 +911,13 @@ fn extract_bearer_and_base_url(
                 headers.push(("accept-encoding", "identity".into()));
             } else if env.tool_id == "qoder_cn" {
                 headers.push(("Cosy-ClientType", "10".into()));
+            } else if env.tool_id == "lobsterai" {
+                headers.push(("User-Agent", "LobsterAI/2026.11.20".into()));
+                headers.push((
+                    "X-LobsterAI-Client-Capabilities",
+                    "virtual-models-v1,kimi-k3-agentic-v1,thinking-level-control-v1,upstream-error-details-v1,context-window-selection-v1".into(),
+                ));
+                headers.push(("X-LobsterAI-Client-Version", "2026.11.20".into()));
             }
             (Some(access_token.clone()), base_url, headers)
         }
@@ -1318,6 +1380,8 @@ fn resolve_upstream_auth(
         "workbuddy" => "https://copilot.tencent.com".to_string(),
         "qoder_cn" => "https://gateway.qoder.com.cn".to_string(),
         "trae_cn" => "https://trae-api-cn.mchost.guru".to_string(),
+        // 有道龙虾：桌面端经本地 token 代理把 /v1 前缀映射到 /api/proxy/v1，这里直接对齐真实上游
+        "lobsterai" => "https://lobsterai-server.youdao.com/api/proxy".to_string(),
         _ => "https://api.openai.com".to_string(),
     };
     let base_url = match custom_base {
@@ -1352,6 +1416,14 @@ async fn send_upstream_stream(
     // 码道不接受 bearer：它用华为云 AK/SK 签名，只能在拿到 body 之后再签，因此单独走一条路
     if member.tool_id == "codearts" {
         return send_codearts_stream(client, member, cred, ir_req, &wire_model).await;
+    }
+    // Trae CN 走 IDE agent 私有协议 `/api/agent/v3/llm_utils_chat`，原生 SSE 需转成 OpenAI SSE
+    if member.tool_id == "trae_cn" {
+        return send_trae_stream(client, member, cred, ir_req, &wire_model).await;
+    }
+    // Qoder CN 走 COSY 签名私有协议 `/algo/api/v2/service/pro/sse/agent_chat_generation`
+    if member.tool_id == "qoder_cn" {
+        return send_qoder_stream(client, member, cred, ir_req, &wire_model).await;
     }
     let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
     let base = base_url.trim_end_matches('/');
@@ -1436,6 +1508,610 @@ async fn send_codearts_stream(
     req.send()
         .await
         .map_err(|e| format!("码道上游请求失败: {}", e.without_url()))
+}
+
+/// Trae CN 对话上游：IDE agent 私有协议 `POST {host}/api/agent/v3/llm_utils_chat`。
+///
+/// 协议依据 magpie 的 `opencode-trae-auth`：
+/// - 鉴权头 `Authorization: Cloud-IDE-JWT {token}`，另需 `x-app-id`、`x-device-id`、
+///   `x-uid`、`x-app-version(-code)`、`x-ide-version(-code)(-type)`、`x-device-*`、
+///   `x-system-type` 等一整套 IDE 头（缺 `x-app-version-code` 会报
+///   `binding: expr_path=app_version_code`）；
+/// - 请求体 `{messages:[{role,content:string}], function:"chat_v3", config_name, model,
+///   stream:true, request_id, session_id}`；
+/// - 响应是 Trae 原生 SSE（`event:output/delta/token_usage/done/error`），且**即便出错也返回
+///   HTTP 200 + `event:error`**，因此这里读全量后：遇错误事件即合成一个非 2xx 响应交给上层
+///   的 429/鉴权/HttpError 分支处理；正常则把原生 SSE 转成 OpenAI `chat.completion.chunk`
+///   SSE 再合成 200 响应交给下游（下游按 OpenAI passthrough 消费）。
+async fn send_trae_stream(
+    client: &reqwest::Client,
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    wire_model: &str,
+) -> Result<reqwest::Response, String> {
+    use crate::adapter::trae::TraeAdapter;
+
+    let (token_opt, custom_base, _extra) = extract_bearer_and_base_url(cred);
+    let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
+    let host = custom_base.unwrap_or_else(|| "https://trae-api-cn.mchost.guru".to_string());
+    let host = host.trim_end_matches('/').to_string();
+    let identity = TraeAdapter::chat_request_identity(cred, &token);
+
+    // 对话消息：Trae 要求 [{role, content: [{text:string}, ...]}]——content 必须是
+    // 「内容块数组」（LLMRawMessageContent），string 会触发 Go 反序列化错误，而
+    // 用 text 字段则被服务端判为 4001 参数非法。
+    let openai_body = to_upstream_openai_chat_body(ir_req, wire_model, true);
+    let mut messages: Vec<Value> = Vec::new();
+    if let Some(arr) = openai_body.get("messages").and_then(Value::as_array) {
+        for m in arr {
+            let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
+            let text = match m.get("content") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Array(parts)) => parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            };
+            messages.push(json!({ "role": role, "content": [{ "text": text }] }));
+        }
+    }
+    if messages.is_empty() {
+        return Err("Trae 请求体为空（无有效对话消息）".to_string());
+    }
+
+    let mut body = json!({
+        "messages": messages,
+        "function": "chat_v3",
+        "config_name": wire_model,
+        "model": wire_model,
+        "stream": true,
+        "request_id": Uuid::new_v4().to_string(),
+        "session_id": Uuid::new_v4().to_string(),
+    });
+    if let Some(max) = ir_req.max_tokens {
+        if max > 0 {
+            body["max_tokens"] = json!(max);
+        }
+    }
+    if let Some(t) = ir_req.temperature {
+        body["temperature"] = json!(t);
+    }
+
+    let app_version = if identity.app_version.trim().is_empty() {
+        "0.1.69".to_string()
+    } else {
+        "0.1.69".to_string()
+    };
+    let device_id = identity.device_id.clone();
+    let uid = identity.uid.clone();
+
+    let url = format!("{host}/api/agent/v3/llm_utils_chat");
+    let mut req = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("Authorization", format!("Cloud-IDE-JWT {token}"))
+        .header("X-Cloudide-Token", &token)
+        .header("x-ide-token", &token)
+        .header("x-app-id", "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8")
+        .header("x-app-version", &app_version)
+        .header("x-app-version-code", "20260917")
+        .header("x-ide-version", &app_version)
+        .header("x-ide-version-code", "20260917")
+        .header("x-ide-version-type", "stable")
+        .header("x-device-type", "windows")
+        .header("x-os-version", "Windows 10")
+        .header("x-system-type", "Windows")
+        .header("x-device-cpu", "AMD")
+        .header("x-request-id", Uuid::new_v4().to_string())
+        .json(&body);
+    if !device_id.trim().is_empty() {
+        req = req
+            .header("x-device-id", &device_id)
+            .header("x-machine-id", &device_id);
+    }
+    if !uid.trim().is_empty() {
+        req = req.header("x-uid", &uid);
+    }
+
+    let resp = req.send().await.map_err(|e| format!("Trae 上游请求失败: {}", e.without_url()))?;
+    let status = resp.status();
+    // Trae 无论成败基本都 200，读到全量文本再判定；SSE 体量小，一次读完
+    let raw = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取 Trae 响应失败: {}", e.without_url()))?;
+
+    // 若首个有效事件是 event:error，则合成一个非 2xx 响应喂给上层的失败分支
+    if let Some((code, msg)) = trae_first_error(&raw) {
+        let http_status = match code.as_deref() {
+            Some("429") | Some("4290") => reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some("401") | Some("403") => reqwest::StatusCode::UNAUTHORIZED,
+            _ => {
+                if status.is_success() {
+                    reqwest::StatusCode::BAD_REQUEST
+                } else {
+                    status
+                }
+            }
+        };
+        let body_bytes = serde_json::to_vec(&json!({
+            "error": { "message": msg, "code": code, "type": "trae_error" }
+        }))
+        .unwrap_or_default();
+        return Ok(synthetic_response(http_status, "application/json", body_bytes));
+    }
+
+    // 正常：把 Trae 原生 SSE 转成 OpenAI chat.completion.chunk SSE 字节
+    let openai_sse = trae_sse_to_openai(&raw, &ir_req.model, &wire_model);
+    Ok(synthetic_response(
+        reqwest::StatusCode::OK,
+        "text/event-stream; charset=utf-8",
+        openai_sse.into_bytes(),
+    ))
+}
+
+/// Qoder CN 对话上游：COSY 签名私有协议 `/algo/api/v2/service/pro/sse/agent_chat_generation`。
+///
+/// - 请求体是 `encodeBody(JSON)`（打乱 base64 + 首尾三分之一互换）；
+/// - 鉴权 `Authorization: Bearer COSY.{payload}.{sig}`，`Cosy-Key` 包裹 AES 密钥；
+/// - 响应 SSE 每帧 `data: {statusCodeValue, body:"<OpenAI chunk JSON 字符串>"}`。
+/// 这里读全量后：`statusCodeValue != 200` 或帧内 error 即合成非 2xx 交给上层失败分支；
+/// 正常则把内层 chunk 还原成 OpenAI SSE 再合成 200 响应。
+async fn send_qoder_stream(
+    client: &reqwest::Client,
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    wire_model: &str,
+) -> Result<reqwest::Response, String> {
+    use crate::adapter::qoder_cosy;
+
+    let (token_opt, custom_base, _extra) = extract_bearer_and_base_url(cred);
+    let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
+    let api = custom_base.unwrap_or_else(|| "https://gateway.qoder.com.cn".to_string());
+    let api = api.trim_end_matches('/').to_string();
+
+    // machine_id / 身份信息从凭据里取
+    let (machine_id, disp_name, disp_email) = extract_qoder_identity(cred);
+
+    let model_key = wire_model;
+    let model_source = "system";
+    let display_name = model_key;
+
+    let plaintext = qoder_cosy::build_qoder_body(
+        ir_req,
+        model_key,
+        model_source,
+        display_name,
+        200_000,
+    );
+    let wire_body = qoder_cosy::encode_body(&plaintext.to_string());
+
+    let url = format!("{api}{}", qoder_cosy::CHAT_PATH);
+    let headers = qoder_cosy::cosy_headers(
+        &url,
+        &cred.uid,
+        disp_name.as_deref().unwrap_or(""),
+        disp_email.as_deref().unwrap_or(""),
+        &token,
+        &machine_id,
+        &wire_body,
+        true,
+        Some(model_key),
+        Some(model_source),
+    )?;
+
+    let mut req = client
+        .post(&url)
+        .header("Accept", "text/event-stream")
+        .body(wire_body);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Qoder 上游请求失败: {}", e.without_url()))?;
+    let status = resp.status();
+    let raw = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取 Qoder 响应失败: {}", e.without_url()))?;
+
+    // 先判定是否整体失败（HTTP 非 2xx，或 SSE 帧里 statusCodeValue != 200 / 帧内 error）
+    if let Some((code, msg)) = qoder_first_error(status.as_u16(), &raw) {
+        let http_status = match code.as_deref() {
+            Some("429") => reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some("401") | Some("403") => reqwest::StatusCode::UNAUTHORIZED,
+            // Qoder 登录过期 / 需要重新登录
+            Some("105") => reqwest::StatusCode::UNAUTHORIZED,
+            _ => {
+                if status.is_success() {
+                    reqwest::StatusCode::BAD_REQUEST
+                } else {
+                    status
+                }
+            }
+        };
+        let body_bytes = serde_json::to_vec(&json!({
+            "error": { "message": msg, "code": code, "type": "qoder_error" }
+        }))
+        .unwrap_or_default();
+        return Ok(synthetic_response(http_status, "application/json", body_bytes));
+    }
+
+    let openai_sse = qoder_sse_to_openai(&raw, &ir_req.model);
+    Ok(synthetic_response(
+        reqwest::StatusCode::OK,
+        "text/event-stream; charset=utf-8",
+        openai_sse.into_bytes(),
+    ))
+}
+
+/// 从 Qoder 凭据里取 (machine_id, display_name, display_email)。
+fn extract_qoder_identity(
+    cred: &CredentialEnvelope,
+) -> (String, Option<String>, Option<String>) {
+    let machine_id = match &cred.payload {
+        CredentialPayload::Token { extra, .. } => extra
+            .get("machine_id")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default(),
+        CredentialPayload::LocalSnapshot { files } => files
+            .get("auth.machine-id")
+            .and_then(|b64| {
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok()
+            })
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    (machine_id, cred.display_name.clone(), cred.display_email.clone())
+}
+
+/// 从 Qoder SSE 文本里提取首个错误。`status` 为 HTTP 状态码。
+fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)> {
+    if !(200..300).contains(&status) {
+        let msg = raw.trim();
+        let msg = if msg.is_empty() { format!("HTTP {status}") } else { msg.chars().take(512).collect() };
+        return Some((Some(status.to_string()), msg));
+    }
+    for line in raw.lines() {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(env) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(sc) = env.get("statusCodeValue").and_then(Value::as_u64) {
+            if sc != 200 {
+                let inner = env.get("body").and_then(Value::as_str).unwrap_or("");
+                let msg = if inner.trim().is_empty() { data.to_string() } else { inner.chars().take(512).collect() };
+                return Some((Some(sc.to_string()), msg));
+            }
+        }
+        // 帧内 body 里带 error 且无 choices
+        let inner = env.get("body").and_then(Value::as_str).unwrap_or("");
+        if let Ok(chunk) = serde_json::from_str::<Value>(inner.trim()) {
+            let has_choices = chunk.get("choices").map(|c| c.is_array()).unwrap_or(false);
+            if !has_choices && (chunk.get("error").is_some() || (chunk.get("code").is_some() && chunk.get("message").is_some())) {
+                let msg = chunk
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(Value::as_str)
+                    .or_else(|| chunk.get("message").and_then(Value::as_str))
+                    .unwrap_or("Qoder 返回错误")
+                    .to_string();
+                let code = chunk.get("code").map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+                return Some((code, msg));
+            }
+        }
+    }
+    None
+}
+
+/// 把 Qoder SSE（外层信封包内层 OpenAI chunk）还原成标准 OpenAI SSE 文本。
+fn qoder_sse_to_openai(raw: &str, model: &str) -> String {
+    let id = format!("chatcmpl-qoder-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let created = chrono::Utc::now().timestamp();
+    let mut out = String::new();
+    let mut wrote_role = false;
+    let mut last_usage: Option<Value> = None;
+    let mut finish_reason: Option<Value> = None;
+
+    for line in raw.lines() {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        let Ok(env) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let inner = env.get("body").and_then(Value::as_str).unwrap_or("");
+        if inner.trim() == "[DONE]" {
+            break;
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(inner.trim()) else {
+            continue;
+        };
+        // usage 既可能挂在有 choices 的帧上，也可能在只带 usage 的 choices:[] 帧上
+        if let Some(u) = chunk.get("usage").filter(|u| !u.is_null()) {
+            last_usage = Some(u.clone());
+        }
+        let delta = chunk
+            .pointer("/choices/0/delta")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let Some(f) = chunk.pointer("/choices/0/finish_reason").filter(|f| f.is_string()) {
+            finish_reason = Some(f.clone());
+        }
+
+        if !wrote_role {
+            out.push_str(&format!(
+                "data: {}\n\n",
+                json!({"id": id, "object":"chat.completion.chunk","created":created,"model":model,
+                       "choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]})
+            ));
+            wrote_role = true;
+        }
+
+        let mut out_delta = serde_json::Map::new();
+        if let Some(c) = delta.get("content").and_then(Value::as_str) {
+            if !c.is_empty() {
+                out_delta.insert("content".into(), json!(c));
+            }
+        }
+        if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
+            if !r.is_empty() {
+                out_delta.insert("reasoning_content".into(), json!(r));
+            }
+        }
+        if let Some(tc) = delta.get("tool_calls") {
+            out_delta.insert("tool_calls".into(), tc.clone());
+        }
+        if !out_delta.is_empty() {
+            out.push_str(&format!(
+                "data: {}\n\n",
+                json!({"id": id, "object":"chat.completion.chunk","created":created,"model":model,
+                       "choices":[{"index":0,"delta":Value::Object(out_delta),"finish_reason":Value::Null}]})
+            ));
+        }
+    }
+    if !wrote_role {
+        out.push_str(&format!(
+            "data: {}\n\n",
+            json!({"id": id, "object":"chat.completion.chunk","created":created,"model":model,
+                   "choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]})
+        ));
+    }
+    // 结束帧：带上 finish_reason 与累积到的 usage（Qoder 的 usage 常在 finish 之后的
+    // 独立 choices:[] 帧里，所以统一在循环后一次性发出）
+    let finish = finish_reason.unwrap_or_else(|| json!("stop"));
+    let mut end = json!({"id": id, "object":"chat.completion.chunk","created":created,"model":model,
+           "choices":[{"index":0,"delta":{},"finish_reason":finish}]});
+    if let Some(u) = &last_usage {
+        end["usage"] = u.clone();
+    }
+    out.push_str(&format!("data: {}\n\n", end));
+    out.push_str("data: [DONE]\n\n");
+    out
+}
+
+/// 用 `http::Response<reqwest::Body>` 合成一个 `reqwest::Response`，供下游统一消费。
+fn synthetic_response(status: reqwest::StatusCode, content_type: &str, body: Vec<u8>) -> reqwest::Response {
+    let mut builder = http::Response::builder().status(status);
+    if !content_type.is_empty() {
+        builder = builder.header("content-type", content_type);
+    }
+    let resp = builder
+        .body(reqwest::Body::from(body))
+        .expect("构造合成响应失败");
+    reqwest::Response::from(resp)
+}
+
+/// 从 Trae 原生 SSE 文本里提取首个错误事件的 (code, message)。
+fn trae_first_error(raw: &str) -> Option<(Option<String>, String)> {
+    for block in raw.split("\n\n") {
+        let mut event = "";
+        let mut data_line = "";
+        for line in block.lines() {
+            if let Some(ev) = line.strip_prefix("event:") {
+                event = ev.trim();
+            } else if let Some(d) = line.strip_prefix("data:") {
+                data_line = d.trim();
+            }
+        }
+        if data_line.is_empty() || data_line == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(data_line) else {
+            continue;
+        };
+        let is_error = event == "error"
+            || (v.get("code").is_some() && v.get("message").is_some() && v.get("content").is_none());
+        if is_error {
+            let code = v
+                .get("code")
+                .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+            let msg = v
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Trae 返回错误")
+                .to_string();
+            return Some((code, msg));
+        }
+    }
+    None
+}
+
+/// 把 Trae 原生 SSE 转成 OpenAI `chat.completion.chunk` SSE 文本。
+/// 逐事件读取：文本字段合并为增量 delta，token_usage→usage 收尾，
+/// done/finish_reason→结束并发送 [DONE]。
+fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
+    let id = format!("chatcmpl-trae-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let created = chrono::Utc::now().timestamp();
+    let mut out = String::new();
+    let mut finish_reason = "stop".to_string();
+    let mut usage_obj: Option<Value> = None;
+    let mut wrote_any = false;
+
+    let push_chunk = |out: &mut String, delta: Value, finish: Option<&str>, usage: &Option<Value>| {
+        let mut payload = json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+        });
+        if let Some(u) = usage {
+            payload["usage"] = u.clone();
+        }
+        out.push_str("data: ");
+        out.push_str(&payload.to_string());
+        out.push_str("\n\n");
+    };
+
+    for block in raw.split("\n\n") {
+        let mut event = String::new();
+        let mut data_line = String::new();
+        for line in block.lines() {
+            if let Some(ev) = line.strip_prefix("event:") {
+                event = ev.trim().to_string();
+            } else if let Some(d) = line.strip_prefix("data:") {
+                data_line = d.trim().to_string();
+            }
+        }
+        if data_line.is_empty() || data_line == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&data_line) else {
+            continue;
+        };
+        // 只有 output 事件承载模型增量；metadata/timing_cost/extra_info/token_usage/done
+        // 等控制事件不能当正文读（extra_info.content 是全量答案 JSON，会污染输出）。
+        let is_output = event == "output" || event.is_empty();
+        if !is_output {
+            // 仍处理 usage / finish 控制事件
+            if event == "token_usage" {
+                if let Some(u) = tokens_of_trae(&v) {
+                    usage_obj = Some(u);
+                }
+            }
+            if event == "done" || event == "response_done" || event == "stream_done" {
+                if let Some(u) = v.get("usage").and_then(|u| tokens_of_trae(u)) {
+                    usage_obj = Some(u);
+                }
+            }
+            if let Some(fr) = v.get("finish_reason").and_then(Value::as_str) {
+                finish_reason = match fr.to_lowercase().as_str() {
+                    "length" | "max_tokens" | "max_output_tokens" | "max_length" => "length".to_string(),
+                    "content_filter" | "sensitive" => "content_filter".to_string(),
+                    _ => "stop".to_string(),
+                };
+            }
+            continue;
+        }
+        // 统一取文本增量：response / content / delta.content / delta(字符串)
+        let delta_obj = v.get("delta").cloned().unwrap_or(Value::Null);
+        let reasoning = [v.get("reasoning_content"), v.get("reasoning"), delta_obj.get("reasoning_content"), delta_obj.get("reasoning")]
+            .into_iter()
+            .flatten()
+            .find_map(|x| x.as_str().filter(|s| !s.is_empty()).map(str::to_string));
+        let text = v
+            .get("response")
+            .and_then(Value::as_str)
+            .or_else(|| v.get("content").and_then(Value::as_str))
+            .or_else(|| delta_obj.get("content").and_then(Value::as_str))
+            .or_else(|| v.get("delta").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
+        if wrote_any == false {
+            push_chunk(&mut out, json!({ "role": "assistant", "content": "" }), None, &usage_obj);
+            wrote_any = true;
+        }
+        if let Some(r) = reasoning {
+            push_chunk(&mut out, json!({ "reasoning_content": r }), None, &usage_obj);
+        }
+        if !text.is_empty() && !text.starts_with("Building prompt:") && !text.starts_with("Completed building prompt") {
+            push_chunk(&mut out, json!({ "content": text }), None, &usage_obj);
+        }
+        if let Some(u) = v.get("usage") {
+            let prompt = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let completion = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+            if prompt != 0 || completion != 0 {
+                usage_obj = Some(json!({
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": u.get("total_tokens").and_then(Value::as_u64).unwrap_or(prompt + completion),
+                }));
+            }
+        }
+        // 直接挂在事件上的 usage（token_usage 事件）
+        if event == "token_usage" {
+            if let Some(u) = tokens_of_trae(&v) {
+                usage_obj = Some(u);
+            }
+        }
+        if let Some(fr) = v.get("finish_reason").and_then(Value::as_str) {
+            finish_reason = match fr.to_lowercase().as_str() {
+                "length" | "max_tokens" | "max_output_tokens" | "max_length" => "length".to_string(),
+                "content_filter" | "sensitive" => "content_filter".to_string(),
+                _ => "stop".to_string(),
+            };
+        }
+        if event == "done" || event == "response_done" || event == "stream_done" {
+            if let Some(u) = v.get("usage").and_then(|u| tokens_of_trae(u)) {
+                usage_obj = Some(u);
+            }
+        }
+    }
+    if wrote_any == false {
+        push_chunk(&mut out, json!({ "role": "assistant", "content": "" }), None, &usage_obj);
+    }
+    // 结束帧
+    let mut end = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }],
+    });
+    if let Some(u) = &usage_obj {
+        end["usage"] = u.clone();
+    }
+    out.push_str("data: ");
+    out.push_str(&end.to_string());
+    out.push_str("\n\n");
+    out.push_str("data: [DONE]\n\n");
+    out
+}
+
+fn tokens_of_trae(u: &Value) -> Option<Value> {
+    let prompt = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let completion = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    if prompt == 0 && completion == 0 {
+        return None;
+    }
+    Some(json!({
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": u.get("total_tokens").and_then(Value::as_u64).unwrap_or(prompt + completion),
+    }))
 }
 
 async fn write_sse_head(stream: &mut TcpStream) -> std::io::Result<()> {
@@ -3101,7 +3777,7 @@ async fn handle_http_connection(
                                         } else if code == 401 || code == 403 {
                                             RoutingAttemptOutcome::Refreshed401
                                         } else {
-                                            RoutingAttemptOutcome::Cooldown429
+                                            RoutingAttemptOutcome::HttpError
                                         },
                                         latency_ms,
                                         detail: format!("HTTP {code} -> {}", own_auth.upstream_url),
@@ -3203,6 +3879,9 @@ async fn handle_http_connection(
     let mut attempts = plan.skipped_attempts;
     let mut final_ir_resp: Option<(IrResponse, PoolMember)> = None;
     let t_start = std::time::Instant::now();
+    // 收集“凭据失效”这类永久性鉴权失败的账号与文案；若整个池只因它失败，
+    // 最终返回 503 + 精确指引，而不是误导性的 502 first byte。
+    let mut auth_expired_hits: Vec<(String, String)> = Vec::new();
 
     for cand in &plan.candidates {
         let Ok((_, mut cred)) = db.get_account_credential(&master_key, &cand.account_id) else {
@@ -3339,17 +4018,36 @@ async fn handle_http_connection(
                                 pool.cooldown_seconds
                             ),
                         });
+                    } else if is_auth_expired_response(code, &body_txt) {
+                        // 永久性鉴权失败（401 / 华为云 APIG.0301）：不冷却、不重试，
+                        // 直接标记账号过期并短路，避免抖动空转成 502。
+                        let _ = db.update_account_status(
+                            &cand.account_id,
+                            crate::domain::AccountStatus::Expired,
+                        );
+                        let reason = auth_expired_reason(&cand.tool_id, &body_txt);
+                        auth_expired_hits.push((cand.label.clone(), reason.clone()));
+                        attempts.push(RoutingAttempt {
+                            account_label: cand.label.clone(),
+                            tool_id: cand.tool_id.clone(),
+                            model: plan.effective_model.clone(),
+                            tier: Some(cand.tier),
+                            outcome: RoutingAttemptOutcome::AuthExpired,
+                            latency_ms: t_hop.elapsed().as_millis() as u64,
+                            detail: format!("凭据失效(HTTP {code})：{reason}"),
+                        });
+                        break;
                     } else {
                         attempts.push(RoutingAttempt {
                             account_label: cand.label.clone(),
                             tool_id: cand.tool_id.clone(),
                             model: plan.effective_model.clone(),
                             tier: Some(cand.tier),
-                            outcome: RoutingAttemptOutcome::Cooldown429,
+                            outcome: RoutingAttemptOutcome::HttpError,
                             latency_ms: t_hop.elapsed().as_millis() as u64,
                             detail: format!(
-                                "HTTP {code}: {}",
-                                body_txt.chars().take(80).collect::<String>()
+                                "上游 HTTP {code}（非限流）: {}",
+                                body_txt.chars().take(120).collect::<String>()
                             ),
                         });
                     }
@@ -3361,9 +4059,9 @@ async fn handle_http_connection(
                         tool_id: cand.tool_id.clone(),
                         model: plan.effective_model.clone(),
                         tier: Some(cand.tier),
-                        outcome: RoutingAttemptOutcome::Cooldown429,
+                        outcome: RoutingAttemptOutcome::HttpError,
                         latency_ms: t_hop.elapsed().as_millis() as u64,
-                        detail: e,
+                        detail: format!("上游请求未到达/传输失败: {e}"),
                     });
                     continue;
                 }
@@ -3437,6 +4135,25 @@ async fn handle_http_connection(
                     ),
                 });
             }
+            Ok((code, err_body)) if is_auth_expired_response(code, &err_body) => {
+                // 永久性鉴权失败（401 / 华为云 APIG.0301）：标记账号过期并短路。
+                let _ = db.update_account_status(
+                    &cand.account_id,
+                    crate::domain::AccountStatus::Expired,
+                );
+                let reason = auth_expired_reason(&cand.tool_id, &err_body);
+                auth_expired_hits.push((cand.label.clone(), reason.clone()));
+                attempts.push(RoutingAttempt {
+                    account_label: cand.label.clone(),
+                    tool_id: cand.tool_id.clone(),
+                    model: plan.effective_model.clone(),
+                    tier: Some(cand.tier),
+                    outcome: RoutingAttemptOutcome::AuthExpired,
+                    latency_ms: t_hop.elapsed().as_millis() as u64,
+                    detail: format!("凭据失效(HTTP {code})：{reason}"),
+                });
+                break;
+            }
             Ok((code, err_body)) => {
                 attempts.push(RoutingAttempt {
                     account_label: cand.label.clone(),
@@ -3466,6 +4183,14 @@ async fn handle_http_connection(
     }
 
     let Some((ir_resp, winner)) = final_ir_resp else {
+        // 抽一条最具体的失败明细，让客户端直接看到「上游 404 / 协议不匹配」等真实原因，
+        // 而不是永远只有一句误导性的 "All pool candidates failed before first byte"。
+        let first_detail = attempts
+            .iter()
+            .find(|a| a.outcome == RoutingAttemptOutcome::HttpError)
+            .map(|a| format!("{}@{}: {}", a.tool_id, a.account_label, a.detail.clone()))
+            .or_else(|| attempts.iter().find(|a| a.outcome == RoutingAttemptOutcome::Cooldown429).map(|a| a.detail.clone()))
+            .unwrap_or_else(|| "无可用候选账号".to_string());
         let trace = RoutingTraceItem {
             id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
@@ -3485,11 +4210,41 @@ async fn handle_http_connection(
             attempts,
         };
         log_db_result("append_routing_trace", db.append_routing_trace(&trace));
+        // 若本次失败全部/主要源于凭据失效，返回可操作的 503 与精确文案，
+        // 而不是误导性的 502 "first byte"。
+        if !auth_expired_hits.is_empty() {
+            let first_label = &auth_expired_hits[0].0;
+            let first_reason = &auth_expired_hits[0].1;
+            let payload = serde_json::json!({
+                "error": "凭据失效：码道等上游账号的 AK/SK 已过期或不存在，需重新登录/导入",
+                "error_type": "auth_expired",
+                "account": first_label,
+                "reason": first_reason,
+                "hint": "请在对应客户端重新登录以刷新临时凭据，再回 Qwitch 重新导入该账号",
+            })
+            .to_string();
+            return write_http_response(
+                stream,
+                "503 Service Unavailable",
+                "application/json",
+                payload.as_bytes(),
+                &[],
+            )
+            .await;
+        }
+        // 抽一条最具体的失败明细，让客户端直接看到真实原因。
+        let payload = serde_json::json!({
+            "error": "全部候选账号均失败",
+            "error_type": "all_candidates_failed",
+            "detail": first_detail,
+            "hint": "常见原因：该工具的上游不是标准 OpenAI/Anthropic 端点（如 Trae 走 /api/agent/v3/llm_utils_chat、Qoder 走 COSY 私有协议），或端点/模型映射错误。",
+        })
+        .to_string();
         return write_http_response(
             stream,
             "502 Bad Gateway",
             "application/json",
-            br#"{"error":"All pool candidates failed before first byte"}"#,
+            payload.as_bytes(),
             &[],
         )
         .await;
@@ -3570,6 +4325,255 @@ mod tests {
     };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn trae_sse_to_openai_emits_text_and_done() {
+        // output 事件承载增量；extra_info/metadata/timing_cost 等控制事件即使带 content
+        // 也不能当正文（extra_info.content 是全量答案 JSON，必须忽略）。
+        let raw = "event: output\ndata: {\"response\":\"你好\"}\n\nevent: output\ndata: {\"content\":\"世界\"}\n\nevent: extra_info\ndata: {\"content\":\"{\\\"reasoning_content\\\":\\\"全量答案\\\"}\"}\n\nevent: metadata\ndata: {\"model\":\"\"}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n";
+        let sse = trae_sse_to_openai(raw, "trae-model", "trae-model");
+        assert!(sse.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(sse.contains("你好"));
+        assert!(sse.contains("世界"));
+        assert!(!sse.contains("全量答案"), "extra_info.content must be ignored: {sse}");
+        assert!(sse.contains("\"finish_reason\":\"stop\""));
+        assert!(sse.trim_end().ends_with("data: [DONE]"));
+    }
+
+    #[test]
+    fn trae_first_error_detects_error_event() {
+        let raw = "event: error\ndata: {\"code\":4001,\"message\":\"param is invalid\"}\n\n";
+        let (code, msg) = trae_first_error(raw).expect("应识别错误事件");
+        assert_eq!(code.as_deref(), Some("4001"));
+        assert!(msg.contains("param is invalid"));
+        // 正常输出不算错误
+        let ok = "event: output\ndata: {\"response\":\"hi\"}\n\nevent: done\ndata: {}\n\n";
+        assert!(trae_first_error(ok).is_none());
+    }
+
+    #[test]
+    fn qoder_sse_to_openai_unwraps_envelope() {
+        // 贴近真实的 Qoder SSE：文本帧 + finish 帧（delta.content 空）+ 仅 usage 的 choices:[] 帧
+        // + [DONE] + 末尾 event:finish 元信息帧。
+        let raw = concat!(
+            "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"你好\\\"},\\\"index\\\":0}]}\"}\n\n",
+            "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"世界\\\"},\\\"index\\\":0}]}\"}\n\n",
+            "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"\\\"},\\\"finish_reason\\\":\\\"stop\\\",\\\"index\\\":0}]}\"}\n\n",
+            "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[],\\\"usage\\\":{\\\"prompt_tokens\\\":10,\\\"completion_tokens\\\":3,\\\"total_tokens\\\":13}}\"}\n\n",
+            "data: {\"statusCodeValue\":200,\"body\":\"[DONE]\",\"statusCode\":\"OK\"}\n\n",
+            "event:finish\ndata: {\"firstTokenDuration\":356}\n\n",
+        );
+        let sse = qoder_sse_to_openai(raw, "qoder-model");
+        assert!(sse.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(sse.contains("你好"));
+        assert!(sse.contains("世界"));
+        assert!(sse.contains("\"finish_reason\":\"stop\""));
+        assert!(sse.contains("\"total_tokens\":13"));
+        assert!(sse.contains("\"tool_calls\":null") == false);
+        assert!(sse.trim_end().ends_with("data: [DONE]"));
+    }
+
+    #[test]
+    fn qoder_first_error_detects_non_200_frame() {
+        // HTTP 200 但帧内 statusCodeValue=400
+        let raw = "data: {\"statusCodeValue\":400,\"body\":\"bad model\"}\n\n";
+        let (code, msg) = qoder_first_error(200, raw).expect("应识别非 200 帧");
+        assert_eq!(code.as_deref(), Some("400"));
+        assert!(msg.contains("bad model"));
+        // 正常帧不算错误
+        let ok = "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"x\\\"}}]}\"}\n\n";
+        assert!(qoder_first_error(200, ok).is_none());
+    }
+
+    #[tokio::test]
+    async fn gateway_lobsterai_routes_via_api_proxy_and_streams() {
+        // 有道龙虾：上游是 {base}/v1/chat/completions（base=.../api/proxy），OpenAI 兼容 SSE
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/proxy/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"龙虾\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+                        "data: [DONE]\n\n"
+                    )),
+            )
+            .mount(&mock)
+            .await;
+
+        let (_db, rt, port, root, model_id) = spawn_gateway_with_custom_account(
+            "lobsterai",
+            "deepseek-flash",
+            format!("{}/api/proxy", mock.uri()),
+            "lobster",
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth("qwitch-bind-opencode")
+            .json(&json!({"model": model_id, "stream": true, "messages": [{"role": "user", "content": "hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("龙虾"), "body: {body}");
+        assert!(body.contains("你好"), "body: {body}");
+
+        // 校验请求带上了 LobsterAI 客户端头
+        let received = mock.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0].headers.get("user-agent").unwrap().to_str().unwrap(),
+            "LobsterAI/2026.11.20"
+        );
+        assert!(received[0]
+            .headers
+            .get("x-lobsterai-client-capabilities")
+            .is_some());
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn gateway_trae_builds_content_array_and_converts_sse() {
+        // Trae CN：POST /api/agent/v3/llm_utils_chat，请求消息 content 必须是数组块，
+        // 响应 event:output 承载增量，extra_info 的 content 必须忽略。
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/agent/v3/llm_utils_chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "event: output\ndata: {\"response\":\"\",\"reasoning_content\":\"思考\"}\n\n",
+                        "event: output\ndata: {\"response\":\"豆包\",\"reasoning_content\":\"\"}\n\n",
+                        "event: output\ndata: {\"response\":\"你好\",\"reasoning_content\":\"\"}\n\n",
+                        "event: extra_info\ndata: {\"content\":\"{\\\"reasoning_content\\\":\\\"应为噪声\\\"}\"}\n\n",
+                        "event: token_usage\ndata: {\"prompt_tokens\":9,\"completion_tokens\":4,\"total_tokens\":13}\n\n",
+                        "event: done\ndata: {\"finish_reason\":\"stop\"}\n\n",
+                    )),
+            )
+            .mount(&mock)
+            .await;
+
+        let (_db, rt, port, root, model_id) = spawn_gateway_with_custom_account(
+            "trae_cn",
+            "Doubao-Seed-2.1-Turbo",
+            mock.uri(),
+            "trae",
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth("qwitch-bind-opencode")
+            .json(&json!({"model": model_id, "stream": true, "messages": [{"role": "user", "content": "hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("豆包"), "body: {body}");
+        assert!(body.contains("你好"), "body: {body}");
+        assert!(body.contains("思考"), "reasoning should stream: {body}");
+        assert!(!body.contains("应为噪声"), "extra_info must be ignored: {body}");
+        assert!(body.contains("\"finish_reason\":\"stop\""), "body: {body}");
+        assert!(body.contains("\"total_tokens\":13"), "body: {body}");
+        assert!(body.trim_end().ends_with("data: [DONE]"), "body: {body}");
+
+        // 校验上游请求体：messages[].content 是数组块，function/config_name/model 正确
+        let received = mock.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        let req_json: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(req_json["function"], "chat_v3");
+        assert_eq!(req_json["config_name"], "Doubao-Seed-2.1-Turbo");
+        assert_eq!(req_json["stream"], true);
+        assert!(req_json["messages"][0]["content"].is_array(), "content must be array: {req_json}");
+        assert!(received[0].headers.get("authorization").is_some());
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn gateway_qoder_streams_and_converts_real_sse_shape() {
+        // 用 wiremock 模拟 Qoder 的 COSY 端点，返回真实信封格式（文本帧 + usage 帧 + [DONE] + event:finish）
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/algo/api/v2/service/pro/sse/agent_chat_generation",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data:{\"headers\":{\"Content-Type\":[\"application/json\"]},\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"你好\\\",\\\"role\\\":\\\"assistant\\\"},\\\"index\\\":0}],\\\"model\\\":\\\"auto\\\",\\\"object\\\":\\\"chat.completion.chunk\\\"}\",\"statusCodeValue\":200,\"statusCode\":\"OK\"}\n\n",
+                        "data:{\"headers\":{\"Content-Type\":[\"application/json\"]},\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"世界\\\"},\\\"index\\\":0}],\\\"model\\\":\\\"auto\\\",\\\"object\\\":\\\"chat.completion.chunk\\\"}\",\"statusCodeValue\":200,\"statusCode\":\"OK\"}\n\n",
+                        "data:{\"headers\":{\"Content-Type\":[\"application/json\"]},\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"\\\"},\\\"finish_reason\\\":\\\"stop\\\",\\\"index\\\":0}],\\\"model\\\":\\\"auto\\\",\\\"object\\\":\\\"chat.completion.chunk\\\"}\",\"statusCodeValue\":200,\"statusCode\":\"OK\"}\n\n",
+                        "data:{\"headers\":{\"Content-Type\":[\"application/json\"]},\"body\":\"{\\\"choices\\\":[],\\\"usage\\\":{\\\"prompt_tokens\\\":8,\\\"completion_tokens\\\":2,\\\"total_tokens\\\":10},\\\"model\\\":\\\"auto\\\"}\",\"statusCodeValue\":200,\"statusCode\":\"OK\"}\n\n",
+                        "data:{\"headers\":{\"Content-Type\":[\"application/json\"]},\"body\":\"[DONE]\",\"statusCodeValue\":200,\"statusCode\":\"OK\"}\n\n",
+                        "event:finish\ndata:{\"firstTokenDuration\":100}\n\n",
+                    )),
+            )
+            .mount(&mock)
+            .await;
+
+        let (_db, rt, port, root, model_id) = spawn_gateway_with_custom_account(
+            "qoder_cn",
+            "dfmodel",
+            mock.uri(),
+            "qoder",
+        )
+        .await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth("qwitch-bind-opencode")
+            .json(&json!({"model": model_id, "stream": true, "messages": [{"role": "user", "content": "hi"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("chat.completion.chunk"), "body: {body}");
+        assert!(body.contains("你好"), "body: {body}");
+        assert!(body.contains("世界"), "body: {body}");
+        assert!(body.contains("\"finish_reason\":\"stop\""), "body: {body}");
+        assert!(body.contains("\"total_tokens\":10"), "body: {body}");
+        assert!(body.trim_end().ends_with("data: [DONE]"), "body: {body}");
+        rt.stop_server();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn classifies_auth_expired_responses() {
+        // 华为云 APIG.0301 两条真实文案（signature fail / access key not found）
+        assert!(is_auth_expired_response(
+            401,
+            r#"{"error_msg":"Incorrect IAM authentication information: verify ak sk signature fail","error_code":"APIG.0301"}"#
+        ));
+        assert!(is_auth_expired_response(
+            401,
+            r#"{"error_msg":"Incorrect IAM authentication information: the access key HSTXXXX is not found","error_code":"APIG.0301"}"#
+        ));
+        // 裸 401 无体也算
+        assert!(is_auth_expired_response(401, ""));
+        // 429/500/普通 4xx 不算
+        assert!(!is_auth_expired_response(429, "rate limited"));
+        assert!(!is_auth_expired_response(500, "boom"));
+        assert!(!is_auth_expired_response(400, "bad request"));
+    }
+
+    #[test]
+    fn auth_expired_reason_extracts_error_code_and_hint() {
+        let r = auth_expired_reason(
+            "codearts",
+            r#"{"error_msg":"the access key HSTXXXX is not found","error_code":"APIG.0301"}"#,
+        );
+        assert!(r.contains("APIG.0301"));
+        assert!(r.contains("access key"));
+        assert!(r.contains("重新登录"));
+    }
 
     #[tokio::test]
     async fn gateway_serves_models_blocks_browser_origin_and_downgrades_ws_to_426() {

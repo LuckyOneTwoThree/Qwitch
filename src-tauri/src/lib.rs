@@ -126,6 +126,11 @@ pub fn run() {
                 migration_warnings.push(format!("历史数据脱敏未完成：{e}"));
             }
             let _ = db.backfill_account_names(&master_key);
+            // 一次性修复：早期建池时上游暂无模型、导致后加入的订阅工具（qoder/trae/
+            // minimax）成员模型为空、永不暴露、客户端走不通的问题。
+            if let Err(e) = db.backfill_empty_tool_members(&master_key) {
+                eprintln!("Qwitch 订阅工具模型回填失败: {e}");
+            }
             let startup_settings = commands::load_app_settings(&db);
             platform::sync_custom_client_paths(&startup_settings.custom_client_paths);
             let _ = db.apply_log_retention(

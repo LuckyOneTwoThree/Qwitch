@@ -5,6 +5,7 @@ pub mod external;
 pub mod lobsterai;
 pub mod minimax;
 pub mod qoder;
+pub mod qoder_cosy;
 pub mod trae;
 pub mod workbuddy;
 

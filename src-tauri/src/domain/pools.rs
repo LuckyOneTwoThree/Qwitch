@@ -298,8 +298,15 @@ pub enum RoutingAttemptOutcome {
     Cooldown429,
     #[serde(rename = "401_refreshed")]
     Refreshed401,
+    #[serde(rename = "auth_expired")]
+    AuthExpired,
     #[serde(rename = "skipped_active")]
     SkippedActive,
+    /// 上游返回了既非 429、也非鉴权失效的真实错误（HTTP 4xx/5xx）或请求未到达。
+    /// 此前这类失败被错误地贴上 `Cooldown429` 标签，掩盖了诸如「端点 404 / 协议不匹配」
+    /// 的真实原因，排查时被误导为限流。现单独成类，detail 里保留真实状态码与响应片段。
+    #[serde(rename = "http_error")]
+    HttpError,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

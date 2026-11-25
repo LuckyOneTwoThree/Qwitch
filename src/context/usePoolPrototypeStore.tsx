@@ -583,13 +583,17 @@ function materializeDedicatedPoolForAgent(
   for (const cand of allCandidates) {
     if (seenAccIds.has(cand.accountId)) continue;
     seenAccIds.add(cand.accountId);
+    // 后加入的订阅工具（qoder/trae/minimax 等）与源池成员走同一套「按工具勾选」口径：
+    // 初始开放为空，避免「建池瞬间把所有工具的全部模型一次性点亮」，导致用户以为
+    // 点一个工具的模型后其他工具也被连带选中。用户在该工具页勾选后才会开放并通过
+    // 后端 set_pool_tool_models 持久化，从而进入 /v1/models 可路由。
     builtMembers.push({
       id: `pm-${agentId}-${cand.accountId}`,
       accountId: cand.accountId,
       toolId: cand.toolId,
       label: cand.label,
       uidMasked: cand.uidMasked,
-      supportedModels: candidateScopedModels(cand),
+      supportedModels: [],
       tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
       channel: cand.channel,
       enabled: true,

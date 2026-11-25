@@ -10,6 +10,21 @@ use crate::storage::QwitchDatabase;
 
 use super::{load_app_settings, resolve_client_executable, AppState, SwitchProgressEvent};
 
+/// 切号结果。
+///
+/// 必须区分「切号完成」与「客户端存活已确认」：两者不是同一件事。
+/// 快照写入成功但客户端未确认存活时，界面要如实告知，而不是一律报成功。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchDesktopAccountResult {
+    /// 目标账号的会话快照是否已成功写入
+    pub switched: bool,
+    /// 是否确认到客户端主进程存活
+    pub liveness_confirmed: bool,
+    /// 存活未确认等需要用户知晓的补充说明
+    pub note: Option<String>,
+}
+
 struct SwitchFlagGuard {
     flag: Arc<AtomicBool>,
 }
@@ -72,13 +87,26 @@ async fn check_client_running_async(
         .map_err(|e| e.to_string())
 }
 
+/// 最弱存活判定：客户端是否有任意进程存在（不要求识别出主进程）。
+async fn client_process_present_async(
+    host: &Arc<dyn PlatformHost>,
+    tool_id: &str,
+) -> Result<bool, String> {
+    let h = Arc::clone(host);
+    let tid = tool_id.to_string();
+    tokio::task::spawn_blocking(move || h.client_process_present(&tid))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn switch_desktop_account(
     app: AppHandle,
     state: State<'_, AppState>,
     account_id: String,
     force_kill: bool,
-) -> Result<(), String> {
+) -> Result<SwitchDesktopAccountResult, String> {
     let _switch_guard = SwitchFlagGuard::try_acquire(Arc::clone(&state.switching_in_progress))?;
     let _queue_guard = state
         .scheduler
@@ -264,6 +292,17 @@ pub async fn switch_desktop_account(
             .await
             .unwrap_or(false);
     }
+    // 兜底：主进程未能识别，但客户端进程确实存在（例如 Electron 打包客户端
+    // 的主二进制名为 `Electron`，极端情况下识别不出主进程）。
+    // 此时**不得**回滚会话快照 —— 回滚会与正在运行的客户端抢同一个会话文件，
+    // 把「切换其实已生效」变成「切换被撤销」。
+    let mut liveness_confirmed = alive;
+    if !alive {
+        alive = client_process_present_async(&state.host, &summary.tool_id)
+            .await
+            .unwrap_or(false);
+        liveness_confirmed = false;
+    }
     if !alive {
         let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
         // 失败后尽力把原客户端重新拉起，避免用户被留在“客户端已关闭”状态
@@ -309,6 +348,15 @@ pub async fn switch_desktop_account(
         return Err(msg);
     }
 
+    let note = if liveness_confirmed {
+        None
+    } else {
+        Some(
+            "已写入目标账号会话并拉起客户端，但未确认到客户端主进程存活；若客户端未正常打开请手动启动"
+                .to_string(),
+        )
+    };
+
     let _ = state.db.append_action_log(
         Some(&summary.id),
         &summary.tool_id,
@@ -347,7 +395,11 @@ pub async fn switch_desktop_account(
         }
     });
 
-    Ok(())
+    Ok(SwitchDesktopAccountResult {
+        switched: true,
+        liveness_confirmed,
+        note,
+    })
 }
 
 #[cfg(test)]

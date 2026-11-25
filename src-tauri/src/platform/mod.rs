@@ -287,6 +287,14 @@ pub trait PlatformHost: Send + Sync {
     fn client_config_dir(&self, tool_id: &str) -> Result<PathBuf, HostError>;
     fn detect_client_executable(&self, tool_id: &str) -> Option<PathBuf>;
     fn is_client_running(&self, tool_id: &str) -> Result<bool, HostError>;
+    /// 判断客户端是否有**任何**进程存在（不区分主进程与辅助进程）。
+    ///
+    /// 用于「客户端已拉起、但主进程未被确认存活」的兜底判定：
+    /// 这种情况下**不应**回滚已经写入的会话快照（回滚会与正在运行的客户端
+    /// 抢同一个会话文件）。默认实现复用 `is_client_running`。
+    fn client_process_present(&self, tool_id: &str) -> Result<bool, HostError> {
+        self.is_client_running(tool_id)
+    }
     async fn terminate_client_gracefully(
         &self,
         tool_id: &str,
@@ -337,6 +345,10 @@ impl PlatformHost for ScopedPlatformHost {
 
     fn is_client_running(&self, tool_id: &str) -> Result<bool, HostError> {
         self.inner.is_client_running(tool_id)
+    }
+
+    fn client_process_present(&self, tool_id: &str) -> Result<bool, HostError> {
+        self.inner.client_process_present(tool_id)
     }
 
     async fn terminate_client_gracefully(
@@ -589,10 +601,22 @@ impl NativePlatformHost {
     }
 
     /// 解析 `ps -axo pid=,command=` 的输出，判断指定 `.app` bundle 是否存在非辅助主进程。
+    ///
+    /// **主二进制名不一定与 `.app` 同名**：WorkBuddy、Trae CN 等 Electron 打包
+    /// 客户端把主可执行文件命名为 `Electron`（Electron 打包的默认产物名），
+    /// 形如 `/Applications/WorkBuddy.app/Contents/MacOS/Electron`。
+    /// 历史实现要求 argv[0] 严格等于 `/<App>.app/Contents/MacOS/<App>`，
+    /// 对这类客户端**永远匹配不到** → 误判「客户端未运行」，连锁后果：
+    /// ① 切号时跳过优雅关闭，旧进程仍持有会话文件；
+    /// ② 切号后的存活轮询必然超时，UI 一直卡在「重启桌面端」，
+    ///    最终还被判为失败并回滚快照 —— 而客户端其实已经起来了。
+    ///
+    /// 现改为：只要进程位于 `<App>.app/Contents/MacOS/` 目录下即视为候选主进程
+    /// （辅助进程位于 `Contents/Frameworks/...`，天然不匹配该路径），
+    /// 再沿用既有的 argv 辅助进程过滤排除 Native Messaging Host / Renderer / GPU。
     #[cfg(target_os = "macos")]
     fn parse_macos_ps_has_main_process(ps_stdout: &str, app_name: &str) -> bool {
-        let clean = app_name.trim_end_matches(".app");
-        let main_bin = format!("/{app_name}/Contents/MacOS/{clean}");
+        let bundle_dir = format!("/{app_name}/Contents/MacOS/");
 
         for line in ps_stdout.lines() {
             let mut parts = line.trim_start().splitn(2, char::is_whitespace);
@@ -601,21 +625,38 @@ impl NativePlatformHost {
                 continue;
             };
             let command = command.trim();
-            let Some(idx) = command.find(&main_bin) else {
+            let Some(idx) = command.find(&bundle_dir) else {
                 continue;
             };
-            let after = &command[idx + main_bin.len()..];
-            // 主二进制之后必须紧跟结尾或空白字符，防止前缀误命中（如 Helper 可执行文件）
-            if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+            let after = &command[idx + bundle_dir.len()..];
+            // 紧跟路径的必须是可执行文件名（argv[0] 的 basename），不能是路径中段
+            let argv0_end = after.find(char::is_whitespace).unwrap_or(after.len());
+            let argv0 = &after[..argv0_end];
+            if argv0.is_empty() || argv0.contains('/') {
                 continue;
             }
 
-            let rest = after.trim();
+            let rest = after[argv0_end..].trim();
             if rest.is_empty() || !Self::is_macos_helper_argv(rest) {
                 return true;
             }
         }
         false
+    }
+
+    /// 判断指定 `.app` bundle 下是否存在**任意**进程（不区分主/辅助）。
+    ///
+    /// 与 `is_macos_app_bundle_running` 的差别只在于不做主进程识别，
+    /// 用于「客户端确实已拉起」的最弱判定。
+    #[cfg(target_os = "macos")]
+    fn is_macos_bundle_process_present(app_name: &str) -> bool {
+        let bundle_needle = format!("/{}/Contents/MacOS/", escape_pgrep_regex(app_name));
+        Command::new("pgrep")
+            .args(["-f", &bundle_needle])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     }
 
     /// 判断 Electron 系 macOS 应用的**主进程**是否在运行。
@@ -1235,6 +1276,25 @@ impl PlatformHost for NativePlatformHost {
     fn is_client_running(&self, tool_id: &str) -> Result<bool, HostError> {
         let (primary_names, proc_names) = self.resolve_target_process_names(tool_id);
         Self::is_client_running_names(&primary_names, &proc_names)
+    }
+
+    /// 只要客户端 bundle 下存在任意进程即视为「进程存在」。
+    ///
+    /// 与 `is_client_running` 的区别是不要求能识别出主进程：
+    /// Electron 打包客户端（WorkBuddy / Trae CN）的主二进制名为 `Electron`，
+    /// 在极端情况下（如主进程刚启动尚未就绪）可能识别不出主进程，
+    /// 但此时客户端进程确实已经拉起，不应据此回滚会话快照。
+    fn client_process_present(&self, tool_id: &str) -> Result<bool, HostError> {
+        #[cfg(target_os = "macos")]
+        {
+            let (primary_names, _) = self.resolve_target_process_names(tool_id);
+            for app_name in &primary_names {
+                if Self::is_macos_bundle_process_present(app_name) {
+                    return Ok(true);
+                }
+            }
+        }
+        self.is_client_running(tool_id)
     }
 
     async fn terminate_client_gracefully(
@@ -2308,6 +2368,75 @@ mod macos_process_detection_tests {
             ),
             "/Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs"
         );
+    }
+
+    /// 回归：Electron 打包客户端的主二进制名为 `Electron`，与 `.app` 同名假设不成立。
+    ///
+    /// WorkBuddy / Trae CN 的主进程形如
+    /// `/Applications/WorkBuddy.app/Contents/MacOS/Electron`。
+    /// 历史实现要求 argv[0] 严格等于 `/<App>.app/Contents/MacOS/<App>`，
+    /// 对这类客户端永远匹配不到 → 误判「客户端未运行」→ 切号后卡死在「重启桌面端」。
+    #[test]
+    fn electron_named_main_binary_is_detected() {
+        let ps_workbuddy = "\
+26126 /Applications/WorkBuddy.app/Contents/MacOS/Electron
+27365 /Applications/WorkBuddy.app/Contents/MacOS/Electron --disable-warning=ExperimentalWarning /Applications/WorkBuddy.app/Contents/Resources/app.asar/main/daemon-app-server-entry.js --stdio
+26758 /Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper.app/Contents/MacOS/WorkBuddy Helper --type=gpu-process
+";
+        assert!(
+            NativePlatformHost::parse_macos_ps_has_main_process(ps_workbuddy, "WorkBuddy.app"),
+            "主二进制名为 Electron 时也必须判定为运行中"
+        );
+
+        let ps_trae = "101 /Applications/Trae CN.app/Contents/MacOS/Electron\n";
+        assert!(NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_trae,
+            "Trae CN.app"
+        ));
+    }
+
+    /// 放宽主二进制名匹配后，辅助进程仍不得被误判为主进程。
+    #[test]
+    fn helper_only_processes_are_still_excluded() {
+        let ps_helpers = "\
+301 /Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper.app/Contents/MacOS/WorkBuddy Helper --type=gpu-process
+302 /Applications/Trae CN.app/Contents/Frameworks/Trae CN Helper.app/Contents/MacOS/Trae CN Helper --type=renderer
+303 /Applications/Qoder CN.app/Contents/MacOS/Qoder CN /Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs
+";
+        assert!(!NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_helpers,
+            "WorkBuddy.app"
+        ));
+        assert!(!NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_helpers,
+            "Trae CN.app"
+        ));
+        assert!(!NativePlatformHost::parse_macos_ps_has_main_process(
+            ps_helpers,
+            "Qoder CN.app"
+        ));
+    }
+
+    /// 端到端：本机若真的跑着 WorkBuddy，必须判定为运行中。
+    ///
+    /// 这条断言直接覆盖用户遇到的现场：客户端明明在运行，
+    /// 却被判为未运行 → 切号跳过优雅关闭 → 拉起后存活确认必然超时。
+    #[test]
+    fn detection_reports_running_for_live_electron_client() {
+        let ps_out = std::process::Command::new("ps")
+            .args(["-axo", "command="])
+            .output();
+        let Ok(o) = ps_out else { return };
+        let s = String::from_utf8_lossy(&o.stdout);
+        if s.lines()
+            .any(|l| l.contains("/WorkBuddy.app/Contents/MacOS/"))
+        {
+            let host = NativePlatformHost;
+            assert!(
+                host.is_client_running("workbuddy").expect("检测不应失败"),
+                "WorkBuddy 正在运行时必须判定为运行中"
+            );
+        }
     }
 
     /// 端到端：真实探测本机 Qoder 主进程。

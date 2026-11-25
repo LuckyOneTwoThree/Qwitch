@@ -21,7 +21,7 @@ const PHASE_RANK: Record<string, number> = {
 const STEP_TEXT: Record<string, string> = {
   closing: "正在优雅关闭本机客户端并等待文件锁释放...",
   writing: "正在写入目标账号加密会话快照...",
-  launching: "正在重新拉起桌面客户端...",
+  launching: "正在重新拉起桌面客户端并确认存活（大体积客户端冷启动最长约 45 秒）...",
   done: "切换完成，客户端已使用新账号启动！",
 };
 

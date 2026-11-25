@@ -64,6 +64,13 @@ interface UseAccountStoreDeps {
  * Account 域 store（四 store 中的主 store）：账号池、客户端状态、查额/领取/切号/导入，
  * 以及后端事件监听、定时自动刷新等编排。依赖注入 Log / Settings / Feedback 三个 store。
  */
+/** 切号结果：快照是否写入、客户端存活是否确认、补充说明 */
+interface SwitchDesktopAccountResult {
+  switched: boolean;
+  livenessConfirmed: boolean;
+  note?: string | null;
+}
+
 export function useAccountStore({
   isTauriRuntime,
   isTrayWindow,
@@ -853,7 +860,7 @@ export function useAccountStore({
         isClientRunning: switchDialog.isClientRunning,
       });
       try {
-        await invoke("switch_desktop_account", {
+        const result = await invoke<SwitchDesktopAccountResult>("switch_desktop_account", {
           accountId: target.id,
           forceKill: true,
         });
@@ -867,7 +874,15 @@ export function useAccountStore({
           coldSwitchDoneTimerRef.current = null;
           coldSwitchSubmittingRef.current = false;
           setSwitchDialog({ account: null, phase: "confirm" });
-          showToast(`本机客户端已切换至 ${target.label}`, "success");
+          // 快照写入成功 ≠ 客户端已确认存活：两者分开播报，不一律报成功
+          if (result && result.livenessConfirmed === false) {
+            showToast(
+              `已切换至 ${target.label}，但未确认客户端存活${result.note ? `：${result.note}` : ""}`,
+              "warning"
+            );
+          } else {
+            showToast(`本机客户端已切换至 ${target.label}`, "success");
+          }
         }, 650);
       } catch (err) {
         coldSwitchSubmittingRef.current = false;

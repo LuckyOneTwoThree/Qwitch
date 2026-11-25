@@ -44,6 +44,10 @@ export const ACTION_TYPE_META: Record<
     label: "账号管理",
     style: "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300",
   },
+  keepalive: {
+    label: "凭据保活",
+    style: "bg-teal-500/12 text-teal-800 dark:text-teal-300",
+  },
 };
 
 export const formatLogDayLabel = (iso: string) => {

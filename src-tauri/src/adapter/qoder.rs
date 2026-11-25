@@ -30,6 +30,7 @@ const QODER_CLIENT_ID: &str = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
 const AUTH_DAT_FILE: &str = "auth.v1.dat";
 const MACHINE_ID_FILE: &str = "auth.machine-id";
 const APP_STATUS_SNAPSHOT_KEY: &str = "qoder_app_status.json";
+const REFRESH_SKEW_MS: i64 = 10 * 60 * 1000;
 
 #[cfg(target_os = "windows")]
 const LOCAL_STATE_FILE: &str = "Local State";
@@ -37,6 +38,7 @@ const LOCAL_STATE_FILE: &str = "Local State";
 pub struct QoderAdapter {
     manifest: AdapterManifest,
     http: reqwest::Client,
+    base_url: String,
     /// 注入的平台宿主。为 None 时回退到 `NativePlatformHost`。
     ///
     /// 历史实现在 `read_local_machine_id_fallback` 内自造 `NativePlatformHost`，
@@ -49,6 +51,13 @@ impl QoderAdapter {
     pub fn with_host(host: Arc<dyn PlatformHost>) -> Self {
         let mut adapter = Self::new();
         adapter.host = Some(host);
+        adapter
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_base_url(base: impl Into<String>) -> Self {
+        let mut adapter = Self::new();
+        adapter.base_url = base.into().trim_end_matches('/').to_string();
         adapter
     }
 
@@ -154,6 +163,7 @@ impl QoderAdapter {
 
         Self {
             host: None,
+            base_url: DEFAULT_BASE_URL.to_string(),
             manifest: AdapterManifest {
                 id: "qoder_cn".to_string(),
                 name: "Qoder CN".to_string(),
@@ -665,6 +675,7 @@ impl QoderAdapter {
         if !machine_id.trim().is_empty() {
             extra.insert("machine_id".to_string(), machine_id.trim().to_string());
         }
+        let expires_at = Self::parse_token_expiry_ms(&body);
 
         Ok(Some(CredentialEnvelope {
             tool_id: "qoder_cn".to_string(),
@@ -674,7 +685,7 @@ impl QoderAdapter {
             payload: CredentialPayload::Token {
                 access_token: token.to_string(),
                 refresh_token,
-                expires_at: None,
+                expires_at,
                 extra,
             },
         }))
@@ -732,6 +743,140 @@ impl QoderAdapter {
             buckets,
             fetched_at: Utc::now().to_rfc3339(),
         }
+    }
+
+    fn parse_token_expiry_ms(body: &Value) -> Option<i64> {
+        if let Some(s) = body
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                return Some(dt.timestamp_millis());
+            }
+        }
+        if let Some(n) = body.get("expires_at").and_then(|v| v.as_i64()) {
+            if n > 0 {
+                return Some(if n < 10_000_000_000 {
+                    n.saturating_mul(1000)
+                } else {
+                    n
+                });
+            }
+        }
+        if let Some(ei) = body.get("expires_in").and_then(|v| v.as_i64()) {
+            if ei > 0 {
+                let delta_ms = if ei > 86_400 * 30 {
+                    ei
+                } else {
+                    ei.saturating_mul(1000)
+                };
+                return Some(Utc::now().timestamp_millis().saturating_add(delta_ms));
+            }
+        }
+        None
+    }
+
+    async fn refresh_credential_inner(
+        &self,
+        cred: &CredentialEnvelope,
+        force: bool,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let CredentialPayload::Token {
+            refresh_token,
+            expires_at,
+            ..
+        } = &cred.payload
+        else {
+            return Ok(None);
+        };
+        let Some(rt) = refresh_token
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        let now_ms = Utc::now().timestamp_millis();
+        if !force {
+            let Some(exp) = expires_at.map(|e| {
+                if e < 10_000_000_000 {
+                    e.saturating_mul(1000)
+                } else {
+                    e
+                }
+            }) else {
+                return Ok(None);
+            };
+            if exp - now_ms >= REFRESH_SKEW_MS {
+                return Ok(None);
+            }
+        }
+
+        let url = format!("{}/api/v1/deviceToken/refresh", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header(ACCEPT, "application/json")
+            .header(USER_AGENT, "qoder/0.5.14")
+            .json(&serde_json::json!({ "refresh_token": rt }))
+            .send()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("刷新 Qoder 登录态失败: {}", e.without_url()),
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: "Qoder 刷新令牌已失效，请重新扫码/授权登录".into(),
+            });
+        }
+        if !status.is_success() {
+            return Err(map_http_status(status, "刷新 Qoder 登录态"));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("解析 Qoder 刷新响应失败: {e}"),
+        })?;
+        let token = body
+            .get("token")
+            .or_else(|| body.get("device_token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "Qoder 刷新响应缺少 token".into(),
+            })?
+            .to_string();
+        let new_refresh = body
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(rt.as_str())
+            .to_string();
+        let new_expires_at = Self::parse_token_expiry_ms(&body);
+
+        let mut updated = cred.clone();
+        if let CredentialPayload::Token {
+            access_token,
+            refresh_token: rt_slot,
+            expires_at: exp_slot,
+            ..
+        } = &mut updated.payload
+        {
+            *access_token = token;
+            *rt_slot = Some(new_refresh);
+            *exp_slot = new_expires_at;
+        }
+        Ok(Some(updated))
     }
 }
 
@@ -1177,6 +1322,20 @@ impl ToolAdapter for QoderAdapter {
         })
     }
 
+    async fn refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, false).await
+    }
+
+    async fn force_refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, true).await
+    }
+
     async fn apply_session(
         &self,
         host: &dyn PlatformHost,
@@ -1507,5 +1666,127 @@ mod capture_snapshot_tests {
                 env.uid
             );
         }
+    }
+
+    #[tokio::test]
+    async fn qoder_refresh_rotates_device_token_and_maps_401_vs_500() {
+        use super::*;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let adapter = QoderAdapter::with_base_url(server.uri());
+
+        let fresh_cred = CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid: "qd-1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "dt-1".into(),
+                refresh_token: Some("drt-1".into()),
+                expires_at: Some(Utc::now().timestamp_millis() + 3_600_000),
+                extra: HashMap::new(),
+            },
+        };
+        assert!(adapter
+            .refresh_credential(&fresh_cred)
+            .await
+            .expect("fresh skip")
+            .is_none());
+
+        let near_cred = CredentialEnvelope {
+            tool_id: "qoder_cn".to_string(),
+            uid: "qd-1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "dt-1".into(),
+                refresh_token: Some("drt-1".into()),
+                expires_at: Some(Utc::now().timestamp_millis() + 60_000),
+                extra: HashMap::new(),
+            },
+        };
+
+        let next_rfc3339 = (Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/deviceToken/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_token": "dt-2",
+                "refresh_token": "drt-2",
+                "expires_at": next_rfc3339
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let updated = adapter
+            .refresh_credential(&near_cred)
+            .await
+            .expect("refresh ok")
+            .expect("updated envelope");
+        match &updated.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                ..
+            } => {
+                assert_eq!(access_token, "dt-2");
+                assert_eq!(refresh_token.as_deref(), Some("drt-2"));
+                assert!(expires_at.unwrap_or(0) > Utc::now().timestamp_millis() + 3_600_000);
+            }
+            _ => panic!("expected Token"),
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/deviceToken/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_token": "dt-forced",
+                "refresh_token": "drt-forced",
+                "expires_in": 7200
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let forced = adapter
+            .force_refresh_credential(&fresh_cred)
+            .await
+            .expect("force ok")
+            .expect("forced envelope");
+        match &forced.payload {
+            CredentialPayload::Token { access_token, .. } => {
+                assert_eq!(access_token, "dt-forced");
+            }
+            _ => panic!("expected Token"),
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/deviceToken/refresh"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            adapter.refresh_credential(&near_cred).await,
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            })
+        ));
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/deviceToken/refresh"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            adapter.refresh_credential(&near_cred).await,
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                ..
+            })
+        ));
     }
 }

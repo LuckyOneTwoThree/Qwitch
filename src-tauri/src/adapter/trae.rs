@@ -39,6 +39,9 @@ const DEVICE_CRED_PREFIX: &str = "iCubeAuthInfo://icube-dc:";
 const SERVER_DATA_PREFIX: &str = "iCubeServerData://";
 const DEFAULT_TRAE_APP_VERSION: &str = "3.4.22";
 const CLAIM_CODE_DEVICE_ALREADY_CHECKED_IN: i64 = 9095;
+const REFRESH_SKEW_SECS: i64 = 10 * 60;
+const TRAE_CN_CLIENT_ID: &str = "ono9krqynydwx5";
+const TRAE_GLOBAL_CLIENT_ID: &str = "7f00001";
 
 struct TraeDeviceHeaders {
     device_id: String,
@@ -111,6 +114,8 @@ pub struct TraeAdapter {
     http: reqwest::Client,
     host: Option<Arc<dyn PlatformHost>>,
     device_cache: OnceLock<Option<Arc<TraeDeviceHeaders>>>,
+    #[cfg(test)]
+    api_base_override: Option<String>,
 }
 
 impl TraeAdapter {
@@ -144,6 +149,8 @@ impl TraeAdapter {
             http,
             host,
             device_cache: OnceLock::new(),
+            #[cfg(test)]
+            api_base_override: None,
         }
     }
 
@@ -153,6 +160,13 @@ impl TraeAdapter {
 
     pub fn with_host(is_cn: bool, host: Arc<dyn PlatformHost>) -> Self {
         Self::new_inner(is_cn, Some(host))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_api_base(is_cn: bool, base: impl Into<String>) -> Self {
+        let mut adapter = Self::new_inner(is_cn, None);
+        adapter.api_base_override = Some(base.into().trim_end_matches('/').to_string());
+        adapter
     }
 
     fn tool_id(&self) -> &str {
@@ -638,7 +652,11 @@ impl TraeAdapter {
         Ok(())
     }
 
-    fn base_api_url(&self) -> &'static str {
+    fn base_api_url(&self) -> &str {
+        #[cfg(test)]
+        if let Some(ref ovr) = self.api_base_override {
+            return ovr.as_str();
+        }
         if self.is_cn {
             "https://api.trae.cn"
         } else {
@@ -1108,6 +1126,152 @@ impl TraeAdapter {
                 root_obj.insert(k, v);
             }
         }
+    }
+
+    async fn refresh_credential_inner(
+        &self,
+        cred: &CredentialEnvelope,
+        force: bool,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let CredentialPayload::Token {
+            access_token,
+            refresh_token,
+            expires_at,
+            ..
+        } = &cred.payload
+        else {
+            return Ok(None);
+        };
+        let Some(rt) = refresh_token
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        let exp_secs = expires_at
+            .map(|e| if e >= 10_000_000_000 { e / 1000 } else { e })
+            .or_else(|| {
+                Self::extract_jwt_claims(access_token)
+                    .and_then(|c| c.get("exp").and_then(|v| v.as_i64()))
+            });
+        let now_secs = Utc::now().timestamp();
+        if !force {
+            let Some(exp) = exp_secs else {
+                return Ok(None);
+            };
+            if exp - now_secs > REFRESH_SKEW_SECS {
+                return Ok(None);
+            }
+        }
+
+        let client_id = if self.is_cn {
+            TRAE_CN_CLIENT_ID
+        } else {
+            TRAE_GLOBAL_CLIENT_ID
+        };
+        let url = format!(
+            "{}/cloudide/api/v3/trae/oauth/ExchangeToken",
+            self.base_api_url()
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json")
+            .json(&serde_json::json!({
+                "ClientID": client_id,
+                "RefreshToken": rt,
+                "ClientSecret": "-",
+                "UserID": ""
+            }))
+            .send()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("刷新 Trae 登录态失败: {}", e.without_url()),
+            })?;
+
+        let status = resp.status();
+        if matches!(status.as_u16(), 400 | 401 | 403) {
+            let err_text = resp.text().await.unwrap_or_default();
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: format!(
+                    "Trae 刷新令牌已失效，请重新登录 ({})",
+                    err_text.chars().take(120).collect::<String>()
+                ),
+            });
+        }
+        if !status.is_success() {
+            return Err(map_http_status(status, "刷新 Trae 登录态"));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("解析 Trae 刷新响应失败: {e}"),
+        })?;
+        if let Some(err_obj) = body
+            .pointer("/ResponseMetadata/Error")
+            .filter(|v| !v.is_null())
+        {
+            let msg = err_obj
+                .get("Message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ExchangeToken failed");
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: format!("Trae 刷新令牌已失效: {msg}"),
+            });
+        }
+
+        let res = body
+            .get("Result")
+            .or_else(|| body.get("result"))
+            .unwrap_or(&body);
+        let new_token = res
+            .get("Token")
+            .or_else(|| res.get("token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "Trae 刷新响应缺少 Token".into(),
+            })?
+            .to_string();
+        let new_refresh = res
+            .get("RefreshToken")
+            .or_else(|| res.get("refresh_token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(rt.as_str())
+            .to_string();
+        let new_expires_at = res
+            .get("TokenExpireAt")
+            .or_else(|| res.get("token_expire_at"))
+            .and_then(|v| v.as_i64())
+            .map(|e| if e >= 10_000_000_000 { e / 1000 } else { e })
+            .or_else(|| {
+                Self::extract_jwt_claims(&new_token)
+                    .and_then(|c| c.get("exp").and_then(|v| v.as_i64()))
+            });
+
+        let mut updated = cred.clone();
+        if let CredentialPayload::Token {
+            access_token: at,
+            refresh_token: rt_slot,
+            expires_at: exp_slot,
+            ..
+        } = &mut updated.payload
+        {
+            *at = new_token;
+            *rt_slot = Some(new_refresh);
+            *exp_slot = new_expires_at;
+        }
+        Ok(Some(updated))
     }
 }
 
@@ -1654,6 +1818,20 @@ impl ToolAdapter for TraeAdapter {
             reward_summary,
             updated_quota: refreshed,
         })
+    }
+
+    async fn refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, false).await
+    }
+
+    async fn force_refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, true).await
     }
 
     async fn apply_session(
@@ -2302,6 +2480,120 @@ mod tests {
             TraeAdapter::parse_auth_entries_from_storage(&logged_out),
             Err(AdapterError::Unified {
                 code: UnifiedErrorCode::ClientNotFound,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn trae_refresh_exchanges_token_forces_fresh_and_maps_400_to_expired() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let adapter = TraeAdapter::with_api_base(true, server.uri());
+
+        let fresh_cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "tr-1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "jwt-1".into(),
+                refresh_token: Some("rt-1".into()),
+                expires_at: Some(Utc::now().timestamp() + 3600),
+                extra: HashMap::new(),
+            },
+        };
+        assert!(adapter
+            .refresh_credential(&fresh_cred)
+            .await
+            .expect("fresh skip")
+            .is_none());
+
+        let near_cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "tr-1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "jwt-1".into(),
+                refresh_token: Some("rt-1".into()),
+                expires_at: Some(Utc::now().timestamp() + 60),
+                extra: HashMap::new(),
+            },
+        };
+        let next_exp = Utc::now().timestamp() + 86_400;
+        Mock::given(method("POST"))
+            .and(path("/cloudide/api/v3/trae/oauth/ExchangeToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Result": {
+                    "Token": "jwt-2",
+                    "RefreshToken": "rt-2",
+                    "TokenExpireAt": next_exp
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let updated = adapter
+            .refresh_credential(&near_cred)
+            .await
+            .expect("exchange ok")
+            .expect("updated envelope");
+        match &updated.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                ..
+            } => {
+                assert_eq!(access_token, "jwt-2");
+                assert_eq!(refresh_token.as_deref(), Some("rt-2"));
+                assert_eq!(*expires_at, Some(next_exp));
+            }
+            _ => panic!("expected Token"),
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/cloudide/api/v3/trae/oauth/ExchangeToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Result": {
+                    "Token": "jwt-forced",
+                    "RefreshToken": "rt-forced",
+                    "TokenExpireAt": next_exp
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let forced = adapter
+            .force_refresh_credential(&fresh_cred)
+            .await
+            .expect("force ok")
+            .expect("forced envelope");
+        match &forced.payload {
+            CredentialPayload::Token { access_token, .. } => {
+                assert_eq!(access_token, "jwt-forced");
+            }
+            _ => panic!("expected Token"),
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/cloudide/api/v3/trae/oauth/ExchangeToken"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "ResponseMetadata": {
+                    "Error": { "Code": "10101", "Message": "refresh token is not matched to the client" }
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            adapter.refresh_credential(&near_cred).await,
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
                 ..
             })
         ));

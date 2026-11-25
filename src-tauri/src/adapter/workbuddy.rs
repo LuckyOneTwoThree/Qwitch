@@ -28,6 +28,8 @@ const DEFAULT_ENDPOINT: &str = "https://copilot.tencent.com";
 const WEB_AUTH_ORIGIN: &str = "https://www.workbuddy.cn";
 const AUTH_FILENAME: &str = "workbuddy-desktop.info";
 const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
+/// accessToken 距离过期不足 10 分钟时提前续期
+const REFRESH_SKEW_MS: i64 = 10 * 60 * 1000;
 
 const AUTH_HELPER_JS: &str = r#"'use strict';
 const crypto = require('crypto');
@@ -144,6 +146,16 @@ pub struct WorkBuddyAdapter {
     /// `NativePlatformHost`，导致多实例 profile 导入使用的 `ScopedPlatformHost`
     /// 无法影响这两条路径（读取的是真实本机配置而非隔离 profile）。
     host: Option<Arc<dyn PlatformHost>>,
+    #[cfg(test)]
+    api_base_override: Option<String>,
+}
+
+struct WorkBuddyRefreshContext {
+    endpoint: String,
+    refresh_token: String,
+    expires_at_ms: Option<i64>,
+    domain: String,
+    enterprise_id: Option<String>,
 }
 
 impl WorkBuddyAdapter {
@@ -151,6 +163,13 @@ impl WorkBuddyAdapter {
     pub fn with_host(host: Arc<dyn PlatformHost>) -> Self {
         let mut adapter = Self::new();
         adapter.host = Some(host);
+        adapter
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_api_base(base: impl Into<String>) -> Self {
+        let mut adapter = Self::new();
+        adapter.api_base_override = Some(base.into().trim_end_matches('/').to_string());
         adapter
     }
 
@@ -166,6 +185,8 @@ impl WorkBuddyAdapter {
 
         Self {
             host: None,
+            #[cfg(test)]
+            api_base_override: None,
             manifest: AdapterManifest {
                 id: "workbuddy".to_string(),
                 name: "WorkBuddy".to_string(),
@@ -998,6 +1019,286 @@ impl WorkBuddyAdapter {
             fetched_at: Utc::now().to_rfc3339(),
         })
     }
+
+    fn jwt_exp_ms(claims: &Value) -> Option<i64> {
+        let exp = claims.get("exp").and_then(|v| v.as_i64())?;
+        Some(if exp < 10_000_000_000 {
+            exp.saturating_mul(1000)
+        } else {
+            exp
+        })
+    }
+
+    fn extract_refresh_context(cred: &CredentialEnvelope) -> Option<WorkBuddyRefreshContext> {
+        match &cred.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                extra,
+            } => {
+                let rt = refresh_token
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())?;
+                let raw_ep = extra
+                    .get("endpoint")
+                    .map(String::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(DEFAULT_ENDPOINT);
+                let endpoint =
+                    Self::validate_endpoint(raw_ep).unwrap_or_else(|_| DEFAULT_ENDPOINT.into());
+                let domain = extra
+                    .get("domain")
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        reqwest::Url::parse(&endpoint)
+                            .ok()
+                            .and_then(|u| u.host_str().map(str::to_string))
+                    })
+                    .unwrap_or_else(|| "copilot.tencent.com".to_string());
+                let exp_ms = expires_at
+                    .map(|e| {
+                        if e < 10_000_000_000 {
+                            e.saturating_mul(1000)
+                        } else {
+                            e
+                        }
+                    })
+                    .or_else(|| decode_jwt_claims(access_token).and_then(|c| Self::jwt_exp_ms(&c)));
+                let enterprise_id = extra
+                    .get("enterprise_id")
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                Some(WorkBuddyRefreshContext {
+                    endpoint,
+                    refresh_token: rt,
+                    expires_at_ms: exp_ms,
+                    domain,
+                    enterprise_id,
+                })
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                let rt = files
+                    .get("decrypted_refresh_token.txt")
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())?;
+                let exp_ms = files
+                    .get(DECRYPTED_TOKEN_FILE)
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .and_then(|tok| decode_jwt_claims(tok.trim()))
+                    .and_then(|c| Self::jwt_exp_ms(&c));
+                let sess = files
+                    .get(AUTH_FILENAME)
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|raw| Self::parse_session_json(&raw).ok());
+                let raw_ep = sess
+                    .as_ref()
+                    .and_then(|s| s.pointer("/auth/endpoint").and_then(|v| v.as_str()))
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(DEFAULT_ENDPOINT);
+                let endpoint =
+                    Self::validate_endpoint(raw_ep).unwrap_or_else(|_| DEFAULT_ENDPOINT.into());
+                let domain = sess
+                    .as_ref()
+                    .and_then(|s| s.pointer("/auth/domain").and_then(|v| v.as_str()))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        reqwest::Url::parse(&endpoint)
+                            .ok()
+                            .and_then(|u| u.host_str().map(str::to_string))
+                    })
+                    .unwrap_or_else(|| "copilot.tencent.com".to_string());
+                let enterprise_id = sess
+                    .as_ref()
+                    .and_then(|s| s.pointer("/account/enterpriseId").and_then(|v| v.as_str()))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                Some(WorkBuddyRefreshContext {
+                    endpoint,
+                    refresh_token: rt,
+                    expires_at_ms: exp_ms,
+                    domain,
+                    enterprise_id,
+                })
+            }
+            CredentialPayload::Cookies { .. } => None,
+        }
+    }
+
+    async fn refresh_credential_inner(
+        &self,
+        cred: &CredentialEnvelope,
+        force: bool,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let Some(WorkBuddyRefreshContext {
+            endpoint,
+            refresh_token: rt,
+            expires_at_ms: exp_ms,
+            domain,
+            enterprise_id,
+        }) = Self::extract_refresh_context(cred)
+        else {
+            return Ok(None);
+        };
+        let now_ms = Utc::now().timestamp_millis();
+        if !force {
+            let Some(exp) = exp_ms else {
+                return Ok(None);
+            };
+            if exp - now_ms >= REFRESH_SKEW_MS {
+                return Ok(None);
+            }
+        }
+
+        #[cfg(test)]
+        let base = self.api_base_override.as_deref().unwrap_or(&endpoint);
+        #[cfg(not(test))]
+        let base = endpoint.as_str();
+        let url = format!("{base}/v2/plugin/auth/token/refresh");
+
+        let mut req = self
+            .http
+            .post(&url)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, "WorkBuddy")
+            .header("X-Refresh-Token", rt.as_str())
+            .header("X-Auth-Refresh-Source", "plugin")
+            .header("X-Domain", domain.as_str());
+        if let Some(eid) = enterprise_id.as_deref() {
+            req = req
+                .header("X-Enterprise-Id", eid)
+                .header("X-Tenant-Id", eid);
+        }
+        let resp = req
+            .body("{}")
+            .send()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("刷新 WorkBuddy 登录态失败: {}", e.without_url()),
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: "WorkBuddy 刷新令牌已失效，请重新登录或导入本机登录态".into(),
+            });
+        }
+        if !status.is_success() {
+            return Err(map_http_status(status, "刷新 WorkBuddy 登录态"));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("解析 WorkBuddy 刷新响应失败: {e}"),
+        })?;
+        if let Some(code) = body.get("code").and_then(|v| v.as_i64()) {
+            if code != 0 {
+                let msg = body
+                    .get("msg")
+                    .or_else(|| body.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("WorkBuddy 刷新被拒绝");
+                if matches!(code, 401 | 403 | 10002 | 10003)
+                    || msg.to_ascii_lowercase().contains("expired")
+                    || msg.to_ascii_lowercase().contains("invalid")
+                {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::AuthExpired,
+                        message: format!("WorkBuddy 登录态已失效: {msg}"),
+                    });
+                }
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!("刷新 WorkBuddy 登录态失败: {msg}"),
+                });
+            }
+        }
+
+        let data = dig_data(&body);
+        let access_token = data
+            .get("accessToken")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "WorkBuddy 刷新响应缺少 accessToken".into(),
+            })?
+            .to_string();
+        let new_refresh = data
+            .get("refreshToken")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(rt.as_str())
+            .to_string();
+        let new_expires_at = data
+            .get("expiresIn")
+            .and_then(|v| v.as_i64())
+            .filter(|&s| s > 0)
+            .map(|s| now_ms.saturating_add(s.saturating_mul(1000)))
+            .or_else(|| decode_jwt_claims(&access_token).and_then(|c| Self::jwt_exp_ms(&c)));
+
+        let mut updated = cred.clone();
+        match &mut updated.payload {
+            CredentialPayload::Token {
+                access_token: at,
+                refresh_token: rt_slot,
+                expires_at,
+                ..
+            } => {
+                *at = access_token;
+                *rt_slot = Some(new_refresh);
+                *expires_at = new_expires_at;
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                files.insert(
+                    DECRYPTED_TOKEN_FILE.to_string(),
+                    BASE64.encode(access_token.as_bytes()),
+                );
+                files.insert(
+                    "decrypted_refresh_token.txt".to_string(),
+                    BASE64.encode(new_refresh.as_bytes()),
+                );
+                if let Some(b64) = files.get(AUTH_FILENAME).cloned() {
+                    if let Ok(raw) = BASE64.decode(b64) {
+                        if let Ok(mut sess) = Self::parse_session_json(&raw) {
+                            if let Some(auth_obj) =
+                                sess.get_mut("auth").and_then(|v| v.as_object_mut())
+                            {
+                                if auth_obj.get("accessToken").is_some_and(|v| v.is_string()) {
+                                    auth_obj.insert(
+                                        "accessToken".into(),
+                                        Value::String(access_token.clone()),
+                                    );
+                                }
+                                if auth_obj.get("refreshToken").is_some_and(|v| v.is_string()) {
+                                    auth_obj.insert(
+                                        "refreshToken".into(),
+                                        Value::String(new_refresh.clone()),
+                                    );
+                                }
+                                if let Ok(bytes) = serde_json::to_vec(&sess) {
+                                    files.insert(AUTH_FILENAME.to_string(), BASE64.encode(bytes));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            CredentialPayload::Cookies { .. } => return Ok(None),
+        }
+        Ok(Some(updated))
+    }
 }
 
 impl Default for WorkBuddyAdapter {
@@ -1342,7 +1643,7 @@ impl ToolAdapter for WorkBuddyAdapter {
                         .get("refreshToken")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    expires_at: None,
+                    expires_at: jwt_claims.as_ref().and_then(Self::jwt_exp_ms),
                     extra,
                 },
             });
@@ -1463,7 +1764,7 @@ impl ToolAdapter for WorkBuddyAdapter {
             payload: CredentialPayload::Token {
                 access_token: clean_token.to_string(),
                 refresh_token: None,
-                expires_at: None,
+                expires_at: jwt_claims.as_ref().and_then(Self::jwt_exp_ms),
                 extra,
             },
         })
@@ -1609,6 +1910,20 @@ impl ToolAdapter for WorkBuddyAdapter {
             reward_summary,
             updated_quota: Some(refreshed),
         })
+    }
+
+    async fn refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, false).await
+    }
+
+    async fn force_refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, true).await
     }
 
     async fn apply_session(
@@ -2031,5 +2346,131 @@ mod tests {
             WorkBuddyAdapter::parse_claim_response_body(reqwest::StatusCode::OK, "null").unwrap(),
             Value::Null
         );
+    }
+
+    #[tokio::test]
+    async fn workbuddy_refresh_rotates_near_expiry_forces_fresh_and_maps_401() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let adapter = WorkBuddyAdapter::with_api_base(server.uri());
+
+        let make_tok = |exp: i64| {
+            let hdr = BASE64_URL.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+            let pay =
+                BASE64_URL.encode(serde_json::json!({ "sub": "wb-1", "exp": exp }).to_string());
+            format!("{hdr}.{pay}.sig")
+        };
+
+        let fresh_exp = Utc::now().timestamp() + 3600;
+        let fresh_cred = CredentialEnvelope {
+            tool_id: "workbuddy".to_string(),
+            uid: "wb-1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: make_tok(fresh_exp),
+                refresh_token: Some("rt-old".into()),
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        assert!(adapter
+            .refresh_credential(&fresh_cred)
+            .await
+            .expect("fresh skip")
+            .is_none());
+
+        let soon_exp = Utc::now().timestamp() + 120;
+        let near_cred = CredentialEnvelope {
+            tool_id: "workbuddy".to_string(),
+            uid: "wb-1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: make_tok(soon_exp),
+                refresh_token: Some("rt-old".into()),
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        let next_tok = make_tok(Utc::now().timestamp() + 7200);
+        Mock::given(method("POST"))
+            .and(path("/v2/plugin/auth/token/refresh"))
+            .and(header("X-Refresh-Token", "rt-old"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "accessToken": next_tok,
+                    "refreshToken": "rt-new",
+                    "expiresIn": 3600
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let updated = adapter
+            .refresh_credential(&near_cred)
+            .await
+            .expect("refresh ok")
+            .expect("updated envelope");
+        match &updated.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                ..
+            } => {
+                assert_eq!(access_token, &next_tok);
+                assert_eq!(refresh_token.as_deref(), Some("rt-new"));
+                assert!(expires_at.unwrap_or(0) > Utc::now().timestamp_millis());
+            }
+            _ => panic!("expected Token"),
+        }
+
+        // force_refresh_credential 绕过未临期检查
+        let forced_tok = make_tok(Utc::now().timestamp() + 9000);
+        Mock::given(method("POST"))
+            .and(path("/v2/plugin/auth/token/refresh"))
+            .and(header("X-Refresh-Token", "rt-old"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "accessToken": forced_tok,
+                    "refreshToken": "rt-forced",
+                    "expiresIn": 7200
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let forced = adapter
+            .force_refresh_credential(&fresh_cred)
+            .await
+            .expect("force ok")
+            .expect("forced envelope");
+        match &forced.payload {
+            CredentialPayload::Token { refresh_token, .. } => {
+                assert_eq!(refresh_token.as_deref(), Some("rt-forced"));
+            }
+            _ => panic!("expected Token"),
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/v2/plugin/auth/token/refresh"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let err = adapter.refresh_credential(&near_cred).await.unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
     }
 }

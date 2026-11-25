@@ -255,14 +255,24 @@ pub fn run() {
                 let app_ka = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                    let mut failed_until: std::collections::HashMap<String, std::time::Instant> =
+                        std::collections::HashMap::new();
+                    let retry_backoff = std::time::Duration::from_secs(6 * 3600);
                     loop {
                         if let Ok(accounts) = db_ka.list_accounts(None) {
+                            let now_inst = std::time::Instant::now();
                             for acc in accounts {
                                 if matches!(
                                     acc.status,
                                     domain::AccountStatus::Disabled
                                         | domain::AccountStatus::RiskPaused
                                 ) || !acc.has_api_token
+                                {
+                                    continue;
+                                }
+                                if failed_until
+                                    .get(&acc.id)
+                                    .is_some_and(|until| now_inst < *until)
                                 {
                                     continue;
                                 }
@@ -287,6 +297,7 @@ pub fn run() {
                                     )
                                     .await
                                 {
+                                    failed_until.remove(&acc.id);
                                     let _ = app_ka.emit("qwitch://account-updated", &acc.id);
                                     let _ = app_ka.emit("qwitch://logs-updated", ());
                                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -300,6 +311,7 @@ pub fn run() {
                                 };
                                 match adapter.refresh_credential(&cred).await {
                                     Ok(Some(updated)) => {
+                                        failed_until.remove(&acc.id);
                                         if db_ka
                                             .bind_account_credential(
                                                 &master_key_ka,
@@ -325,11 +337,15 @@ pub fn run() {
                                             let _ = app_ka.emit("qwitch://logs-updated", ());
                                         }
                                     }
-                                    Ok(None) => {}
+                                    Ok(None) => {
+                                        failed_until.remove(&acc.id);
+                                    }
                                     Err(adapter::AdapterError::Unified {
                                         code: domain::UnifiedErrorCode::AuthExpired,
                                         message,
                                     }) => {
+                                        failed_until
+                                            .insert(acc.id.clone(), now_inst + retry_backoff);
                                         if summary.status != domain::AccountStatus::Expired {
                                             let _ = db_ka.update_account_status(
                                                 &acc.id,
@@ -351,7 +367,10 @@ pub fn run() {
                                             let _ = app_ka.emit("qwitch://logs-updated", ());
                                         }
                                     }
-                                    Err(_) => {}
+                                    Err(_) => {
+                                        failed_until
+                                            .insert(acc.id.clone(), now_inst + retry_backoff);
+                                    }
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                             }

@@ -154,7 +154,7 @@ export interface ActionLogItem {
   id: number;
   accountId?: string;
   toolId: ToolId;
-  actionType: "import" | "query" | "claim" | "switch";
+  actionType: "import" | "query" | "claim" | "switch" | "keepalive";
   resultStatus: "success" | "skipped" | "failed";
   errorCode?: UnifiedErrorCode;
   messageSanitized: string;

@@ -333,6 +333,7 @@ export function LogsToolbar({
                 { id: "query", label: "额度查询" },
                 { id: "switch", label: "桌面切号" },
                 { id: "import", label: "账号管理" },
+                { id: "keepalive", label: "凭据保活" },
               ] as const
             ).map((item) => (
               <button

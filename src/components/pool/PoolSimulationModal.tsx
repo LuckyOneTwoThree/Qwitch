@@ -151,101 +151,114 @@ export function PoolSimulationModal({
   ];
 
   return (
-    <Modal open={open} onClose={onClose} labelledBy={titleId} maxWidthClass="max-w-2xl">
-      <div className="flex max-h-[88vh] flex-col">
-        <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
-          <div>
-            <h2 id={titleId} className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-              网关路由连通性测试
-            </h2>
-            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-              请求穿过网关 ({gateway.host}:{gateway.port}) 时严格锁定选定模型，支持同会话连续测试冷却跳过与亲和缓存
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="关闭路由连通性测试弹窗"
-            className="btn btn-icon btn-ghost"
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
+    <Modal open={open} onClose={onClose} labelledBy={titleId} flush maxWidthClass="max-w-2xl">
+      <div className="flex items-start justify-between gap-3 border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
+        <div>
+          <h2 id={titleId} className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+            网关路由连通性测试
+          </h2>
+          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+            请求穿过网关 ({gateway.host}:{gateway.port}) 时严格锁定选定模型，支持同会话连续测试冷却跳过与亲和缓存
+          </p>
         </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="关闭路由连通性测试弹窗"
+          className="btn btn-icon btn-ghost"
+        >
+          <X className="h-4 w-4" aria-hidden="true" />
+        </button>
+      </div>
 
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div>
+            <span className="mb-1.5 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
+              1. 测试请求来源 Agent
+            </span>
+            <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="选择测试来源 Agent">
+              {agentBindings.map((b) => {
+                const active = agentId === b.agentId;
+                return (
+                  <button
+                    key={b.agentId}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setAgentId(b.agentId)}
+                    className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition ${
+                      active
+                        ? "border-brand-500 bg-brand-50/70 ring-1 ring-brand-500/20 dark:border-brand-400/60 dark:bg-brand-500/10"
+                        : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60"
+                    }`}
+                  >
+                    <AgentBrandIcon agentId={b.agentId} size="xs" />
+                    <span className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                      {b.name}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="space-y-2.5">
             <div>
-              <span className="mb-1.5 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                1. 测试请求来源 Agent
-              </span>
-              <div className="grid grid-cols-2 gap-1.5">
-                {agentBindings.map((b) => {
-                  const active = agentId === b.agentId;
-                  return (
-                    <button
-                      key={b.agentId}
-                      type="button"
-                      onClick={() => setAgentId(b.agentId)}
-                      className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition ${
-                        active
-                          ? "border-brand-500 bg-brand-50/70 ring-1 ring-brand-500/20 dark:border-brand-400/60 dark:bg-brand-500/10"
-                          : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/60"
-                      }`}
-                    >
-                      <AgentBrandIcon agentId={b.agentId} size="xs" />
-                      <span className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                        {b.name}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+              <label
+                htmlFor="sim-pool-select"
+                className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300"
+              >
+                2. 目标调度号池
+              </label>
+              <select
+                id="sim-pool-select"
+                value={poolId}
+                onChange={(e) => handlePoolChange(e.target.value)}
+                className="field-input w-full py-2"
+              >
+                {pools.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}（{POOL_STRATEGY_META[p.strategy].shortLabel}）
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div className="space-y-2.5">
-              <div>
-                <label
-                  htmlFor="sim-pool-select"
-                  className="mb-1 block text-xs font-medium text-zinc-700 dark:text-zinc-300"
-                >
-                  2. 目标调度号池
-                </label>
-                <select
-                  id="sim-pool-select"
-                  value={poolId}
-                  onChange={(e) => handlePoolChange(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-brand-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                >
-                  {pools.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}（{POOL_STRATEGY_META[p.strategy].shortLabel}）
-                    </option>
-                  ))}
-                </select>
+            {selectedAgent && (
+              <div className="flex items-center justify-between rounded-lg bg-zinc-100/80 px-2.5 py-1.5 text-[11px] dark:bg-zinc-800/70">
+                <span className="text-zinc-500 dark:text-zinc-400">入口线协议</span>
+                <span className={`badge ${WIRE_PROTOCOL_META[selectedAgent.protocol].badgeClass}`}>
+                  {WIRE_PROTOCOL_META[selectedAgent.protocol].label}
+                </span>
               </div>
+            )}
+          </div>
+        </div>
 
-              {selectedAgent && (
-                <div className="flex items-center justify-between rounded-lg bg-zinc-100/80 px-2.5 py-1.5 text-[11px] dark:bg-zinc-800/70">
-                  <span className="text-zinc-500 dark:text-zinc-400">入口线协议</span>
-                  <span className={`badge ${WIRE_PROTOCOL_META[selectedAgent.protocol].badgeClass}`}>
-                    {WIRE_PROTOCOL_META[selectedAgent.protocol].label}
-                  </span>
-                </div>
+        {/* 3. 首要选择项：目标模型 */}
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300">
+              <Cpu className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400" aria-hidden="true" />
+              3. 指定请求模型（网关严守所选模型，不私自换模）
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                session #{sessionSeq} · 已发 {turnCount} 轮
+              </span>
+              {resultTrace && (
+                <button
+                  type="button"
+                  onClick={() => setSessionSeq((s) => s + 1)}
+                  className="btn btn-xs btn-secondary gap-1"
+                  title="重开全新对话上下文（清除当前测试会话亲和记忆）"
+                >
+                  <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                  新会话
+                </button>
               )}
             </div>
           </div>
-
-          {/* 3. 首要选择项：目标模型 */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                <Cpu className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400" aria-hidden="true" />
-                3. 指定请求模型（网关严守所选模型，不私自换模）
-              </span>
-              <span className="font-mono text-[11px] text-zinc-400">
-                session #{sessionSeq} · 已发 {turnCount} 轮
-              </span>
-            </div>
             <div className="flex flex-wrap gap-1.5">
               {availableModels.length === 0 ? (
                 <div className="w-full rounded-xl border border-dashed border-zinc-300/80 bg-zinc-50/70 px-3 py-2.5 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900/50 dark:text-zinc-400">
@@ -309,13 +322,14 @@ export function PoolSimulationModal({
               className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-3 py-2 text-xs text-zinc-900 focus:border-brand-500 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-100"
             />
 
-            <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-3" role="group" aria-label="故障演练模式">
               <button
                 type="button"
+                aria-pressed={failureMode === "none"}
                 onClick={() => setFailureMode("none")}
                 className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition ${
                   failureMode === "none"
-                    ? "border-emerald-500 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200"
+                    ? "border-brand-500 bg-brand-500/10 text-brand-800 dark:text-brand-200"
                     : "border-zinc-200 bg-white text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300"
                 }`}
               >
@@ -328,6 +342,7 @@ export function PoolSimulationModal({
 
               <button
                 type="button"
+                aria-pressed={failureMode === "429_first"}
                 onClick={() => setFailureMode("429_first")}
                 className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition ${
                   failureMode === "429_first"
@@ -344,6 +359,7 @@ export function PoolSimulationModal({
 
               <button
                 type="button"
+                aria-pressed={failureMode === "401_refresh"}
                 onClick={() => setFailureMode("401_refresh")}
                 className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs transition ${
                   failureMode === "401_refresh"
@@ -362,31 +378,38 @@ export function PoolSimulationModal({
 
           {/* 实时网关链路结果 */}
           {resultTrace && (
-            <section className="space-y-3 rounded-2xl border border-zinc-200 bg-zinc-50/90 p-3.5 dark:border-zinc-800 dark:bg-zinc-950/70">
+            <section
+              aria-live="polite"
+              className="space-y-3 rounded-2xl border border-zinc-200 bg-zinc-50/90 p-3.5 dark:border-zinc-800 dark:bg-zinc-950/70"
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
                   本次测试链路回放 · {resultTrace.id}
                 </span>
                 <div className="flex items-center gap-1.5">
-                  {resultTrace.cacheAffinityHit && (
+                  {runningStep >= 5 && resultTrace.cacheAffinityHit && (
                     <span className="badge border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300">
                       Prompt Cache 亲和命中
                     </span>
                   )}
                   <span
                     className={`badge ${
-                      resultTrace.status === "success"
-                        ? "border-emerald-500/30 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
-                        : resultTrace.status === "failover_success"
-                          ? "border-amber-500/30 bg-amber-500/12 text-amber-700 dark:text-amber-300"
-                          : "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
+                      runningStep < 5
+                        ? "badge-neutral"
+                        : resultTrace.status === "success"
+                          ? "border-emerald-500/30 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                          : resultTrace.status === "failover_success"
+                            ? "border-amber-500/30 bg-amber-500/12 text-amber-700 dark:text-amber-300"
+                            : "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
                     }`}
                   >
-                    {resultTrace.status === "success"
-                      ? "直连成功"
-                      : resultTrace.status === "failover_success"
-                        ? "无感切换接管成功"
-                        : "严格锁模调度失败"}
+                    {runningStep < 5
+                      ? "链路回放中…"
+                      : resultTrace.status === "success"
+                        ? "直连成功"
+                        : resultTrace.status === "failover_success"
+                          ? "无感切换接管成功"
+                          : "严格锁模调度失败"}
                   </span>
                 </div>
               </div>
@@ -400,7 +423,7 @@ export function PoolSimulationModal({
                       className={`rounded-lg border px-2 py-1.5 text-[11px] transition ${
                         done
                           ? "border-brand-500/40 bg-brand-500/10 text-brand-900 dark:text-brand-200"
-                          : "border-zinc-200 bg-white text-zinc-400 dark:border-zinc-800 dark:bg-zinc-900"
+                          : "border-zinc-200 bg-white text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
                       }`}
                     >
                       <div className="font-mono text-[11px] opacity-75">STEP {idx + 1}</div>
@@ -413,7 +436,7 @@ export function PoolSimulationModal({
               <div className="space-y-1.5">
                 {resultTrace.attempts.map((att, idx) => (
                   <div
-                    key={idx}
+                    key={`${att.accountLabel}-${att.model}-${idx}`}
                     className="flex items-start gap-2.5 rounded-xl border border-zinc-200/80 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900"
                   >
                     <UpstreamMemberIcon toolId={att.toolId} size="xs" className="mt-0.5" />
@@ -428,7 +451,7 @@ export function PoolSimulationModal({
                           </span>
                         )}
                         <span className="font-mono text-[11px] text-zinc-500">{att.model}</span>
-                        <span className="font-mono text-[11px] tabular-nums text-zinc-400">
+                        <span className="font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
                           {att.latencyMs}ms
                         </span>
                         {att.outcome === "ok" ? (
@@ -448,7 +471,7 @@ export function PoolSimulationModal({
           )}
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-50/70 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-900/70">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-zinc-200 bg-zinc-50/70 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-900/70">
           <div className="flex items-center gap-1.5">
             {resultTrace && onOpenRoutingView && (
               <button
@@ -459,19 +482,8 @@ export function PoolSimulationModal({
                 }}
                 className="btn btn-sm btn-ghost gap-1 text-brand-700 dark:text-brand-300"
               >
-                去路由观测页查看完整流水
+                去路由观测页
                 <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            )}
-            {resultTrace && (
-              <button
-                type="button"
-                onClick={() => setSessionSeq((s) => s + 1)}
-                className="btn btn-xs btn-ghost text-zinc-500"
-                title="重开全新对话上下文（清除当前测试会话亲和记忆）"
-              >
-                <RotateCcw className="h-3 w-3" aria-hidden="true" />
-                新会话
               </button>
             )}
           </div>
@@ -490,7 +502,7 @@ export function PoolSimulationModal({
                 className="btn btn-md btn-brand-soft gap-1.5"
               >
                 <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                继续发下一条（验证冷却跳过与亲和）
+                再发一轮（同会话）
               </button>
             )}
             <button
@@ -504,7 +516,6 @@ export function PoolSimulationModal({
             </button>
           </div>
         </div>
-      </div>
     </Modal>
   );
 }

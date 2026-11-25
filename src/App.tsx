@@ -31,9 +31,13 @@ function PrototypeShell() {
         <TrayPopover
           onOpenMain={(target) => {
             void (async () => {
-              await invoke("show_main_window");
-              if (target?.nav || target?.agentId) {
-                await emit("qwitch://navigate", target);
+              try {
+                await invoke("show_main_window");
+                if (target?.nav || target?.agentId) {
+                  await emit("qwitch://navigate", target);
+                }
+              } catch (err) {
+                console.error("[Qwitch] Failed to open main window from tray:", err);
               }
             })();
           }}
@@ -51,9 +55,10 @@ function PrototypeShell() {
             Qwitch 浏览器预览模式（非桌面端运行时）
           </span>
           <div className="flex items-center gap-2">
-            <div className="inline-flex rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-800">
+            <div role="group" aria-label="预览视图切换" className="inline-flex rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-800">
               <button
                 type="button"
+                aria-pressed={previewMode === "dashboard"}
                 onClick={() => setPreviewMode("dashboard")}
                 className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
                   previewMode === "dashboard"
@@ -66,6 +71,7 @@ function PrototypeShell() {
               </button>
               <button
                 type="button"
+                aria-pressed={previewMode === "tray"}
                 onClick={() => setPreviewMode("tray")}
                 className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
                   previewMode === "tray"
@@ -95,9 +101,12 @@ function PrototypeShell() {
       )}
 
       {previewMode === "dashboard" ? (
-        <div className="min-h-0 flex-1 overflow-hidden">
-          <Dashboard externalNavTarget={previewNavTarget} />
-        </div>
+        <>
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <Dashboard externalNavTarget={previewNavTarget} />
+          </div>
+          <ToastViewport />
+        </>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-zinc-100 p-8 dark:bg-zinc-950">
           <div className="relative h-[500px] w-[384px] p-2 pt-1 pb-2.5">
@@ -107,11 +116,10 @@ function PrototypeShell() {
                 setPreviewMode("dashboard");
               }}
             />
+            <ToastViewport compact contained />
           </div>
         </div>
       )}
-
-      <ToastViewport compact={previewMode === "tray"} />
     </div>
   );
 }

@@ -64,6 +64,28 @@ export function TrayPopover({
   } = useQwitch();
 
   const [trayTab, setTrayTab] = useState<"accounts" | "pools">("accounts");
+  const [confirmUnbindAgentId, setConfirmUnbindAgentId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!confirmUnbindAgentId) return;
+    const timer = window.setTimeout(() => setConfirmUnbindAgentId(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [confirmUnbindAgentId]);
+
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (switchDialog.account || document.querySelector('[role="dialog"], [role="alertdialog"]')) {
+        return;
+      }
+      void import("@tauri-apps/api/window")
+        .then(({ getCurrentWindow }) => getCurrentWindow().hide())
+        .catch(() => {});
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isTauriRuntime, switchDialog.account]);
   const [toolFilter, setToolFilter] = useState<"all" | ToolId>("all");
   const [batchRestarting, setBatchRestarting] = useState(false);
   const {
@@ -217,6 +239,11 @@ export function TrayPopover({
       return (
         <div
           role="status"
+          title={
+            globalStats.unclaimedAuthMissingCount > 0
+              ? `可签已全领 (${globalStats.claimedCount}/${globalStats.eligibleClaimTotal}) · ${globalStats.unclaimedAuthMissingCount} 待授权`
+              : `今日已全部签到 (${globalStats.claimedCount}/${globalStats.eligibleClaimTotal})`
+          }
           className="badge min-w-0 flex-1 justify-center gap-1.5 border-emerald-500/30 bg-emerald-500/12 px-3 py-2 text-xs font-medium text-emerald-800 dark:text-emerald-300"
         >
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -280,12 +307,12 @@ export function TrayPopover({
           - 不再提供「检查更新」入口：无更新时该入口只会得到「已是最新」，
             属于噪音；手动检查保留在主面板设置页。 */}
       {isTauriRuntime && updateInfo?.updateAvailable && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-indigo-500/20 bg-indigo-500/[0.07] px-3.5 py-1.5 dark:border-indigo-400/20 dark:bg-indigo-400/[0.09]">
+        <div className="flex shrink-0 items-center gap-2 border-b border-brand-500/20 bg-brand-500/[0.07] px-3.5 py-1.5 dark:border-brand-400/20 dark:bg-brand-400/[0.09]">
           <Sparkles
-            className="h-3.5 w-3.5 shrink-0 text-indigo-600 dark:text-indigo-300"
+            className="h-3.5 w-3.5 shrink-0 text-brand-600 dark:text-brand-300"
             aria-hidden="true"
           />
-          <span className="min-w-0 flex-1 truncate text-[11px] leading-snug text-indigo-900 dark:text-indigo-100">
+          <span className="min-w-0 flex-1 truncate text-[11px] leading-snug text-brand-900 dark:text-brand-100">
             新版本{" "}
             <span className="font-mono font-semibold">v{updateInfo.latestVersion}</span>
           </span>
@@ -296,7 +323,7 @@ export function TrayPopover({
             onClick={() => void runUpdatePrimaryAction()}
             title={updatePrimaryLabel}
             aria-label={updatePrimaryLabel}
-            className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-indigo-600 text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500 dark:hover:bg-indigo-400"
+            className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-brand-700 text-white transition hover:bg-brand-800 disabled:opacity-60 dark:bg-brand-400 dark:text-zinc-950 dark:hover:bg-brand-300"
           >
             {updateInstalling ? (
               <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
@@ -308,10 +335,10 @@ export function TrayPopover({
           {onOpenMain && (
             <button
               type="button"
-              onClick={() => onOpenMain()}
+              onClick={() => onOpenMain({ nav: "settings" })}
               title="查看更新详情"
               aria-label="查看更新详情"
-              className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-indigo-700 transition hover:bg-indigo-500/15 dark:text-indigo-200"
+              className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-brand-700 transition hover:bg-brand-500/15 dark:text-brand-200"
             >
               <ExternalLink className="h-3 w-3" aria-hidden="true" />
             </button>
@@ -698,15 +725,30 @@ export function TrayPopover({
                         <SlidersHorizontal className="h-3 w-3" aria-hidden="true" />
                       </button>
 
-                      <button
-                        type="button"
-                        onClick={() => unbindAgent(b.agentId)}
-                        title={`解绑 ${b.name} 并还原原厂配置`}
-                        aria-label={`解绑 ${b.name}`}
-                        className="btn btn-icon btn-secondary shrink-0 hover:border-rose-500/40 hover:text-rose-600 dark:hover:text-rose-400"
-                      >
-                        <Unlink className="h-3 w-3" aria-hidden="true" />
-                      </button>
+                      {confirmUnbindAgentId === b.agentId ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmUnbindAgentId(null);
+                            unbindAgent(b.agentId);
+                          }}
+                          title={`再次点击确认解绑 ${b.name} 并还原原厂配置`}
+                          aria-label={`确认解绑 ${b.name}`}
+                          className="btn btn-xs btn-danger shrink-0"
+                        >
+                          确认解绑
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmUnbindAgentId(b.agentId)}
+                          title={`解绑 ${b.name} 并还原原厂配置`}
+                          aria-label={`解绑 ${b.name}`}
+                          className="btn btn-icon btn-secondary shrink-0 hover:border-rose-500/40 hover:text-rose-600 dark:hover:text-rose-400"
+                        >
+                          <Unlink className="h-3 w-3" aria-hidden="true" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -852,7 +894,10 @@ export function TrayPopover({
                                   className="h-2 w-2 shrink-0 rounded-full bg-emerald-500"
                                 />
                               )}
-                              <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                              <span
+                                title={acc.label}
+                                className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100"
+                              >
                                 {acc.label}
                               </span>
                               {acc.latestQuota?.planName && (

@@ -1,5 +1,5 @@
-import { useId } from "react";
-import { AlertTriangle, X } from "lucide-react";
+import { useId, useRef, useState } from "react";
+import { AlertTriangle, Loader2, X } from "lucide-react";
 import { Modal } from "./Modal";
 
 export function ConfirmDialog({
@@ -22,9 +22,32 @@ export function ConfirmDialog({
   onCancel: () => void;
 }) {
   const titleId = useId();
+  const descId = useId();
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleConfirm = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      await onConfirm();
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
-    <Modal open={open} onClose={onCancel} labelledBy={titleId} maxWidthClass="max-w-md">
+    <Modal
+      open={open}
+      onClose={onCancel}
+      labelledBy={titleId}
+      describedBy={descId}
+      role="alertdialog"
+      disableClose={submitting}
+      initialFocusRef={danger ? cancelRef : confirmRef}
+      maxWidthClass="max-w-md"
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           <div
@@ -40,7 +63,7 @@ export function ConfirmDialog({
             <h3 id={titleId} className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
               {title}
             </h3>
-            <p className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
+            <p id={descId} className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
               {description}
             </p>
           </div>
@@ -48,8 +71,9 @@ export function ConfirmDialog({
         <button
           type="button"
           onClick={onCancel}
+          disabled={submitting}
           aria-label="关闭确认弹窗"
-          className="btn btn-sm btn-ghost shrink-0 p-1"
+          className="btn btn-icon btn-ghost shrink-0"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -57,19 +81,24 @@ export function ConfirmDialog({
 
       <div className="mt-5 flex justify-end gap-2">
         <button
+          ref={cancelRef}
           type="button"
           onClick={onCancel}
+          disabled={submitting}
           className="btn btn-md btn-secondary shrink-0 whitespace-nowrap"
         >
           {cancelLabel}
         </button>
         <button
+          ref={confirmRef}
           type="button"
-          onClick={() => void onConfirm()}
+          onClick={() => void handleConfirm()}
+          disabled={submitting}
           className={`btn btn-md shrink-0 whitespace-nowrap ${
             danger ? "btn-danger" : "btn-primary"
           }`}
         >
+          {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
           {confirmLabel}
         </button>
       </div>

@@ -232,7 +232,24 @@ export function SettingsView({
         aria-label="设置分类导航"
         className="surface-card flex flex-wrap items-center justify-between gap-2 p-2"
       >
-        <div role="tablist" aria-label="设置分类" className="flex flex-wrap items-center gap-1">
+        <div
+          role="tablist"
+          aria-label="设置分类"
+          onKeyDown={(e) => {
+            const idx = SETTINGS_TABS.findIndex((t) => t.id === activeTab);
+            if (idx === -1) return;
+            if (e.key === "ArrowRight") {
+              e.preventDefault();
+              setActiveTab(SETTINGS_TABS[(idx + 1) % SETTINGS_TABS.length].id);
+            } else if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              setActiveTab(
+                SETTINGS_TABS[(idx - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length].id
+              );
+            }
+          }}
+          className="flex flex-wrap items-center gap-1"
+        >
           {SETTINGS_TABS.map((tab) => {
             const selected = activeTab === tab.id;
             return (
@@ -244,13 +261,13 @@ export function SettingsView({
                 onClick={() => setActiveTab(tab.id)}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
                   selected
-                    ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                    ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
                     : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80"
                 }`}
               >
                 <span>{tab.label}</span>
                 {tab.id === "clients" && runningClientsCount > 0 && (
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
                 )}
               </button>
             );
@@ -402,6 +419,7 @@ export function SettingsView({
                         <button
                           key={opt.value}
                           type="button"
+                          aria-pressed={selected}
                           onClick={() =>
                             void saveAppSettings({
                               autoRefreshIntervalMinutes: opt.value,
@@ -455,7 +473,7 @@ export function SettingsView({
             <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
               批量查额与每日领取均强制单队列串行，并在账号间加入随机抖动延迟。
             </p>
-            <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="mt-4 grid grid-cols-1 gap-3 @sm:grid-cols-2">
               <div>
                 <label
                   htmlFor="qwitch-jitter-min"
@@ -550,7 +568,7 @@ export function SettingsView({
             <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
               启动及保存时自动将超期或超出上限的旧日志移入归档，填 0 表示不限制。
             </p>
-            <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="mt-4 grid grid-cols-1 gap-3 @sm:grid-cols-2">
               <div>
                 <label
                   htmlFor="qwitch-log-days"
@@ -714,10 +732,15 @@ export function SettingsView({
               </button>
               <button
                 type="button"
-                disabled={portBusy}
+                disabled={portBusy || Number(portInput.trim()) === gateway.port}
+                title={
+                  Number(portInput.trim()) === gateway.port
+                    ? "端口与当前运行端口相同"
+                    : undefined
+                }
                 aria-busy={portApplying}
                 onClick={() => void runPortApply()}
-                className="btn btn-sm btn-primary gap-1 disabled:cursor-not-allowed disabled:opacity-60"
+                className="btn btn-sm btn-primary gap-1"
               >
                 {portApplying ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
                 {portApplying ? "应用中…" : "应用端口"}
@@ -725,6 +748,7 @@ export function SettingsView({
             </div>
             {portCheck && (
               <div
+                role={portCheck.available ? "status" : "alert"}
                 className={`mt-2.5 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
                   portCheck.available
                     ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300"
@@ -779,13 +803,13 @@ export function SettingsView({
                     </div>
 
                     <div className="mt-2.5 grid grid-cols-1 gap-1.5 text-xs text-zinc-600 dark:text-zinc-400 @md:grid-cols-2">
-                      <div className="truncate">
+                      <div className="truncate" title={status?.executablePath ?? "未检测到安装路径"}>
                         <span className="text-zinc-500 dark:text-zinc-400">探测应用：</span>
                         <span className="font-mono text-zinc-800 dark:text-zinc-200">
                           {status?.executablePath ?? "未检测到安装路径"}
                         </span>
                       </div>
-                      <div className="truncate">
+                      <div className="truncate" title={status?.configDir ?? "未知"}>
                         <span className="text-zinc-500 dark:text-zinc-400">会话目录：</span>
                         <span className="font-mono text-zinc-800 dark:text-zinc-200">
                           {status?.configDir ?? "未知"}

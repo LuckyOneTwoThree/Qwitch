@@ -69,7 +69,7 @@ export function UpdateCard() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold">
-            <Sparkles className="h-4 w-4 text-indigo-500" aria-hidden="true" />
+            <Sparkles className="h-4 w-4 text-brand-600 dark:text-brand-400" aria-hidden="true" />
             软件更新
           </div>
           <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
@@ -108,7 +108,10 @@ export function UpdateCard() {
       )}
 
       {error && (
-        <div className="mt-3 flex items-start gap-2 rounded-xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs text-rose-700 dark:text-rose-300">
+        <div
+          role="alert"
+          className="mt-3 flex items-start gap-2 rounded-xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs text-rose-700 dark:text-rose-300"
+        >
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           <div className="min-w-0">
             <div className="font-medium">检查更新失败</div>
@@ -143,7 +146,7 @@ export function UpdateCard() {
                   type="button"
                   disabled={installing}
                   onClick={() => void runPrimaryAction()}
-                  className="btn btn-md btn-primary shrink-0 gap-1.5"
+                  className="btn btn-sm btn-primary shrink-0 gap-1.5"
                 >
                   {installing ? (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
@@ -161,8 +164,9 @@ export function UpdateCard() {
               <button
                 type="button"
                 disabled={!info.assetUrl}
+                title={!info.assetUrl ? "当前平台未匹配到直接安装包，请点击「查看 Release」手动下载" : undefined}
                 onClick={() => void openDownloadPage(info.assetUrl)}
-                className="btn btn-md btn-primary shrink-0 gap-1.5"
+                className="btn btn-sm btn-primary shrink-0 gap-1.5"
               >
                 <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 下载 {info.platformLabel} 安装包

@@ -456,6 +456,8 @@ describe("TrayPopover", () => {
     expect(onOpenMain).toHaveBeenCalledWith({ nav: "agents", agentId: "dsh" });
 
     fireEvent.click(screen.getByLabelText("解绑 DeepSeek Harness"));
+    expect(unbindAgent).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("确认解绑 DeepSeek Harness"));
     expect(unbindAgent).toHaveBeenCalledWith("dsh");
 
     fireEvent.click(screen.getByRole("button", { name: "去接入" }));

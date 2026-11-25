@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Copy, FileArchive, FolderOpen, Globe, HardDriveDownload, KeyRound, Loader2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Copy,
+  FileArchive,
+  FolderOpen,
+  Globe,
+  HardDriveDownload,
+  KeyRound,
+  Loader2,
+  X,
+} from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { getVisibleTools } from "../domain/toolRegistry";
 import { ToolBrandIcon } from "./ToolBrandIcon";
@@ -304,7 +315,7 @@ export function ImportAccountModal({  open,
             disabled={submitting}
             onClick={onClose}
             aria-label="关闭导入弹窗"
-            className="btn btn-sm btn-ghost shrink-0 p-1 disabled:cursor-not-allowed disabled:opacity-40"
+            className="btn btn-icon btn-ghost shrink-0"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -315,13 +326,14 @@ export function ImportAccountModal({  open,
             <span className="mb-1.5 block text-xs font-medium text-zinc-700 dark:text-zinc-300">
               目标 AI 工具
             </span>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {visibleTools.map((tool) => {
                 const active = toolId === tool.id;
                 return (
                   <button
                     key={tool.id}
                     type="button"
+                    aria-pressed={active}
                     disabled={Boolean(targetAccount)}
                     onClick={() => {
                       setToolId(tool.id);
@@ -334,19 +346,19 @@ export function ImportAccountModal({  open,
                       targetAccount && !active
                         ? "cursor-not-allowed border-zinc-100 bg-zinc-50 text-zinc-400 dark:border-zinc-800/60 dark:bg-zinc-900/40 dark:text-zinc-500"
                         : active
-                          ? "border-brand-700 bg-brand-700 text-white shadow-xs dark:border-brand-300 dark:bg-brand-300 dark:text-zinc-900"
+                          ? "border-brand-700 bg-brand-50 text-brand-900 ring-1 ring-brand-700/15 dark:border-brand-300 dark:bg-brand-500/15 dark:text-brand-100 dark:ring-brand-300/15"
                           : "border-zinc-200 text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800/60"
                     }`}
                   >
                     <ToolBrandIcon toolId={tool.id} size="sm" decorative />
                     <div className="min-w-0">
-                      <div className="text-xs font-semibold leading-tight">
+                      <div className="truncate text-xs font-semibold leading-tight" title={tool.name}>
                         {tool.name}
                       </div>
                       <div
                         className={`truncate text-xs ${
                           active
-                            ? "text-white/80 dark:text-zinc-700"
+                            ? "text-brand-800/80 dark:text-brand-200/80"
                             : "text-zinc-500 dark:text-zinc-400"
                         }`}
                       >
@@ -391,7 +403,9 @@ export function ImportAccountModal({  open,
                   <button
                     key={item.id}
                     type="button"
+                    aria-pressed={active}
                     disabled={!supported}
+                    title={!supported ? "当前所选工具不支持该导入方式" : undefined}
                     onClick={() => setMethod(item.id)}
                     className={`flex flex-col items-start gap-1 rounded-xl border p-2.5 text-left transition ${
                       !supported
@@ -422,6 +436,7 @@ export function ImportAccountModal({  open,
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
+                  aria-pressed={profileMode === "default"}
                   onClick={() => setProfileMode("default")}
                   className={`rounded-lg border px-2.5 py-2 text-left text-xs transition ${
                     profileMode === "default"
@@ -436,6 +451,7 @@ export function ImportAccountModal({  open,
                 </button>
                 <button
                   type="button"
+                  aria-pressed={profileMode === "device"}
                   onClick={() => {
                     setProfileMode("device");
                     if (!profileDir.trim()) {
@@ -469,14 +485,14 @@ export function ImportAccountModal({  open,
                       <span className="text-xs text-zinc-500 dark:text-zinc-400">那台设备系统</span>
                       <div className="inline-flex rounded-lg bg-zinc-200/70 p-0.5 dark:bg-zinc-700/70">
                         {(["mac", "win"] as DevicePlatform[]).map((p) => (
-                          <button key={p} type="button" onClick={() => setDevicePlatform(p)}
+                          <button key={p} type="button" aria-pressed={devicePlatform === p} onClick={() => setDevicePlatform(p)}
                             className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition ${devicePlatform === p ? "bg-white text-zinc-900 shadow-xs dark:bg-zinc-800 dark:text-zinc-100" : "text-zinc-600 dark:text-zinc-300"}`}>
                             {p === "mac" ? "macOS" : "Windows"}
                           </button>
                         ))}
                       </div>
                       <button type="button" onClick={() => void handleCopyExport()}
-                        className="btn btn-xs btn-primary gap-1">
+                        className="btn btn-xs btn-secondary gap-1">
                         <Copy className="h-3 w-3" aria-hidden="true" /> 复制导出命令
                       </button>
                     </div>
@@ -496,11 +512,11 @@ export function ImportAccountModal({  open,
                       value={profileDir}
                       onChange={(e) => setProfileDir(e.target.value)}
                       aria-label="设备导出包路径"
-                      className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-[11px] text-zinc-900 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                      className="field-input w-full py-2 font-mono text-[11px]"
                     />
                     <div className="mt-1.5 flex flex-wrap gap-2">
                       <button type="button" onClick={() => void handlePickFile()}
-                        className="btn btn-sm btn-primary gap-1.5">
+                        className="btn btn-sm btn-brand-soft gap-1.5">
                         <FileArchive className="h-3.5 w-3.5" aria-hidden="true" /> 选择导出包(.zip)
                       </button>
                       <button type="button" onClick={() => void handlePickFolder()}
@@ -509,7 +525,7 @@ export function ImportAccountModal({  open,
                       </button>
                     </div>
                     {profileDir.trim() && (
-                      <p className="mt-1.5 text-xs leading-snug">
+                      <p role="status" aria-live="polite" className="mt-1.5 text-xs leading-snug">
                         {inspecting ? (
                           <span className="text-zinc-500 dark:text-zinc-400">校验中…</span>
                         ) : inspectError ? (
@@ -518,9 +534,15 @@ export function ImportAccountModal({  open,
                           !inspectResult.hasStorage ? (
                             <span className="text-rose-600 dark:text-rose-400">无法识别：请选 Trae CN 导出的 zip，或含 User/globalStorage/storage.json 的文件夹</span>
                           ) : inspectResult.sameAsLocal ? (
-                            <span className="text-amber-600 dark:text-amber-400">⚠️ 该设备与本机相同（同一台设备），无法并行签到；请换另一台设备/用户/虚拟机</span>
+                            <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                              该设备与本机相同（同一台设备），无法并行签到；请换另一台设备/用户/虚拟机
+                            </span>
                           ) : (
-                            <span className="text-emerald-600 dark:text-emerald-400">✅ 已识别设备 {inspectResult.deviceIdMasked ?? "（未知）"}，可添加</span>
+                            <span className="inline-flex items-center gap-1 text-brand-700 dark:text-brand-300">
+                              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                              已识别设备 {inspectResult.deviceIdMasked ?? "（未知）"}，可添加
+                            </span>
                           )
                         ) : (
                           <span className="text-zinc-400">&nbsp;</span>
@@ -601,7 +623,13 @@ export function ImportAccountModal({  open,
           </button>
           <button
             type="submit"
-            disabled={submitting || (isDeviceProfile && inspecting)}
+            disabled={
+              submitting ||
+              (isDeviceProfile &&
+                (inspecting ||
+                  Boolean(inspectError) ||
+                  Boolean(inspectResult && (!inspectResult.hasStorage || inspectResult.sameAsLocal))))
+            }
             className="btn btn-md btn-primary shrink-0 gap-1.5 whitespace-nowrap"
           >
             {submitting && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />}

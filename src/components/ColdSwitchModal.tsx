@@ -11,36 +11,38 @@ const SWITCH_STEPS: Array<{ key: "closing" | "writing" | "launching"; label: str
   { key: "launching", label: "重启桌面端" },
 ];
 
+const PHASE_RANK: Record<string, number> = {
+  closing: 0,
+  writing: 1,
+  launching: 2,
+  done: 3,
+};
+
+const STEP_TEXT: Record<string, string> = {
+  closing: "正在优雅关闭本机客户端并等待文件锁释放...",
+  writing: "正在写入目标账号加密会话快照...",
+  launching: "正在重新拉起桌面客户端...",
+  done: "切换完成，客户端已使用新账号启动！",
+};
+
 export function ColdSwitchModal() {
   const { switchDialog, cancelColdSwitch, confirmColdSwitch, adapters } = useQwitch();
   const titleId = useId();
   const isOpen = Boolean(switchDialog.account);
   const isProcessing = switchDialog.phase !== "confirm";
+  const isDone = switchDialog.phase === "done";
 
   if (!switchDialog.account) return null;
 
   const brand = getToolBrandMeta(switchDialog.account.toolId, adapters);
-  const stepText: Record<string, string> = {
-    closing: "1/3 正在优雅关闭本机客户端并等待文件锁释放...",
-    writing: "2/3 正在写入目标账号加密会话快照...",
-    launching: "3/3 正在重新拉起桌面客户端...",
-    done: "切换完成，客户端已使用新账号启动！",
-  };
-
-  const phaseRank: Record<string, number> = {
-    closing: 0,
-    writing: 1,
-    launching: 2,
-    done: 3,
-  };
-  const currentRank = phaseRank[switchDialog.phase] ?? 0;
+  const currentRank = PHASE_RANK[switchDialog.phase] ?? 0;
 
   return (
     <Modal
       open={isOpen}
       onClose={cancelColdSwitch}
       labelledBy={titleId}
-      disableClose={isProcessing}
+      disableClose={isProcessing && !isDone}
       maxWidthClass="max-w-md"
     >
       <div className="flex items-start justify-between gap-3">
@@ -55,12 +57,12 @@ export function ColdSwitchModal() {
             </p>
           </div>
         </div>
-        {!isProcessing && (
+        {(!isProcessing || isDone) && (
           <button
             type="button"
             onClick={cancelColdSwitch}
             aria-label="关闭切换确认窗口"
-            className="btn btn-sm btn-ghost shrink-0 p-1"
+            className="btn btn-icon btn-ghost shrink-0"
           >
             <X className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -92,9 +94,8 @@ export function ColdSwitchModal() {
             </button>
             <button
               type="button"
-              disabled={isProcessing}
               onClick={() => void confirmColdSwitch()}
-              className="btn btn-md btn-primary shrink-0 whitespace-nowrap disabled:opacity-50"
+              className="btn btn-md btn-primary shrink-0 whitespace-nowrap"
             >
               {switchDialog.isClientRunning !== false ? "确认关闭并切换" : "确认写入并启动"}
             </button>
@@ -105,21 +106,21 @@ export function ColdSwitchModal() {
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             {SWITCH_STEPS.map((st, idx) => {
               const skipped = st.key === "closing" && switchDialog.isClientRunning === false;
-              const done = !skipped && (currentRank > idx || switchDialog.phase === "done");
-              const active = !skipped && currentRank === idx && switchDialog.phase !== "done";
+              const done = !skipped && (currentRank > idx || isDone);
+              const active = !skipped && currentRank === idx && !isDone;
               return (
                 <div
                   key={st.key}
-                  className={`badge gap-1.5 ${
+                  className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium ${
                     done
-                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                      ? "border-brand-500/30 bg-brand-500/10 text-brand-800 dark:text-brand-300"
                       : active
                         ? "border-zinc-900/20 bg-white text-zinc-900 shadow-2xs dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
                         : "border-zinc-200/70 text-zinc-500 dark:border-zinc-700/70 dark:text-zinc-400"
                   }`}
                 >
                   {done ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden="true" />
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-brand-600 dark:text-brand-400" aria-hidden="true" />
                   ) : active ? (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
                   ) : (
@@ -132,13 +133,28 @@ export function ColdSwitchModal() {
               );
             })}
           </div>
-          <div className="flex items-center gap-2 text-xs font-medium text-zinc-700 dark:text-zinc-200">
-            {switchDialog.phase === "done" ? (
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" aria-hidden="true" />
-            ) : (
-              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-zinc-500" aria-hidden="true" />
+          <div className="flex items-center justify-between gap-2">
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex min-w-0 items-center gap-2 text-xs font-medium text-zinc-700 dark:text-zinc-200"
+            >
+              {isDone ? (
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-brand-600 dark:text-brand-400" aria-hidden="true" />
+              ) : (
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-zinc-500" aria-hidden="true" />
+              )}
+              <span>{STEP_TEXT[switchDialog.phase]}</span>
+            </div>
+            {isDone && (
+              <button
+                type="button"
+                onClick={cancelColdSwitch}
+                className="btn btn-xs btn-primary shrink-0"
+              >
+                完成
+              </button>
             )}
-            <span>{stepText[switchDialog.phase]}</span>
           </div>
         </div>
       )}

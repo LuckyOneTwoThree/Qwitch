@@ -26,9 +26,10 @@ describe("ToastViewport", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("renders nothing without a toast", () => {
+  it("keeps live region mounted without rendering a toast card when toast is null", () => {
     currentToast = null;
-    const { container } = render(<ToastViewport />);
-    expect(container.firstChild).toBeNull();
+    render(<ToastViewport />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

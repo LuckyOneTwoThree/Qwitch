@@ -9,6 +9,7 @@ import {
   ExternalLink,
   Globe,
   Link2,
+  Loader2,
   PauseCircle,
   Pencil,
   PlayCircle,
@@ -272,6 +273,7 @@ export const AccountCard = React.memo(function AccountCard({
                     <input
                       type="text"
                       value={labelDraft}
+                      disabled={renaming}
                       onChange={(e) => setLabelDraft(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") {
@@ -289,16 +291,20 @@ export const AccountCard = React.memo(function AccountCard({
                       }
                       aria-label="编辑账号别名"
                       autoFocus
-                      className="min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-xs font-medium text-zinc-900 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
+                      className="min-w-0 flex-1 rounded-[var(--radius-control)] border border-zinc-300 bg-white px-2 py-0.5 text-xs font-medium text-zinc-900 disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
                     />
                     <button
                       type="button"
                       disabled={renaming}
                       onClick={() => void handleSaveRename()}
                       aria-label="保存账号别名"
-                      className="btn btn-icon btn-primary rounded-md disabled:opacity-50"
+                      className="btn btn-icon btn-primary"
                     >
-                      <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                      {renaming ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
                     </button>
                     {hasCustomAlias && (
                       <button
@@ -307,19 +313,20 @@ export const AccountCard = React.memo(function AccountCard({
                         onClick={() => void handleRestoreOriginalName()}
                         title={`恢复原用户名（${account.accountName}）`}
                         aria-label="恢复原用户名"
-                        className="btn btn-icon btn-secondary rounded-md disabled:opacity-50"
+                        className="btn btn-icon btn-secondary"
                       >
                         <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                       </button>
                     )}
                     <button
                       type="button"
+                      disabled={renaming}
                       onClick={() => {
                         setLabelDraft(account.label);
                         setEditingLabel(false);
                       }}
                       aria-label="取消重命名"
-                      className="btn btn-icon btn-secondary rounded-md"
+                      className="btn btn-icon btn-secondary"
                     >
                       <X className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
@@ -401,7 +408,7 @@ export const AccountCard = React.memo(function AccountCard({
                     type="button"
                     disabled={oauthLaunching}
                     onClick={() => void handleDirectOAuth()}
-                    className="btn btn-sm gap-1 whitespace-nowrap bg-amber-600 text-white transition hover:bg-amber-700 disabled:opacity-50 dark:bg-amber-500 dark:text-zinc-950 dark:hover:bg-amber-400"
+                    className="btn btn-sm gap-1 whitespace-nowrap bg-amber-700 text-white transition hover:bg-amber-800 disabled:opacity-50 dark:bg-amber-400 dark:text-zinc-950 dark:hover:bg-amber-300"
                   >
                     <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     {oauthLaunching ? "授权中..." : "在线授权"}
@@ -410,7 +417,7 @@ export const AccountCard = React.memo(function AccountCard({
                     <button
                       type="button"
                       onClick={() => onOpenBindModal(account, "token_paste")}
-                      className="btn btn-sm shrink-0 gap-1 whitespace-nowrap border border-amber-500/35 bg-white/80 text-[11px] font-medium text-amber-900 transition hover:bg-white dark:bg-zinc-900/70 dark:text-amber-200 dark:hover:bg-zinc-800"
+                      className="btn btn-sm shrink-0 gap-1 whitespace-nowrap border border-amber-500/35 bg-white/80 font-medium text-amber-900 transition hover:bg-white dark:bg-zinc-900/70 dark:text-amber-200 dark:hover:bg-zinc-800"
                     >
                       <ClipboardPaste className="h-3 w-3 shrink-0" aria-hidden="true" />
                       粘贴凭据
@@ -676,9 +683,11 @@ export const AccountCard = React.memo(function AccountCard({
                   title={
                     !canQuery
                       ? "该适配器声明不支持查额"
-                      : isBatchRunning
-                        ? "批量任务进行中，查额已排队禁用"
-                        : "刷新额度"
+                      : isDisabled
+                        ? "账号已停用，恢复启用后可查额"
+                        : isBatchRunning
+                          ? "批量任务进行中，查额已排队禁用"
+                          : "刷新额度"
                   }
                   className="btn btn-sm btn-secondary gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
                 >
@@ -696,9 +705,11 @@ export const AccountCard = React.memo(function AccountCard({
                       type="button"
                       disabled={isBatchRunning}
                       title={
-                        effectiveClaimStatus === "unknown"
-                          ? "先核实今日签到状态，未领取则自动领取"
-                          : "领取今日签到福利"
+                        isBatchRunning
+                          ? "批量任务进行中"
+                          : effectiveClaimStatus === "unknown"
+                            ? "先核实今日签到状态，未领取则自动领取"
+                            : "领取今日签到福利"
                       }
                       onClick={() => void claimDailyBatch([account.id])}
                       className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap"
@@ -713,6 +724,14 @@ export const AccountCard = React.memo(function AccountCard({
             <OverflowMenu
               label={`账号管理 ${account.label}`}
               items={[
+                {
+                  label: "修改别名",
+                  icon: Pencil,
+                  onSelect: () => {
+                    setLabelDraft(account.label);
+                    setEditingLabel(true);
+                  },
+                },
                 {
                   label: isDisabled ? "恢复启用" : "停用账号",
                   icon: isDisabled ? PlayCircle : PauseCircle,
@@ -759,14 +778,22 @@ export const AccountCard = React.memo(function AccountCard({
           ) : (
             account.isActiveOnClient ? (
               <span className="badge shrink-0 whitespace-nowrap border-emerald-500/25 bg-emerald-500/12 font-semibold text-emerald-800 dark:text-emerald-300">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
                 本机使用中
               </span>
             ) : (
               <button
                 type="button"
-                disabled={!canSwitch}
-                title={!canSwitch ? "该适配器声明不支持切号" : undefined}
+                disabled={!canSwitch || isDisabled || isBatchRunning}
+                title={
+                  !canSwitch
+                    ? "该适配器声明不支持切号"
+                    : isDisabled
+                      ? "账号已停用，恢复启用后可切号"
+                      : isBatchRunning
+                        ? "批量任务进行中，请稍候"
+                        : undefined
+                }
                 onClick={() => requestColdSwitch(account)}
                 className="btn btn-sm btn-brand-soft gap-1 whitespace-nowrap"
               >

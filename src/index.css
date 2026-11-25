@@ -107,10 +107,8 @@
   }
 
   /* 焦点环统一为品牌色，比默认 outline 更精致且与主题一致。
-     控件（按钮/链接）与表单字段分两组处理：
-     - 控件额外补 border-radius，保证 outline 形状贴合小圆角元素；
-     - 表单字段**不覆盖** border-radius（避免把 rounded-lg 输入框的圆角改写成
-       --radius-inner 而引发布局抖动），仅用 1px 偏移避免压住边框。 */
+     现代浏览器会自动让 outline 贴合元素自身的 border-radius，
+     因此不再覆写 border-radius（避免把圆形药丸或开关按钮在聚焦时变方）。 */
   button:focus-visible,
   a:focus-visible,
   [role="button"]:focus-visible,
@@ -119,7 +117,6 @@
   [tabindex]:focus-visible {
     outline: 2px solid var(--color-brand-500);
     outline-offset: 2px;
-    border-radius: var(--radius-inner);
   }
 
   input:focus-visible,
@@ -134,13 +131,16 @@
     color: inherit;
   }
 
-  /* 细滚动条：默认的粗滚动条会破坏精密感 */
-  * {
-    scrollbar-width: thin;
-    scrollbar-color: var(--color-zinc-300) transparent;
-  }
-  .dark * {
-    scrollbar-color: var(--color-zinc-700) transparent;
+  /* 细滚动条：Chromium 121+ 中 scrollbar-width 会覆盖 ::-webkit-scrollbar，
+     因此仅在不支持 ::-webkit-scrollbar 的引擎中启用标准属性，保证双端一致。 */
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: var(--color-zinc-300) transparent;
+    }
+    .dark * {
+      scrollbar-color: var(--color-zinc-700) transparent;
+    }
   }
   ::-webkit-scrollbar {
     width: 8px;
@@ -208,9 +208,31 @@
     padding: 0.5rem 0.875rem;
     font-size: 0.75rem;
   }
-  /* 方形图标按钮：与 btn-sm 同高但保持正方形，避免图标按钮比文字按钮更宽 */
+  /* 方形图标按钮：统一最小正方形尺寸，避免不同图标导致按钮大小不一 */
   .btn-icon {
+    min-height: 1.75rem;
+    min-width: 1.75rem;
     padding: 0.375rem;
+  }
+
+  /* 统一表单输入框/选择框基元 */
+  .field-input {
+    border-radius: var(--radius-control);
+    border: 1px solid var(--color-zinc-200);
+    background-color: #fff;
+    padding: 0.375rem 0.625rem;
+    font-size: 0.75rem;
+    color: var(--color-zinc-900);
+    transition: border-color 0.16s var(--ease-soft), box-shadow 0.16s var(--ease-soft);
+  }
+  .field-input:focus {
+    border-color: var(--color-brand-500);
+    outline: none;
+  }
+  .dark .field-input {
+    border-color: var(--color-zinc-700);
+    background-color: var(--color-zinc-900);
+    color: var(--color-zinc-100);
   }
 
   /* 主按钮：品牌色实心 + 内高光，避免「纯黑按钮」的通用感 */
@@ -574,7 +596,7 @@
   }
 }
 
-/* 尊重「减少动态效果」偏好：覆盖骨架 shimmer、旋转、进度条、入场与悬停位移 */
+/* 尊重「减少动态效果」偏好：禁用装饰性入场/悬停位移，同时保留加载旋转指示器的可读性 */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -583,5 +605,14 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  .surface-interactive:hover {
+    transform: none !important;
+  }
+
+  .animate-spin {
+    animation-duration: 1.8s !important;
+    animation-iteration-count: infinite !important;
   }
 }

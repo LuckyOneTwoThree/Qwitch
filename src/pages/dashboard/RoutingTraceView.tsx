@@ -75,6 +75,11 @@ export function RoutingTraceView({
     });
   }, [traces, agentFilter, statusFilter, search]);
 
+  const agentById = useMemo(
+    () => new Map(agentBindings.map((b) => [b.agentId, b])),
+    [agentBindings]
+  );
+
   const hasActiveFilter =
     Boolean(search.trim()) || agentFilter !== "all" || statusFilter !== "all";
 
@@ -99,7 +104,7 @@ export function RoutingTraceView({
               {stats.total}
             </span>
             <span className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-              覆盖 {pools.length} 个号池
+              直连 {stats.directSuccessCount} · 失败 {stats.failedCount}
             </span>
           </div>
         </div>
@@ -247,13 +252,26 @@ export function RoutingTraceView({
                 重置
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => onOpenSimulation()}
+              className="btn btn-xs btn-brand-soft gap-1 whitespace-nowrap"
+            >
+              <Play className="h-3 w-3" aria-hidden="true" />
+              测试路由
+            </button>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-200/70 pt-2 dark:border-zinc-800/80">
+        <div
+          role="group"
+          aria-label="按 Agent 筛选"
+          className="flex flex-wrap items-center gap-1.5 border-t border-zinc-200/70 pt-2 dark:border-zinc-800/80"
+        >
           <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Agent：</span>
           <button
             type="button"
+            aria-pressed={agentFilter === "all"}
             onClick={() => setAgentFilter("all")}
             className={`chip ${agentFilter === "all" ? "chip-active" : ""}`}
           >
@@ -263,6 +281,7 @@ export function RoutingTraceView({
             <button
               key={ab.agentId}
               type="button"
+              aria-pressed={agentFilter === ab.agentId}
               onClick={() => setAgentFilter(ab.agentId)}
               className={`chip gap-1.5 ${agentFilter === ab.agentId ? "chip-active" : ""}`}
             >
@@ -277,7 +296,7 @@ export function RoutingTraceView({
       <div className="space-y-2">
         {filteredTraces.map((trace) => {
           const isOpen = expandedId === trace.id;
-          const agentMeta = agentBindings.find((b) => b.agentId === trace.agentId);
+          const agentMeta = agentById.get(trace.agentId);
           const statusDotClass =
             trace.status === "failed"
               ? "bg-rose-500"
@@ -348,7 +367,7 @@ export function RoutingTraceView({
 
                 {/* 第二行：时间、号池、耗时与步数 */}
                 <div className="flex w-full flex-wrap items-center gap-x-2.5 gap-y-1 pl-4 text-[11px] text-zinc-500 dark:text-zinc-400">
-                  <span className="font-mono tabular-nums text-zinc-400 dark:text-zinc-500">
+                  <span className="font-mono tabular-nums text-zinc-500 dark:text-zinc-400">
                     {trace.timestamp}
                   </span>
                   <span className="badge badge-neutral">{trace.poolName}</span>
@@ -385,7 +404,7 @@ export function RoutingTraceView({
                   <div className="space-y-1.5">
                     {trace.attempts.map((att, idx) => (
                       <div
-                        key={idx}
+                        key={`${att.accountLabel}-${att.model}-${idx}`}
                         className="flex items-start gap-2.5 rounded-xl border border-zinc-200/80 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900"
                       >
                         <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-100 font-mono text-[11px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -428,7 +447,7 @@ export function RoutingTraceView({
                                       ? "401 单飞刷新"
                                       : "活跃避让跳过"}
                               </span>
-                              <span className="font-mono text-[11px] tabular-nums text-zinc-400">
+                              <span className="font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
                                 {att.latencyMs}ms
                               </span>
                             </div>

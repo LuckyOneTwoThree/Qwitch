@@ -42,6 +42,7 @@ import { AgentBrandIcon } from "../../components/AgentBrandIcon";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
+import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
 
 type ModelLike = { id: string; isFree?: boolean; creditMultiplier?: number };
 
@@ -65,7 +66,6 @@ function shortModelLabel(name: string): string {
   const parts = name.split(" · ");
   return parts.length > 1 ? parts.slice(1).join(" · ") : name;
 }
-import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
 
 const DEFAULT_TOOL_ORDER = [
   "workbuddy",
@@ -370,7 +370,7 @@ export function AgentBindingsView({
 
   const copyText = (id: string, text: string) => {
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-      void navigator.clipboard.writeText(text);
+      void navigator.clipboard.writeText(text).catch(() => {});
     }
     setCopiedId(id);
     window.setTimeout(() => {
@@ -424,6 +424,14 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
   const currentStrategy: PoolStrategy = activeAgentPool?.strategy ?? "order";
   const currentSkipActive = activeAgentPool?.skipActiveClientAccount ?? true;
   const currentCooldownSec = activeAgentPool?.cooldownSeconds ?? 60;
+
+  const exposedByAgent = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof computeAgentExposedModels>>();
+    for (const b of agentBindings) {
+      map.set(b.agentId, computeAgentExposedModels(b, pools, nowMs));
+    }
+    return map;
+  }, [agentBindings, pools, nowMs]);
 
   const activeStrategyDesc =
     AGENT_STRATEGY_OPTIONS.find((opt) => opt.id === currentStrategy)?.desc ??
@@ -515,10 +523,11 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
   return (
     <div className="space-y-3.5">
       {/* 顶部精简网关状态条（顶栏已提供启停/重探/测试路由主操作，此处仅作状态自检） */}
-      <section className="surface-card flex flex-nowrap items-center justify-between gap-2.5 px-3.5 py-2">
-        <div className="flex min-w-0 shrink-0 items-center gap-2 text-xs">
+      <section className="surface-card flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
           <div className="flex items-center gap-1.5">
             <span
+              aria-hidden="true"
               className={`h-2 w-2 rounded-full ${
                 gateway.running ? "bg-emerald-500" : "bg-zinc-400"
               }`}
@@ -542,7 +551,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                 className={`badge ${
                   gateway.bridgeRuntime === "missing"
                     ? "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
-                    : "border-indigo-500/25 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
+                    : "badge-neutral"
                 }`}
               >
                 插件桥：{gateway.bridgeVersion}
@@ -554,7 +563,17 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                 }`}
               >
-                {gateway.globalProxyDetected ? "⚠️ 全局代理" : "✓ 回环正常"}
+                {gateway.globalProxyDetected ? (
+                  <>
+                    <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    全局代理
+                  </>
+                ) : (
+                  <>
+                    <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    回环正常
+                  </>
+                )}
               </span>
             </>
           ) : (
@@ -566,7 +585,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                 className={`badge cursor-pointer ${
                   gateway.bridgeRuntime === "missing"
                     ? "border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300"
-                    : "border-indigo-500/25 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300"
+                    : "badge-neutral"
                 }`}
               >
                 插件桥：{gateway.bridgeVersion}
@@ -581,7 +600,17 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     : "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
                 }`}
               >
-                {gateway.globalProxyDetected ? "⚠️ 全局代理" : "✓ 回环正常"}
+                {gateway.globalProxyDetected ? (
+                  <>
+                    <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    全局代理
+                  </>
+                ) : (
+                  <>
+                    <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    回环正常
+                  </>
+                )}
               </button>
             </>
           )}
@@ -594,7 +623,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
           <button
             type="button"
             onClick={() => setClearConfirm({ mode: "restore" })}
-            className="btn btn-xs btn-danger gap-1"
+            className="btn btn-xs btn-danger shrink-0 gap-1"
             title="清除所有 Agent 的 Qwitch 配置：有备份则还原，无备份则强制清除 Qwitch 写入"
           >
             <Trash2 className="h-3 w-3" aria-hidden="true" />
@@ -615,7 +644,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
         )}
         {agentBindings.map((binding) => {
           const isSelected = activeBinding?.agentId === binding.agentId;
-          const exposed = computeAgentExposedModels(binding, pools, nowMs);
+          const exposed = exposedByAgent.get(binding.agentId) ?? [];
           const defModel = exposed.find((m) => m.isDefault) ?? exposed[0];
 
           return (
@@ -644,7 +673,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         {binding.name}
                       </h2>
                       <span
-                        className={`mt-0.5 inline-flex shrink-0 whitespace-nowrap rounded px-1 py-0.2 text-[11px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
+                        className={`mt-0.5 inline-flex shrink-0 whitespace-nowrap rounded px-1 py-0.5 text-[11px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
                       >
                         {WIRE_PROTOCOL_META[binding.protocol].label}
                       </span>
@@ -886,13 +915,13 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                 onClick={() => setSubTab("models")}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
                   subTab === "models"
-                    ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                    ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
                     : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80"
                 }`}
               >
                 <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>模型配置</span>
-                <span className="rounded px-1 py-0.2 font-mono text-[11px] opacity-85">
+                <span className="rounded px-1 py-0.5 font-mono text-[11px] opacity-85">
                   {activeExposedModels.length}
                 </span>
               </button>
@@ -904,13 +933,13 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                 onClick={() => setSubTab("scheduling")}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
                   subTab === "scheduling"
-                    ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                    ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
                     : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80"
                 }`}
               >
                 <Crown className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>账号调度</span>
-                <span className="rounded px-1 py-0.2 font-mono text-[11px] opacity-85">
+                <span className="rounded px-1 py-0.5 font-mono text-[11px] opacity-85">
                   {toolAccounts.filter((a) => a.enabled).length}/{toolAccounts.length}
                 </span>
               </button>
@@ -922,7 +951,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                 onClick={() => setSubTab("connection")}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
                   subTab === "connection"
-                    ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                    ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
                     : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/80"
                 }`}
               >
@@ -994,8 +1023,8 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         aria-label="搜索订阅模型"
                         value={modelSearch}
                         onChange={(e) => setModelSearch(e.target.value)}
-                        placeholder={`搜索 ${activeToolName} 模型名、家族或 Wire ID...`}
-                        className="w-full rounded-xl border border-zinc-200 bg-zinc-50 py-1.5 pr-8 pl-8 text-xs text-zinc-900 outline-none transition focus:border-brand-500 focus:bg-white dark:border-zinc-700 dark:bg-zinc-950/60 dark:text-zinc-100"
+                        placeholder={`搜索 ${activeToolName} 模型名、家族或模型 ID...`}
+                        className="field-input w-full bg-zinc-50 py-1.5 pr-8 pl-8 focus:bg-white dark:bg-zinc-950/60"
                       />
                       {modelSearch && (
                         <button
@@ -1009,7 +1038,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       )}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-1">
+                    <div role="group" aria-label="模型快速筛选" className="flex flex-wrap items-center gap-1">
                       {(
                         [
                           { id: "all", label: `全部 (${filterCounts.all})` },
@@ -1021,10 +1050,11 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         <button
                           key={tab.id}
                           type="button"
+                          aria-pressed={modelQuickFilter === tab.id}
                           onClick={() => setModelQuickFilter(tab.id)}
                           className={`rounded-lg px-2 py-1 text-[11px] font-medium transition ${
                             modelQuickFilter === tab.id
-                              ? "bg-brand-600 text-white dark:bg-brand-500"
+                              ? "bg-brand-700 text-white dark:bg-brand-400 dark:text-zinc-950"
                               : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
                           }`}
                         >
@@ -1094,7 +1124,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   </div>
 
                   {/* 双列宽松模型复选列表 */}
-                  <div className="grid max-h-[380px] grid-cols-1 gap-1.5 overflow-y-auto pr-1 @2xl:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-1.5 @2xl:grid-cols-2">
                     {filteredToolModels.length === 0 ? (
                       <div className="col-span-full rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
                         当前筛选条件下无匹配模型
@@ -1243,7 +1273,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
 
                 {/* 紧凑横向分段策略选择器 + 1 行当前策略说明 */}
                 <div className="space-y-1.5">
-                  <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+                  <div className="grid grid-cols-1 gap-1.5 @lg:grid-cols-3">
                     {AGENT_STRATEGY_OPTIONS.map((mode) => {
                       const active = currentStrategy === mode.id;
                       return (
@@ -1378,7 +1408,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                 <span
                                   className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
                                     isPrimary
-                                      ? "bg-brand-600 text-white dark:bg-brand-500"
+                                      ? "bg-brand-700 text-white dark:bg-brand-400 dark:text-zinc-950"
                                       : "bg-zinc-200/80 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
                                   }`}
                                 >
@@ -1587,17 +1617,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
                         已写入 <code>qwitch_models.json</code> · 保留官方 ChatGPT 登录模型直连，解绑不破坏历史线程
                       </span>
-                      {activeBinding.mountedPoolIds.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => void restartAgentClient("codex_desktop")}
-                          disabled={restartingAgentId === "codex_desktop"}
-                          aria-busy={restartingAgentId === "codex_desktop"}
-                          className="btn btn-xs btn-secondary disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {restartingAgentId === "codex_desktop" ? "处理中…" : "重启"}
-                        </button>
-                      )}
                     </div>
                   )}
 
@@ -1617,7 +1636,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   {activeBinding.agentId === "opencode" && (
                     <div className="flex w-full items-center justify-between gap-2">
                       <span>
-                        OpenCode JSONC 键控模型表格式（切换即时重写 <code>opencode.jsonc</code>）
+                        OpenCode 配置文件格式（切换即时重写 <code>opencode.jsonc</code>）
                       </span>
                       <button
                         type="button"
@@ -1637,17 +1656,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
                         已写入 <code>mimocode.jsonc</code>（仅托管 <code>provider.qwitch</code> 节点），桌面端重启后生效
                       </span>
-                      {activeBinding.mountedPoolIds.length > 0 && activeBinding.installed && (
-                        <button
-                          type="button"
-                          onClick={() => void restartAgentClient("mimo")}
-                          disabled={restartingAgentId === "mimo"}
-                          aria-busy={restartingAgentId === "mimo"}
-                          className="btn btn-xs btn-secondary disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {restartingAgentId === "mimo" ? "处理中…" : "重启"}
-                        </button>
-                      )}
                     </div>
                   )}
 
@@ -1657,17 +1665,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
                         已写入 <code>config.json</code>（仅托管 <code>provider.qwitch</code> 节点），桌面端重启后生效
                       </span>
-                      {activeBinding.mountedPoolIds.length > 0 && activeBinding.installed && (
-                        <button
-                          type="button"
-                          onClick={() => void restartAgentClient("zcode")}
-                          disabled={restartingAgentId === "zcode"}
-                          aria-busy={restartingAgentId === "zcode"}
-                          className="btn btn-xs btn-secondary disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {restartingAgentId === "zcode" ? "处理中…" : "重启"}
-                        </button>
-                      )}
                     </div>
                   )}
                 </div>
@@ -1679,21 +1676,21 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   <div className="flex items-center gap-2.5">
                     <AgentBrandIcon agentId="custom_endpoint" size="sm" />
                     <div>
-                      <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                      <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                         通用标准网关端点（适用于任意兼容 OpenAI / Anthropic 的客户端）
-                      </h2>
+                      </h3>
                       <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
                         选择已接入的模型后直接生成环境变量，请求将自动按当前 Agent 的同工具主备顺位路由
                       </p>
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <select
                       value={effectiveCustomWire}
                       onChange={(e) => setCustomModelWire(e.target.value)}
                       aria-label="选择导出环境变量的目标模型"
-                      className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-xs dark:border-zinc-700 dark:bg-zinc-800"
+                      className="field-input max-w-full min-w-0 font-mono"
                     >
                       {customExportModels.map((m) => (
                         <option key={m.wireId} value={m.wireId}>

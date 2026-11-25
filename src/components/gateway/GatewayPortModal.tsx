@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from "react";
-import { CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Loader2, X, XCircle } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
 
@@ -29,41 +29,55 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
   }, [open, gateway.port]);
 
   const busy = checking || applying;
+  const parsedPort = parsePortInput(port);
+  const isUnchangedPort = parsedPort === gateway.port;
 
   const runCheck = async () => {
     if (busy) return;
-    const p = parsePortInput(port);
-    if (p === null) {
+    if (parsedPort === null) {
       setResult({ available: false, inUseBySelf: false, message: "端口必须在 1024–65535 之间" });
       return;
     }
     setChecking(true);
     try {
-      setResult(await checkGatewayPort(p));
+      setResult(await checkGatewayPort(parsedPort));
+    } catch (err) {
+      setResult({
+        available: false,
+        inUseBySelf: false,
+        message: err instanceof Error ? err.message : "端口检测失败，请重试",
+      });
     } finally {
       setChecking(false);
     }
   };
 
   const apply = async () => {
-    if (busy) return;
-    const p = parsePortInput(port);
-    if (p === null) {
+    if (busy || isUnchangedPort) return;
+    if (parsedPort === null) {
       setResult({ available: false, inUseBySelf: false, message: "端口必须在 1024–65535 之间" });
       return;
     }
     setApplying(true);
     try {
-      const res = await updateGatewayPort(p);
+      const res = await updateGatewayPort(parsedPort);
       if (res.ok) {
         onClose();
       } else {
         setResult({ available: false, inUseBySelf: false, message: res.message ?? "更新失败" });
       }
+    } catch (err) {
+      setResult({
+        available: false,
+        inUseBySelf: false,
+        message: err instanceof Error ? err.message : "端口更新失败，请重试",
+      });
     } finally {
       setApplying(false);
     }
   };
+
+  const resultId = `${titleId}-result`;
 
   return (
     <Modal
@@ -79,9 +93,20 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
           void apply();
         }}
       >
-        <h3 id={titleId} className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-          网关端口与占用检测
-        </h3>
+        <div className="flex items-start justify-between gap-3">
+          <h2 id={titleId} className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+            网关端口与占用检测
+          </h2>
+          <button
+            type="button"
+            disabled={applying}
+            onClick={onClose}
+            aria-label="关闭网关端口弹窗"
+            className="btn btn-icon btn-ghost shrink-0"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
         <p className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
           监听地址固定为 <code>127.0.0.1</code>，端口范围 <b>1024–65535</b>。修改会自动重启网关并同步所有已挂载
           Agent 配置；如需立即让桌面客户端生效，可在「系统设置 → 客户端环境」一键重启运行中的 Agent。
@@ -101,19 +126,21 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
               min={1024}
               max={65535}
               disabled={busy}
+              aria-invalid={result ? !result.available : undefined}
+              aria-describedby={result ? resultId : undefined}
               value={port}
               onChange={(e) => {
                 setPort(e.target.value);
                 setResult(null);
               }}
-              className="w-40 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-900 focus:border-brand-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              className="field-input w-40 font-mono text-sm"
             />
             <button
               type="button"
               onClick={() => void runCheck()}
               disabled={busy}
               aria-busy={checking}
-              className="btn btn-sm btn-secondary gap-1 disabled:cursor-not-allowed disabled:opacity-60"
+              className="btn btn-sm btn-secondary gap-1"
             >
               {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
               {checking ? "检测中…" : "检测占用"}
@@ -123,6 +150,8 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
 
         {result && (
           <div
+            id={resultId}
+            role={result.available ? "status" : "alert"}
             className={`mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${
               result.available
                 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300"
@@ -146,15 +175,16 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
             type="button"
             disabled={applying}
             onClick={onClose}
-            className="btn btn-md btn-secondary disabled:cursor-not-allowed disabled:opacity-60"
+            className="btn btn-md btn-secondary"
           >
             取消
           </button>
           <button
             type="submit"
-            disabled={busy}
+            disabled={busy || isUnchangedPort}
+            title={isUnchangedPort ? "端口与当前运行端口相同" : undefined}
             aria-busy={applying}
-            className="btn btn-md btn-primary gap-1 disabled:cursor-not-allowed disabled:opacity-60"
+            className="btn btn-md btn-primary gap-1"
           >
             {applying ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
             {applying ? "应用中…" : "应用端口"}

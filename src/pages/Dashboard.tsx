@@ -178,8 +178,11 @@ export function Dashboard({
   } = usePoolPrototype();
 
   const mainScrollRef = useRef<HTMLElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [nav, setNav] = useState<NavSection>("all");
   const prevNavRef = useRef<NavSection>(nav);
+  const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
+  const [confirmQuitOpen, setConfirmQuitOpen] = useState(false);
   const [simModalOpen, setSimModalOpen] = useState(false);
   const [simDefaultPoolId, setSimDefaultPoolId] = useState<string | undefined>(undefined);
   const [simDefaultModelId, setSimDefaultModelId] = useState<string | undefined>(undefined);
@@ -471,6 +474,7 @@ export function Dashboard({
   }, [logScope, nav]);
 
   const filteredLogs = useMemo(() => {
+    if (nav !== "logs") return [];
     const q = logSearch.trim().toLowerCase();
     return logs.filter((log) => {
       if (logActionFilter !== "all" && log.actionType !== logActionFilter) return false;
@@ -482,15 +486,60 @@ export function Dashboard({
         .toLowerCase()
         .includes(q);
     });
-  }, [logs, logActionFilter, logResultFilter, logSearch, adapters]);
+  }, [nav, logs, logActionFilter, logResultFilter, logSearch, adapters]);
 
   useEffect(() => {
+    if (nav !== "logs") return;
     const validIds = new Set(filteredLogs.map((l) => l.id));
     setSelectedLogIds((prev) => {
       const valid = prev.filter((id) => validIds.has(id));
       return valid.length === prev.length ? prev : valid;
     });
-  }, [filteredLogs]);
+  }, [nav, filteredLogs]);
+
+  // 全局桌面快捷键：Cmd/Ctrl+K 聚焦搜索，Cmd/Ctrl+, 打开设置，Cmd/Ctrl+1~4 切换主工作区
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
+      const target = e.target as HTMLElement | null;
+      const isEditing =
+        Boolean(target) &&
+        (target!.tagName === "INPUT" ||
+          target!.tagName === "TEXTAREA" ||
+          target!.tagName === "SELECT" ||
+          target!.isContentEditable);
+
+      const key = e.key.toLowerCase();
+      if (key === "k") {
+        e.preventDefault();
+        if (nav === "pools" || nav === "agents" || nav === "routing" || nav === "logs" || nav === "settings") {
+          setNav("all");
+        }
+        requestAnimationFrame(() => searchInputRef.current?.focus());
+        return;
+      }
+      if (isEditing) return;
+      if (key === ",") {
+        e.preventDefault();
+        setNav("settings");
+      } else if (key === "1") {
+        e.preventDefault();
+        setNav("all");
+      } else if (key === "2") {
+        e.preventDefault();
+        setNav("agents");
+      } else if (key === "3") {
+        e.preventDefault();
+        setNav("routing");
+      } else if (key === "4") {
+        e.preventDefault();
+        setNav("logs");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [nav]);
 
   const autoStartDescription = useMemo(() => {
     const ua = typeof navigator !== "undefined" ? navigator.userAgent.toLowerCase() : "";
@@ -819,7 +868,7 @@ export function Dashboard({
                   </span>
                   {updateInfo?.updateAvailable && (
                     <span
-                      className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500"
+                      className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-brand-500"
                       title={`发现新版本 v${updateInfo.latestVersion}`}
                       aria-label={`发现新版本 v${updateInfo.latestVersion}`}
                     />
@@ -840,6 +889,7 @@ export function Dashboard({
               className="flex min-w-0 items-center gap-2 text-left font-medium text-zinc-700 hover:text-zinc-950 dark:text-zinc-200 dark:hover:text-white"
             >
               <span
+                aria-hidden="true"
                 className={`h-2 w-2 shrink-0 rounded-full ${
                   gateway.running ? "bg-emerald-500" : "bg-zinc-400"
                 }`}
@@ -854,10 +904,10 @@ export function Dashboard({
               disabled={gatewayBusy}
               aria-busy={gatewayBusy}
               aria-label={gateway.running ? "关闭本地网关" : "启动本地网关"}
-              className={`inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${
+              className={`btn btn-xs shrink-0 ${
                 gateway.running
                   ? "bg-zinc-200/80 text-zinc-700 hover:bg-rose-500/15 hover:text-rose-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-rose-500/20 dark:hover:text-rose-300"
-                  : "bg-brand-600 text-white shadow-2xs hover:bg-brand-700 dark:bg-brand-500 dark:text-zinc-950 dark:hover:bg-brand-400"
+                  : "btn-primary"
               }`}
             >
               {gatewayBusy ? (
@@ -871,12 +921,12 @@ export function Dashboard({
 
           {/* 精简版本与加密库底栏 */}
           {hasUpdate ? (
-            <div className="rounded-xl border border-indigo-500/35 bg-indigo-500/[0.06] p-2 text-[11px] dark:border-indigo-400/30 dark:bg-indigo-400/[0.08]">
+            <div className="rounded-xl border border-brand-500/30 bg-brand-500/[0.06] p-2 text-[11px] dark:border-brand-400/25 dark:bg-brand-400/[0.08]">
               <div className="flex items-center justify-between gap-1.5">
                 <button
                   type="button"
                   onClick={() => setNav("settings")}
-                  className="truncate font-medium text-indigo-800 hover:underline dark:text-indigo-200"
+                  className="truncate font-medium text-brand-800 hover:underline dark:text-brand-200"
                 >
                   新版本可升级
                 </button>
@@ -886,7 +936,7 @@ export function Dashboard({
                   disabled={updateInstalling}
                   title={updatePrimaryLabel}
                   aria-label={updatePrimaryLabel}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-brand-700 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white transition hover:bg-brand-800 disabled:opacity-60 dark:bg-brand-400 dark:text-zinc-950"
                 >
                   {updateInstalling ? (
                     <Loader2 className="h-2.5 w-2.5 animate-spin" aria-hidden="true" />
@@ -913,7 +963,13 @@ export function Dashboard({
             </span>
             <button
               type="button"
-              onClick={() => void quitApp()}
+              onClick={() => {
+                if (gateway.running || batchProgress?.running) {
+                  setConfirmQuitOpen(true);
+                } else {
+                  void quitApp();
+                }
+              }}
               className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
             >
               <Power className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -1168,19 +1224,24 @@ export function Dashboard({
                         {accounts.length}
                       </span>
                     </div>
-                    {orderedVisibleTools.map((tool) => (
-                      <div
-                        key={tool.id}
-                        data-measure-tool
-                        className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium"
-                      >
-                        <ToolBrandIcon toolId={tool.id} size="xs" decorative />
-                        <span>{tool.name}</span>
-                        <span className="rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums">
-                          {accountCountByTool.get(tool.id) ?? 0}
-                        </span>
-                      </div>
-                    ))}
+                    {orderedVisibleTools.map((tool) => {
+                      const count = accountCountByTool.get(tool.id) ?? 0;
+                      const isRunning = Boolean(clientStatuses[tool.id]?.isRunning);
+                      return (
+                        <div
+                          key={tool.id}
+                          data-measure-tool
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium"
+                        >
+                          <ToolBrandIcon toolId={tool.id} size="xs" decorative />
+                          <span>{tool.name}</span>
+                          {isRunning && count > 0 && <span className="h-1.5 w-1.5 shrink-0" />}
+                          <span className="rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums">
+                            {count}
+                          </span>
+                        </div>
+                      );
+                    })}
                     </div>
                   </div>
 
@@ -1196,7 +1257,7 @@ export function Dashboard({
                       aria-current={nav === "all" ? "page" : undefined}
                       className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
                         nav === "all"
-                          ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                          ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
                           : "bg-white text-zinc-700 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-800 dark:hover:bg-zinc-800"
                       }`}
                     >
@@ -1225,7 +1286,7 @@ export function Dashboard({
                           aria-current={active ? "page" : undefined}
                           className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
                             active
-                              ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                              ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
                               : count > 0
                                 ? "bg-white text-zinc-700 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-800 dark:hover:bg-zinc-800"
                                 : "bg-white/60 text-zinc-500 ring-1 ring-zinc-200/70 hover:bg-white hover:text-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400 dark:ring-zinc-800/80 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
@@ -1236,6 +1297,7 @@ export function Dashboard({
                           {isRunning && count > 0 && (
                             <span
                               title="本机客户端运行中"
+                              aria-hidden="true"
                               className={`h-1.5 w-1.5 shrink-0 rounded-full ${
                                 active ? "bg-white dark:bg-zinc-950" : "bg-emerald-500"
                               }`}
@@ -1269,7 +1331,7 @@ export function Dashboard({
                       }
                       className={`mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
                         !toolNavExpanded && activeOverflowTool
-                          ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                          ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
                           : "bg-white text-zinc-700 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-800 dark:hover:bg-zinc-800"
                       }`}
                     >
@@ -1295,7 +1357,123 @@ export function Dashboard({
                   )}
                 </div>
 
-                {/* 紧凑单行 KPI 筛选条 */}
+                {showFilterToolbar && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                    <div className="relative min-w-[180px] flex-1 max-w-xs">
+                      <Search
+                        className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500"
+                        aria-hidden="true"
+                      />
+                      <input
+                        ref={searchInputRef}
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="搜索昵称、UID、手机号或套餐..."
+                        aria-label="搜索账号"
+                        className="w-full rounded-lg border border-zinc-200 bg-white py-1 pr-10 pl-8 text-xs text-zinc-900 transition focus:border-brand-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-brand-500"
+                      />
+                      {searchQuery ? (
+                        <button
+                          type="button"
+                          onClick={() => setSearchQuery("")}
+                          aria-label="清空搜索"
+                          className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-200/70 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                        >
+                          <X className="h-3 w-3" aria-hidden="true" />
+                        </button>
+                      ) : (
+                        <kbd
+                          aria-hidden="true"
+                          className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded border border-zinc-200 bg-zinc-50 px-1 py-0.5 font-mono text-[10px] leading-none text-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-500"
+                        >
+                          ⌘K
+                        </kbd>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div role="group" aria-label="账号状态筛选" className="flex flex-wrap items-center gap-1">
+                        {(
+                          [
+                            { id: "all", label: "全部" },
+                            { id: "active_client", label: "使用中" },
+                            { id: "claimable", label: "待领" },
+                            { id: "attention", label: "待完善" },
+                          ] as const
+                        ).map((f) => {
+                          const active = statusFilter === f.id;
+                          const cnt = scopedStats.filterCounts[f.id];
+                          return (
+                            <button
+                              key={f.id}
+                              type="button"
+                              aria-pressed={active}
+                              onClick={() => setStatusFilter(f.id)}
+                              className={`chip ${active ? "chip-active" : ""}`}
+                            >
+                              <span>{f.label}</span>
+                              <span
+                                className={`text-[11px] tabular-nums ${
+                                  active ? "opacity-80" : "text-zinc-500 dark:text-zinc-400"
+                                }`}
+                              >
+                                {cnt}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {nav === "all" && (
+                        <div
+                          role="group"
+                          aria-label="视图模式"
+                          className="inline-flex shrink-0 rounded-lg border border-zinc-200 bg-white p-0.5 dark:border-zinc-700 dark:bg-zinc-900"
+                        >
+                          <button
+                            type="button"
+                            aria-pressed={viewMode === "grouped"}
+                            onClick={() => setViewMode("grouped")}
+                            title="按平台模块化分类展示"
+                            className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                              viewMode === "grouped"
+                                ? "bg-zinc-100 text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
+                                : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                            }`}
+                          >
+                            <LayoutList className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            分组
+                          </button>
+                          <button
+                            type="button"
+                            aria-pressed={viewMode === "flat"}
+                            onClick={() => setViewMode("flat")}
+                            title="紧凑平铺展示"
+                            className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                              viewMode === "flat"
+                                ? "bg-zinc-100 text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
+                                : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                            }`}
+                          >
+                            <LayoutGrid className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            平铺
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3.5 px-5 py-3.5">
+                <UpdateBanner
+                  onOpenSettings={() => setNav("settings")}
+                  dismissed={updateBannerDismissed}
+                  onDismiss={() => setUpdateBannerDismissed(true)}
+                />
+
+                {/* 核心指标筛选卡随内容区滚动，避免在 768px 窄高窗口吸顶挤压账号列表 */}
                 <section
                   aria-label="当前作用域核心指标"
                   className="grid grid-cols-2 gap-2 @3xl:grid-cols-4"
@@ -1463,107 +1641,12 @@ export function Dashboard({
                   </button>
                 </section>
 
-                {showFilterToolbar && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                    <div className="relative min-w-[180px] flex-1 max-w-xs">
-                      <Search
-                        className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500"
-                        aria-hidden="true"
-                      />
-                      <input
-                        type="text"
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="搜索昵称、UID、手机号或套餐..."
-                        aria-label="搜索账号"
-                        className="w-full rounded-lg border border-zinc-200 bg-white py-1 pr-7 pl-8 text-xs text-zinc-900 transition focus:border-brand-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-brand-500"
-                      />
-                      {searchQuery && (
-                        <button
-                          type="button"
-                          onClick={() => setSearchQuery("")}
-                          aria-label="清空搜索"
-                          className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-zinc-500 transition hover:bg-zinc-200/70 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-                        >
-                          <X className="h-3 w-3" aria-hidden="true" />
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="flex flex-wrap items-center gap-1">
-                        {(
-                          [
-                            { id: "all", label: "全部" },
-                            { id: "active_client", label: "使用中" },
-                            { id: "claimable", label: "待领" },
-                            { id: "attention", label: "待完善" },
-                          ] as const
-                        ).map((f) => {
-                          const active = statusFilter === f.id;
-                          const cnt = scopedStats.filterCounts[f.id];
-                          return (
-                            <button
-                              key={f.id}
-                              type="button"
-                              onClick={() => setStatusFilter(f.id)}
-                              className={`chip ${active ? "chip-active" : ""}`}
-                            >
-                              <span>{f.label}</span>
-                              <span
-                                className={`text-[11px] tabular-nums ${
-                                  active ? "opacity-80" : "text-zinc-500 dark:text-zinc-400"
-                                }`}
-                              >
-                                {cnt}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      {nav === "all" && (
-                        <div className="inline-flex shrink-0 rounded-lg border border-zinc-200 bg-white p-0.5 dark:border-zinc-700 dark:bg-zinc-900">
-                          <button
-                            type="button"
-                            onClick={() => setViewMode("grouped")}
-                            title="按平台模块化分类展示"
-                            className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                              viewMode === "grouped"
-                                ? "bg-zinc-100 text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                                : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
-                            }`}
-                          >
-                            <LayoutList className="h-3 w-3 shrink-0" aria-hidden="true" />
-                            分组
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setViewMode("flat")}
-                            title="紧凑平铺展示"
-                            className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                              viewMode === "flat"
-                                ? "bg-zinc-100 text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                                : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
-                            }`}
-                          >
-                            <LayoutGrid className="h-3 w-3 shrink-0" aria-hidden="true" />
-                            平铺
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="px-5 py-3.5">
-                <UpdateBanner onOpenSettings={() => setNav("settings")} />
-
                 {isInitializing && scopeAccounts.length === 0 ? (
                 <div
+                  role="status"
+                  aria-busy="true"
                   aria-label="正在加载本地账号库"
-                  className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))]"
+                  className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))]"
                 >
                   {[0, 1, 2].map((idx) => (
                     <div
@@ -1667,7 +1750,7 @@ export function Dashboard({
                             }`}
                           >
                             {group.isRunning && (
-                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
                             )}
                             {group.isRunning ? "桌面端运行中" : "桌面端未运行"}
                           </span>
@@ -1708,7 +1791,7 @@ export function Dashboard({
 
                           <button
                             type="button"
-                            onClick={() => openImportModal("webview_oauth", group.id)}
+                            onClick={() => openImportModal(undefined, group.id)}
                             className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
                           >
                             <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -1717,7 +1800,7 @@ export function Dashboard({
                         </div>
                       </div>
 
-                      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))]">
+                      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))]">
                         {group.accounts.map((acc) => (
                           <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                         ))}
@@ -1726,7 +1809,7 @@ export function Dashboard({
                           <SecondAccountGhostCard
                             toolName={group.name}
                             scopeHint="新增副号后可在本模块内一键无缝切换桌面端登录态"
-                            onClick={() => openImportModal("webview_oauth", group.id)}
+                            onClick={() => openImportModal(undefined, group.id)}
                           />
                         )}
                       </div>
@@ -1734,7 +1817,7 @@ export function Dashboard({
                   ))}
                 </div>
               ) : (
-                <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))]">
+                <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))]">
                   {sortedFlatAccounts.map((acc) => (
                     <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                   ))}
@@ -1746,7 +1829,7 @@ export function Dashboard({
                       <SecondAccountGhostCard
                         toolName={activeToolMeta.name}
                         scopeHint="新增副号后可在本页一键无缝切换桌面端登录态"
-                        onClick={() => openImportModal("webview_oauth", activeToolFilter)}
+                        onClick={() => openImportModal(undefined, activeToolFilter)}
                       />
                     )}
                 </div>
@@ -1832,6 +1915,24 @@ export function Dashboard({
               setSelectedLogIds([]);
             }
           }
+        }}
+      />
+      <ConfirmDialog
+        open={confirmQuitOpen}
+        title="确认退出 Qwitch？"
+        description={
+          gateway.running && batchProgress?.running
+            ? "当前本地路由网关仍在运行，且有批量任务正在执行；退出将同时停止网关并中断未完成任务。"
+            : gateway.running
+              ? "当前本地路由网关仍在运行，退出后已接入的 Agent 将无法通过本地网关调度请求。"
+              : "当前有批量额度刷新/领取任务正在执行，退出将中断未完成任务。"
+        }
+        confirmLabel="确认退出"
+        danger
+        onCancel={() => setConfirmQuitOpen(false)}
+        onConfirm={async () => {
+          setConfirmQuitOpen(false);
+          await quitApp();
         }}
       />
     </div>

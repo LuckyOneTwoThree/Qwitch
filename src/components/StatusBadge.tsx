@@ -14,8 +14,18 @@ export function AccountStatusBadge({
   missingLocalSnapshot?: boolean;
 }) {
   if (status === "active" && (missingApiToken || missingLocalSnapshot)) {
+    const missingBoth = missingApiToken && missingLocalSnapshot;
     return (
-      <span className="badge border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300">
+      <span
+        title={
+          missingBoth
+            ? "缺少在线授权凭据与本机切号快照"
+            : missingApiToken
+              ? "缺少在线授权凭据（授权后开启查额与签到）"
+              : "未关联本机客户端会话（关联后可一键冷切换）"
+        }
+        className="badge border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300"
+      >
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
         {missingApiToken ? "待授权" : "待关联"}
       </span>

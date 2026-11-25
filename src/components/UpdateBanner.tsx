@@ -16,9 +16,19 @@ import { useUpdateActions } from "../context/useUpdateActions";
  *   下次启动仍会提示，避免用户永久错过安全更新；
  * - 主按钮区分平台：Windows 可直接应用内安装，macOS 走浏览器下载页。
  */
-export function UpdateBanner({ onOpenSettings }: { onOpenSettings: () => void }) {
+export function UpdateBanner({
+  onOpenSettings,
+  dismissed: controlledDismissed,
+  onDismiss,
+}: {
+  onOpenSettings: () => void;
+  dismissed?: boolean;
+  onDismiss?: () => void;
+}) {
   const { isTauriRuntime, updateInfo: info } = useQwitch();
-  const [dismissed, setDismissed] = useState(false);
+  const [localDismissed, setLocalDismissed] = useState(false);
+  const dismissed = controlledDismissed ?? localDismissed;
+  const handleDismiss = onDismiss ?? (() => setLocalDismissed(true));
   const {
     installing,
     runPrimaryAction,
@@ -33,13 +43,13 @@ export function UpdateBanner({ onOpenSettings }: { onOpenSettings: () => void })
   return (
     <div
       role="status"
-      className="flex flex-wrap items-center gap-2 rounded-xl border border-indigo-500/25 bg-indigo-500/[0.07] px-3 py-2 text-xs text-indigo-900 dark:border-indigo-400/25 dark:bg-indigo-400/10 dark:text-indigo-100"
+      className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-500/25 bg-brand-500/[0.07] px-3 py-2 text-xs text-brand-900 dark:border-brand-400/25 dark:bg-brand-400/10 dark:text-brand-100"
     >
-      <Sparkles className="h-3.5 w-3.5 shrink-0 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
+      <Sparkles className="h-3.5 w-3.5 shrink-0 text-brand-600 dark:text-brand-300" aria-hidden="true" />
       <span className="min-w-0 flex-1 leading-snug">
         发现新版本{" "}
         <span className="font-mono font-semibold">v{info.latestVersion}</span>
-        <span className="text-indigo-700/70 dark:text-indigo-200/70">
+        <span className="text-brand-800/75 dark:text-brand-200/75">
           {" "}
           · 当前 v{info.currentVersion}
         </span>
@@ -72,10 +82,10 @@ export function UpdateBanner({ onOpenSettings }: { onOpenSettings: () => void })
 
       <button
         type="button"
-        onClick={() => setDismissed(true)}
+        onClick={handleDismiss}
         title="本次运行不再提示"
         aria-label="关闭更新提示"
-        className="shrink-0 rounded-md p-1 text-indigo-700/60 transition hover:bg-indigo-500/10 hover:text-indigo-900 dark:text-indigo-200/60 dark:hover:text-indigo-100"
+        className="shrink-0 rounded-md p-1 text-brand-800/75 transition hover:bg-brand-500/10 hover:text-brand-950 dark:text-brand-200/75 dark:hover:text-brand-50"
       >
         <X className="h-3.5 w-3.5" aria-hidden="true" />
       </button>

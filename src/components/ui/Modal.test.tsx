@@ -109,4 +109,25 @@ describe("Modal 焦点陷阱", () => {
     expect(screen.queryByText("标题")).toBeNull();
     expect(document.body.style.overflow).not.toBe("hidden");
   });
+
+  it("叠加多个 Modal 时 Escape 仅关闭最顶层弹窗", () => {
+    const onCloseOuter = vi.fn();
+    const onCloseInner = vi.fn();
+    render(
+      <>
+        <Modal open onClose={onCloseOuter} labelledBy="outer-title">
+          <h2 id="outer-title">外层弹窗</h2>
+          <button type="button">外层按钮</button>
+        </Modal>
+        <Modal open onClose={onCloseInner} labelledBy="inner-title" flush>
+          <h2 id="inner-title">内层弹窗</h2>
+          <button type="button">内层按钮</button>
+        </Modal>
+      </>
+    );
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onCloseInner).toHaveBeenCalledTimes(1);
+    expect(onCloseOuter).not.toHaveBeenCalled();
+  });
 });

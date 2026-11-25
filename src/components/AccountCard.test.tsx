@@ -238,4 +238,22 @@ describe("AccountCard", () => {
     render(<AccountCard account={{ ...account, latestQuota: undefined }} />);
     expect(screen.getByText("尚未查额")).toBeTruthy();
   });
+
+  it("已停用账号禁用「切至桌面端」与「查额」并给出明确原因提示", () => {
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          status: "disabled",
+          isActiveOnClient: false,
+        }}
+      />
+    );
+    const switchBtn = screen.getByRole("button", { name: /切至桌面端/ }) as HTMLButtonElement;
+    const queryBtn = screen.getByRole("button", { name: /查额/ }) as HTMLButtonElement;
+    expect(switchBtn.disabled).toBe(true);
+    expect(switchBtn.title).toContain("已停用");
+    expect(queryBtn.disabled).toBe(true);
+    expect(queryBtn.title).toContain("已停用");
+  });
 });

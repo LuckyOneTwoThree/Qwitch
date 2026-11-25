@@ -43,332 +43,370 @@ export function LogsToolbar({
   toggleSelectAllVisibleLogs,
 }: LogsToolbarProps) {
   const { logStats, logScope, setLogScope, archiveLogs, unarchiveLogs, deleteLogs, exportLogs } = useQwitch();
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const runBusy = async (key: string, fn: () => Promise<unknown>) => {
+    if (busyAction) return;
+    setBusyAction(key);
+    try {
+      await fn();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+  const isBusy = busyAction !== null;
+
   return (
-    <div className="shrink-0 space-y-2.5 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
-      <div className="surface-card flex flex-wrap items-center justify-between gap-3 p-3">
-        <div className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/60">
-          <button
-            type="button"
-            onClick={() => setLogScope("active")}
-            className={`chip gap-1.5 text-xs ${
-              logScope === "active" ? "chip-active" : ""
-            }`}
+    <div className="shrink-0 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
+      <div className="surface-card divide-y divide-zinc-200/70 dark:divide-zinc-800">
+        <div className="flex flex-wrap items-center justify-between gap-2.5 p-3">
+          <div
+            role="group"
+            aria-label="日志作用域"
+            className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/60"
           >
-            <ScrollText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            活跃日志
-            <span
-              className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
-                logScope === "active"
-                  ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
-                  : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+            <button
+              type="button"
+              aria-pressed={logScope === "active"}
+              onClick={() => setLogScope("active")}
+              className={`chip gap-1.5 text-xs ${
+                logScope === "active" ? "chip-active" : ""
               }`}
             >
-              {logStats.activeCount}
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setLogScope("archived")}
-            className={`chip gap-1.5 text-xs ${
-              logScope === "archived" ? "chip-active" : ""
-            }`}
-          >
-            <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            已归档
-            <span
-              className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
-                logScope === "archived"
-                  ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
-                  : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              <ScrollText className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              活跃日志
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                  logScope === "active"
+                    ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                    : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                }`}
+              >
+                {logStats.activeCount}
+              </span>
+            </button>
+            <button
+              type="button"
+              aria-pressed={logScope === "archived"}
+              onClick={() => setLogScope("archived")}
+              className={`chip gap-1.5 text-xs ${
+                logScope === "archived" ? "chip-active" : ""
               }`}
             >
-              {logStats.archivedCount}
-            </span>
-          </button>
+              <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              已归档
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                  logScope === "archived"
+                    ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                    : "bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                }`}
+              >
+                {logStats.archivedCount}
+              </span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {logScope === "active" ? (
+              <>
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.noiseActiveCount === 0}
+                  onClick={() =>
+                    void runBusy("cleanup", () =>
+                      archiveLogs(
+                        { scope: "active", redundantOnly: true },
+                        (count) =>
+                          `已归档 ${count} 条日常冗余记录（已保留签到、切号与异常）`
+                      )
+                    )
+                  }
+                  title="将日常“额度查询成功”和“已跳过”归档，仅保留签到成功、切号、导入及所有异常"
+                  className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
+                >
+                  <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  清理冗余
+                  {logStats.noiseActiveCount > 0 && (
+                    <span className="rounded-full bg-white/20 px-1.5 text-[11px] tabular-nums dark:bg-zinc-900/15">
+                      {logStats.noiseActiveCount}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.activeCount === 0}
+                  onClick={() =>
+                    void runBusy("archive7d", () =>
+                      archiveLogs(
+                        { scope: "active", olderThanDays: 7 },
+                        "已将 7 天前活跃日志移入归档"
+                      )
+                    )
+                  }
+                  className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                >
+                  <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  归档 7 天前
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.activeCount === 0}
+                  onClick={() =>
+                    setConfirmLogAction({
+                      label: "归档当前全部活跃日志？",
+                      detail: `将把 ${logStats.activeCount} 条活跃日志全部转入「已归档」，可在归档区查看、导出或恢复。`,
+                      run: async () => (await archiveLogs({ scope: "active" })) !== null,
+                    })
+                  }
+                  className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                >
+                  <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  全部归档
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.activeCount === 0}
+                  onClick={() => void runBusy("exportActive", () => exportLogs("active", false))}
+                  className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                >
+                  <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  导出
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.activeCount === 0}
+                  onClick={() =>
+                    setConfirmLogAction({
+                      label: "确认清空全部活跃日志？",
+                      detail: `将永久删除 ${logStats.activeCount} 条活跃日志，不可恢复；若需留存请先点击「全部归档」或「导出」。`,
+                      danger: true,
+                      run: async () => (await deleteLogs({ scope: "active" })) !== null,
+                    })
+                  }
+                  className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
+                >
+                  <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  清空活跃
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.archivedCount === 0}
+                  onClick={() =>
+                    void runBusy("exportArchived", () => exportLogs("archived", false))
+                  }
+                  className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
+                >
+                  <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  导出归档 JSON
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.archivedCount === 0}
+                  onClick={() =>
+                    void runBusy("unarchiveAll", () =>
+                      unarchiveLogs(
+                        { scope: "archived" },
+                        (count) => `已恢复 ${count} 条归档日志`
+                      )
+                    )
+                  }
+                  className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                >
+                  <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  全部恢复
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isBusy || logStats.archivedCount === 0}
+                  onClick={() =>
+                    setConfirmLogAction({
+                      label: "确认彻底清空已归档日志？",
+                      detail: `将永久删除 ${logStats.archivedCount} 条已归档历史记录，建议先点击「导出归档 JSON」保存备份。`,
+                      danger: true,
+                      run: async () => (await deleteLogs({ scope: "archived" })) !== null,
+                    })
+                  }
+                  className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
+                >
+                  <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  彻底清空归档
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          {logScope === "active" ? (
-            <>
-              <button
-                type="button"
-                disabled={logStats.noiseActiveCount === 0}
-                onClick={() =>
-                  void archiveLogs(
-                    { scope: "active", redundantOnly: true },
-                    (count) =>
-                      `已归档 ${count} 条日常冗余记录（已保留签到、切号与异常）`
-                  )
-                }
-                title="将日常“额度查询成功”和“幂等跳过”归档，仅保留签到成功、切号、导入及所有异常"
-                className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
-              >
-                <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                清理冗余
-                {logStats.noiseActiveCount > 0 && (
-                  <span className="rounded-full bg-white/20 px-1.5 text-[11px] tabular-nums dark:bg-zinc-900/15">
-                    {logStats.noiseActiveCount}
-                  </span>
+        <div className="flex flex-col gap-2 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="relative min-w-[160px] flex-1">
+              <Search
+                className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
+                aria-hidden="true"
+              />
+              <input
+                type="text"
+                value={logSearch}
+                onChange={(e) => setLogSearch(e.target.value)}
+                placeholder="搜索日志内容、平台名称或错误码..."
+                aria-label="搜索操作日志"
+                className="field-input w-full bg-zinc-50/70 py-1.5 pr-8 pl-8 dark:bg-zinc-800/60"
+              />
+              {logSearch && (
+                <button
+                  type="button"
+                  onClick={() => setLogSearch("")}
+                  className="btn btn-icon btn-ghost absolute top-1/2 right-1 -translate-y-1/2"
+                  aria-label="清除搜索"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+
+            {filteredLogs.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-pressed={allVisibleLogsSelected}
+                  onClick={toggleSelectAllVisibleLogs}
+                  className="btn btn-sm btn-secondary shrink-0 gap-1.5 whitespace-nowrap"
+                >
+                  {allVisibleLogsSelected ? (
+                    <CheckSquare className="h-3.5 w-3.5 text-zinc-900 dark:text-zinc-100" aria-hidden="true" />
+                  ) : (
+                    <Square className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" aria-hidden="true" />
+                  )}
+                  {allVisibleLogsSelected ? "取消全选" : `全选 (${filteredLogs.length})`}
+                </button>
+
+                {selectedLogIds.length > 0 && (
+                  <>
+                    {logScope === "active" ? (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() =>
+                          void runBusy("archiveSelected", async () => {
+                            const ids = [...selectedLogIds];
+                            const count = await archiveLogs({ scope: "active", ids });
+                            if (count !== null) {
+                              setSelectedLogIds([]);
+                            }
+                          })
+                        }
+                        className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
+                      >
+                        <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        归档已选 ({selectedLogIds.length})
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() =>
+                          void runBusy("unarchiveSelected", async () => {
+                            const ids = [...selectedLogIds];
+                            const count = await unarchiveLogs({ scope: "archived", ids });
+                            if (count !== null) {
+                              setSelectedLogIds([]);
+                            }
+                          })
+                        }
+                        className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
+                      >
+                        <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        恢复已选 ({selectedLogIds.length})
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() =>
+                        setConfirmLogAction({
+                          label: `确认永久删除已选 ${selectedLogIds.length} 条日志？`,
+                          detail: "删除后将无法在活跃或归档列表中恢复。",
+                          danger: true,
+                          run: async () => {
+                            const ids = [...selectedLogIds];
+                            return (await deleteLogs({ scope: logScope, ids })) !== null;
+                          },
+                        })
+                      }
+                      className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      删除已选 ({selectedLogIds.length})
+                    </button>
+                  </>
                 )}
-              </button>
-
-              <button
-                type="button"
-                disabled={logStats.activeCount === 0}
-                onClick={() =>
-                  void archiveLogs(
-                    { scope: "active", olderThanDays: 7 },
-                    "已将 7 天前活跃日志移入归档"
-                  )
-                }
-                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
-              >
-                <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                归档 7 天前
-              </button>
-
-              <button
-                type="button"
-                disabled={logStats.activeCount === 0}
-                onClick={() =>
-                  setConfirmLogAction({
-                    label: "归档当前全部活跃日志？",
-                    detail: `将把 ${logStats.activeCount} 条活跃日志全部转入「已归档」，可在归档区查看、导出或恢复。`,
-                    run: async () => (await archiveLogs({ scope: "active" })) !== null,
-                  })
-                }
-                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
-              >
-                <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                全部归档
-              </button>
-
-              <button
-                type="button"
-                disabled={logStats.activeCount === 0}
-                onClick={() => void exportLogs("active", false)}
-                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
-              >
-                <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                导出
-              </button>
-
-              <button
-                type="button"
-                disabled={logStats.activeCount === 0}
-                onClick={() =>
-                  setConfirmLogAction({
-                    label: "确认清空全部活跃日志？",
-                    detail: `将永久删除 ${logStats.activeCount} 条活跃日志，不可恢复；若需留存请先点击「全部归档」或「导出」。`,
-                    danger: true,
-                    run: async () => (await deleteLogs({ scope: "active" })) !== null,
-                  })
-                }
-                className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
-              >
-                <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                清空活跃
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                disabled={logStats.archivedCount === 0}
-                onClick={() => void exportLogs("archived", false)}
-                className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
-              >
-                <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                导出归档 JSON
-              </button>
-
-              <button
-                type="button"
-                disabled={logStats.archivedCount === 0}
-                onClick={() =>
-                  void unarchiveLogs(
-                    { scope: "archived" },
-                    (count) => `已恢复 ${count} 条归档日志`
-                  )
-                }
-                className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
-              >
-                <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                全部恢复
-              </button>
-
-              <button
-                type="button"
-                disabled={logStats.archivedCount === 0}
-                onClick={() =>
-                  setConfirmLogAction({
-                    label: "确认彻底清空已归档日志？",
-                    detail: `将永久删除 ${logStats.archivedCount} 条已归档历史记录，建议先点击「导出归档 JSON」保存备份。`,
-                    danger: true,
-                    run: async () => (await deleteLogs({ scope: "archived" })) !== null,
-                  })
-                }
-                className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
-              >
-                <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                彻底清空归档
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      <div className="surface-card flex flex-col gap-2.5 p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="relative min-w-[160px] flex-1">
-            <Search
-              className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
-              aria-hidden="true"
-            />
-            <input
-              type="text"
-              value={logSearch}
-              onChange={(e) => setLogSearch(e.target.value)}
-              placeholder="搜索日志内容、平台名称或错误码..."
-              aria-label="搜索操作日志"
-              className="w-full rounded-xl border border-zinc-200 bg-zinc-50/70 py-1.5 pr-8 pl-8 text-xs text-zinc-900 transition focus:border-zinc-400 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-100 dark:focus:border-zinc-500"
-            />
-            {logSearch && (
-              <button
-                type="button"
-                onClick={() => setLogSearch("")}
-                className="btn btn-xs btn-ghost absolute top-1/2 right-2.5 -translate-y-1/2 p-0 hover:text-zinc-800 dark:hover:text-zinc-200"
-                aria-label="清除搜索"
-              >
-                <X className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
+              </div>
             )}
           </div>
 
-          {filteredLogs.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={toggleSelectAllVisibleLogs}
-                className="btn btn-sm btn-secondary shrink-0 gap-1.5 whitespace-nowrap"
-              >
-                {allVisibleLogsSelected ? (
-                  <CheckSquare className="h-3.5 w-3.5 text-zinc-900 dark:text-zinc-100" aria-hidden="true" />
-                ) : (
-                  <Square className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" aria-hidden="true" />
-                )}
-                {allVisibleLogsSelected ? "取消全选" : `全选 (${filteredLogs.length})`}
-              </button>
-
-              {selectedLogIds.length > 0 && (
-                <>
-                  {logScope === "active" ? (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const ids = [...selectedLogIds];
-                        const count = await archiveLogs({ scope: "active", ids });
-                        if (count !== null) {
-                          setSelectedLogIds([]);
-                        }
-                      }}
-                      className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
-                    >
-                      <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                      归档已选 ({selectedLogIds.length})
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const ids = [...selectedLogIds];
-                        const count = await unarchiveLogs({ scope: "archived", ids });
-                        if (count !== null) {
-                          setSelectedLogIds([]);
-                        }
-                      }}
-                      className="btn btn-sm btn-primary shrink-0 gap-1 whitespace-nowrap"
-                    >
-                      <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                      恢复已选 ({selectedLogIds.length})
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setConfirmLogAction({
-                        label: `确认永久删除已选 ${selectedLogIds.length} 条日志？`,
-                        detail: "删除后将无法在活跃或归档列表中恢复。",
-                        danger: true,
-                        run: async () => {
-                          const ids = [...selectedLogIds];
-                          return (await deleteLogs({ scope: logScope, ids })) !== null;
-                        },
-                      })
-                    }
-                    className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
-                  >
-                    <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    删除已选 ({selectedLogIds.length})
-                  </button>
-                </>
-              )}
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div role="group" aria-label="按动作筛选" className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-xs text-zinc-500 dark:text-zinc-400">
+                动作：
+              </span>
+              {(
+                [
+                  { id: "all", label: "全部" },
+                  { id: "claim", label: "每日签到" },
+                  { id: "query", label: "额度查询" },
+                  { id: "switch", label: "桌面切号" },
+                  { id: "import", label: "账号管理" },
+                  { id: "keepalive", label: "凭据保活" },
+                ] as const
+              ).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-pressed={logActionFilter === item.id}
+                  onClick={() => setLogActionFilter(item.id)}
+                  className={`chip text-xs ${
+                    logActionFilter === item.id ? "chip-active" : ""
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
             </div>
-          )}
-        </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-xs text-zinc-500 dark:text-zinc-400">
-              动作：
-            </span>
-            {(
-              [
-                { id: "all", label: "全部" },
-                { id: "claim", label: "每日签到" },
-                { id: "query", label: "额度查询" },
-                { id: "switch", label: "桌面切号" },
-                { id: "import", label: "账号管理" },
-                { id: "keepalive", label: "凭据保活" },
-              ] as const
-            ).map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setLogActionFilter(item.id)}
-                className={`chip text-xs ${
-                  logActionFilter === item.id ? "chip-active" : ""
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-xs text-zinc-500 dark:text-zinc-400">
-              结果：
-            </span>
-            {(
-              [
-                { id: "all", label: "全部" },
-                { id: "success", label: "成功" },
-                { id: "skipped", label: "幂等跳过" },
-                { id: "failed", label: "异常" },
-              ] as const
-            ).map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setLogResultFilter(item.id)}
-                className={`chip text-xs ${
-                  logResultFilter === item.id ? "chip-active" : ""
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
+            <div role="group" aria-label="按结果筛选" className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-xs text-zinc-500 dark:text-zinc-400">
+                结果：
+              </span>
+              {(
+                [
+                  { id: "all", label: "全部" },
+                  { id: "success", label: "成功" },
+                  { id: "skipped", label: "已跳过" },
+                  { id: "failed", label: "异常" },
+                ] as const
+              ).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-pressed={logResultFilter === item.id}
+                  onClick={() => setLogResultFilter(item.id)}
+                  className={`chip text-xs ${
+                    logResultFilter === item.id ? "chip-active" : ""
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -434,16 +472,23 @@ export function LogsPanel({
                       };
                       const toolName = getToolBrandMeta(log.toolId, adapters).name;
                       const checked = selectedLogIdSet.has(log.id);
+                      const createdDate = new Date(log.createdAt);
+                      const createdFull = createdDate.toLocaleString("zh-CN");
+                      const createdTime = createdDate.toLocaleTimeString("zh-CN", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      });
                       return (
                         <div
                           key={log.id}
-                          className={`group flex items-center justify-between gap-3 px-4 py-2.5 text-xs transition ${
+                          className={`group flex flex-col gap-1.5 px-4 py-2.5 text-xs transition @2xl:flex-row @2xl:items-center @2xl:justify-between @2xl:gap-3 ${
                             checked
-                              ? "bg-zinc-100/80 dark:bg-zinc-800/70"
+                              ? "bg-brand-500/[0.06] dark:bg-brand-400/[0.08]"
                               : "hover:bg-zinc-50/80 dark:hover:bg-zinc-800/40"
                           }`}
                         >
-                          <div className="flex min-w-0 items-center gap-2.5">
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2.5 gap-y-1.5 @2xl:flex-nowrap">
                             <button
                               type="button"
                               role="checkbox"
@@ -457,7 +502,7 @@ export function LogsPanel({
                               aria-label={checked ? "取消选择该条日志" : "选择该条日志"}
                             >
                               {checked ? (
-                                <CheckSquare className="h-3.5 w-3.5 text-zinc-900 dark:text-zinc-100" aria-hidden="true" />
+                                <CheckSquare className="h-3.5 w-3.5 text-brand-700 dark:text-brand-300" aria-hidden="true" />
                               ) : (
                                 <Square className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" aria-hidden="true" />
                               )}
@@ -501,22 +546,18 @@ export function LogsPanel({
                             )}
                             <span
                               title={log.messageSanitized}
-                              className="truncate text-zinc-800 dark:text-zinc-200"
+                              className="w-full break-words text-zinc-800 @2xl:w-auto @2xl:min-w-0 @2xl:flex-1 @2xl:truncate dark:text-zinc-200"
                             >
                               {log.messageSanitized}
                             </span>
                           </div>
 
-                          <div className="flex shrink-0 items-center gap-2">
+                          <div className="flex shrink-0 items-center justify-end gap-2">
                             <span
-                              title={new Date(log.createdAt).toLocaleString("zh-CN")}
+                              title={createdFull}
                               className="font-mono text-[11px] text-zinc-500 tabular-nums dark:text-zinc-400"
                             >
-                              {new Date(log.createdAt).toLocaleTimeString("zh-CN", {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                                second: "2-digit",
-                              })}
+                              {createdTime}
                             </span>
                             <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
                               {logScope === "active" ? (

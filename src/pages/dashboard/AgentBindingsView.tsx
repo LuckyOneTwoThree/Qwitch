@@ -1043,6 +1043,21 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     </div>
 
                     <div className="flex shrink-0 items-center gap-1.5">
+                      {presetAvailable &&
+                        modelSourceBadge.tone === "warn" &&
+                        toolAccountsForScope[0] && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              applyAccountPresetModels(toolAccountsForScope[0].accountId)
+                            }
+                            className="btn btn-xs btn-primary gap-1"
+                            title="用内置推荐目录替换当前静态兜底列表（来源标记为「内置预设」）"
+                          >
+                            <Sparkles className="h-3 w-3" aria-hidden="true" />
+                            套用推荐目录
+                          </button>
+                        )}
                       <button
                         type="button"
                         onClick={() => setManualModelModalOpen(true)}
@@ -1068,22 +1083,14 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   </div>
 
                   {scopeReadonly && (
-                    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:text-amber-300">
-                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <div className="flex flex-wrap items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:text-amber-300">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       <span className="min-w-0 flex-1">
-                        该工具当前只有「本机只读凭据」，不参与网关调度，所以模型无法勾选。
-                        如需纳入网关，请先签发独立 OAuth 授权。
+                        该工具当前只有「本机只读凭据」，不参与网关调度，因此模型无法勾选。
+                        需要纳入网关时，请到
+                        <strong className="font-medium"> 账号资产 → 导入账号 → 码道 CodeArts → 内置 OAuth 授权 </strong>
+                        重新授权一次（会得到与客户端隔离的独立凭据；直接沿用客户端令牌会和 IDE 互相踢下线）。
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const target = toolAccountsForScope[0];
-                          if (target) authorizeCodeArtsIsolated(target.accountId);
-                        }}
-                        className="btn btn-xs btn-secondary shrink-0"
-                      >
-                        签发独立 OAuth
-                      </button>
                     </div>
                   )}
 

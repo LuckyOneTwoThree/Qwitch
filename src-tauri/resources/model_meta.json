@@ -1,25 +1,20 @@
 {
  "_comment": "模型元数据快照（上下文窗口 / 最大输出）。来源：models.dev（经 magpie 本地缓存生成于 2026-11-25）。仅在 id 命中时补全，缺失不猜。",
  "models": {
-  "DeepSeek-V4-Pro": {
-   "name": "DeepSeek V4 Pro",
-   "context": 1048576,
-   "output": 384000
-  },
   "Doubao-Seed-2.1-Pro": {
    "name": "Seed 2.1 Pro",
    "context": 1024000,
    "output": 256000
   },
-  "GLM-5.3": {
-   "name": "GLM-5.3",
-   "context": 1000000,
-   "output": 131072
+  "doubao-2.1-pro": {
+   "name": "Doubao 2.1 Pro",
+   "context": 1024000,
+   "output": 256000
   },
-  "Kimi-K3.1-Pro": {
-   "name": "Kimi K3.1 Pro",
-   "context": 1048576,
-   "output": 1048576
+  "doubao-2.1-lite": {
+   "name": "Doubao 2.1 Lite",
+   "context": 256000,
+   "output": 65536
   },
   "auto": {
    "name": "Auto (account strategy)",
@@ -101,6 +96,11 @@
    "context": 1000000,
    "output": 131072
   },
+  "glm-5.4": {
+   "name": "GLM-5.4",
+   "context": 1000000,
+   "output": 131072
+  },
   "hunyuan-2.0-instruct": {
    "name": "Tencent HY 2.0 Instruct",
    "context": 131072,
@@ -128,6 +128,11 @@
   },
   "kimi-k3.1-pro": {
    "name": "Kimi K3.1 Pro",
+   "context": 1048576,
+   "output": 1048576
+  },
+  "kimi-k3.1-pro-fast": {
+   "name": "Kimi K3.1 Pro Fast",
    "context": 1048576,
    "output": 1048576
   },

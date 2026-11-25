@@ -381,19 +381,23 @@ impl QwitchDatabase {
         &self,
     ) -> Result<HashMap<String, Vec<UpstreamModelOption>>, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let mut stmt = conn
-            .prepare("SELECT account_id, models_json, updated_at FROM account_discovered_models")?;
+        let mut stmt = conn.prepare(
+            "SELECT m.account_id, a.tool_id, m.models_json, m.updated_at
+             FROM account_discovered_models m
+             JOIN accounts a ON a.id = m.account_id",
+        )?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut map = HashMap::new();
-        for (aid, raw_json, updated_at) in rows {
+        for (aid, tool_id, raw_json, updated_at) in rows {
             let Ok(list) = serde_json::from_str::<Vec<UpstreamModelOption>>(&raw_json) else {
                 continue;
             };
@@ -405,6 +409,7 @@ impl QwitchDatabase {
                 .iter()
                 .all(|m| matches!(m.source.as_str(), "manual" | "preset"))
             {
+                crate::domain::register_live_wire_ids(&tool_id, &list);
                 map.insert(aid, list);
                 continue;
             }
@@ -415,6 +420,7 @@ impl QwitchDatabase {
                 .iter()
                 .all(|m| matches!(m.source.as_str(), "live" | "client"))
             {
+                crate::domain::register_live_wire_ids(&tool_id, &list);
                 map.insert(aid, list);
             }
         }
@@ -1495,6 +1501,7 @@ impl QwitchDatabase {
 
         // (member_id, pool_id, tool_id, 需要回填的 scoped 模型)
         let mut plan: Vec<(String, String, String, Vec<String>)> = Vec::new();
+        let mut skipped_missing_models = false;
         {
             let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
             // 每个 (pool, tool) 现有的策略行数量，用于区分「从未配置」与「用户显式清空」。
@@ -1516,7 +1523,7 @@ impl QwitchDatabase {
             let mut stmt = conn.prepare(
                 "SELECT pm.id, pm.pool_id, pm.supported_models_json, a.tool_id, pm.account_id
                  FROM pool_members pm JOIN accounts a ON a.id = pm.account_id
-                 WHERE pm.supported_models_json IS NULL OR pm.supported_models_json = '[]'",
+                 WHERE pm.supported_models_json IS NULL OR TRIM(pm.supported_models_json) IN ('', '[]')",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
@@ -1529,6 +1536,10 @@ impl QwitchDatabase {
             })?;
             for row in rows {
                 let (mid, pid, raw, tid, acc_id) = row?;
+                // 豆包工作不支持网关调度，禁止回填不可路由模型
+                if tid == "doubaowork" {
+                    continue;
+                }
                 let empty = raw
                     .as_deref()
                     .map(|s| s.trim().is_empty() || s.trim() == "[]")
@@ -1554,6 +1565,7 @@ impl QwitchDatabase {
                     raw_models = cand.default_models.clone();
                 }
                 if raw_models.is_empty() {
+                    skipped_missing_models = true;
                     continue;
                 }
                 let mut seen = HashSet::new();
@@ -1569,6 +1581,7 @@ impl QwitchDatabase {
                     .filter(|s| seen.insert(s.clone()))
                     .collect();
                 if scoped.is_empty() {
+                    skipped_missing_models = true;
                     continue;
                 }
                 plan.push((mid, pid, tid, scoped));
@@ -1577,23 +1590,24 @@ impl QwitchDatabase {
 
         if !plan.is_empty() {
             let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let tx = conn.unchecked_transaction()?;
             let mut touched_pools: HashSet<String> = HashSet::new();
             for (mid, pid, _tid, scoped) in &plan {
                 let models_json = serde_json::to_string(scoped)?;
-                conn.execute(
+                tx.execute(
                     "UPDATE pool_members SET supported_models_json = ?1 WHERE id = ?2",
                     params![models_json, mid],
                 )?;
                 touched_pools.insert(pid.clone());
             }
             for pid in &touched_pools {
-                Self::resync_pool_policies_locked(&conn, pid)?;
+                Self::resync_pool_policies_locked(&tx, pid)?;
             }
             // 显式把回填出的策略置为 enabled=1（resync 新建的已是 1，这里兜底幂等）。
             for (_mid, pid, tid, scoped) in &plan {
                 for mid_model in scoped {
                     if split_scoped_model_id(mid_model).0 == Some(tid.as_str()) {
-                        conn.execute(
+                        tx.execute(
                             "UPDATE pool_model_policies SET enabled = 1
                              WHERE pool_id = ?1 AND model_id = ?2",
                             params![pid, mid_model],
@@ -1601,9 +1615,12 @@ impl QwitchDatabase {
                     }
                 }
             }
+            tx.commit()?;
         }
 
-        self.set_setting(FLAG, MARK)?;
+        if !skipped_missing_models {
+            self.set_setting(FLAG, MARK)?;
+        }
         Ok(())
     }
 
@@ -1658,6 +1675,24 @@ impl QwitchDatabase {
         }
         let mut next_prio = all_rows.iter().map(|r| r.3).max().unwrap_or(0) + 1;
 
+        let inherited_models_json: String = {
+            let existing = conn
+                .query_row(
+                    "SELECT pm.supported_models_json
+                     FROM pool_members pm
+                     JOIN accounts a ON a.id = pm.account_id
+                     WHERE pm.pool_id = ?1 AND a.tool_id = ?2
+                       AND pm.supported_models_json IS NOT NULL
+                       AND TRIM(pm.supported_models_json) NOT IN ('', '[]')
+                     ORDER BY pm.priority ASC, pm.id ASC
+                     LIMIT 1",
+                    params![pool_id, tool_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            existing.unwrap_or_else(|| "[]".to_string())
+        };
+
         for cand in candidates.iter().filter(|c| c.tool_id == tool_id) {
             if !tool_member_by_acc.contains_key(&cand.account_id) {
                 let mid = format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]);
@@ -1668,8 +1703,15 @@ impl QwitchDatabase {
                 };
                 conn.execute(
                     "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled)
-                     VALUES (?1, ?2, ?3, '[]', ?4, ?5, 1)",
-                    params![mid, pool_id, cand.account_id, tier.as_str(), next_prio],
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+                    params![
+                        mid,
+                        pool_id,
+                        cand.account_id,
+                        inherited_models_json,
+                        tier.as_str(),
+                        next_prio
+                    ],
                 )?;
                 tool_member_by_acc.insert(cand.account_id.clone(), mid);
                 tool_slots.push(next_prio);

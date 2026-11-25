@@ -21,10 +21,7 @@ fn wire_registry_tool_key(tool_id: &str) -> &str {
     }
 }
 
-/// 登记一次实时探测得到的模型 wire ID。
-///
-/// 仅登记 `source == "live"` 的条目：静态兜底目录里的 wire ID 是猜测值，
-/// 登记进去反而会让网关优先使用猜测值而不是上游真实值。
+/// 登记一次实时探测/本机读取/人工维护得到的模型 wire ID（排除纯静态兜底 `"catalog"`）。
 pub fn register_live_wire_ids(tool_id: &str, models: &[UpstreamModelOption]) {
     let key = wire_registry_tool_key(tool_id).to_string();
     let mut guard = match LIVE_WIRE_IDS.write() {
@@ -33,7 +30,10 @@ pub fn register_live_wire_ids(tool_id: &str, models: &[UpstreamModelOption]) {
     };
     let map = guard.get_or_insert_with(HashMap::new);
     for model in models {
-        if model.source != "live" {
+        if !matches!(
+            model.source.as_str(),
+            "live" | "client" | "manual" | "preset"
+        ) {
             continue;
         }
         let wire = model.vendor_wire_id.trim();
@@ -947,6 +947,11 @@ pub fn resolve_vendor_wire_model_id(tool_id: &str, canonical_or_raw_model_id: &s
     let lower = trimmed.to_ascii_lowercase();
     let cid = map_raw_to_canonical_id(tool_id, trimmed, None).unwrap_or(lower.as_str());
 
+    // 优先使用实时探测/客户端读取登记的真实 wire ID，避免静态表猜测值遮蔽上游新命名。
+    if let Some(live_wire) = live_wire_model_id(tool_id, cid) {
+        return live_wire;
+    }
+
     match tool_id {
         "qoder_cn" | "qoder" => match cid {
             "deepseek-v4-pro" => Some("dmodel".into()),
@@ -1348,6 +1353,12 @@ pub fn compute_agent_exposed_models(
                     .into_iter()
                     .find(|o| o.id == bare_model)
                     .map(|o| o.display_name)
+                    .or_else(|| {
+                        CANONICAL_MODEL_SPECS
+                            .iter()
+                            .find(|s| s.canonical_id == bare_model)
+                            .map(|s| s.display_name.to_string())
+                    })
                     .unwrap_or_else(|| bare_model.to_string());
                 let base_name = format!("{} · {}", tool_short_display_name(tid), human_label);
                 if collision {

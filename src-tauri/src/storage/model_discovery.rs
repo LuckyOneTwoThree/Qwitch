@@ -170,7 +170,7 @@ pub fn load_magpie_provider_models(tool_id: &str) -> Option<Vec<UpstreamModelOpt
         let is_free = m.get("free").and_then(|v| v.as_bool()).unwrap_or(false)
             || rate.is_some_and(|r| r == 0.0 && raw_id.contains("free"));
         parsed.push(normalize_upstream_model(
-            tool_id, raw_id, display, rate, is_free, "live",
+            tool_id, raw_id, display, rate, is_free, "cache",
         ));
     }
 
@@ -353,6 +353,10 @@ pub fn parse_qoder_model_list(body: &Value) -> Vec<UpstreamModelOption> {
             continue;
         };
         for item in items {
+            let enabled = item.get("enable").and_then(|v| v.as_bool()).unwrap_or(true);
+            if !enabled {
+                continue;
+            }
             let Some(key) = item.get("key").and_then(|v| v.as_str()).map(str::trim) else {
                 continue;
             };
@@ -367,10 +371,6 @@ pub fn parse_qoder_model_list(body: &Value) -> Vec<UpstreamModelOption> {
 
     let mut out = Vec::new();
     for item in combined {
-        let enabled = item.get("enable").and_then(|v| v.as_bool()).unwrap_or(true);
-        if !enabled {
-            continue;
-        }
         let Some(key) = item.get("key").and_then(|v| v.as_str()).map(str::trim) else {
             continue;
         };
@@ -574,7 +574,11 @@ pub fn parse_openai_models_list(tool_id: &str, body: &Value) -> Vec<UpstreamMode
 /// （`v1` / `v3` / `v4` / `v1beta` …）时直接追加 `/models`。
 pub fn build_models_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    let has_version = trimmed.split('/').any(|seg| {
+    let path_part = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest.split_once('/').map(|(_, p)| p).unwrap_or(""))
+        .unwrap_or(trimmed);
+    let has_version = path_part.split('/').any(|seg| {
         let s = seg.to_ascii_lowercase();
         s.len() > 1 && s.starts_with('v') && s[1..].starts_with(|c: char| c.is_ascii_digit())
     });
@@ -1158,14 +1162,32 @@ async fn try_probe_live_models(
             let (token_opt, _, mid_opt) = extract_token_and_extra(cred);
             let token = token_opt.ok_or_else(|| "Qoder 凭据缺少 access token".to_string())?;
             let url = "https://gateway.qoder.com.cn/algo/api/v2/model/list?Encode=1";
-            let mut req = client
-                .get(url)
-                .bearer_auth(&token)
-                .header("Accept", "application/json")
-                .header("User-Agent", "Qoder/claim")
-                .header("Cosy-ClientType", "10");
-            if let Some(mid) = mid_opt.filter(|s| !s.trim().is_empty()) {
-                req = req.header("Cosy-MachineId", mid);
+            let machine_id = mid_opt.unwrap_or_default();
+            let mut req = client.get(url);
+            if let Ok(cosy_hdrs) = crate::adapter::qoder_cosy::cosy_headers(
+                url,
+                &cred.uid,
+                cred.display_name.as_deref().unwrap_or(""),
+                cred.display_email.as_deref().unwrap_or(""),
+                &token,
+                &machine_id,
+                "",
+                false,
+                None,
+                None,
+            ) {
+                for (k, v) in cosy_hdrs {
+                    req = req.header(k, v);
+                }
+            } else {
+                req = req
+                    .bearer_auth(&token)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "Qoder/claim")
+                    .header("Cosy-ClientType", "10");
+                if !machine_id.trim().is_empty() {
+                    req = req.header("Cosy-MachineId", machine_id);
+                }
             }
             let resp = req
                 .send()
@@ -1194,12 +1216,20 @@ async fn try_probe_live_models(
                 .header("Authorization", format!("Cloud-IDE-JWT {token}"))
                 .header("Accept", "application/json")
                 .header("X-User-Region", "CN");
-            // 服务端按客户端版本隐藏新模型，版本号需与 adapter 对齐
-            req = req.header("x-app-version", TRAE_APP_VERSION);
+            // 服务端按客户端版本隐藏新模型，版本号需与 adapter 对齐；避免与设备头重复追加 x-app-version
+            let mut has_app_ver = false;
             if let CredentialPayload::LocalSnapshot { files } = &cred.payload {
                 for (name, value) in extract_trae_device_headers(files) {
-                    req = req.header(name, value);
+                    if name.eq_ignore_ascii_case("x-app-version") {
+                        has_app_ver = true;
+                        req = req.header(name, TRAE_APP_VERSION);
+                    } else {
+                        req = req.header(name, value);
+                    }
                 }
+            }
+            if !has_app_ver {
+                req = req.header("x-app-version", TRAE_APP_VERSION);
             }
             let resp = req
                 .json(&json!({
@@ -1265,7 +1295,7 @@ async fn try_probe_live_models(
             let anthropic_style = is_anthropic_style_base(&base);
             let mut all: Vec<UpstreamModelOption> = Vec::new();
             let mut next_after: Option<String> = None;
-            for _page in 0..10 {
+            for page in 0..10 {
                 let url = build_models_endpoint(&base);
                 let mut req = client.get(&url).header("Accept", "application/json");
                 // 鉴权头按协议分开发送：同时发送 Bearer 与 x-api-key 会被部分严格
@@ -1280,17 +1310,30 @@ async fn try_probe_live_models(
                 if let Some(after) = next_after.as_deref() {
                     req = req.query(&[("limit", "100"), ("after_id", after)]);
                 }
-                let resp = req
-                    .send()
-                    .await
-                    .map_err(|e| format!("请求自定义网关模型目录失败: {}", e.without_url()))?;
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        if page > 0 && !all.is_empty() {
+                            break;
+                        }
+                        return Err(format!("请求自定义网关模型目录失败: {}", e.without_url()));
+                    }
+                };
                 if !resp.status().is_success() {
+                    if page > 0 && !all.is_empty() {
+                        break;
+                    }
                     return Err(format!("自定义网关模型目录返回 HTTP {}", resp.status()));
                 }
-                let json: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("解析自定义网关模型目录失败: {e}"))?;
+                let json: Value = match resp.json().await {
+                    Ok(j) => j,
+                    Err(e) => {
+                        if page > 0 && !all.is_empty() {
+                            break;
+                        }
+                        return Err(format!("解析自定义网关模型目录失败: {e}"));
+                    }
+                };
                 all.extend(parse_openai_models_list("custom_api_key", &json));
                 // Anthropic 兼容分页
                 let has_more = json
@@ -1308,8 +1351,10 @@ async fn try_probe_live_models(
                     break;
                 }
                 match last_id {
-                    Some(id) => next_after = Some(id),
-                    None => break,
+                    Some(id) if next_after.as_deref() != Some(id.as_str()) => {
+                        next_after = Some(id);
+                    }
+                    _ => break,
                 }
             }
             let deduped = dedup_model_options(all);

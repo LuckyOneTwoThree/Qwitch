@@ -1263,6 +1263,25 @@ impl ToolAdapter for LobsterAiAdapter {
         self.refresh_credential_inner(cred, true).await
     }
 
+    async fn fetch_account_profile(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let tokens = Self::extract_tokens(cred).ok()?;
+        let profile = self.fetch_user_profile(&tokens.access_token).await.ok()?;
+        let user = profile.get("user").unwrap_or(&profile);
+        let name = user
+            .get("nickname")
+            .or_else(|| user.get("name"))
+            .or_else(|| user.get("username"))
+            .and_then(non_empty_str);
+        let email = user
+            .get("email")
+            .and_then(non_empty_str)
+            .filter(|e| e.contains('@'));
+        (name.is_some() || email.is_some()).then_some((name, email))
+    }
+
     async fn apply_session(
         &self,
         host: &dyn PlatformHost,

@@ -1131,16 +1131,12 @@ export function useAccountStore({
   const renameAccount = useCallback(
     async (accountId: string, label: string) => {
       const trimmed = label.trim();
-      if (!trimmed) {
-        showToast("账号备注不能为空", "warning");
-        return;
-      }
 
       if (isTauriRuntime) {
         try {
           await invoke("rename_account", { accountId, label: trimmed });
           await syncFromBackend();
-          showToast(`已重命名为 ${trimmed}`, "success");
+          showToast(trimmed ? `已设置别名为 ${trimmed}` : "已恢复原用户名", "success");
         } catch (err) {
           showToast(`重命名失败：${String(err)}`, "error");
         }
@@ -1148,11 +1144,13 @@ export function useAccountStore({
       }
 
       setAccounts((prev) =>
-        prev.map((acc) =>
-          acc.id === accountId ? { ...acc, label: trimmed, updatedAt: new Date().toISOString() } : acc
-        )
+        prev.map((acc) => {
+          if (acc.id !== accountId) return acc;
+          const nextLabel = trimmed || acc.accountName || acc.label;
+          return { ...acc, label: nextLabel, updatedAt: new Date().toISOString() };
+        })
       );
-      showToast(`已重命名为 ${trimmed}`, "success");
+      showToast(trimmed ? `已设置别名为 ${trimmed}` : "已恢复原用户名", "success");
     },
     [isTauriRuntime, showToast, syncFromBackend]
   );
@@ -1206,10 +1204,23 @@ export function useAccountStore({
   /// 用途：CodeArts 这类由客户端自行托管并轮换凭据的工具，凭据过期时
   /// 由用户一键拉起客户端完成刷新，Qwitch 不代刷（refresh token 一次性轮换，
   /// 双端刷新会互相作废）。
-  const launchToolClient = useCallback(async (toolId: string) => {
-    if (!isTauriRuntime) return;
-    await invoke<string>("launch_tool_client", { toolId });
-  }, [isTauriRuntime]);
+  const launchToolClient = useCallback(
+    async (toolId: string) => {
+      if (!isTauriRuntime) {
+        showToast("浏览器预览模式无法启动本地客户端", "info");
+        return;
+      }
+      const toolName = adapters.find((a) => a.id === toolId)?.name ?? toolId;
+      try {
+        await invoke<string>("launch_tool_client", { toolId });
+        showToast(`已启动 ${toolName} 客户端`, "success");
+        window.setTimeout(() => void refreshClientStatuses(), 1200);
+      } catch (err) {
+        showToast(`启动 ${toolName} 失败：${String(err)}`, "error");
+      }
+    },
+    [adapters, isTauriRuntime, refreshClientStatuses, showToast]
+  );
 
   const captureLocalSession = useCallback(
     async (accountId: string): Promise<boolean> => {

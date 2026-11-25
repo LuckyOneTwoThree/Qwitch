@@ -729,6 +729,14 @@ impl AntiRiskScheduler {
                     reset_tool_breaker_counter(&summary.tool_id, &mut consecutive_network_errors);
                     refreshed_count += 1;
                     let _ = db.save_quota_snapshot(&summary.id, &snapshot);
+                    if let Some((name, email)) = adapter.fetch_account_profile(&cred).await {
+                        let _ = db.sync_account_profile(
+                            master_key,
+                            &summary.id,
+                            name.as_deref(),
+                            email.as_deref(),
+                        );
+                    }
                     let _ = db.append_action_log(
                         Some(&summary.id),
                         &summary.tool_id,

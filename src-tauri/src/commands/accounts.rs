@@ -461,7 +461,8 @@ pub async fn refresh_account_quota(
         }
     };
 
-    let inspect_result = match adapter.inspect_quota(&cred).await {
+    let mut active_cred = cred.clone();
+    let inspect_result = match adapter.inspect_quota(&active_cred).await {
         Err(
             orig_err @ AdapterError::Unified {
                 code: UnifiedErrorCode::AuthExpired,
@@ -483,7 +484,8 @@ pub async fn refresh_account_quota(
                         None,
                         &refreshed,
                     );
-                    adapter.inspect_quota(&refreshed).await
+                    active_cred = refreshed;
+                    adapter.inspect_quota(&active_cred).await
                 }
                 Ok(None) => Err(orig_err),
                 Err(err) => Err(err),
@@ -498,6 +500,14 @@ pub async fn refresh_account_quota(
                 .db
                 .save_quota_snapshot(&summary.id, &snapshot)
                 .map_err(|e| format!("额度已查询但落盘失败: {e}"))?;
+            if let Some((name, email)) = adapter.fetch_account_profile(&active_cred).await {
+                let _ = state.db.sync_account_profile(
+                    &state.master_key,
+                    &summary.id,
+                    name.as_deref(),
+                    email.as_deref(),
+                );
+            }
             if matches!(
                 summary.status,
                 AccountStatus::Expired | AccountStatus::RiskPaused
@@ -618,20 +628,29 @@ pub fn rename_account(
     account_id: String,
     label: String,
 ) -> Result<AccountSummary, String> {
+    let restoring = label.trim().is_empty();
     let summary = state
         .db
-        .update_account_label(&account_id, &label)
+        .update_account_alias(&state.master_key, &account_id, &label)
         .map_err(|e| e.to_string())?;
+    let log_msg = if restoring {
+        format!(
+            "已恢复账号 ({}) 为原用户名 {}",
+            summary.uid_masked, summary.label
+        )
+    } else {
+        format!(
+            "已将账号 ({}) 别名设置为 {}",
+            summary.uid_masked, summary.label
+        )
+    };
     let _ = state.db.append_action_log(
         Some(&summary.id),
         &summary.tool_id,
         "import",
         "success",
         None,
-        &format!(
-            "已将账号 ({}) 备注重命名为 {}",
-            summary.uid_masked, summary.label
-        ),
+        &log_msg,
     );
     let _ = app.emit("qwitch://account-updated", &summary.id);
     let _ = app.emit("qwitch://logs-updated", ());

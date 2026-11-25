@@ -125,6 +125,7 @@ pub fn run() {
                 eprintln!("Qwitch 历史 PII 迁移失败: {e}");
                 migration_warnings.push(format!("历史数据脱敏未完成：{e}"));
             }
+            let _ = db.backfill_account_names(&master_key);
             let startup_settings = commands::load_app_settings(&db);
             platform::sync_custom_client_paths(&startup_settings.custom_client_paths);
             let _ = db.apply_log_retention(

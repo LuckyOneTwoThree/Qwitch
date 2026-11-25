@@ -73,6 +73,7 @@ pub struct AccountSummary {
     pub id: String,
     pub tool_id: String,
     pub label: String,
+    pub account_name: Option<String>,
     pub uid_masked: String,
     pub email_masked: Option<String>,
     pub status: AccountStatus,

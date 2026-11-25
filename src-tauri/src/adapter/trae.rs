@@ -31,6 +31,7 @@ const SNAPSHOT_AUTH_KEY: &str = "icube_auth_entries.json";
 const SNAPSHOT_VSCDB_KEY: &str = "icube_vscdb_entries.json";
 const SNAPSHOT_SERVERDATA_KEY: &str = "icube_serverdata_entries.json";
 const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
+const DECRYPTED_REFRESH_TOKEN_FILE: &str = "decrypted_refresh_token.txt";
 /// 账号级设备身份（多设备方案）：随账号快照加密保存，用于按账号而非整机签发签到设备头
 const DEVICE_SNAPSHOT_KEY: &str = "trae_device.json";
 const PRIMARY_AUTH_KEY: &str = "iCubeAuthInfo://icube.cloudide";
@@ -106,6 +107,13 @@ impl TraeDeviceIdentity {
                 .unwrap_or_else(|| DEFAULT_TRAE_APP_VERSION.to_string()),
         })
     }
+}
+
+pub struct TraeOAuthFlow {
+    pub auth_url: String,
+    pub device_id: String,
+    pub machine_id: String,
+    pub callback_port: u16,
 }
 
 pub struct TraeAdapter {
@@ -698,25 +706,31 @@ impl TraeAdapter {
                 token_opt = Some(access_token.clone());
             }
             CredentialPayload::LocalSnapshot { files } => {
-                if let Some(b64) = files.get(SNAPSHOT_AUTH_KEY) {
-                    if let Ok(bytes) = BASE64.decode(b64) {
-                        if let Ok(entries) = serde_json::from_slice::<Map<String, Value>>(&bytes) {
-                            let (_, _, _, tok) =
-                                Self::extract_identity_from_auth_entries(self.tool_id(), &entries);
-                            if tok.is_some() {
-                                token_opt = tok;
-                            } else {
-                                is_encrypted_local = true;
+                // 优先读取经 OAuth/续期/回吸写入的 decrypted_token.txt，
+                // 避免旧的桌面端快照 icube_auth_entries.json 中的过期 JWT 覆盖新凭据。
+                if let Some(tok_b64) = files.get(DECRYPTED_TOKEN_FILE) {
+                    if let Ok(bytes) = BASE64.decode(tok_b64) {
+                        if let Ok(tok) = String::from_utf8(bytes) {
+                            if !tok.trim().is_empty() {
+                                token_opt = Some(tok.trim().to_string());
                             }
                         }
                     }
                 }
                 if token_opt.is_none() {
-                    if let Some(tok_b64) = files.get(DECRYPTED_TOKEN_FILE) {
-                        if let Ok(bytes) = BASE64.decode(tok_b64) {
-                            if let Ok(tok) = String::from_utf8(bytes) {
-                                if !tok.trim().is_empty() {
-                                    token_opt = Some(tok.trim().to_string());
+                    if let Some(b64) = files.get(SNAPSHOT_AUTH_KEY) {
+                        if let Ok(bytes) = BASE64.decode(b64) {
+                            if let Ok(entries) =
+                                serde_json::from_slice::<Map<String, Value>>(&bytes)
+                            {
+                                let (_, _, _, tok) = Self::extract_identity_from_auth_entries(
+                                    self.tool_id(),
+                                    &entries,
+                                );
+                                if tok.is_some() {
+                                    token_opt = tok;
+                                } else {
+                                    is_encrypted_local = true;
                                 }
                             }
                         }
@@ -1133,27 +1147,42 @@ impl TraeAdapter {
         cred: &CredentialEnvelope,
         force: bool,
     ) -> Result<Option<CredentialEnvelope>, AdapterError> {
-        let CredentialPayload::Token {
-            access_token,
-            refresh_token,
-            expires_at,
-            ..
-        } = &cred.payload
-        else {
-            return Ok(None);
-        };
-        let Some(rt) = refresh_token
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        else {
-            return Ok(None);
+        let (access_token, rt, expires_at): (String, String, Option<i64>) = match &cred.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                ..
+            } => {
+                let Some(rt) = refresh_token
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Ok(None);
+                };
+                (access_token.clone(), rt, *expires_at)
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                let Some(rt) = files
+                    .get(DECRYPTED_REFRESH_TOKEN_FILE)
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Ok(None);
+                };
+                let access_token = self.extract_token_from_cred(cred).0.unwrap_or_default();
+                (access_token, rt, None)
+            }
+            CredentialPayload::Cookies { .. } => return Ok(None),
         };
 
         let exp_secs = expires_at
             .map(|e| if e >= 10_000_000_000 { e / 1000 } else { e })
             .or_else(|| {
-                Self::extract_jwt_claims(access_token)
+                Self::extract_jwt_claims(&access_token)
                     .and_then(|c| c.get("exp").and_then(|v| v.as_i64()))
             });
         let now_secs = Utc::now().timestamp();
@@ -1260,18 +1289,360 @@ impl TraeAdapter {
             });
 
         let mut updated = cred.clone();
-        if let CredentialPayload::Token {
-            access_token: at,
-            refresh_token: rt_slot,
-            expires_at: exp_slot,
-            ..
-        } = &mut updated.payload
+        match &mut updated.payload {
+            CredentialPayload::Token {
+                access_token: at,
+                refresh_token: rt_slot,
+                expires_at: exp_slot,
+                ..
+            } => {
+                *at = new_token;
+                *rt_slot = Some(new_refresh);
+                *exp_slot = new_expires_at;
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                files.insert(
+                    DECRYPTED_TOKEN_FILE.to_string(),
+                    BASE64.encode(new_token.as_bytes()),
+                );
+                files.insert(
+                    DECRYPTED_REFRESH_TOKEN_FILE.to_string(),
+                    BASE64.encode(new_refresh.as_bytes()),
+                );
+            }
+            CredentialPayload::Cookies { .. } => {}
+        }
+
+        if let Some(res_user_info) = res
+            .get("UserInfo")
+            .or_else(|| res.get("user_info"))
+            .and_then(|v| {
+                if let Some(s) = v.as_str() {
+                    serde_json::from_str::<Value>(s).ok()
+                } else if v.is_object() {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
         {
-            *at = new_token;
-            *rt_slot = Some(new_refresh);
-            *exp_slot = new_expires_at;
+            if let Some(n) = ["ScreenName", "screenName", "NickName", "nickname", "name"]
+                .iter()
+                .find_map(|k| res_user_info.get(*k).and_then(|v| v.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                updated.display_name = Some(n.to_string());
+            }
+            if let Some(e) = ["Email", "email"]
+                .iter()
+                .find_map(|k| res_user_info.get(*k).and_then(|v| v.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                updated.display_email = Some(e.to_string());
+            }
         }
         Ok(Some(updated))
+    }
+
+    pub fn create_oauth_flow(callback_port: u16) -> Result<TraeOAuthFlow, AdapterError> {
+        let mut rng = rand::thread_rng();
+        let mut digits = [0u8; 16];
+        rng.fill_bytes(&mut digits);
+        let device_id: String = digits
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let d = if i == 0 { 1 + (b % 9) } else { b % 10 };
+                char::from(b'0' + d)
+            })
+            .collect();
+
+        let mut machine_bytes = [0u8; 16];
+        rng.fill_bytes(&mut machine_bytes);
+        let machine_id: String = machine_bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let callback_url = format!("http://127.0.0.1:{callback_port}/authorize");
+
+        let device_brand = Self::detect_device_brand().unwrap_or_else(|| "Apple".to_string());
+        let os_version = Self::detect_os_version().unwrap_or_else(|| "macOS".to_string());
+
+        let mut url = reqwest::Url::parse("https://www.trae.cn/authorization").map_err(|e| {
+            AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("构造 Trae 授权地址失败: {e}"),
+            }
+        })?;
+        url.query_pairs_mut()
+            .append_pair("login_version", "1")
+            .append_pair("auth_from", "solo")
+            .append_pair("login_channel", "native_ide")
+            .append_pair("plugin_version", "2.3.24254")
+            .append_pair("auth_type", "local")
+            .append_pair("client_id", TRAE_CN_CLIENT_ID)
+            .append_pair("redirect", "0")
+            .append_pair("login_trace_id", &trace_id)
+            .append_pair("auth_callback_url", &callback_url)
+            .append_pair("machine_id", &machine_id)
+            .append_pair("device_id", &device_id)
+            .append_pair("x_device_id", &device_id)
+            .append_pair("x_machine_id", &machine_id)
+            .append_pair("x_device_brand", &device_brand)
+            .append_pair("x_device_type", Self::device_type_tag())
+            .append_pair("x_os_version", &os_version)
+            .append_pair("x_env", "")
+            .append_pair("x_app_version", DEFAULT_TRAE_APP_VERSION)
+            .append_pair("x_app_type", "stable")
+            .append_pair("hide_saas_login", "false");
+
+        Ok(TraeOAuthFlow {
+            auth_url: url.to_string(),
+            device_id,
+            machine_id,
+            callback_port,
+        })
+    }
+
+    pub async fn exchange_oauth_callback(
+        &self,
+        callback_url: &reqwest::Url,
+        device_id: &str,
+        machine_id: &str,
+    ) -> Result<CredentialEnvelope, AdapterError> {
+        let query_param = |key: &str| -> Option<String> {
+            callback_url
+                .query_pairs()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+
+        if let Some(err) = query_param("error") {
+            let desc = query_param("error_description").unwrap_or(err);
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                message: format!("Trae 授权失败: {desc}"),
+            });
+        }
+
+        let user_jwt: Option<Value> =
+            query_param("userJwt").and_then(|raw| serde_json::from_str(&raw).ok());
+        let user_info: Option<Value> =
+            query_param("userInfo").and_then(|raw| serde_json::from_str(&raw).ok());
+
+        let str_field = |obj: Option<&Value>, keys: &[&str]| -> Option<String> {
+            let obj = obj?;
+            keys.iter()
+                .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+        };
+
+        let mut token = str_field(user_jwt.as_ref(), &["Token", "token"]).unwrap_or_default();
+        let mut refresh_token = str_field(
+            user_jwt.as_ref(),
+            &["RefreshToken", "refreshToken", "refresh_token"],
+        )
+        .or_else(|| query_param("refreshToken"));
+        let mut expires_at = user_jwt
+            .as_ref()
+            .and_then(|v| {
+                v.get("TokenExpireAt")
+                    .or_else(|| v.get("tokenExpireAt"))
+                    .or_else(|| v.get("token_expire_at"))
+            })
+            .and_then(|v| v.as_i64())
+            .map(|e| if e >= 10_000_000_000 { e / 1000 } else { e });
+        let client_id = str_field(user_jwt.as_ref(), &["ClientID", "clientId"])
+            .or_else(|| query_param("clientId"))
+            .unwrap_or_else(|| {
+                if self.is_cn {
+                    TRAE_CN_CLIENT_ID.to_string()
+                } else {
+                    TRAE_GLOBAL_CLIENT_ID.to_string()
+                }
+            });
+        let mut uid = user_info
+            .as_ref()
+            .and_then(|v| {
+                v.get("UserID")
+                    .or_else(|| v.get("userId"))
+                    .or_else(|| v.get("uid"))
+            })
+            .and_then(crate::adapter::common::json_uid_to_string)
+            .or_else(|| query_param("userId"));
+        let mut name = str_field(
+            user_info.as_ref(),
+            &[
+                "ScreenName",
+                "screenName",
+                "NickName",
+                "nickName",
+                "nickname",
+                "username",
+                "name",
+            ],
+        );
+        let mut email = str_field(user_info.as_ref(), &["Email", "email"]);
+        let host_hint =
+            query_param("host").or_else(|| str_field(user_info.as_ref(), &["Host", "host"]));
+
+        if token.is_empty() {
+            if let Some(rt) = refresh_token.as_deref() {
+                let exchange_url = format!(
+                    "{}/cloudide/api/v3/trae/oauth/ExchangeToken",
+                    self.base_api_url()
+                );
+                let resp = self
+                    .http
+                    .post(&exchange_url)
+                    .header(ACCEPT, "application/json")
+                    .header(CONTENT_TYPE, "application/json")
+                    .json(&serde_json::json!({
+                        "ClientID": client_id,
+                        "RefreshToken": rt,
+                        "ClientSecret": "-",
+                        "UserID": ""
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        message: format!("交换 Trae 授权令牌失败: {}", e.without_url()),
+                    })?;
+
+                let status = resp.status();
+                if matches!(status.as_u16(), 400 | 401 | 403) {
+                    let err_text = resp.text().await.unwrap_or_default();
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::AuthExpired,
+                        message: format!(
+                            "Trae 授权换取令牌失败 ({})",
+                            err_text.chars().take(120).collect::<String>()
+                        ),
+                    });
+                }
+                if !status.is_success() {
+                    return Err(map_http_status(status, "交换 Trae 授权令牌"));
+                }
+
+                let body: Value = resp.json().await.map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::NetworkError,
+                    message: format!("解析 Trae 授权响应失败: {e}"),
+                })?;
+                if let Some(err_obj) = body
+                    .pointer("/ResponseMetadata/Error")
+                    .filter(|v| !v.is_null())
+                {
+                    let msg = err_obj
+                        .get("Message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("ExchangeToken failed");
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::AuthExpired,
+                        message: format!("Trae 授权换取令牌失败: {msg}"),
+                    });
+                }
+
+                let res = body
+                    .get("Result")
+                    .or_else(|| body.get("result"))
+                    .unwrap_or(&body);
+                if let Some(new_tok) = str_field(Some(res), &["Token", "token"]) {
+                    token = new_tok;
+                }
+                if let Some(new_rt) = str_field(Some(res), &["RefreshToken", "refresh_token"]) {
+                    refresh_token = Some(new_rt);
+                }
+                if expires_at.is_none() {
+                    expires_at = res
+                        .get("TokenExpireAt")
+                        .or_else(|| res.get("token_expire_at"))
+                        .and_then(|v| v.as_i64())
+                        .map(|e| if e >= 10_000_000_000 { e / 1000 } else { e });
+                }
+                let res_user_info = res
+                    .get("UserInfo")
+                    .or_else(|| res.get("user_info"))
+                    .and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            serde_json::from_str::<Value>(s).ok()
+                        } else if v.is_object() {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    });
+                if uid.is_none() {
+                    uid = res_user_info
+                        .as_ref()
+                        .and_then(|v| {
+                            v.get("UserID")
+                                .or_else(|| v.get("userId"))
+                                .or_else(|| v.get("uid"))
+                        })
+                        .and_then(crate::adapter::common::json_uid_to_string);
+                }
+                if name.is_none() {
+                    name = str_field(
+                        res_user_info.as_ref(),
+                        &["ScreenName", "screenName", "NickName", "nickname", "name"],
+                    );
+                }
+                if email.is_none() {
+                    email = str_field(res_user_info.as_ref(), &["Email", "email"]);
+                }
+            }
+        }
+
+        if token.is_empty() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "Trae 授权回调缺少有效 Token，请重试".into(),
+            });
+        }
+
+        let claims = Self::extract_jwt_claims(&token);
+        let final_uid = uid
+            .or_else(|| {
+                claims.as_ref().and_then(|c| {
+                    c.get("userId")
+                        .or_else(|| c.get("sub"))
+                        .or_else(|| c.get("uid"))
+                        .and_then(crate::adapter::common::json_uid_to_string)
+                })
+            })
+            .unwrap_or_else(|| Self::hash_fallback_uid(self.tool_id(), &token));
+        let final_name = name.or_else(|| str_field(claims.as_ref(), &["name", "nickname"]));
+        let final_email = email.or_else(|| str_field(claims.as_ref(), &["email"]));
+        let final_expires_at = expires_at.or_else(|| {
+            claims
+                .as_ref()
+                .and_then(|c| c.get("exp").and_then(|v| v.as_i64()))
+        });
+
+        let mut extra = HashMap::new();
+        extra.insert("device_id".to_string(), device_id.to_string());
+        extra.insert("machine_id".to_string(), machine_id.to_string());
+        extra.insert("client_id".to_string(), client_id);
+        if let Some(h) = host_hint {
+            extra.insert("host".to_string(), h);
+        }
+
+        Ok(CredentialEnvelope {
+            tool_id: self.tool_id().to_string(),
+            uid: final_uid,
+            display_name: final_name,
+            display_email: final_email,
+            payload: CredentialPayload::Token {
+                access_token: token,
+                refresh_token,
+                expires_at: final_expires_at,
+                extra,
+            },
+        })
     }
 }
 
@@ -2597,5 +2968,233 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn create_oauth_flow_builds_valid_authorization_url() {
+        let flow = TraeAdapter::create_oauth_flow(43210).expect("flow");
+        assert_eq!(flow.callback_port, 43210);
+        assert_eq!(flow.device_id.len(), 16);
+        assert!(flow.device_id.chars().all(|c| c.is_ascii_digit()));
+        assert!(!flow.device_id.starts_with('0'));
+        assert_eq!(flow.machine_id.len(), 32);
+        assert!(flow.machine_id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let parsed: reqwest::Url = flow.auth_url.parse().expect("valid url");
+        assert_eq!(parsed.host_str(), Some("www.trae.cn"));
+        assert_eq!(parsed.path(), "/authorization");
+        let params: HashMap<String, String> = parsed
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some(TRAE_CN_CLIENT_ID)
+        );
+        assert_eq!(
+            params.get("login_channel").map(String::as_str),
+            Some("native_ide")
+        );
+        assert_eq!(
+            params.get("auth_callback_url").map(String::as_str),
+            Some("http://127.0.0.1:43210/authorize")
+        );
+        assert_eq!(params.get("device_id"), Some(&flow.device_id));
+        assert_eq!(params.get("machine_id"), Some(&flow.machine_id));
+    }
+
+    #[tokio::test]
+    async fn exchange_oauth_callback_parses_user_jwt_and_user_info() {
+        let adapter = TraeAdapter::new(true);
+        let mut cb: reqwest::Url = "http://127.0.0.1:43210/authorize".parse().unwrap();
+        let exp = Utc::now().timestamp() + 7200;
+        let jwt_json = serde_json::json!({
+            "Token": "jwt-direct-1",
+            "RefreshToken": "rt-direct-1",
+            "TokenExpireAt": exp,
+            "ClientID": TRAE_CN_CLIENT_ID
+        })
+        .to_string();
+        let info_json = serde_json::json!({
+            "UserID": "u-trae-1",
+            "ScreenName": "Alice",
+            "Email": "alice@example.com",
+            "Host": "https://api.trae.cn"
+        })
+        .to_string();
+        cb.query_pairs_mut()
+            .append_pair("userJwt", &jwt_json)
+            .append_pair("userInfo", &info_json);
+
+        let env = adapter
+            .exchange_oauth_callback(&cb, "1234567890123456", "0123456789abcdef0123456789abcdef")
+            .await
+            .expect("callback parsed");
+        assert_eq!(env.tool_id, "trae_cn");
+        assert_eq!(env.uid, "u-trae-1");
+        assert_eq!(env.display_name.as_deref(), Some("Alice"));
+        assert_eq!(env.display_email.as_deref(), Some("alice@example.com"));
+        match env.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                extra,
+            } => {
+                assert_eq!(access_token, "jwt-direct-1");
+                assert_eq!(refresh_token.as_deref(), Some("rt-direct-1"));
+                assert_eq!(expires_at, Some(exp));
+                assert_eq!(
+                    extra.get("device_id").map(String::as_str),
+                    Some("1234567890123456")
+                );
+                assert_eq!(
+                    extra.get("host").map(String::as_str),
+                    Some("https://api.trae.cn")
+                );
+            }
+            _ => panic!("expected Token"),
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_oauth_callback_exchanges_refresh_token_when_jwt_missing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let next_exp = Utc::now().timestamp() + 7200;
+        Mock::given(method("POST"))
+            .and(path("/cloudide/api/v3/trae/oauth/ExchangeToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Result": {
+                    "Token": "jwt-exchanged",
+                    "RefreshToken": "rt-exchanged",
+                    "TokenExpireAt": next_exp * 1000,
+                    "UserInfo": serde_json::json!({
+                        "UserID": "u-trae-2",
+                        "ScreenName": "Bob"
+                    }).to_string()
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = TraeAdapter::with_api_base(true, server.uri());
+        let cb: reqwest::Url = "http://127.0.0.1:43210/authorize?refreshToken=rt-old"
+            .parse()
+            .unwrap();
+        let env = adapter
+            .exchange_oauth_callback(&cb, "1234567890123456", "0123456789abcdef0123456789abcdef")
+            .await
+            .expect("exchange ok");
+        assert_eq!(env.uid, "u-trae-2");
+        assert_eq!(env.display_name.as_deref(), Some("Bob"));
+        match env.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                ..
+            } => {
+                assert_eq!(access_token, "jwt-exchanged");
+                assert_eq!(refresh_token.as_deref(), Some("rt-exchanged"));
+                assert_eq!(expires_at, Some(next_exp));
+            }
+            _ => panic!("expected Token"),
+        }
+    }
+
+    #[test]
+    fn extract_token_prefers_decrypted_token_over_stale_snapshot_entry() {
+        let adapter = TraeAdapter::new(true);
+        let mut auth_entries = Map::new();
+        auth_entries.insert(
+            PRIMARY_AUTH_KEY.to_string(),
+            Value::String(serde_json::json!({ "token": "stale-desktop-jwt" }).to_string()),
+        );
+        let mut files = HashMap::new();
+        files.insert(
+            SNAPSHOT_AUTH_KEY.to_string(),
+            BASE64.encode(serde_json::to_vec(&auth_entries).unwrap()),
+        );
+        files.insert(
+            DECRYPTED_TOKEN_FILE.to_string(),
+            BASE64.encode(b"fresh-oauth-jwt"),
+        );
+
+        let cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u-1".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+        let (tok, is_enc) = adapter.extract_token_from_cred(&cred);
+        assert_eq!(tok.as_deref(), Some("fresh-oauth-jwt"));
+        assert!(!is_enc);
+    }
+
+    #[tokio::test]
+    async fn refresh_credential_updates_local_snapshot_decrypted_tokens() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let next_exp = Utc::now().timestamp() + 7200;
+        Mock::given(method("POST"))
+            .and(path("/cloudide/api/v3/trae/oauth/ExchangeToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Result": {
+                    "Token": "jwt-snap-new",
+                    "RefreshToken": "rt-snap-new",
+                    "TokenExpireAt": next_exp
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = TraeAdapter::with_api_base(true, server.uri());
+        let mut files = HashMap::new();
+        files.insert(
+            DECRYPTED_TOKEN_FILE.to_string(),
+            BASE64.encode(b"jwt-snap-old"),
+        );
+        files.insert(
+            DECRYPTED_REFRESH_TOKEN_FILE.to_string(),
+            BASE64.encode(b"rt-snap-old"),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "trae_cn".to_string(),
+            uid: "u-snap".to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+
+        let refreshed = adapter
+            .force_refresh_credential(&cred)
+            .await
+            .expect("refresh ok")
+            .expect("updated envelope");
+        match &refreshed.payload {
+            CredentialPayload::LocalSnapshot { files } => {
+                assert_eq!(
+                    BASE64
+                        .decode(files.get(DECRYPTED_TOKEN_FILE).unwrap())
+                        .unwrap(),
+                    b"jwt-snap-new"
+                );
+                assert_eq!(
+                    BASE64
+                        .decode(files.get(DECRYPTED_REFRESH_TOKEN_FILE).unwrap())
+                        .unwrap(),
+                    b"rt-snap-new"
+                );
+            }
+            _ => panic!("expected LocalSnapshot"),
+        }
     }
 }

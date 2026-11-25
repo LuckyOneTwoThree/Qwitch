@@ -65,6 +65,7 @@ export interface AccountSummary {
   id: string;
   toolId: ToolId;
   label: string;
+  accountName?: string;
   uidMasked: string;
   emailMasked?: string;
   status: AccountStatus;

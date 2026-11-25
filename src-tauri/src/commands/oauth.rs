@@ -2,11 +2,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::adapter::{
     codearts::CodeArtsAdapter, doubaowork::DoubaoWorkAdapter, lobsterai::LobsterAiAdapter,
-    minimax::MiniMaxAdapter, qoder::QoderAdapter, workbuddy::WorkBuddyAdapter, AdapterError,
-    ToolAdapter,
+    minimax::MiniMaxAdapter, qoder::QoderAdapter, trae::TraeAdapter, workbuddy::WorkBuddyAdapter,
+    AdapterError, ToolAdapter,
 };
 use crate::domain::UnifiedErrorCode;
 use crate::platform::PlatformHost;
@@ -14,281 +15,6 @@ use crate::scheduler::AntiRiskScheduler;
 use crate::storage::QwitchDatabase;
 
 use super::{is_valid_oauth_uid, record_import_quota_check, AppState};
-
-const OAUTH_CAPTURE_JS: &str = r#"
-(function() {
-  if (window.__qwitchOAuthInjected) return;
-  window.__qwitchOAuthInjected = true;
-  let captured = false;
-
-  function isTraeCaptureOrigin() {
-    const h = (window.location.hostname || '').toLowerCase();
-    return h === 'trae.cn' || h.endsWith('.trae.cn');
-  }
-
-  const ACC_KEY = '__qwitch_oauth_acc_v2';
-  function loadAcc() {
-    try {
-      const raw = window.sessionStorage.getItem(ACC_KEY);
-      return raw ? JSON.parse(raw) : {};
-    } catch (_) {
-      return {};
-    }
-  }
-  function saveAcc(acc) {
-    try {
-      window.sessionStorage.setItem(ACC_KEY, JSON.stringify(acc));
-    } catch (_) {}
-  }
-
-  function decodeJwtPayload(token) {
-    if (typeof token !== 'string') return null;
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    try {
-      const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-      const json = decodeURIComponent(atob(b64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
-      return JSON.parse(json);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function isValidUid(val) {
-    if (typeof val !== 'string' && typeof val !== 'number') return false;
-    const s = String(val).trim();
-    if (!s || s.length < 2 || s.length > 128) return false;
-    if (/[\s,\[\]{}"']/.test(s)) return false;
-    if (/^(0|-1|null|undefined|none|guest|anonymous)$/i.test(s)) return false;
-    return true;
-  }
-
-  function isLikelyAuthToken(val) {
-    if (typeof val !== 'string') return false;
-    const s = val.trim();
-    if (s.length < 24 || /\s/.test(s)) return false;
-    if (/^(qr_|qrcode_|csrf_|anon_|guest_)/i.test(s)) return false;
-    return true;
-  }
-
-  function isOnLoginPage() {
-    const h = window.location.hostname || '';
-    const p = window.location.pathname || '';
-    if (/douyin\.com|doubao\.com|feishu\.cn|larkoffice\.com|weixin\.qq\.com|aliyun\.com|apple\.com|github\.com|google\.com/i.test(h)) return true;
-    if (/\/login|\/sign-in|\/signin|\/oauth/i.test(p)) return true;
-    return false;
-  }
-
-  function isValidDisplayName(val) {
-    if (typeof val !== 'string') return false;
-    const s = val.trim();
-    if (!s || s.length > 64) return false;
-    if (/^(success|ok|okay|error|fail|failed|true|false|null|undefined|none|unknown|trae|douyin|doubao|qoder|workbuddy|guest|anonymous|resource|data|result|message|status|code|user|account|info|default|normal)$/i.test(s)) {
-      return false;
-    }
-    return true;
-  }
-
-  function collectFields(obj, depth, acc) {
-    if (!obj || typeof obj !== 'object' || (depth || 0) > 5) return;
-    const d = depth || 0;
-
-    for (const key of ['accessToken', 'access_token', 'jwt', 'idToken', 'id_token', 'Token', 'token']) {
-      if (isLikelyAuthToken(obj[key])) {
-        acc.token = obj[key].trim();
-        break;
-      }
-    }
-
-    for (const key of ['userId', 'uid', 'user_id', 'UserId', 'uin', 'sub', 'accountId', 'memberId']) {
-      if (isValidUid(obj[key])) {
-        acc.userId = String(obj[key]).trim();
-        break;
-      }
-    }
-
-    for (const key of ['email', 'Email', 'mail']) {
-      if (typeof obj[key] === 'string' && obj[key].includes('@')) {
-        acc.email = obj[key].trim();
-        break;
-      }
-    }
-
-    for (const key of ['ScreenName', 'screenName', 'NickName', 'nickName', 'nickname', 'username', 'userName', 'displayName']) {
-      if (isValidDisplayName(obj[key])) {
-        acc.name = obj[key].trim();
-        break;
-      }
-    }
-
-    for (const key of ['refreshToken', 'refresh_token']) {
-      if (isLikelyAuthToken(obj[key])) {
-        acc.refreshToken = obj[key].trim();
-        break;
-      }
-    }
-
-    if (Array.isArray(obj)) {
-      for (let i = 0; i < Math.min(obj.length, 5); i++) {
-        collectFields(obj[i], d + 1, acc);
-      }
-      return;
-    }
-
-    for (const k of Object.keys(obj)) {
-      if (obj[k] && typeof obj[k] === 'object') {
-        collectFields(obj[k], d + 1, acc);
-      }
-    }
-  }
-
-  function tryEmit(sourceObj, fromTrustedEndpoint) {
-    if (captured || !isTraeCaptureOrigin()) return;
-    // 仍在登录页或第三方 OAuth 页时，仅放行明确已登录的 GetUserToken / iCubeAuthInfo 凭据
-    if (isOnLoginPage() && !fromTrustedEndpoint) return;
-
-    const acc = loadAcc();
-    if (sourceObj && typeof sourceObj === 'object') {
-      collectFields(sourceObj, 0, acc);
-    }
-
-    if (acc.token && !acc.userId) {
-      const claims = decodeJwtPayload(acc.token);
-      if (claims && typeof claims === 'object') {
-        const claimUid = claims.userId || claims.uid || claims.user_id || claims.sub || claims.uin;
-        if (isValidUid(claimUid)) acc.userId = String(claimUid).trim();
-        if (!acc.email && typeof claims.email === 'string' && claims.email.includes('@')) {
-          acc.email = claims.email.trim();
-        }
-        if (!acc.name && typeof (claims.name || claims.nickname) === 'string') {
-          acc.name = (claims.name || claims.nickname).trim();
-        }
-      }
-    }
-
-    saveAcc(acc);
-
-    // 必须同时具备有效 token 与真实用户身份 (userId 或 email)
-    if (acc.token && (acc.userId || acc.email)) {
-      captured = true;
-      try { window.sessionStorage.removeItem(ACC_KEY); } catch (_) {}
-      const payloadStr = JSON.stringify({
-        token: acc.token,
-        userId: acc.userId || undefined,
-        email: acc.email || undefined,
-        name: acc.name || undefined,
-        refreshToken: acc.refreshToken || undefined,
-      });
-      window.location.href = 'https://qwitch.local/oauth-callback#nonce=' + encodeURIComponent('__QWITCH_NONCE__') + '&payload=' + encodeURIComponent(payloadStr);
-    }
-  }
-
-  function isIgnoredUrl(url) {
-    return /qrcode|qr_code|get_qr|check_qr|qrconnect|csrf|captcha|config|anon|guest|metrics|telemetry|report|tea\/v|slardar|passport\/web\/get/i.test(url);
-  }
-
-  function isTrustedAuthUrl(url) {
-    return /GetUserToken|iCubeAuthInfo|\/v2\/billing\/meter\/|\/sash\/api\/v1\/me\//i.test(url);
-  }
-
-  function inspectResponseText(url, text) {
-    if (captured || !text || !isTraeCaptureOrigin() || isIgnoredUrl(url)) return;
-    const trimmed = text.trim();
-    if (trimmed[0] !== '{' && trimmed[0] !== '[') return;
-    try {
-      const json = JSON.parse(trimmed);
-      tryEmit(json, isTrustedAuthUrl(url));
-    } catch (_) {}
-  }
-
-  if (isTraeCaptureOrigin()) {
-    const origFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const resp = await origFetch.apply(this, args);
-      try {
-        const url = String(args[0] && args[0].url ? args[0].url : args[0] || '');
-        if (!isIgnoredUrl(url) && /GetUserToken|GetUserInfo|userinfo|user\/info|account|session|campaigns|checkin|billing/i.test(url)) {
-          resp.clone().text().then(txt => inspectResponseText(url, txt)).catch(() => {});
-        }
-      } catch (_) {}
-      return resp;
-    };
-
-    const origOpen = XMLHttpRequest.prototype.open;
-    const origSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function(method, url) {
-      this.__qwitchUrl = String(url || '');
-      return origOpen.apply(this, arguments);
-    };
-    XMLHttpRequest.prototype.send = function() {
-      this.addEventListener('load', function() {
-        try {
-          const url = this.__qwitchUrl || '';
-          if (!isIgnoredUrl(url) && /GetUserToken|GetUserInfo|userinfo|user\/info|account|session|campaigns|checkin|billing/i.test(url)) {
-            inspectResponseText(url, this.responseText);
-          }
-        } catch (_) {}
-      });
-      return origSend.apply(this, arguments);
-    };
-  }
-
-  function scanStorage() {
-    if (captured || !isTraeCaptureOrigin()) return;
-    for (const store of [window.localStorage, window.sessionStorage]) {
-      try {
-        if (!store) continue;
-        for (let i = 0; i < store.length; i++) {
-          const k = store.key(i);
-          if (!k || k === ACC_KEY) continue;
-          // 仅扫描明确的工具登录态键名，绝不扫描埋点/统计键 (__tea_cache 等)
-          if (!/iCubeAuthInfo|workbuddy|qoder|auth_info|user_info/i.test(k)) continue;
-          const v = store.getItem(k);
-          if (!v) continue;
-          const trimmed = v.trim();
-          if (trimmed[0] === '{') {
-            try {
-              tryEmit(JSON.parse(trimmed), k.startsWith('iCubeAuthInfo'));
-              if (captured) return;
-            } catch (_) {}
-          }
-        }
-      } catch (_) {}
-    }
-  }
-
-  // 将第三方登录（如抖音/微信/阿里云）通过 window.open 或 target="_blank" 打开的页面直接引导到当前窗口显示
-  window.open = function(url) {
-    if (typeof url === 'string' && url && url !== 'about:blank') {
-      window.location.href = url;
-      return window;
-    }
-    return {
-      closed: false,
-      close: function() {},
-      focus: function() {},
-      location: {
-        set href(u) { if (typeof u === 'string' && u) window.location.href = u; },
-        get href() { return window.location.href; },
-        replace: function(u) { if (typeof u === 'string' && u) window.location.replace(u); },
-        assign: function(u) { if (typeof u === 'string' && u) window.location.assign(u); }
-      }
-    };
-  };
-
-  document.addEventListener('click', function(e) {
-    const a = e.target && e.target.closest ? e.target.closest('a[target="_blank"]') : null;
-    if (a && a.href && /^https?:\/\//i.test(a.href)) {
-      e.preventDefault();
-      window.location.href = a.href;
-    }
-  }, true);
-
-  if (isTraeCaptureOrigin()) {
-    setInterval(scanStorage, 1000);
-  }
-})();
-"#;
 
 const POPUP_REDIRECT_JS: &str = r#"
 (function() {
@@ -330,14 +56,23 @@ fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
     match tool_id {
         "trae_cn" => &[
             "trae.cn",
+            "mchost.guru",
             "douyin.com",
             "bytedance.com",
             "snssdk.com",
             "volcengine.com",
             "bytegoofy.com",
+            "bytetos.com",
+            "byteimg.com",
+            "zijieapi.com",
+            "yhgfb-cn-static.com",
             "doubao.com",
+            "doubaocdn.com",
             "feishu.cn",
             "larkoffice.com",
+            "weixin.qq.com",
+            "wx.qq.com",
+            "qq.com",
             "github.com",
             "apple.com",
             "microsoftonline.com",
@@ -648,7 +383,10 @@ pub async fn start_webview_oauth(
     close_existing_oauth_windows(&app);
 
     enum OAuthMode {
-        TraeCapture,
+        TraeCallback {
+            flow: crate::adapter::trae::TraeOAuthFlow,
+            listener: tokio::net::TcpListener,
+        },
         LobsterAiCallback,
         DoubaoCookiePoll,
         WorkBuddyPoll {
@@ -668,10 +406,20 @@ pub async fn start_webview_oauth(
     }
 
     let (login_url, mode) = match tool_id.as_str() {
-        "trae_cn" => (
-            "https://www.trae.cn/login".to_string(),
-            OAuthMode::TraeCapture,
-        ),
+        "trae_cn" => {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(|e| format!("启动 Trae 本地回调监听失败: {e}"))?;
+            let callback_port = listener
+                .local_addr()
+                .map_err(|e| format!("获取 Trae 回调端口失败: {e}"))?
+                .port();
+            let flow = TraeAdapter::create_oauth_flow(callback_port).map_err(|e| format!("{e}"))?;
+            (
+                flow.auth_url.clone(),
+                OAuthMode::TraeCallback { flow, listener },
+            )
+        }
         "lobsterai" => {
             let auth_url =
                 LobsterAiAdapter::build_oauth_login_url(LOBSTER_CALLBACK_URI, &flow_nonce)
@@ -740,8 +488,8 @@ pub async fn start_webview_oauth(
     let app_for_popup = app.clone();
     let win_label_popup = win_label.clone();
     let init_js: String = match mode {
-        OAuthMode::TraeCapture => OAUTH_CAPTURE_JS.replace("__QWITCH_NONCE__", &flow_nonce),
-        OAuthMode::LobsterAiCallback
+        OAuthMode::TraeCallback { .. }
+        | OAuthMode::LobsterAiCallback
         | OAuthMode::WorkBuddyPoll { .. }
         | OAuthMode::QoderPkcePoll { .. } => POPUP_REDIRECT_JS.to_string(),
         // MiniMax / 豆包工作 / CodeArts 官方登录页依赖自身安全脚本，不注入自定义 JS
@@ -773,129 +521,16 @@ pub async fn start_webview_oauth(
         builder = builder.initialization_script(&init_js);
     }
 
-    if matches!(mode, OAuthMode::TraeCapture) {
-        let app_nav = app_handle.clone();
-        let db_nav = Arc::clone(&db);
-        let scheduler_nav = Arc::clone(&scheduler_arc);
-        let host_nav = Arc::clone(&host_arc);
-        let adapter_nav = Arc::clone(&adapter);
-        let flow_seq_nav = Arc::clone(&flow_seq);
-        let expected_nonce = flow_nonce.clone();
-        let consumed_nonces = Arc::clone(&state.consumed_oauth_nonces);
-        let tid_nav = tool_id_owned.clone();
-        let lbl_nav = label_owned.clone();
-        let target_nav = target_id_owned.clone();
-        let win_label_nav = win_label.clone();
-
+    if let OAuthMode::TraeCallback { flow, .. } = &mode {
+        let callback_port = flow.callback_port;
         builder = builder.on_navigation(move |nav_url| {
-            if nav_url.host_str() == Some("qwitch.local") {
-                if nav_url.scheme() != "https"
-                    || nav_url.path() != "/oauth-callback"
-                    || flow_seq_nav.load(Ordering::SeqCst) != flow_id
-                {
-                    return false;
-                }
-                let fragment_url = nav_url
-                    .fragment()
-                    .filter(|f| !f.is_empty())
-                    .and_then(|frag| {
-                        reqwest::Url::parse(&format!("https://qwitch.local/?{frag}")).ok()
-                    });
-                let find_param = |key: &str| -> Option<String> {
-                    // 凭据只允许经 URL fragment 传递（fragment 不会发送到任何服务器），
-                    // 且经 nonce/flow/path 校验后在进程内被拦截；不再回退读取 URL query，
-                    // 避免凭据出现在真实服务器可见的 query string 中。
-                    fragment_url.as_ref().and_then(|fu| {
-                        fu.query_pairs()
-                            .find(|(k, _)| k == key)
-                            .map(|(_, v)| v.to_string())
-                    })
-                };
-
-                let callback_nonce = find_param("nonce");
-                if callback_nonce.as_deref() != Some(expected_nonce.as_str()) {
-                    let _ = app_nav.emit(
-                        "qwitch://oauth-error",
-                        "内置授权回调校验失败（会话状态不匹配），已拒绝该请求",
-                    );
-                    return false;
-                }
-
-                // 一次性消费：同一个 nonce 只允许成功回调一次。
-                // 否则授权页内的脚本可反复投递不同 payload，向凭据库注入任意 token。
-                {
-                    match consume_oauth_nonce(&consumed_nonces, &expected_nonce) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            let _ = app_nav.emit(
-                                "qwitch://oauth-error",
-                                "该授权回调已被使用过，已拒绝重复提交",
-                            );
-                            return false;
-                        }
-                        Err(()) => {
-                            let _ = app_nav.emit(
-                                "qwitch://oauth-error",
-                                "内置授权回调校验失败（内部状态不可用），已拒绝该请求",
-                            );
-                            return false;
-                        }
-                    }
-                }
-
-                let raw_payload = find_param("payload").or_else(|| find_param("token"));
-
-                if let Some(payload_str) = raw_payload {
-                    let app_clone = app_nav.clone();
-                    let db_clone = Arc::clone(&db_nav);
-                    let scheduler_clone = Arc::clone(&scheduler_nav);
-                    let host_clone = Arc::clone(&host_nav);
-                    let adapter_clone = Arc::clone(&adapter_nav);
-                    let flow_seq_clone = Arc::clone(&flow_seq_nav);
-                    let tid = tid_nav.clone();
-                    let lbl = lbl_nav.clone();
-                    let target_id = target_nav.clone();
-                    let win_l = win_label_nav.clone();
-
-                    tauri::async_runtime::spawn(async move {
-                        match adapter_clone.parse_manual_token(&payload_str).await {
-                            Ok(envelope) => {
-                                persist_oauth_envelope(
-                                    &app_clone,
-                                    &db_clone,
-                                    &host_clone,
-                                    &master_key,
-                                    &adapter_clone,
-                                    &scheduler_clone,
-                                    &flow_seq_clone,
-                                    flow_id,
-                                    &win_l,
-                                    &tid,
-                                    &lbl,
-                                    target_id.as_deref(),
-                                    envelope,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = app_clone.emit(
-                                    "qwitch://oauth-error",
-                                    crate::storage::crypto::sanitize_log_message(&format!(
-                                        "解析授权凭据失败: {e}"
-                                    )),
-                                );
-                                if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
-                                    if let Some(win) = app_clone.get_webview_window(&win_l) {
-                                        let _ = win.close();
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
-                return false;
-            }
-            nav_url.as_str() == "about:blank" || is_allowed_oauth_url(nav_url, allowed_hosts)
+            let is_cb = nav_url.scheme() == "http"
+                && nav_url.host_str() == Some("127.0.0.1")
+                && nav_url.port() == Some(callback_port)
+                && nav_url.path() == "/authorize";
+            is_cb
+                || nav_url.as_str() == "about:blank"
+                || is_allowed_oauth_url(nav_url, allowed_hosts)
         });
     } else if matches!(mode, OAuthMode::LobsterAiCallback) {
         let app_nav = app_handle.clone();
@@ -1120,9 +755,156 @@ pub async fn start_webview_oauth(
         .map_err(|e| format!("导航至授权页失败: {e}"))?;
 
     match mode {
-        OAuthMode::TraeCapture
-        | OAuthMode::LobsterAiCallback
-        | OAuthMode::CodeArtsCallback { .. } => {}
+        OAuthMode::LobsterAiCallback | OAuthMode::CodeArtsCallback { .. } => {}
+        OAuthMode::TraeCallback { flow, listener } => {
+            tauri::async_runtime::spawn(async move {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+                let cors_headers = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Allow-Private-Network: true\r\n";
+                let mut finished = false;
+
+                while tokio::time::Instant::now() < deadline {
+                    if flow_seq.load(Ordering::SeqCst) != flow_id
+                        || app_handle.get_webview_window(&win_label).is_none()
+                    {
+                        finished = true;
+                        break;
+                    }
+
+                    let accept_res = tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        listener.accept(),
+                    )
+                    .await;
+                    let Ok(Ok((mut socket, _))) = accept_res else {
+                        continue;
+                    };
+
+                    let mut buf = Vec::with_capacity(8192);
+                    let mut tmp = [0u8; 4096];
+                    let read_res = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        loop {
+                            let n = socket.read(&mut tmp).await?;
+                            if n == 0 {
+                                break;
+                            }
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() >= 65_536 {
+                                break;
+                            }
+                        }
+                        Ok::<(), std::io::Error>(())
+                    })
+                    .await;
+                    if read_res.is_err() {
+                        continue;
+                    }
+
+                    let req_str = String::from_utf8_lossy(&buf);
+                    let Some(req_line) = req_str.lines().next() else {
+                        continue;
+                    };
+                    let mut parts = req_line.split_whitespace();
+                    let method = parts.next().unwrap_or("");
+                    let target = parts.next().unwrap_or("/");
+
+                    if method.eq_ignore_ascii_case("OPTIONS") {
+                        let resp = format!(
+                            "HTTP/1.1 204 No Content\r\n{cors_headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        continue;
+                    }
+
+                    let Ok(cb_url) = reqwest::Url::parse(&format!(
+                        "http://127.0.0.1:{}{target}",
+                        flow.callback_port
+                    )) else {
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\n{cors_headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        continue;
+                    };
+
+                    if cb_url.path() != "/authorize" {
+                        let resp = format!(
+                            "HTTP/1.1 404 Not Found\r\n{cors_headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        continue;
+                    }
+
+                    let has_payload = cb_url.query_pairs().any(|(k, v)| {
+                        !v.trim().is_empty()
+                            && matches!(k.as_ref(), "userJwt" | "refreshToken" | "error")
+                    });
+                    if !has_payload {
+                        let body = "<!doctype html><meta charset=\"utf-8\"><p>未收到授权凭据，请返回重试。</p>";
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\n{cors_headers}Content-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        continue;
+                    }
+
+                    let body = "<!doctype html><meta charset=\"utf-8\"><p>Trae 授权已接收，正在返回 Qwitch...</p>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\n{cors_headers}Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+
+                    finished = true;
+                    match TraeAdapter::new(true)
+                        .exchange_oauth_callback(&cb_url, &flow.device_id, &flow.machine_id)
+                        .await
+                    {
+                        Ok(envelope) => {
+                            persist_oauth_envelope(
+                                &app_handle,
+                                &db,
+                                &host_arc,
+                                &master_key,
+                                &adapter,
+                                &scheduler_arc,
+                                &flow_seq,
+                                flow_id,
+                                &win_label,
+                                &tool_id_owned,
+                                &label_owned,
+                                target_id_owned.as_deref(),
+                                envelope,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            if flow_seq.load(Ordering::SeqCst) == flow_id {
+                                let _ = app_handle.emit(
+                                    "qwitch://oauth-error",
+                                    crate::storage::crypto::sanitize_log_message(&format!("{e}")),
+                                );
+                                if let Some(win) = app_handle.get_webview_window(&win_label) {
+                                    let _ = win.close();
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                if !finished && flow_seq.load(Ordering::SeqCst) == flow_id {
+                    if let Some(win) = app_handle.get_webview_window(&win_label) {
+                        let _ = app_handle.emit(
+                            "qwitch://oauth-error",
+                            "Trae CN 内置授权登录超时（5 分钟未完成），请重试",
+                        );
+                        let _ = win.close();
+                    }
+                }
+            });
+        }
         OAuthMode::WorkBuddyPoll { state_token } => {
             tauri::async_runtime::spawn(async move {
                 let mut consecutive_errors = 0u32;
@@ -1558,7 +1340,13 @@ mod tests {
     fn oauth_url_whitelist_allows_official_sso_https_and_blocks_http_or_evil() {
         let trae = allowed_oauth_hosts("trae_cn");
         assert!(is_allowed_oauth_url(
-            &"https://www.trae.cn/login".parse().unwrap(),
+            &"https://www.trae.cn/authorization".parse().unwrap(),
+            trae
+        ));
+        assert!(is_allowed_oauth_url(
+            &"https://accounts.doubao.com/passport/web/login/"
+                .parse()
+                .unwrap(),
             trae
         ));
         assert!(is_allowed_oauth_url(

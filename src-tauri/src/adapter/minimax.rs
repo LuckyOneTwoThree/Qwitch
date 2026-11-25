@@ -1448,6 +1448,15 @@ impl ToolAdapter for MiniMaxAdapter {
     ) -> Result<Option<CredentialEnvelope>, AdapterError> {
         self.refresh_credential_inner(cred, true).await
     }
+
+    async fn fetch_account_profile(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let token = Self::extract_access_token(cred).ok()?;
+        let (_, name, email) = Self::fetch_user_profile(&token).await.ok()?;
+        (name.is_some() || email.is_some()).then_some((name, email))
+    }
 }
 
 #[cfg(test)]

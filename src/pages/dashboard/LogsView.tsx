@@ -223,7 +223,7 @@ export function LogsToolbar({
 
       <div className="surface-card flex flex-col gap-2.5 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="relative min-w-[220px] flex-1">
+          <div className="relative min-w-[160px] flex-1">
             <Search
               className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500 dark:text-zinc-400"
               aria-hidden="true"

@@ -208,10 +208,14 @@ export const AccountCard = React.memo(function AccountCard({
     }
   };
 
+  const hasCustomAlias = Boolean(
+    account.accountName && account.accountName !== account.label
+  );
+
   const handleSaveRename = async () => {
     if (renaming) return;
     const trimmed = labelDraft.trim();
-    if (trimmed && trimmed !== account.label) {
+    if ((!trimmed && hasCustomAlias) || (trimmed && trimmed !== account.label)) {
       setRenaming(true);
       try {
         await renameAccount(account.id, trimmed);
@@ -220,6 +224,17 @@ export const AccountCard = React.memo(function AccountCard({
       }
     }
     setEditingLabel(false);
+  };
+
+  const handleRestoreOriginalName = async () => {
+    if (renaming) return;
+    setRenaming(true);
+    try {
+      await renameAccount(account.id, "");
+    } finally {
+      setRenaming(false);
+      setEditingLabel(false);
+    }
   };
 
   return (
@@ -263,7 +278,12 @@ export const AccountCard = React.memo(function AccountCard({
                           setEditingLabel(false);
                         }
                       }}
-                      aria-label="编辑账号备注"
+                      placeholder={
+                        account.accountName
+                          ? `输入别名（留空恢复 ${account.accountName}）`
+                          : "输入账号别名"
+                      }
+                      aria-label="编辑账号别名"
                       autoFocus
                       className="min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-xs font-medium text-zinc-900 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
                     />
@@ -271,11 +291,23 @@ export const AccountCard = React.memo(function AccountCard({
                       type="button"
                       disabled={renaming}
                       onClick={() => void handleSaveRename()}
-                      aria-label="保存账号备注"
+                      aria-label="保存账号别名"
                       className="btn btn-icon btn-primary rounded-md disabled:opacity-50"
                     >
                       <Check className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
+                    {hasCustomAlias && (
+                      <button
+                        type="button"
+                        disabled={renaming}
+                        onClick={() => void handleRestoreOriginalName()}
+                        title={`恢复原用户名（${account.accountName}）`}
+                        aria-label="恢复原用户名"
+                        className="btn btn-icon btn-secondary rounded-md disabled:opacity-50"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => {
@@ -289,18 +321,26 @@ export const AccountCard = React.memo(function AccountCard({
                     </button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1">
+                  <div className="flex min-w-0 items-center gap-1">
                     <h3 className="truncate text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">
                       {account.label}
                     </h3>
+                    {hasCustomAlias && (
+                      <span
+                        title={`当前显示为本地别名，平台原用户名：${account.accountName}`}
+                        className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-[10px] leading-none font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                      >
+                        别名
+                      </span>
+                    )}
                     <button
                       type="button"
                       onClick={() => {
                         setLabelDraft(account.label);
                         setEditingLabel(true);
                       }}
-                      title="修改账号备注"
-                      aria-label={`修改 ${account.label} 备注`}
+                      title="修改账号别名"
+                      aria-label={`修改 ${account.label} 别名`}
                       className="shrink-0 rounded p-0.5 text-zinc-400 opacity-0 transition hover:bg-zinc-100 hover:text-zinc-800 group-hover:opacity-100 focus-visible:opacity-100 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                     >
                       <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
@@ -309,6 +349,7 @@ export const AccountCard = React.memo(function AccountCard({
                 )}
 
                 <p className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {hasCustomAlias ? `${account.accountName} · ` : ""}
                   {account.uidMasked}
                   {account.emailMasked ? ` · ${account.emailMasked}` : ""}
                   {account.deviceIdMasked && (
@@ -502,8 +543,8 @@ export const AccountCard = React.memo(function AccountCard({
             )}
           </div>
 
-          <div className="mt-2.5 flex items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="mt-2.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
               {needsRecovery ? (
                 <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 text-amber-700 dark:text-amber-300">
                   <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />

@@ -217,6 +217,7 @@ impl QwitchDatabase {
             "ALTER TABLE accounts ADD COLUMN credential_expires_at TEXT",
         )?;
         exec_add_column(&conn, "ALTER TABLE accounts ADD COLUMN renewal_mode TEXT")?;
+        exec_add_column(&conn, "ALTER TABLE accounts ADD COLUMN account_name TEXT")?;
         exec_add_column(&conn, "ALTER TABLE action_logs ADD COLUMN archived_at TEXT")?;
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_archived_id ON action_logs(archived_at, id DESC)",
@@ -383,12 +384,13 @@ impl QwitchDatabase {
                     Some(lo) => lo.to_string(),
                     None => {
                         if label_was_auto && !new_default.is_empty() {
-                            new_default
+                            new_default.clone()
                         } else {
                             stored_label
                         }
                     }
                 };
+                let account_name = (!new_default.is_empty()).then_some(new_default);
 
                 let (_, incoming_has_token) = envelope.capability_flags();
                 let status_sql = if incoming_has_token {
@@ -398,17 +400,18 @@ impl QwitchDatabase {
                 };
                 let update_sql = format!(
                     "UPDATE accounts
-                     SET label = ?1, uid_masked = ?2, email_masked = ?3,
+                     SET label = ?1, account_name = ?2, uid_masked = ?3, email_masked = ?4,
                          status = {status_sql},
-                         encrypted_credential = ?4, has_local_snapshot = ?5, has_api_token = ?6,
-                         device_id_masked = ?7, device_type = ?8,
-                         credential_expires_at = ?9, renewal_mode = ?10, updated_at = ?11
-                     WHERE id = ?12"
+                         encrypted_credential = ?5, has_local_snapshot = ?6, has_api_token = ?7,
+                         device_id_masked = ?8, device_type = ?9,
+                         credential_expires_at = ?10, renewal_mode = ?11, updated_at = ?12
+                     WHERE id = ?13"
                 );
                 conn.execute(
                     &update_sql,
                     params![
                         effective_label,
+                        account_name,
                         uid_masked,
                         email_masked,
                         encrypted_cred,
@@ -428,6 +431,7 @@ impl QwitchDatabase {
                 let id = Uuid::new_v4().to_string();
                 let default_label = default_account_label(envelope);
                 let label = label_override.unwrap_or(&default_label);
+                let account_name = (!default_label.is_empty()).then_some(default_label.as_str());
                 let uid_masked = crypto::mask_uid(&envelope.uid);
                 let email_masked = envelope.display_email.as_deref().map(crypto::mask_email);
                 let aad = crypto::credential_aad(&envelope.tool_id, &id);
@@ -441,16 +445,17 @@ impl QwitchDatabase {
 
                 conn.execute(
                     "INSERT INTO accounts (
-                        id, tool_id, label, uid_masked, uid_hash, email_masked,
+                        id, tool_id, label, account_name, uid_masked, uid_hash, email_masked,
                         status, is_active_on_client, has_local_snapshot, has_api_token,
                         device_id_masked, device_type,
                         encrypted_credential, last_claimed_at,
                         credential_expires_at, renewal_mode, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, ?14, ?14)",
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', 0, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14, ?15, ?15)",
                     params![
                         id,
                         envelope.tool_id,
                         label,
+                        account_name,
                         uid_masked,
                         uid_hash,
                         email_masked,
@@ -560,12 +565,13 @@ impl QwitchDatabase {
             Some(lo) => lo.to_string(),
             None => {
                 if label_was_auto && !new_default.is_empty() {
-                    new_default
+                    new_default.clone()
                 } else {
                     existing_label.clone()
                 }
             }
         };
+        let account_name = (!new_default.is_empty()).then_some(new_default);
 
         let status_sql = if incoming_has_token {
             "CASE WHEN status = 'disabled' THEN 'disabled' ELSE 'active' END"
@@ -574,18 +580,19 @@ impl QwitchDatabase {
         };
         let update_sql = format!(
             "UPDATE accounts
-             SET label = ?1, uid_masked = ?2, uid_hash = ?3, email_masked = ?4,
+             SET label = ?1, account_name = ?2, uid_masked = ?3, uid_hash = ?4, email_masked = ?5,
                  status = {status_sql},
-                 encrypted_credential = ?5,
-                 has_local_snapshot = ?6, has_api_token = ?7,
-                 device_id_masked = ?8, device_type = ?9,
-                 credential_expires_at = ?10, renewal_mode = ?11, updated_at = ?12
-             WHERE id = ?13"
+                 encrypted_credential = ?6,
+                 has_local_snapshot = ?7, has_api_token = ?8,
+                 device_id_masked = ?9, device_type = ?10,
+                 credential_expires_at = ?11, renewal_mode = ?12, updated_at = ?13
+             WHERE id = ?14"
         );
         conn.execute(
             &update_sql,
             params![
                 effective_label,
+                account_name,
                 uid_masked,
                 uid_hash,
                 email_masked,
@@ -605,6 +612,164 @@ impl QwitchDatabase {
         self.get_account_summary(account_id)
     }
 
+    /// 同步账号最新资料（昵称、邮箱）到加密凭据与展示摘要。
+    /// 若用户未自定义备注（`label == default_account_label(old_env)`），则同步刷新 `label`；
+    /// 若用户手动改过备注，则仅更新底层 `encrypted_credential` 与 `email_masked`，保留自定义备注。
+    pub fn sync_account_profile(
+        &self,
+        master_key: &[u8; 32],
+        account_id: &str,
+        display_name: Option<&str>,
+        display_email: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let new_name = display_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        let new_email = display_email
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        if new_name.is_none() && new_email.is_none() {
+            return Ok(false);
+        }
+
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        let existing: Option<(String, String, Vec<u8>)> = conn
+            .query_row(
+                "SELECT tool_id, label, encrypted_credential FROM accounts WHERE id = ?1",
+                params![account_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((tool_id, existing_label, old_blob)) = existing else {
+            return Ok(false);
+        };
+
+        let old_env = crypto::decrypt_credential(
+            master_key,
+            &crypto::credential_aad(&tool_id, account_id),
+            &old_blob,
+        )?;
+        let name_changed = new_name
+            .as_ref()
+            .is_some_and(|n| old_env.display_name.as_deref() != Some(n.as_str()));
+        let email_changed = new_email
+            .as_ref()
+            .is_some_and(|e| old_env.display_email.as_deref() != Some(e.as_str()));
+        if !name_changed && !email_changed {
+            return Ok(false);
+        }
+
+        let label_was_auto = existing_label == default_account_label(&old_env);
+        let mut updated_env = old_env;
+        if let Some(n) = new_name {
+            updated_env.display_name = Some(n);
+        }
+        if let Some(e) = new_email {
+            updated_env.display_email = Some(e);
+        }
+
+        let aad = crypto::credential_aad(&tool_id, account_id);
+        let encrypted_cred = crypto::encrypt_credential(master_key, &aad, &updated_env)?;
+        let platform_name = default_account_label(&updated_env);
+        let effective_label = if label_was_auto {
+            platform_name.clone()
+        } else {
+            existing_label
+        };
+        let account_name = (!platform_name.is_empty()).then_some(platform_name);
+        let email_masked = updated_env.display_email.as_deref().map(crypto::mask_email);
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE accounts
+             SET label = ?1, account_name = ?2, email_masked = ?3, encrypted_credential = ?4, updated_at = ?5
+             WHERE id = ?6",
+            params![
+                effective_label,
+                account_name,
+                email_masked,
+                encrypted_cred,
+                now,
+                account_id
+            ],
+        )?;
+        Ok(true)
+    }
+
+    /// 为历史上尚未记录 `account_name` 的账号回填平台原始用户名。
+    pub fn backfill_account_names(&self, master_key: &[u8; 32]) -> Result<usize, StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, tool_id, encrypted_credential FROM accounts WHERE account_name IS NULL",
+        )?;
+        let rows: Vec<(String, String, Vec<u8>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .filter_map(Result::ok)
+            .collect();
+        drop(stmt);
+
+        let mut updated = 0usize;
+        for (id, tool_id, blob) in rows {
+            if let Ok(env) = crypto::decrypt_credential(
+                master_key,
+                &crypto::credential_aad(&tool_id, &id),
+                &blob,
+            ) {
+                let name = default_account_label(&env);
+                if !name.is_empty() {
+                    let _ = conn.execute(
+                        "UPDATE accounts SET account_name = ?1 WHERE id = ?2",
+                        params![name, id],
+                    );
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
+    }
+
+    /// 设置账号本地别名；若传入空字符串，则自动恢复为该账号当前的平台原用户名。
+    pub fn update_account_alias(
+        &self,
+        master_key: &[u8; 32],
+        account_id: &str,
+        alias: &str,
+    ) -> Result<AccountSummary, StorageError> {
+        {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let existing: Option<(String, Vec<u8>)> = conn
+                .query_row(
+                    "SELECT tool_id, encrypted_credential FROM accounts WHERE id = ?1",
+                    params![account_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let (tool_id, blob) =
+                existing.ok_or_else(|| StorageError::NotFound(account_id.to_string()))?;
+            let env = crypto::decrypt_credential(
+                master_key,
+                &crypto::credential_aad(&tool_id, account_id),
+                &blob,
+            )?;
+            let platform_name = default_account_label(&env);
+            let trimmed = alias.trim();
+            let effective_label = if trimmed.is_empty() {
+                platform_name.clone()
+            } else {
+                trimmed.to_string()
+            };
+            let account_name = (!platform_name.is_empty()).then_some(platform_name);
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE accounts SET label = ?1, account_name = ?2, updated_at = ?3 WHERE id = ?4",
+                params![effective_label, account_name, now, account_id],
+            )?;
+        }
+        self.get_account_summary(account_id)
+    }
+
     pub fn get_account_summary(&self, account_id: &str) -> Result<AccountSummary, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let mut stmt = conn.prepare(
@@ -612,7 +777,7 @@ impl QwitchDatabase {
                     a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                     a.last_claimed_at, a.updated_at,
                     q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type,
-                    a.credential_expires_at, a.renewal_mode
+                    a.credential_expires_at, a.renewal_mode, a.account_name
              FROM accounts a
              LEFT JOIN quota_snapshots q ON q.id = (
                  SELECT q2.id FROM quota_snapshots q2
@@ -641,7 +806,7 @@ impl QwitchDatabase {
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
                         q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type,
-                        a.credential_expires_at, a.renewal_mode
+                        a.credential_expires_at, a.renewal_mode, a.account_name
                  FROM accounts a
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
@@ -662,7 +827,7 @@ impl QwitchDatabase {
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
                         q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type,
-                        a.credential_expires_at, a.renewal_mode
+                        a.credential_expires_at, a.renewal_mode, a.account_name
                  FROM accounts a
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
@@ -1334,6 +1499,7 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
         id: row.get(0)?,
         tool_id: row.get(1)?,
         label: row.get(2)?,
+        account_name: row.get(19)?,
         uid_masked: row.get(3)?,
         email_masked: row.get(4)?,
         status: parse_account_status(&status_str),

@@ -3,8 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
   CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
+  ChevronDown,
   Download,
   Globe,
   HardDriveDownload,
@@ -71,6 +70,38 @@ import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import type { TargetAgentId, TrayNavigateTarget } from "../types/pool";
 
+export function computeVisibleToolCount(
+  containerWidth: number,
+  allTabWidth: number,
+  toolWidths: number[],
+  moreButtonWidth: number,
+  gap = 6
+): number {
+  if (containerWidth <= 0 || toolWidths.length === 0) {
+    return toolWidths.length;
+  }
+  const totalToolsWidth = toolWidths.reduce((sum, w) => sum + w, 0);
+  const fullWidth = allTabWidth + totalToolsWidth + gap * toolWidths.length;
+  if (fullWidth <= containerWidth) {
+    return toolWidths.length;
+  }
+  const available = containerWidth - allTabWidth - gap - moreButtonWidth;
+  if (available <= 0) {
+    return 0;
+  }
+  let used = 0;
+  let count = 0;
+  for (const w of toolWidths) {
+    const nextUsed = used === 0 ? w : used + gap + w;
+    if (nextUsed > available) {
+      break;
+    }
+    used = nextUsed;
+    count += 1;
+  }
+  return count;
+}
+
 function SecondAccountGhostCard({
   toolName,
   scopeHint,
@@ -120,6 +151,7 @@ export function Dashboard({
     clientStatuses,
     resetSettingsDrafts,
     refreshClientStatuses,
+    launchToolClient,
     cstDayKey,
     theme,
     toggleTheme,
@@ -156,6 +188,19 @@ export function Dashboard({
   const [importDefaultMethod, setImportDefaultMethod] = useState<AuthMethod | undefined>(undefined);
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
   const [bindTargetAccount, setBindTargetAccount] = useState<AccountSummary | null>(null);
+  const [launchingToolId, setLaunchingToolId] = useState<string | null>(null);
+  const handleLaunchToolClient = useCallback(
+    async (toolId: ToolId) => {
+      if (launchingToolId) return;
+      setLaunchingToolId(toolId);
+      try {
+        await launchToolClient(toolId);
+      } finally {
+        setLaunchingToolId(null);
+      }
+    },
+    [launchToolClient, launchingToolId]
+  );
   const [pathDrafts, setPathDrafts] = useState<Record<string, string>>({});
   const [pathDraftsDirty, setPathDraftsDirty] = useState(false);
   const [externalPlugins, setExternalPlugins] = useState<ExternalAdapterInfo[]>([]);
@@ -244,29 +289,62 @@ export function Dashboard({
     return [...populated, ...empty];
   }, [visibleTools, accountCountByTool]);
 
-  const toolNavRef = useRef<HTMLElement | null>(null);
-  const [toolNavOverflow, setToolNavOverflow] = useState({ left: false, right: false });
+  const toolNavContainerRef = useRef<HTMLDivElement | null>(null);
+  const toolNavMeasureRef = useRef<HTMLDivElement | null>(null);
+  const [visibleToolCount, setVisibleToolCount] = useState<number>(orderedVisibleTools.length);
+  const [toolNavExpanded, setToolNavExpanded] = useState(false);
 
-  const syncToolNavOverflow = useCallback(() => {
-    const el = toolNavRef.current;
-    if (!el) return;
-    const left = el.scrollLeft > 4;
-    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 4;
-    setToolNavOverflow((prev) =>
-      prev.left === left && prev.right === right ? prev : { left, right }
-    );
-  }, []);
+  const recomputeVisibleTools = useCallback(() => {
+    const container = toolNavContainerRef.current;
+    const measure = toolNavMeasureRef.current;
+    if (!container || !measure) {
+      setVisibleToolCount(orderedVisibleTools.length);
+      return;
+    }
+    const containerWidth = container.clientWidth;
+    if (containerWidth <= 0) {
+      setVisibleToolCount(orderedVisibleTools.length);
+      return;
+    }
+    const allEl = measure.querySelector<HTMLElement>("[data-measure-all]");
+    const toolEls = Array.from(measure.querySelectorAll<HTMLElement>("[data-measure-tool]"));
+    const allTabWidth = allEl?.offsetWidth ?? 96;
+    const toolWidths = toolEls.map((el) => el.offsetWidth);
+    const nextCount = computeVisibleToolCount(containerWidth, allTabWidth, toolWidths, 96, 6);
+    setVisibleToolCount((prev) => (prev === nextCount ? prev : nextCount));
+  }, [orderedVisibleTools.length]);
 
   useEffect(() => {
-    syncToolNavOverflow();
-    if (typeof window === "undefined") return;
-    window.addEventListener("resize", syncToolNavOverflow);
-    return () => window.removeEventListener("resize", syncToolNavOverflow);
-  }, [syncToolNavOverflow, orderedVisibleTools, isInitializing, nav]);
+    recomputeVisibleTools();
+    const container = toolNavContainerRef.current;
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined" && container) {
+      observer = new ResizeObserver(() => recomputeVisibleTools());
+      observer.observe(container);
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("resize", recomputeVisibleTools);
+    }
+    return () => {
+      observer?.disconnect();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("resize", recomputeVisibleTools);
+      }
+    };
+  }, [recomputeVisibleTools, orderedVisibleTools, isInitializing, nav]);
 
-  const scrollToolNavBy = (delta: number) => {
-    toolNavRef.current?.scrollBy?.({ left: delta, behavior: "smooth" });
-  };
+  const inlineTools = useMemo(
+    () => orderedVisibleTools.slice(0, visibleToolCount),
+    [orderedVisibleTools, visibleToolCount]
+  );
+  const overflowTools = useMemo(
+    () => orderedVisibleTools.slice(visibleToolCount),
+    [orderedVisibleTools, visibleToolCount]
+  );
+  const activeOverflowTool = useMemo(
+    () => overflowTools.find((t) => t.id === nav) ?? null,
+    [overflowTools, nav]
+  );
 
   const activeToolFilter: ToolId | undefined =
     nav !== "all" &&
@@ -332,6 +410,7 @@ export function Dashboard({
       if (!q) return true;
       const haystack = [
         acc.label,
+        acc.accountName ?? "",
         acc.uidMasked,
         acc.emailMasked ?? "",
         acc.latestQuota?.planName ?? "",
@@ -843,8 +922,8 @@ export function Dashboard({
       </aside>
 
       <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="z-20 flex shrink-0 flex-nowrap items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
-          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+        <header onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
+          <div className="flex min-w-[160px] flex-1 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
               <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>
@@ -854,7 +933,7 @@ export function Dashboard({
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
             {isAccountSection && (
               <>
                 {scopeAccounts.length > 0 && (
@@ -919,6 +998,32 @@ export function Dashboard({
                       </button>
                     ) : null}
                   </>
+                )}
+
+                {activeToolFilter && activeToolMeta && (
+                  <button
+                    type="button"
+                    onClick={() => void handleLaunchToolClient(activeToolFilter)}
+                    disabled={launchingToolId === activeToolFilter}
+                    title={
+                      clientStatuses[activeToolFilter]?.isRunning
+                        ? `唤起 ${activeToolMeta.name} 客户端`
+                        : `快捷启动 ${activeToolMeta.name} 客户端`
+                    }
+                    aria-label={
+                      clientStatuses[activeToolFilter]?.isRunning
+                        ? `唤起 ${activeToolMeta.name} 客户端`
+                        : `快捷启动 ${activeToolMeta.name} 客户端`
+                    }
+                    className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                  >
+                    {launchingToolId === activeToolFilter ? (
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    )}
+                    {clientStatuses[activeToolFilter]?.isRunning ? "打开客户端" : "快捷启动"}
+                  </button>
                 )}
 
                 <button
@@ -1046,36 +1151,50 @@ export function Dashboard({
             <>
               {/* 统一吸顶控制区（紧贴顶栏无缝衔接，内部包含工具切换 / 核心指标 / 搜索筛选，且全区支持滚轮滚动） */}
               <div className="sticky top-0 z-10 space-y-2.5 border-b border-zinc-200/90 bg-zinc-50 px-5 py-3 shadow-2xs dark:border-zinc-800 dark:bg-zinc-950">
-                <div className="relative flex items-center gap-1.5">
-                  {toolNavOverflow.left && (
-                    <button
-                      type="button"
-                      onClick={() => scrollToolNavBy(-220)}
-                      aria-label="向左滚动工具栏"
-                      className="flex h-7 w-6 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-600 shadow-2xs transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                <div ref={toolNavContainerRef} className="relative flex items-start gap-1.5">
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none invisible absolute inset-x-0 top-0 overflow-hidden"
+                  >
+                    <div
+                      ref={toolNavMeasureRef}
+                      className="flex w-max flex-nowrap items-center gap-1.5 whitespace-nowrap"
                     >
-                      <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                  )}
+                    <div
+                      data-measure-all
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium"
+                    >
+                      <Layers className="h-3.5 w-3.5 shrink-0" />
+                      <span>全部账号</span>
+                      <span className="rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums">
+                        {accounts.length}
+                      </span>
+                    </div>
+                    {orderedVisibleTools.map((tool) => (
+                      <div
+                        key={tool.id}
+                        data-measure-tool
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium"
+                      >
+                        <ToolBrandIcon toolId={tool.id} size="xs" decorative />
+                        <span>{tool.name}</span>
+                        <span className="rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums">
+                          {accountCountByTool.get(tool.id) ?? 0}
+                        </span>
+                      </div>
+                    ))}
+                    </div>
+                  </div>
 
                   <nav
-                    ref={toolNavRef}
-                    onScroll={syncToolNavOverflow}
                     aria-label="账号视图导航"
-                    className={`scrollbar-none flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto py-0.5 ${
-                      toolNavOverflow.right ? "mask-fade-r pr-2" : ""
+                    className={`flex min-w-0 flex-1 items-center gap-1.5 py-0.5 ${
+                      toolNavExpanded ? "flex-wrap" : "flex-nowrap"
                     }`}
                   >
                     <button
                       type="button"
-                      onClick={(e) => {
-                        setNav("all");
-                        e.currentTarget.scrollIntoView?.({
-                          behavior: "smooth",
-                          inline: "nearest",
-                          block: "nearest",
-                        });
-                      }}
+                      onClick={() => setNav("all")}
                       aria-current={nav === "all" ? "page" : undefined}
                       className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
                         nav === "all"
@@ -1096,7 +1215,7 @@ export function Dashboard({
                       </span>
                     </button>
 
-                    {orderedVisibleTools.map((tool) => {
+                    {(toolNavExpanded ? orderedVisibleTools : inlineTools).map((tool) => {
                       const active = nav === tool.id;
                       const count = accountCountByTool.get(tool.id) ?? 0;
                       const isRunning = clientStatuses[tool.id]?.isRunning;
@@ -1104,14 +1223,7 @@ export function Dashboard({
                         <button
                           key={tool.id}
                           type="button"
-                          onClick={(e) => {
-                            setNav(tool.id);
-                            e.currentTarget.scrollIntoView?.({
-                              behavior: "smooth",
-                              inline: "nearest",
-                              block: "nearest",
-                            });
-                          }}
+                          onClick={() => setNav(tool.id)}
                           aria-current={active ? "page" : undefined}
                           className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
                             active
@@ -1147,14 +1259,40 @@ export function Dashboard({
                     })}
                   </nav>
 
-                  {toolNavOverflow.right && (
+                  {overflowTools.length > 0 && (
                     <button
                       type="button"
-                      onClick={() => scrollToolNavBy(220)}
-                      aria-label="向右滚动工具栏"
-                      className="flex h-7 w-6 shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-600 shadow-2xs transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                      onClick={() => setToolNavExpanded((prev) => !prev)}
+                      aria-expanded={toolNavExpanded}
+                      aria-label={
+                        toolNavExpanded
+                          ? "收起更多工具类型"
+                          : `展开其余 ${overflowTools.length} 个工具类型`
+                      }
+                      className={`mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
+                        !toolNavExpanded && activeOverflowTool
+                          ? "bg-brand-600 text-white shadow-2xs dark:bg-brand-500 dark:text-zinc-950"
+                          : "bg-white text-zinc-700 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-800 dark:hover:bg-zinc-800"
+                      }`}
                     >
-                      <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>{toolNavExpanded ? "收起" : "展开"}</span>
+                      {!toolNavExpanded && (
+                        <span
+                          className={`rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums ${
+                            activeOverflowTool
+                              ? "bg-white/20 text-white dark:bg-zinc-950/15 dark:text-zinc-950"
+                              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                          }`}
+                        >
+                          {overflowTools.length}
+                        </span>
+                      )}
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 shrink-0 transition-transform ${
+                          toolNavExpanded ? "rotate-180" : ""
+                        }`}
+                        aria-hidden="true"
+                      />
                     </button>
                   )}
                 </div>
@@ -1162,7 +1300,7 @@ export function Dashboard({
                 {/* 紧凑单行 KPI 筛选条 */}
                 <section
                   aria-label="当前作用域核心指标"
-                  className="grid grid-cols-2 gap-2 @2xl:grid-cols-4"
+                  className="grid grid-cols-2 gap-2 @3xl:grid-cols-4"
                 >
                   <button
                     type="button"
@@ -1544,14 +1682,43 @@ export function Dashboard({
                           )}
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => openImportModal("webview_oauth", group.id)}
-                          className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
-                        >
-                          <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
-                          添加账号
-                        </button>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => void handleLaunchToolClient(group.id)}
+                            disabled={launchingToolId === group.id}
+                            title={
+                              group.isRunning
+                                ? `唤起 ${group.name} 客户端`
+                                : `快捷启动 ${group.name} 客户端`
+                            }
+                            aria-label={
+                              group.isRunning
+                                ? `唤起 ${group.name} 客户端`
+                                : `快捷启动 ${group.name} 客户端`
+                            }
+                            className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                          >
+                            {launchingToolId === group.id ? (
+                              <Loader2
+                                className="h-3 w-3 shrink-0 animate-spin"
+                                aria-hidden="true"
+                              />
+                            ) : (
+                              <Play className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            )}
+                            {group.isRunning ? "打开客户端" : "快捷启动"}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => openImportModal("webview_oauth", group.id)}
+                            className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                          >
+                            <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            添加账号
+                          </button>
+                        </div>
                       </div>
 
                       <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr))]">

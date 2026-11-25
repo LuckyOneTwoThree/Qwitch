@@ -1336,6 +1336,53 @@ impl ToolAdapter for QoderAdapter {
         self.refresh_credential_inner(cred, true).await
     }
 
+    async fn fetch_account_profile(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let token = match &cred.payload {
+            CredentialPayload::Token { access_token, .. } => access_token.trim().to_string(),
+            CredentialPayload::LocalSnapshot { files } => files
+                .get("decrypted_token.txt")
+                .and_then(|b64| BASE64.decode(b64).ok())
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default(),
+            CredentialPayload::Cookies { .. } => return None,
+        };
+        if token.is_empty() {
+            return None;
+        }
+        let resp = self
+            .http
+            .get(format!("{DEFAULT_BASE_URL}/api/v1/userinfo"))
+            .header(ACCEPT, "application/json")
+            .header(USER_AGENT, "qoder/0.5.14")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let info: Value = resp.json().await.ok()?;
+        let name = info
+            .get("name")
+            .or_else(|| info.get("username"))
+            .or_else(|| info.get("user_name"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        let email = info
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        (name.is_some() || email.is_some()).then_some((name, email))
+    }
+
     async fn apply_session(
         &self,
         host: &dyn PlatformHost,

@@ -1833,34 +1833,97 @@ impl ToolAdapter for DoubaoWorkAdapter {
             });
         }
 
-        let Some(merged_cookie) = merge_set_cookies(&cookie, &set_cookies) else {
+        let screen_name = data
+            .get("screen_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        let merged_cookie = merge_set_cookies(&cookie, &set_cookies);
+        let name_changed = screen_name
+            .as_ref()
+            .is_some_and(|n| cred.display_name.as_deref() != Some(n.as_str()));
+        if merged_cookie.is_none() && !name_changed {
             return Ok(None);
-        };
+        }
 
         let mut updated = cred.clone();
-        match &mut updated.payload {
-            CredentialPayload::Token { access_token, .. } => {
-                *access_token = merged_cookie;
-            }
-            CredentialPayload::LocalSnapshot { files } => {
-                files.insert(
-                    SNAPSHOT_TOKEN_FILE.to_string(),
-                    BASE64.encode(merged_cookie.as_bytes()),
-                );
-            }
-            CredentialPayload::Cookies { cookies, .. } => {
-                cookies.clear();
-                for pair in merged_cookie.split(';') {
-                    if let Some((k, v)) = pair.split_once('=') {
-                        let key = k.trim();
-                        if !key.is_empty() {
-                            cookies.insert(key.to_string(), v.trim().to_string());
+        if let Some(n) = screen_name {
+            updated.display_name = Some(n);
+        }
+        if let Some(merged_cookie) = merged_cookie {
+            match &mut updated.payload {
+                CredentialPayload::Token { access_token, .. } => {
+                    *access_token = merged_cookie;
+                }
+                CredentialPayload::LocalSnapshot { files } => {
+                    files.insert(
+                        SNAPSHOT_TOKEN_FILE.to_string(),
+                        BASE64.encode(merged_cookie.as_bytes()),
+                    );
+                }
+                CredentialPayload::Cookies { cookies, .. } => {
+                    cookies.clear();
+                    for pair in merged_cookie.split(';') {
+                        if let Some((k, v)) = pair.split_once('=') {
+                            let key = k.trim();
+                            if !key.is_empty() {
+                                cookies.insert(key.to_string(), v.trim().to_string());
+                            }
                         }
                     }
                 }
             }
         }
         Ok(Some(updated))
+    }
+
+    async fn fetch_account_profile(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let cookie = Self::extract_cookie(cred).ok()?;
+        let query_path = format!("/passport/account/info/v2/?aid={AID}&account_sdk_source=web");
+        let (body, _) = match self
+            .get_with_cookie_and_set_cookies(
+                &self.web_base,
+                &query_path,
+                &cookie,
+                "查询豆包工作账号资料",
+            )
+            .await
+        {
+            Ok(pair) => pair,
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                ..
+            }) => self
+                .get_with_cookie_and_set_cookies(
+                    &self.accounts_base,
+                    &query_path,
+                    &cookie,
+                    "查询豆包工作账号资料",
+                )
+                .await
+                .ok()?,
+            Err(_) => return None,
+        };
+        let message = body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(str::to_ascii_lowercase);
+        let data = body.get("data").unwrap_or(&Value::Null);
+        let passport_err = data.get("error_code").and_then(int_field).unwrap_or(0);
+        if message.as_deref() == Some("error") || passport_err != 0 {
+            return None;
+        }
+        let screen_name = data
+            .get("screen_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)?;
+        Some((Some(screen_name), None))
     }
 
     async fn apply_session(

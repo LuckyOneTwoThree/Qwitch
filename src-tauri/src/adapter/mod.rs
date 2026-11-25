@@ -271,6 +271,15 @@ pub trait ToolAdapter: Send + Sync {
         self.refresh_credential(cred).await
     }
 
+    /// 查询账号在服务端的最新资料（昵称、邮箱），用于在刷新额度时同步用户名变更。
+    /// 默认返回 `None`（不额外发起网络请求）。
+    async fn fetch_account_profile(
+        &self,
+        _cred: &CredentialEnvelope,
+    ) -> Option<(Option<String>, Option<String>)> {
+        None
+    }
+
     async fn apply_session(
         &self,
         host: &dyn PlatformHost,

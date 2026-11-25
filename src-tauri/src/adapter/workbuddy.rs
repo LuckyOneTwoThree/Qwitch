@@ -1926,6 +1926,48 @@ impl ToolAdapter for WorkBuddyAdapter {
         self.refresh_credential_inner(cred, true).await
     }
 
+    async fn fetch_account_profile(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let (endpoint, uid, headers) = Self::extract_api_context(cred, None).await.ok()?;
+        let resp = self
+            .http
+            .get(format!("{endpoint}/console/accounts"))
+            .headers(headers)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: Value = resp.json().await.ok()?;
+        let list = body
+            .pointer("/data/accounts")
+            .or_else(|| body.pointer("/accounts"))
+            .and_then(|v| v.as_array())?;
+        let target = list
+            .iter()
+            .find(|acc| {
+                acc.get("uid")
+                    .and_then(crate::adapter::common::json_uid_to_string)
+                    .as_deref()
+                    == Some(uid.as_str())
+            })
+            .or_else(|| (list.len() == 1).then(|| &list[0]))?;
+        let nick = target
+            .get("nickname")
+            .or_else(|| target.get("nickName"))
+            .and_then(|v| v.as_str());
+        let phone = target
+            .get("phoneNumber")
+            .or_else(|| target.get("phone_number"))
+            .and_then(|v| v.as_str());
+        let email = target.get("email").and_then(|v| v.as_str());
+        let (display_name, display_email) = Self::format_display_identity(nick, phone, email);
+        (display_name.is_some() || display_email.is_some()).then_some((display_name, display_email))
+    }
+
     async fn apply_session(
         &self,
         host: &dyn PlatformHost,

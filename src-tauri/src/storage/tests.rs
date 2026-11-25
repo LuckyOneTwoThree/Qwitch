@@ -1475,3 +1475,76 @@ fn upsert_snapshot_only_preserves_expired_status() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sync_account_profile_updates_auto_label_and_preserves_custom_remark() {
+    let dir = temp_data_dir("sync_profile");
+    let key = [19u8; 32];
+    let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+
+    let mut env1 = token_envelope("u_auto");
+    env1.display_name = Some("旧昵称".to_string());
+    let auto_acc = db.upsert_account(&key, None, &env1).expect("insert auto");
+    assert_eq!(auto_acc.label, "旧昵称");
+
+    let changed = db
+        .sync_account_profile(&key, &auto_acc.id, Some("新昵称"), Some("new@example.com"))
+        .expect("sync auto");
+    assert!(changed);
+    let updated_auto = db.get_account_summary(&auto_acc.id).expect("summary");
+    assert_eq!(updated_auto.label, "新昵称");
+    assert_eq!(
+        updated_auto.email_masked.as_deref(),
+        Some("ne***@example.com")
+    );
+
+    let mut env2 = token_envelope("u_custom");
+    env2.display_name = Some("原昵称".to_string());
+    let custom_acc = db
+        .upsert_account(&key, Some("我的自定义备注"), &env2)
+        .expect("insert custom");
+    assert_eq!(custom_acc.label, "我的自定义备注");
+
+    let changed_custom = db
+        .sync_account_profile(&key, &custom_acc.id, Some("改名后的昵称"), None)
+        .expect("sync custom");
+    assert!(changed_custom);
+    let updated_custom = db.get_account_summary(&custom_acc.id).expect("summary");
+    assert_eq!(updated_custom.label, "我的自定义备注");
+    assert_eq!(updated_custom.account_name.as_deref(), Some("改名后的昵称"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn account_alias_preserves_platform_name_and_restores_on_empty() {
+    let dir = temp_data_dir("alias_restore");
+    let key = [29u8; 32];
+    let db = QwitchDatabase::open(&dir.join("qwitch.db")).expect("open");
+
+    let mut env = token_envelope("u_alias");
+    env.display_name = Some("原昵称".to_string());
+    let created = db.upsert_account(&key, None, &env).expect("insert");
+    assert_eq!(created.label, "原昵称");
+    assert_eq!(created.account_name.as_deref(), Some("原昵称"));
+
+    let aliased = db
+        .update_account_alias(&key, &created.id, "主力号")
+        .expect("set alias");
+    assert_eq!(aliased.label, "主力号");
+    assert_eq!(aliased.account_name.as_deref(), Some("原昵称"));
+
+    db.sync_account_profile(&key, &created.id, Some("平台新昵称"), None)
+        .expect("sync profile");
+    let after_sync = db.get_account_summary(&created.id).expect("after sync");
+    assert_eq!(after_sync.label, "主力号");
+    assert_eq!(after_sync.account_name.as_deref(), Some("平台新昵称"));
+
+    let restored = db
+        .update_account_alias(&key, &created.id, "")
+        .expect("restore");
+    assert_eq!(restored.label, "平台新昵称");
+    assert_eq!(restored.account_name.as_deref(), Some("平台新昵称"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computeMockLogStats } from "../context/logStateUtils";
 import { normalizeAppSettings } from "../context/settingsUtils";
@@ -8,6 +8,7 @@ import { toCstDayKey } from "../domain/selectors";
 
 const resetSettingsDrafts = vi.fn();
 const refreshClientStatuses = vi.fn().mockResolvedValue(undefined);
+const launchToolClient = vi.fn().mockResolvedValue(undefined);
 
 // 稳定引用：Dashboard 的 effect 依赖这些值，每次渲染返回新对象会造成无限循环
 const ctxValue = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
@@ -30,6 +31,7 @@ const baseCtx: Record<string, unknown> = {
   clientStatuses: {},
   resetSettingsDrafts,
   refreshClientStatuses,
+  launchToolClient,
   cstDayKey: toCstDayKey(Date.now()),
   theme: "light",
   toggleTheme: vi.fn(),
@@ -54,7 +56,7 @@ vi.mock("./dashboard/SettingsView", () => ({
   SettingsView: () => <div data-testid="settings-view" />,
 }));
 
-import { Dashboard } from "./Dashboard";
+import { computeVisibleToolCount, Dashboard } from "./Dashboard";
 
 beforeEach(() => {
   ctxValue.current = { ...baseCtx };
@@ -183,5 +185,33 @@ describe("Dashboard navigation", () => {
 
     fireEvent.click(mainNav.getByRole("button", { name: /路由观测/ }));
     expect(screen.getByRole("heading", { name: "网关路由观测与决策链路" })).toBeTruthy();
+  });
+
+  it("renders quick-launch client buttons in grouped and single-tool views", async () => {
+    launchToolClient.mockClear();
+    render(<Dashboard />);
+
+    const groupedLaunch = screen.getByRole("button", { name: /快捷启动 Trae CN 客户端/ });
+    fireEvent.click(groupedLaunch);
+    await waitFor(() => expect(launchToolClient).toHaveBeenCalledWith("trae_cn"));
+
+    launchToolClient.mockClear();
+    const toolNav = within(screen.getByRole("navigation", { name: "账号视图导航" }));
+    fireEvent.click(toolNav.getByRole("button", { name: /Trae CN/ }));
+
+    const headerLaunch = screen.getByRole("button", { name: /快捷启动 Trae CN 客户端/ });
+    await waitFor(() => expect((headerLaunch as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(headerLaunch);
+    await waitFor(() => expect(launchToolClient).toHaveBeenCalledWith("trae_cn"));
+  });
+
+  it("computes Priority+ visible tool count when overflowing", () => {
+    // 未测量或全部放得下时完整展示
+    expect(computeVisibleToolCount(0, 100, [100, 100, 100], 96, 6)).toBe(3);
+    expect(computeVisibleToolCount(450, 100, [100, 100, 100], 96, 6)).toBe(3);
+    // 溢出时预留“更多”按钮宽度，仅保留能放下的前置工具
+    expect(computeVisibleToolCount(400, 100, [100, 100, 100], 96, 6)).toBe(1);
+    expect(computeVisibleToolCount(410, 100, [100, 100, 100], 96, 6)).toBe(2);
+    expect(computeVisibleToolCount(150, 100, [100, 100], 96, 6)).toBe(0);
   });
 });

@@ -158,4 +158,24 @@ describe("AccountCard", () => {
     );
     expect(screen.getByText("自动续期")).toBeTruthy();
   });
+
+  it("设置别名后仍保留展示原用户名，并支持一键恢复原用户名", () => {
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          label: "主力号",
+          accountName: "真实用户名",
+        }}
+      />
+    );
+
+    expect(screen.getByText("主力号")).toBeTruthy();
+    expect(screen.getByText("别名")).toBeTruthy();
+    expect(screen.getByText(/真实用户名/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "修改 主力号 别名" }));
+    fireEvent.click(screen.getByRole("button", { name: "恢复原用户名" }));
+    expect(ctx.renameAccount).toHaveBeenCalledWith(account.id, "");
+  });
 });

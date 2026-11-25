@@ -270,3 +270,46 @@ deepseek-v4.1-flash-1017 | glm-5.3-flash | deepseek-v4.1-flash | kimi-k3.1-pro |
    漏登记任意一处直接测试失败。这类坑已经踩过两次，必须钉死。
 
 门禁：`cargo test` 243 + ACL 2，前端 185 / 30 files。
+
+---
+
+## 十一、码道为什么「勾选模型没反应」：它根本不在网关的上游列表里
+
+前几轮一直把原因归到「只读凭据 / 需要 OAuth」，这个结论**不完整**。真实情况：
+
+网关的 `resolve_upstream_auth`（`gateway/mod.rs:1310`）只认一种凭据形态——Bearer 令牌：
+它调 `extract_bearer_and_base_url(cred)`，拿不到令牌就直接报「账号缺少有效 API Token」。
+而码道的凭据里 `access_token` 恒为空（`adapter/codearts.rs` 三处构造都是 `String::new()`），
+真实鉴权材料是华为云 AK/SK + STS，走的是 **SDK-HMAC-SHA256 签名**。
+
+网关的上游地址映射也只有四个工具：
+
+```rust
+"minimax_code_cn" => "...", "workbuddy" => "...", "qoder_cn" => "...", "trae_cn" => "...",
+_ => "https://api.openai.com",
+```
+
+没有 codearts 分支，也没有 AK/SK 签名实现。也就是说：即使账号被放进号池、即使完成独立 OAuth、
+即使模型被勾选，请求也只会在 `resolve_upstream_auth` 阶段失败。
+
+### 本轮修正
+
+1. 新增 `domain/toolScope.ts::isToolGatewayRoutable()`：把「网关能调度哪些工具」显式化，
+   码道返回 false，并附上原因（AK/SK 无 bearer 令牌）。
+2. 模型区横幅改为如实说明：「{工具} 暂不支持网关调度，这里展示的模型目录仅用于和客户端对照，
+   勾选不会生效」，删掉上一轮「去签独立 OAuth 就能用」的错误承诺。
+3. 勾选 / 设为默认在该工具下直接禁用（`scopeNotSelectable = gatewayUnsupported || scopeReadonly`）。
+4. README 同步修正。
+
+### 想让码道真正可调度需要做什么（未实施）
+
+内核二进制里能看到协议线索：`@ai-sdk/openai-compatible` + `@ai-sdk/inferhub-provider`，
+请求 `POST {inferhubBaseUrl}chat/completions`（base 为
+`https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/`），鉴权头含
+`x-auth-token` 与 `hws_access_key/hws_secret_key/hws_security_token`，另有 `maas_type` 头。
+
+缺口有两个：① 现有凭据只存 AK/SK/STS，没存该接口需要的 `accessToken`；
+② 需要在网关里新增一条 CodeArts 上游分支（含流式解析与错误映射）。
+这是一个功能开发，不是修 bug，需要单独排期与真机验证。
+
+门禁：前端 187 / 31 files（新增 gateway 可调度性测试）；Rust 246 + ACL 2。

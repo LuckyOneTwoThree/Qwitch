@@ -78,7 +78,7 @@ Qwitch 目前内置 7 个账号适配器，另支持一个通用 API Key 作为�
 
 说明：
 
-- 码道 CodeArts 目前只做额度监控，不支持切换桌面登录；它没有可用的模型接口，Qwitch 改为从本机客户端启动配置里读取真实模型清单（需启动过一次 CodeArts），读不到时可用「套用推荐目录」或手工维护。
+- 码道 CodeArts 目前只做额度监控，不支持切换桌面登录，也**不在网关调度范围内**：它使用华为云 AK/SK + STS 签名，而网关只代理 Bearer 令牌类上游（WorkBuddy / Qoder / Trae / MiniMax / 自定义 API）。模型清单改为从本机客户端启动配置读取（需启动过一次 CodeArts），仅供对照，勾选不会生效。
 - Trae 和 Qoder 的国际版没有每日签到，暂未内置适配器。
 - 码道 CodeArts 的 refreshToken 是一次性轮换的。Qwitch 默认只读，避免和官方 IDE 互相踢下线；要让它参与网关调度，需要在号池里单独完成一次 OAuth 授权。
 

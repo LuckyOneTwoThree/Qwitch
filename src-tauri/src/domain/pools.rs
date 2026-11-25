@@ -1240,15 +1240,17 @@ pub fn compute_pool_serving_accounts(
             MemberTier::T3Fallback => t3 += 1,
         }
         let cooled = m.cooldown_until_ms.is_some_and(|until| until > now_ms);
-        let skipped = pool.skip_active_client_account && m.is_active_on_client.unwrap_or(false);
+        // 码道不参与切号流程，桌面端活跃不构成跳过理由
+        let skipped = pool.skip_active_client_account
+            && m.is_active_on_client.unwrap_or(false)
+            && m.tool_id != "codearts";
         let paused = matches!(
             m.account_status.as_deref(),
             Some("risk_paused") | Some("expired") | Some("disabled")
         );
-        let readonly = m.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly);
         // API Key 兜底关闭时，custom_api_key 成员不计入可用（与 gateway 调度口径一致）
         let api_key_disabled = m.tool_id == "custom_api_key" && !pool.fallback_api_key_enabled;
-        if m.enabled && !paused && !readonly && !cooled && !skipped && !api_key_disabled {
+        if m.enabled && !paused && !cooled && !skipped && !api_key_disabled {
             healthy += 1;
         }
     }

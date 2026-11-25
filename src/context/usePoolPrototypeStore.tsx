@@ -2220,7 +2220,8 @@ export function PoolPrototypeProvider({
           if (m.toolId === "custom_api_key" && !pool.fallbackApiKeyEnabled) continue;
           if (m.accountStatus === "risk_paused" || m.accountStatus === "expired") continue;
           if (typeof m.cooldownUntilMs === "number" && m.cooldownUntilMs > now) continue;
-          if (pool.skipActiveClientAccount && m.isActiveOnClient) {
+          // 码道不参与切号流程，桌面端活跃不影响它被调度
+          if (pool.skipActiveClientAccount && m.isActiveOnClient && m.toolId !== "codearts") {
             collectAttempts.push({
               accountLabel: m.label,
               toolId: m.toolId,

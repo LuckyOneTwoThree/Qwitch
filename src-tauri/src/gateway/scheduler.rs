@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::domain::{
-    AccountPool, AffinityMode, CodeArtsAuthMode, MemberTier, PoolMember, PoolStrategy,
-    RoutingAttempt, RoutingAttemptOutcome,
+    AccountPool, AffinityMode, MemberTier, PoolMember, PoolStrategy, RoutingAttempt,
+    RoutingAttemptOutcome,
 };
 
 #[derive(Debug, Clone)]
@@ -97,9 +97,7 @@ fn collect_for_model(
         ) {
             continue;
         }
-        if m.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly) {
-            continue;
-        }
+        // 码道有专用签名上游，只读凭据同样可被调度（不再跳过）
         let runtime_cool = cooldowns
             .get(&m.account_id)
             .copied()
@@ -107,7 +105,12 @@ fn collect_for_model(
         if runtime_cool.is_some_and(|until| until > now_ms) {
             continue;
         }
-        if pool.skip_active_client_account && m.is_active_on_client.unwrap_or(false) {
+        // 「跳过桌面端活跃账号」是为切号流程准备的：切号会重启客户端、和网关抢同一份凭据。
+        // 码道不切号、也不刷新令牌，用同一个 STS 并行请求是安全的，不能因此把它排掉。
+        if pool.skip_active_client_account
+            && m.is_active_on_client.unwrap_or(false)
+            && m.tool_id != "codearts"
+        {
             skipped_attempts.push(RoutingAttempt {
                 account_label: m.label.clone(),
                 tool_id: m.tool_id.clone(),
@@ -473,5 +476,101 @@ mod tests {
             .map(|c| c.account_id.as_str())
             .collect();
         assert_eq!(ids, vec!["qd-1", "qd-2"]);
+    }
+
+    /// 回归：码道只读凭据 + 桌面端活跃，两个历史护栏都不能把它排掉，
+    /// 否则请求会直接 503「所属账号当前均处于冷却、禁用」。
+    #[test]
+    fn codearts_readonly_active_on_client_is_still_schedulable() {
+        let mut member = make_member(
+            "ca-1",
+            "codearts",
+            MemberTier::T1Primary,
+            1,
+            80,
+            &["codearts/deepseek-v4.1-flash-1017"],
+        );
+        member.is_active_on_client = Some(true);
+        member.code_arts_mode = Some(crate::domain::CodeArtsAuthMode::ClientReadonly);
+
+        let pool = AccountPool {
+            id: "p-codearts".into(),
+            slug: "p-codearts".into(),
+            name: "码道池".into(),
+            description: String::new(),
+            scene_tag: "Coding".into(),
+            enabled: true,
+            strategy: PoolStrategy::Order,
+            affinity_mode: AffinityMode::Off,
+            skip_active_client_account: true,
+            cooldown_seconds: 60,
+            auto_refresh_on_401: true,
+            fallback_api_key_enabled: false,
+            model_policies: Vec::new(),
+            members: vec![member],
+            today_requests: 0,
+            today_failovers: 0,
+            cache_hit_rate: 0,
+            created_at: String::new(),
+        };
+
+        let plan = select_candidates_for_request(
+            &pool,
+            "codearts/deepseek-v4.1-flash-1017",
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            1_000,
+        );
+        assert_eq!(
+            plan.candidates.len(),
+            1,
+            "码道必须可被调度：{:?}",
+            plan.diagnostic_reason
+        );
+        assert_eq!(plan.candidates[0].account_id, "ca-1");
+    }
+
+    /// 对照：非码道工具仍然遵守「跳过桌面端活跃账号」护栏。
+    #[test]
+    fn active_on_client_still_skips_other_tools() {
+        let mut member = make_member(
+            "wb-1",
+            "workbuddy",
+            MemberTier::T1Primary,
+            1,
+            80,
+            &["claude-sonnet-4.6"],
+        );
+        member.is_active_on_client = Some(true);
+        let pool = AccountPool {
+            id: "p-wb".into(),
+            slug: "p-wb".into(),
+            name: "WB".into(),
+            description: String::new(),
+            scene_tag: "Coding".into(),
+            enabled: true,
+            strategy: PoolStrategy::Order,
+            affinity_mode: AffinityMode::Off,
+            skip_active_client_account: true,
+            cooldown_seconds: 60,
+            auto_refresh_on_401: true,
+            fallback_api_key_enabled: false,
+            model_policies: Vec::new(),
+            members: vec![member],
+            today_requests: 0,
+            today_failovers: 0,
+            cache_hit_rate: 0,
+            created_at: String::new(),
+        };
+        let plan = select_candidates_for_request(
+            &pool,
+            "claude-sonnet-4.6",
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            1_000,
+        );
+        assert!(plan.candidates.is_empty(), "桌面端活跃的普通账号仍应被跳过");
     }
 }

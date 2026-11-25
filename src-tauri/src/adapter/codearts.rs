@@ -435,8 +435,10 @@ impl CodeArtsAdapter {
         })
     }
 
-    /// 码道数据面（snap-access）的 host，按凭据里的 region 选择国内/国际站。
-    pub(crate) fn snap_base_url(cred: &CredentialEnvelope) -> String {
+    /// 码道数据面（snap-access）的候选 host 列表，按凭据里的 region 选择国内/国际站。
+    /// 国内站主域名 `.myhuaweicloud.com` 在部分代理/TUN 环境下 TLS 握手会 reset，
+    /// 因此附上码道官方内置的 `.myhuaweicloud.cn` 备用域名按序回退。
+    pub(crate) fn snap_base_urls(cred: &CredentialEnvelope) -> Vec<String> {
         let region = match &cred.payload {
             CredentialPayload::Token { extra, .. } => extra
                 .get(EXTRA_REGION)
@@ -445,10 +447,22 @@ impl CodeArtsAdapter {
             _ => DEFAULT_REGION,
         };
         if region.starts_with("ap-") {
-            "https://snap-access.ap-southeast-1.myhuaweicloud.com".to_string()
+            vec!["https://snap-access.ap-southeast-1.myhuaweicloud.com".to_string()]
         } else {
-            "https://snap-access.cn-north-4.myhuaweicloud.com".to_string()
+            vec![
+                "https://snap-access.cn-north-4.myhuaweicloud.com".to_string(),
+                "https://snap-access.cn-north-4.myhuaweicloud.cn".to_string(),
+            ]
         }
+    }
+
+    /// 码道数据面（snap-access）的首选 host。
+    #[cfg(test)]
+    pub(crate) fn snap_base_url(cred: &CredentialEnvelope) -> String {
+        Self::snap_base_urls(cred)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| DEFAULT_SNAP_ENGINE.to_string())
     }
 
     /// 为一次具体请求生成完整的签名头（含 `X-Security-Token`、`Content-Type`）。
@@ -1967,6 +1981,14 @@ mod tests {
         assert_eq!(
             CodeArtsAdapter::snap_base_url(&token_cred_with_extra(intl)),
             "https://snap-access.ap-southeast-1.myhuaweicloud.com"
+        );
+        let cn_urls = CodeArtsAdapter::snap_base_urls(&token_cred_with_extra(HashMap::new()));
+        assert_eq!(
+            cn_urls,
+            vec![
+                "https://snap-access.cn-north-4.myhuaweicloud.com".to_string(),
+                "https://snap-access.cn-north-4.myhuaweicloud.cn".to_string(),
+            ]
         );
     }
 

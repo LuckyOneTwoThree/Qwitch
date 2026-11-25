@@ -1512,8 +1512,6 @@ async fn send_codearts_stream(
 ) -> Result<reqwest::Response, String> {
     use crate::adapter::codearts::CodeArtsAdapter;
 
-    let base = CodeArtsAdapter::snap_base_url(cred);
-    let url = format!("{base}/api/v2/chat/completions");
     let mut body = to_upstream_openai_chat_body(ir_req, wire_model, true);
     // 码道把思考单独放在 reasoning_content，不开 thinking 就拿不到
     if body.get("thinking").is_none() {
@@ -1526,20 +1524,31 @@ async fn send_codearts_stream(
         }
     }
     let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("序列化码道请求体失败: {e}"))?;
-    let signed = CodeArtsAdapter::signed_request_headers(cred, "POST", &url, &body_bytes)?;
+    let bases = CodeArtsAdapter::snap_base_urls(cred);
+    let mut last_err = String::new();
 
-    let mut req = client
-        .post(&url)
-        .header("Accept", "text/event-stream")
-        // 每账号一个稳定会话 id，避免同一账号被码道当成 3 个不同会话
-        .header("x-ot-session-id", member.account_id.clone())
-        .body(body_bytes);
-    for (k, v) in signed {
-        req = req.header(k, v);
+    for base in bases {
+        let url = format!("{base}/api/v2/chat/completions");
+        let signed = CodeArtsAdapter::signed_request_headers(cred, "POST", &url, &body_bytes)?;
+
+        let mut req = client
+            .post(&url)
+            .header("Accept", "text/event-stream")
+            // 每账号一个稳定会话 id，避免同一账号被码道当成 3 个不同会话
+            .header("x-ot-session-id", member.account_id.clone())
+            .body(body_bytes.clone());
+        for (k, v) in signed {
+            req = req.header(k, v);
+        }
+        match req.send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                last_err = format!("码道上游请求失败: {}", e.without_url());
+            }
+        }
     }
-    req.send()
-        .await
-        .map_err(|e| format!("码道上游请求失败: {}", e.without_url()))
+
+    Err(last_err)
 }
 
 /// Trae CN 对话上游：IDE agent 私有协议 `POST {host}/api/agent/v3/llm_utils_chat`。

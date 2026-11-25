@@ -106,10 +106,14 @@ fn collect_for_model(
             continue;
         }
         // 「跳过桌面端活跃账号」是为切号流程准备的：切号会重启客户端、和网关抢同一份凭据。
-        // 码道不切号、也不刷新令牌，用同一个 STS 并行请求是安全的，不能因此把它排掉。
+        // 码道（STS 签名）、有道龙虾（OAuth Bearer /api/proxy）、Qoder CN（COSY 签名 API）
+        // 均支持与桌面端并行请求而不互踢，不能因此把它们唯一的可用账号排掉。
         if pool.skip_active_client_account
             && m.is_active_on_client.unwrap_or(false)
-            && m.tool_id != "codearts"
+            && !matches!(
+                m.tool_id.as_str(),
+                "codearts" | "lobsterai" | "qoder_cn"
+            )
         {
             skipped_attempts.push(RoutingAttempt {
                 account_label: m.label.clone(),
@@ -195,9 +199,21 @@ pub fn select_candidates_for_request(
             Some(fb) => format!(
                 "主模型「{requested_model}」与显式降级模型「{fb}」当前均无可用账号"
             ),
-            None => format!(
-                "严格锁模「{requested_model}」：所属账号当前均处于冷却、禁用或未启用 API Key 兜底（网关已拒绝私自换模型）"
-            ),
+            None => {
+                if !skipped_attempts.is_empty()
+                    && skipped_attempts
+                        .iter()
+                        .all(|a| a.outcome == RoutingAttemptOutcome::SkippedActive)
+                {
+                    format!(
+                        "严格锁模「{requested_model}」：可用账号均被「跳过桌面端活跃账号」护栏避让（请在 Agent 调度页关闭该开关或导入第二个账号）"
+                    )
+                } else {
+                    format!(
+                        "严格锁模「{requested_model}」：所属账号当前均处于冷却、禁用或未启用 API Key 兜底（网关已拒绝私自换模型）"
+                    )
+                }
+            }
         })
     } else {
         None
@@ -572,5 +588,65 @@ mod tests {
             1_000,
         );
         assert!(plan.candidates.is_empty(), "桌面端活跃的普通账号仍应被跳过");
+        assert!(
+            plan.diagnostic_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("跳过桌面端活跃账号"),
+            "被活跃护栏跳过时应给出准确诊断：{:?}",
+            plan.diagnostic_reason
+        );
+    }
+
+    #[test]
+    fn active_on_client_does_not_skip_lobsterai_or_qoder_cn() {
+        for (tool_id, model_id) in [
+            ("lobsterai", "lobsterai/deepseek-v4.1-flash"),
+            ("qoder_cn", "qoder_cn/deepseek-v4.1-flash"),
+        ] {
+            let mut member = make_member(
+                "acc-1",
+                tool_id,
+                MemberTier::T1Primary,
+                1,
+                90,
+                &[model_id],
+            );
+            member.is_active_on_client = Some(true);
+            let pool = AccountPool {
+                id: "p-exempt".into(),
+                slug: "p-exempt".into(),
+                name: "Exempt".into(),
+                description: String::new(),
+                scene_tag: "Coding".into(),
+                enabled: true,
+                strategy: PoolStrategy::Order,
+                affinity_mode: AffinityMode::Off,
+                skip_active_client_account: true,
+                cooldown_seconds: 60,
+                auto_refresh_on_401: true,
+                fallback_api_key_enabled: false,
+                model_policies: Vec::new(),
+                members: vec![member],
+                today_requests: 0,
+                today_failovers: 0,
+                cache_hit_rate: 0,
+                created_at: String::new(),
+            };
+            let plan = select_candidates_for_request(
+                &pool,
+                model_id,
+                None,
+                &HashMap::new(),
+                &HashMap::new(),
+                1_000,
+            );
+            assert_eq!(
+                plan.candidates.len(),
+                1,
+                "{tool_id} 唯一的活跃账号不应被跳过：{:?}",
+                plan.diagnostic_reason
+            );
+        }
     }
 }

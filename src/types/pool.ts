@@ -92,6 +92,7 @@ export interface AgentBinding {
   restartHint?: string;
   lastHitAt?: string;
   options: AgentBindingOptions;
+  gatewayToken?: string;
   beforeSnippet: string;
   afterSnippet: string;
 }

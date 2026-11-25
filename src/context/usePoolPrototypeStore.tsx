@@ -518,7 +518,7 @@ function materializeDedicatedPoolForAgent(
         toolId: cand.toolId,
         label: cand.label,
         uidMasked: cand.uidMasked,
-        supportedModels: candidateScopedModels(cand),
+        supportedModels: [],
         tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
         channel: cand.channel,
         enabled: true,
@@ -715,6 +715,8 @@ export function PoolPrototypeProvider({
   const [detectingAgents, setDetectingAgents] = useState(false);
   const [restartingAgentId, setRestartingAgentId] = useState<TargetAgentId | null>(null);
   const appliedSeqRef = useRef(0);
+  const ensureInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshingModelsRef = useRef(false);
 
   const hasActiveCooldown = useMemo(
     () =>
@@ -752,9 +754,12 @@ export function PoolPrototypeProvider({
 
   const refreshWorkspace = useCallback(async () => {
     if (!isTauriRuntime) return;
+    const seq = ++opSeqRef.current;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const ws = await invoke<PoolWorkspaceState>("get_pool_workspace_state");
+      if (seq < appliedSeqRef.current) return;
+      appliedSeqRef.current = seq;
       applyWorkspaceState(ws);
     } catch (err) {
       notify(`加载网关与号池状态失败：${err instanceof Error ? err.message : String(err)}`, "error");
@@ -763,6 +768,8 @@ export function PoolPrototypeProvider({
 
   const refreshUpstreamModels = useCallback(
     async (accountId?: string) => {
+      if (refreshingModelsRef.current) return;
+      refreshingModelsRef.current = true;
       setIsRefreshingModels(true);
       try {
         if (!isTauriRuntime) {
@@ -785,6 +792,7 @@ export function PoolPrototypeProvider({
           "error"
         );
       } finally {
+        refreshingModelsRef.current = false;
         setIsRefreshingModels(false);
       }
     },
@@ -801,21 +809,28 @@ export function PoolPrototypeProvider({
   const ensureUpstreamModels = useCallback(
     async (accountId?: string) => {
       if (!isTauriRuntime) return;
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const result = await invoke<EnsureUpstreamModelsResult>(
-          "ensure_upstream_models_cmd",
-          { accountId: accountId ?? null }
-        );
-        if (result.probedCount > 0) {
-          await refreshWorkspace();
-        }
-      } catch (err) {
-        // 自动探测失败不应打断用户操作：保留静态兜底目录即可。
-        console.warn("[Qwitch] 自动模型探测失败：", err);
+      if (ensureInFlightRef.current) {
+        return ensureInFlightRef.current;
       }
+      const task = (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke<EnsureUpstreamModelsResult>(
+            "ensure_upstream_models_cmd",
+            { accountId: accountId ?? null }
+          );
+          // 探测完成且有更新时，后端会主动 emit `qwitch://pool-workspace-updated` 事件回流。
+        } catch (err) {
+          // 自动探测失败不应打断用户操作：保留静态兜底目录即可。
+          console.warn("[Qwitch] 自动模型探测失败：", err);
+        } finally {
+          ensureInFlightRef.current = null;
+        }
+      })();
+      ensureInFlightRef.current = task;
+      return task;
     },
-    [isTauriRuntime, refreshWorkspace]
+    [isTauriRuntime]
   );
 
   const syncWorkspaceCommand = useCallback(
@@ -878,6 +893,27 @@ export function PoolPrototypeProvider({
     },
     [flushModelWrites]
   );
+
+  const cancelPendingModelWrites = useCallback((agentId?: TargetAgentId) => {
+    if (agentId) {
+      const prefix = `${agentId}:`;
+      for (const key of Array.from(pendingModelWritesRef.current.keys())) {
+        if (key.startsWith(prefix)) {
+          pendingModelWritesRef.current.delete(key);
+        }
+      }
+      if (pendingModelWritesRef.current.size === 0 && modelWriteTimerRef.current !== null) {
+        window.clearTimeout(modelWriteTimerRef.current);
+        modelWriteTimerRef.current = null;
+      }
+      return;
+    }
+    pendingModelWritesRef.current.clear();
+    if (modelWriteTimerRef.current !== null) {
+      window.clearTimeout(modelWriteTimerRef.current);
+      modelWriteTimerRef.current = null;
+    }
+  }, []);
 
   // 卸载前把未下发的勾选写回，避免「点了但没保存」
   useEffect(() => () => flushModelWrites(), [flushModelWrites]);
@@ -1920,6 +1956,7 @@ export function PoolPrototypeProvider({
 
   const unbindAgent = useCallback(
     (agentId: TargetAgentId) => {
+      cancelPendingModelWrites(agentId);
       setRawBindings((prev) =>
         prev.map((b) => {
           if (b.agentId !== agentId) return b;
@@ -1942,7 +1979,7 @@ export function PoolPrototypeProvider({
       );
       void syncWorkspaceCommand("unbind_agent_cmd", { agentId });
     },
-    [notify, rawBindings, syncWorkspaceCommand]
+    [cancelPendingModelWrites, notify, rawBindings, syncWorkspaceCommand]
   );
 
   const clearAgentWiring = useCallback(
@@ -1971,6 +2008,7 @@ export function PoolPrototypeProvider({
   const clearAllAgentWiring = useCallback(
     (mode: "restore" | "force", stopGateway: boolean) => {
       if (!isTauriRuntime) return;
+      cancelPendingModelWrites();
       void (async () => {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
@@ -1993,7 +2031,7 @@ export function PoolPrototypeProvider({
         }
       })();
     },
-    [applyWorkspaceState, isTauriRuntime, notify]
+    [applyWorkspaceState, cancelPendingModelWrites, isTauriRuntime, notify]
   );
 
   const repairAgentDrift = useCallback(
@@ -2856,6 +2894,7 @@ export function PoolPrototypeProvider({
       const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
       notify(`已将 ${toolLabel} · ${bare} 设为默认首选模型`, "success");
 
+      cancelPendingModelWrites(agentId);
       void syncWorkspaceCommand("set_agent_tool_models_cmd", {
         agentId,
         toolId,
@@ -2863,7 +2902,7 @@ export function PoolPrototypeProvider({
         defaultModelKey: nextDefaultKey,
       });
     },
-    [candidates, getAgentToolEnabledModelIds, notify, syncWorkspaceCommand]
+    [cancelPendingModelWrites, candidates, getAgentToolEnabledModelIds, notify, syncWorkspaceCommand]
   );
 
   const commitAgentToolAccountSchedule = useCallback(
@@ -2936,6 +2975,7 @@ export function PoolPrototypeProvider({
         notify(toastMsg, "success");
       }
 
+      cancelPendingModelWrites(agentId);
       void syncWorkspaceCommand("update_agent_tool_schedule_cmd", {
         agentId,
         toolId,
@@ -2946,7 +2986,7 @@ export function PoolPrototypeProvider({
         cooldownSeconds: patch?.cooldownSeconds ?? null,
       });
     },
-    [candidates, notify, syncWorkspaceCommand]
+    [cancelPendingModelWrites, candidates, notify, syncWorkspaceCommand]
   );
 
   const promoteAgentToolPrimaryAccount = useCallback(

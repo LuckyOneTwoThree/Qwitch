@@ -431,12 +431,15 @@ export function AgentBindingsView({
   };
 
   const noProxyCmd = "export NO_PROXY=127.0.0.1,localhost,::1";
+  const resolvedGatewayToken =
+    activeBinding?.gatewayToken ??
+    `qwitch-bind-${(activeBinding?.agentId ?? "custom").replace(/_/g, "-")}`;
   const customEndpointEnv = `export OPENAI_BASE_URL=http://${gateway.host}:${gateway.port}/v1
-export OPENAI_API_KEY=qwitch-bind-${activeBinding?.agentId ?? "custom"}
+export OPENAI_API_KEY=${resolvedGatewayToken}
 # 直接指定订阅工具与模型（严格锁模不跨工具混调）：${effectiveCustomWire}
 # 或 Anthropic Messages 协议:
 export ANTHROPIC_BASE_URL=http://${gateway.host}:${gateway.port}
-export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desktop"}`;
+export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
 
   const activeToolName = TOOL_SHORT_LABELS[activeToolId] ?? activeToolId;
   // 该工具的账号是否全部为「本机只读凭据」：这类账号不参与网关，勾选模型不会生效
@@ -1174,6 +1177,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   >
                     <button
                       type="button"
+                      disabled={scopeNotSelectable}
                       onClick={() =>
                         selectAllAgentToolModels(
                           activeBinding.agentId,
@@ -1190,6 +1194,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     </button>
                     <button
                       type="button"
+                      disabled={scopeNotSelectable}
                       onClick={() =>
                         selectLowRateAgentToolModels(activeBinding.agentId, activeToolId)
                       }
@@ -1200,6 +1205,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     </button>
                     <button
                       type="button"
+                      disabled={scopeNotSelectable}
                       onClick={() =>
                         invertAgentToolModels(
                           activeBinding.agentId,
@@ -1215,7 +1221,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     </button>
                     <button
                       type="button"
-                      disabled={enabledBareModelIds.length === 0}
+                      disabled={scopeNotSelectable || enabledBareModelIds.length === 0}
                       onClick={() =>
                         clearAgentToolModels(activeBinding.agentId, activeToolId)
                       }
@@ -1624,7 +1630,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                             </div>
 
                             <div className="flex shrink-0 items-center gap-1">
-                              {!isPrimary && !isReadonlyCodeArts && (
+                              {!isPrimary && (
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -1699,17 +1705,16 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                             </div>
 
                             <div className="flex shrink-0 items-center gap-1.5">
-                              {isReadonlyCodeArts ? (
+                              {isReadonlyCodeArts && (
                                 <button
                                   type="button"
                                   onClick={() => authorizeCodeArtsIsolated(acc.accountId)}
-                                  className="btn btn-xs btn-primary"
+                                  className="btn btn-xs btn-secondary"
                                 >
                                   签发独立 OAuth
                                 </button>
-                              ) : (
-                                <>
-                                  {activeAgentPool && !acc.id.startsWith("cand-") && (
+                              )}
+                              {activeAgentPool && !acc.id.startsWith("cand-") && (
                                     cooldownRemain > 0 ? (
                                       <button
                                         type="button"
@@ -1751,8 +1756,6 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                   >
                                     {acc.enabled ? "参与调度" : "已停用"}
                                   </button>
-                                </>
-                              )}
                             </div>
                           </div>
                         </div>

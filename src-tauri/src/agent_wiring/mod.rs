@@ -580,6 +580,30 @@ pub fn build_agent_config_snippets(
     }
 }
 
+fn has_port_ref(content: &str, port: u16) -> bool {
+    let needle = format!(":{port}");
+    let bytes = content.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = content[start..].find(&needle) {
+        let end = start + pos + needle.len();
+        let next = bytes.get(end).copied();
+        if matches!(
+            next,
+            None | Some(b'/')
+                | Some(b'"')
+                | Some(b'\'')
+                | Some(b' ')
+                | Some(b'\t')
+                | Some(b'\r')
+                | Some(b'\n')
+        ) {
+            return true;
+        }
+        start += pos + 1;
+    }
+    false
+}
+
 fn check_disk_drift(
     agent_id: TargetAgentId,
     mounted_pool_ids: &[String],
@@ -590,13 +614,12 @@ fn check_disk_drift(
     if mounted_pool_ids.is_empty() {
         return None;
     }
-    let port_needle = format!(":{port}");
     match agent_id {
         TargetAgentId::Dsh => {
             let patch_content = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
             let patch_ok = patch_content.contains("qwitch:")
                 && patch_content.contains("baseURL:")
-                && patch_content.contains(&port_needle);
+                && has_port_ref(&patch_content, port);
             let creds_text = std::fs::read_to_string(&paths.files[2]).unwrap_or_default();
             let creds_ok = creds_text.contains("QWITCH_GATEWAY_KEY")
                 && !creds_text.contains("refs: {}\n  QWITCH_GATEWAY_KEY")
@@ -620,7 +643,7 @@ fn check_disk_drift(
             } else {
                 content.contains("\"providers\"")
             };
-            if !has_key || !content.contains("\"qwitch\"") || !content.contains(&port_needle) {
+            if !has_key || !content.contains("\"qwitch\"") || !has_port_ref(&content, port) {
                 return Some(
                     "检测到 opencode 配置与当前 Schema / 端口不一致，建议重新同步写入".into(),
                 );
@@ -632,7 +655,7 @@ fn check_disk_drift(
                 .map(|c| c.contains("\"3p\""))
                 .unwrap_or(false);
             let lib_ok = std::fs::read_to_string(&paths.files[1])
-                .map(|c| c.contains(&port_needle))
+                .map(|c| has_port_ref(&c, port))
                 .unwrap_or(false);
             let official_3p_cfg_ok = paths.files.get(3).is_none_or(|p| {
                 std::fs::read_to_string(p)
@@ -641,7 +664,7 @@ fn check_disk_drift(
             });
             let official_3p_lib_ok = paths.files.get(4).is_none_or(|p| {
                 std::fs::read_to_string(p)
-                    .map(|c| c.contains(&port_needle))
+                    .map(|c| has_port_ref(&c, port))
                     .unwrap_or(false)
             });
             if !main_ok || !lib_ok || !official_3p_cfg_ok || !official_3p_lib_ok {
@@ -659,7 +682,7 @@ fn check_disk_drift(
                         && c.contains("model_provider = \"qwitch\"")
                         && c.contains("model_catalog_json")
                         && c.contains("requires_openai_auth = true")
-                        && c.contains(&port_needle)
+                        && has_port_ref(&c, port)
                 })
                 .unwrap_or(false);
             let catalog_ok = paths.files[1].is_file();
@@ -672,7 +695,7 @@ fn check_disk_drift(
         }
         TargetAgentId::Mimo => {
             let content = std::fs::read_to_string(&paths.files[0]).unwrap_or_default();
-            if !content.contains("\"qwitch\"") || !content.contains(&port_needle) {
+            if !content.contains("\"qwitch\"") || !has_port_ref(&content, port) {
                 return Some("检测到 MiMo Code 配置未同步 Qwitch provider 或端口".into());
             }
             None
@@ -684,9 +707,9 @@ fn check_disk_drift(
                 .get(1)
                 .map(|p| std::fs::read_to_string(p).unwrap_or_default())
                 .unwrap_or_default();
-            let cfg_ok = cfg.contains("qwitch") && cfg.contains(&port_needle);
-            let rules_ok = rules.contains("qwitch") && rules.contains(&port_needle);
-            if !cfg_ok && !rules_ok {
+            let cfg_ok = cfg.contains("qwitch") && has_port_ref(&cfg, port);
+            let rules_ok = rules.contains("qwitch") && has_port_ref(&rules, port);
+            if !cfg_ok || (!rules.trim().is_empty() && !rules_ok) {
                 return Some("检测到 ZCode 配置未同步 Qwitch provider 或端口".into());
             }
             None
@@ -949,6 +972,7 @@ pub fn build_agent_binding_dto(
         restart_hint,
         last_hit_at: stored.last_hit_at.clone(),
         options,
+        gateway_token: Some(agent_token(stored.agent_id)),
         before_snippet,
         after_snippet,
     }
@@ -1040,23 +1064,59 @@ fn upsert_toml_key_line(content: &str, key: &str, new_line: &str) -> String {
     lines.join("\n") + "\n"
 }
 
+fn is_matching_toml_section_or_subtable(trimmed: &str, section_header: &str) -> bool {
+    if trimmed == section_header {
+        return true;
+    }
+    if let (Some(base), Some(rest)) = (
+        section_header.strip_suffix(']'),
+        trimmed.strip_suffix(']'),
+    ) {
+        return rest
+            .strip_prefix(base)
+            .is_some_and(|suffix| suffix.starts_with('.'));
+    }
+    false
+}
+
 fn strip_toml_section(content: &str, section_header: &str) -> String {
     let mut out = Vec::new();
     let mut skipping = false;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed == section_header {
-            skipping = true;
-            continue;
-        }
-        if skipping && trimmed.starts_with('[') {
-            skipping = false;
+        if trimmed.starts_with('[') {
+            skipping = is_matching_toml_section_or_subtable(trimmed, section_header);
         }
         if !skipping {
             out.push(line);
         }
     }
     out.join("\n")
+}
+
+fn extract_toml_section_block(content: &str, section_header: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut capturing = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if is_matching_toml_section_or_subtable(trimmed, section_header) {
+                capturing = true;
+            } else if capturing {
+                break;
+            }
+        }
+        if capturing {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        Some(out)
+    }
 }
 
 fn strip_jsonc_comments(raw: &str) -> String {
@@ -1181,6 +1241,32 @@ fn parse_jsonc_lenient(raw: &str) -> Result<Value, String> {
     serde_json::from_str::<Value>(&no_trailing).map_err(|e| {
         format!("无法解析 JSONC：{e}（请先修复该文件语法，Qwitch 不会清空你的原有配置）")
     })
+}
+
+fn upsert_env_key(existing: &str, key_name: &str, value: &str) -> String {
+    let key_prefix = format!("{key_name}=");
+    let export_prefix = format!("export {key_name}=");
+    let mut replaced = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&key_prefix) || trimmed.starts_with(&export_prefix) {
+            if !replaced {
+                lines.push(format!("{key_name}={value}"));
+                replaced = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !replaced {
+        lines.push(format!("{key_name}={value}"));
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 fn upsert_dsh_credentials_yaml(existing: &str, key_name: &str, token: &str) -> String {
@@ -1614,6 +1700,9 @@ pub fn apply_agent_wiring(
                         Value::String(format!("qwitch/{default_wire}")),
                     );
                     if is_v1 {
+                        if let Some(pm) = obj.get_mut("providers").and_then(Value::as_object_mut) {
+                            pm.remove("qwitch");
+                        }
                         let mut models_map = serde_json::Map::new();
                         for m in &exposed {
                             models_map.insert(
@@ -1645,6 +1734,9 @@ pub fn apply_agent_wiring(
                             );
                         }
                     } else {
+                        if let Some(pm) = obj.get_mut("provider").and_then(Value::as_object_mut) {
+                            pm.remove("qwitch");
+                        }
                         let mut models_map = serde_json::Map::new();
                         for m in &exposed {
                             models_map.insert(
@@ -1733,13 +1825,8 @@ pub fn apply_agent_wiring(
                     .map_err(|e| e.to_string())?;
 
                 // 双写 .env 与 .credentials.yaml（dsh 桌面版强依赖 .credentials.yaml）
-                let mut env_text = std::fs::read_to_string(&paths.files[1]).unwrap_or_default();
-                if !env_text.contains("QWITCH_GATEWAY_KEY=") {
-                    if !env_text.is_empty() && !env_text.ends_with('\n') {
-                        env_text.push('\n');
-                    }
-                    env_text.push_str(&format!("QWITCH_GATEWAY_KEY={token}\n"));
-                }
+                let existing_env = std::fs::read_to_string(&paths.files[1]).unwrap_or_default();
+                let env_text = upsert_env_key(&existing_env, "QWITCH_GATEWAY_KEY", &token);
                 write_private_file_atomic(&paths.files[1], env_text.as_bytes())
                     .map_err(|e| e.to_string())?;
 
@@ -2005,7 +2092,7 @@ fn remove_qwitch_from_dsh(paths: &AgentPaths) -> Result<(), String> {
                     if !next.is_empty() && !next.ends_with('\n') {
                         next.push('\n');
                     }
-                    let _ = write_private_file_atomic(p, next.as_bytes());
+                    write_private_file_atomic(p, next.as_bytes()).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -2037,7 +2124,7 @@ fn remove_qwitch_from_dsh(paths: &AgentPaths) -> Result<(), String> {
                 if !next.is_empty() && !next.ends_with('\n') {
                     next.push('\n');
                 }
-                let _ = write_private_file_atomic(p, next.as_bytes());
+                write_private_file_atomic(p, next.as_bytes()).map_err(|e| e.to_string())?;
             }
         }
     }
@@ -2060,7 +2147,7 @@ fn remove_qwitch_from_codex(paths: &AgentPaths) -> Result<(), String> {
             if !next.is_empty() && !next.ends_with('\n') {
                 next.push('\n');
             }
-            let _ = write_private_file_atomic(p, next.as_bytes());
+            write_private_file_atomic(p, next.as_bytes()).map_err(|e| e.to_string())?;
         }
     }
     if let Some(catalog) = paths.files.get(1) {
@@ -2208,15 +2295,18 @@ pub fn unbind_and_restore_agent(
                     }
                 }
                 if !restored.contains("[model_providers.qwitch]") {
-                    if let Some(idx) = curr.find("[model_providers.qwitch]") {
-                        if !restored.ends_with('\n') {
+                    if let Some(block) =
+                        extract_toml_section_block(&curr, "[model_providers.qwitch]")
+                    {
+                        if !restored.is_empty() && !restored.ends_with('\n') {
                             restored.push('\n');
                         }
                         restored.push('\n');
-                        restored.push_str(&curr[idx..]);
+                        restored.push_str(&block);
                     }
                 }
-                let _ = write_private_file_atomic(&p, restored.as_bytes());
+                write_private_file_atomic(&p, restored.as_bytes())
+                    .map_err(|e| e.to_string())?;
                 continue;
             }
         }

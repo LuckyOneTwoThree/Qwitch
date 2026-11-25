@@ -1153,7 +1153,7 @@ pub fn toggle_agent_option_cmd(
     match key.as_str() {
         "claudeIsolatedTwin" => {
             stored.options.claude_isolated_twin =
-                Some(!stored.options.claude_isolated_twin.unwrap_or(true));
+                Some(!stored.options.claude_isolated_twin.unwrap_or(false));
         }
         "codexPreserveTable" => {
             stored.options.codex_preserve_table =

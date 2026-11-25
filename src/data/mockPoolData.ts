@@ -771,7 +771,6 @@ export function computePoolServingAccounts(
       m.enabled &&
       m.accountStatus !== "risk_paused" &&
       m.accountStatus !== "expired" &&
-      m.codeArtsMode !== "client_readonly" &&
       !cooled &&
       !skipped
     ) {

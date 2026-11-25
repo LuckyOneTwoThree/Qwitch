@@ -45,7 +45,7 @@ export function RoutingTraceView({
     const directSuccessCount = traces.filter((t) => t.status === "success").length;
     const cacheHits = traces.filter((t) => t.cacheAffinityHit).length;
     const healthyUpstreams = candidates.filter(
-      (c) => c.accountStatus === "active" && c.codeArtsMode !== "client_readonly"
+      (c) => c.accountStatus === "active"
     ).length;
 
     return {
@@ -350,7 +350,7 @@ export function RoutingTraceView({
                       </span>
                     ) : trace.status === "failed" ? (
                       <span className="badge whitespace-nowrap border-rose-500/30 bg-rose-500/12 text-rose-700 dark:text-rose-300">
-                        无可用成员
+                        {trace.attempts.length > 0 ? "请求失败" : "无可用成员"}
                       </span>
                     ) : (
                       <span className="badge whitespace-nowrap border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">

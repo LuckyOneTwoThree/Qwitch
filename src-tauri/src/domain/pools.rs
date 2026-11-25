@@ -269,6 +269,8 @@ pub struct AgentBinding {
     pub restart_hint: Option<String>,
     pub last_hit_at: Option<String>,
     pub options: AgentBindingOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_token: Option<String>,
     pub before_snippet: String,
     pub after_snippet: String,
 }

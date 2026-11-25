@@ -851,7 +851,7 @@ pub fn normalize_upstream_model(
     let canonical = map_raw_to_canonical_id(tool_id, &wire, raw_display_name);
     if let Some(cid) = canonical {
         if let Some(spec) = CANONICAL_MODEL_SPECS.iter().find(|s| s.canonical_id == cid) {
-            return enrich_meta(UpstreamModelOption {
+            return enrich_model_meta(UpstreamModelOption {
                 id: spec.canonical_id.to_string(),
                 display_name: spec.display_name.to_string(),
                 vendor_wire_id: wire,
@@ -871,7 +871,7 @@ pub fn normalize_upstream_model(
         .filter(|s| !s.is_empty() && *s != "-")
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| wire.clone());
-    enrich_meta(UpstreamModelOption {
+    enrich_model_meta(UpstreamModelOption {
         id: normalized_id.clone(),
         display_name,
         vendor_wire_id: wire,
@@ -887,7 +887,7 @@ pub fn normalize_upstream_model(
 /// 用内嵌的 models.dev 快照补齐上下文窗口 / 最大输出。
 ///
 /// 只在 id 命中时补：未命中保持 None，UI 不显示，避免把猜的数字当成上游事实。
-fn enrich_meta(mut model: UpstreamModelOption) -> UpstreamModelOption {
+pub fn enrich_model_meta(mut model: UpstreamModelOption) -> UpstreamModelOption {
     if let Some(meta) = crate::domain::model_meta::lookup(&model.id) {
         if meta.context > 0 {
             model.context_window = Some(meta.context);

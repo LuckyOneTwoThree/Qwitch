@@ -444,7 +444,13 @@ impl QwitchDatabase {
                 MemberTier::T1Primary
             };
             let model_options = if let Some(cached) = cached_map.get(&acc.id) {
-                cached.clone()
+                // 老缓存里没有 contextWindow/maxOutputTokens：读时补一次，
+                // 不必等 12h TTL 过期或手动刷新才能看到规格
+                cached
+                    .iter()
+                    .cloned()
+                    .map(crate::domain::enrich_model_meta)
+                    .collect()
             } else if let Some(shared) = tool_cache.get(&acc.tool_id) {
                 shared.clone()
             } else {

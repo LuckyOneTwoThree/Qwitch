@@ -8,6 +8,12 @@ import React, {
   useState,
 } from "react";
 import type { ToastTone } from "../types/qwitch";
+import {
+  EMPTY_GUARD,
+  consumeSelfEvent,
+  markSelfEvent,
+  type SelfEventGuard,
+} from "./eventRefreshGuard";
 import type {
   AccountPool,
   AgentBinding,
@@ -113,6 +119,8 @@ export interface PoolPrototypeContextValue {
   injectMemberCooldown: (poolId: string, memberId: string) => void;
   clearMemberCooldown: (poolId: string, memberId: string) => void;
   authorizeCodeArtsIsolated: (accountId: string) => void;
+  /** 人工维护某账号的模型目录（无实时探测能力的工具使用；传空数组即清空） */
+  setAccountManualModels: (accountId: string, modelIds: string[]) => void;
   updateAgentMountedPools: (
     agentId: TargetAgentId,
     mountedPoolIds: string[],
@@ -304,6 +312,7 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   injectMemberCooldown: () => {},
   clearMemberCooldown: () => {},
   authorizeCodeArtsIsolated: () => {},
+  setAccountManualModels: () => {},
   updateAgentMountedPools: () => {},
   setAgentDefaultModel: () => {},
   mountPoolToAgents: () => {},
@@ -342,6 +351,17 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
 };
 
 const PoolPrototypeContext = createContext<PoolPrototypeContextValue | null>(null);
+
+/** 勾选模型的合并窗口：窗口内同一 (agent, tool) 只下发一次写命令 */
+const MODEL_WRITE_DEBOUNCE_MS = 250;
+
+type PendingModelWrite = {
+  agentId: TargetAgentId;
+  toolId: string;
+  modelIds: string[];
+  defaultModelKey: string | null;
+  message: string;
+};
 
 function slugifyPoolName(name: string): string {
   const ascii = name
@@ -674,6 +694,11 @@ export function PoolPrototypeProvider({
   rawBindingsRef.current = rawBindings;
   // 命令响应乱序保护：仅应用「不小于已应用序号」的快照，避免旧响应覆盖新状态。
   const opSeqRef = useRef(0);
+  // 模型勾选的合并写入队列（key = agentId:toolId）
+  const pendingModelWritesRef = useRef<Map<string, PendingModelWrite>>(new Map());
+  const modelWriteTimerRef = useRef<number | null>(null);
+  // 抑制「本次命令自己触发的重复刷新」，只吞自己那一次事件（见 eventRefreshGuard）
+  const selfEventGuardRef = useRef<SelfEventGuard>(EMPTY_GUARD);
   const gatewayBusyRef = useRef(false);
   const [gatewayBusy, setGatewayBusy] = useState(false);
   const [detectingAgents, setDetectingAgents] = useState(false);
@@ -791,6 +816,9 @@ export function PoolPrototypeProvider({
         const ws = await invoke<PoolWorkspaceState>(command, args);
         if (seq >= appliedSeqRef.current) {
           appliedSeqRef.current = seq;
+          // 命令已返回最新快照：随后由本次 emit 触发的事件刷新是纯重复劳动
+          // （再构建一遍 200KB 全量快照）。登记一次「待跳过」，只吞掉自己那一次。
+          selfEventGuardRef.current = markSelfEvent(selfEventGuardRef.current, Date.now());
           applyWorkspaceState(ws);
         }
       } catch (err) {
@@ -800,6 +828,48 @@ export function PoolPrototypeProvider({
     },
     [applyWorkspaceState, isTauriRuntime, notify, refreshWorkspace]
   );
+
+  /**
+   * 合并同一 (agent, tool) 的高频模型勾选。
+   *
+   * 单次写库 + 写 Agent 配置 + 回读快照约 200ms；连点 5 个模型会串成秒级。
+   * 这里以 250ms 为窗口只下发最终列表一次，乐观更新已在前端即时生效。
+   */
+  const flushModelWrites = useCallback(() => {
+    if (modelWriteTimerRef.current !== null) {
+      window.clearTimeout(modelWriteTimerRef.current);
+      modelWriteTimerRef.current = null;
+    }
+    if (pendingModelWritesRef.current.size === 0) return;
+    const pending = Array.from(pendingModelWritesRef.current.values());
+    pendingModelWritesRef.current.clear();
+    for (const write of pending) {
+      notify(write.message, "success");
+      void syncWorkspaceCommand("set_agent_tool_models_cmd", {
+        agentId: write.agentId,
+        toolId: write.toolId,
+        modelIds: write.modelIds,
+        defaultModelKey: write.defaultModelKey,
+      });
+    }
+  }, [notify, syncWorkspaceCommand]);
+
+  const queueModelWrite = useCallback(
+    (write: PendingModelWrite) => {
+      pendingModelWritesRef.current.set(`${write.agentId}:${write.toolId}`, write);
+      if (modelWriteTimerRef.current !== null) {
+        window.clearTimeout(modelWriteTimerRef.current);
+      }
+      modelWriteTimerRef.current = window.setTimeout(() => {
+        modelWriteTimerRef.current = null;
+        flushModelWrites();
+      }, MODEL_WRITE_DEBOUNCE_MS);
+    },
+    [flushModelWrites]
+  );
+
+  // 卸载前把未下发的勾选写回，避免「点了但没保存」
+  useEffect(() => () => flushModelWrites(), [flushModelWrites]);
 
   useEffect(() => {
     if (!isTauriRuntime) return;
@@ -811,7 +881,13 @@ export function PoolPrototypeProvider({
       if (debounceTimer !== null) window.clearTimeout(debounceTimer);
       debounceTimer = window.setTimeout(() => {
         debounceTimer = null;
-        if (!disposed) void refreshWorkspace();
+        if (disposed) return;
+        // 只跳过「自己命令刚回填快照」对应的那一次事件，且不超过窗口上限；
+        // 其它来源（托盘切换网关、账号导入等）的变更必须照常刷新。
+        const decision = consumeSelfEvent(selfEventGuardRef.current, Date.now());
+        selfEventGuardRef.current = decision.next;
+        if (decision.skip) return;
+        void refreshWorkspace();
       }, 80);
     };
 
@@ -1596,6 +1672,47 @@ export function PoolPrototypeProvider({
     [notify, syncWorkspaceCommand]
   );
 
+  /**
+   * 人工维护某账号的模型目录（仅用于没有实时探测能力的工具）。
+   *
+   * 乐观更新候选账号的 modelOptions，随后以后端返回的 workspace 为准。
+   */
+  const setAccountManualModels = useCallback(
+    (accountId: string, modelIds: string[]) => {
+      const trimmed = modelIds.map((m) => m.trim()).filter(Boolean);
+      const toolId = candidates.find((c) => c.accountId === accountId)?.toolId ?? "";
+      setCandidates((prev) =>
+        prev.map((c) =>
+          c.accountId === accountId
+            ? {
+                ...c,
+                modelOptions: trimmed.map((id) => ({
+                  id,
+                  displayName: id,
+                  vendorWireId: id,
+                  family: "Other",
+                  source: "manual",
+                  isFree: false,
+                })),
+                defaultModels: trimmed,
+              }
+            : c
+        )
+      );
+      notify(
+        trimmed.length === 0
+          ? "已清空该账号的人工模型目录"
+          : `已保存 ${trimmed.length} 个手工模型（${toolId || "账号"}）`,
+        "success"
+      );
+      void syncWorkspaceCommand("set_account_manual_models_cmd", {
+        accountId,
+        models: trimmed,
+      });
+    },
+    [candidates, notify, syncWorkspaceCommand]
+  );
+
   const applyMountedPoolsLocally = useCallback(
     (
       agentId: TargetAgentId,
@@ -1995,13 +2112,22 @@ export function PoolPrototypeProvider({
     void (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const ws = await invoke<PoolWorkspaceState>("get_pool_workspace_state");
-        setRawBindings((prev) =>
-          prev.map((b) => {
-            const found = ws.agentBindings.find((x) => x.agentId === b.agentId);
-            return found ? { ...b, running: found.running } : b;
-          })
+        // 只取 6 个 bool：此前每 6 秒拉一次 200KB 全量快照（含进程探测与磁盘读），
+        // 是停留在此页时的周期性卡顿来源。
+        const states = await invoke<Array<{ agentId: TargetAgentId; running: boolean }>>(
+          "detect_agent_running_cmd"
         );
+        setRawBindings((prev) => {
+          let changed = false;
+          const next = prev.map((b) => {
+            const found = states.find((s) => s.agentId === b.agentId);
+            if (!found || found.running === b.running) return b;
+            changed = true;
+            return { ...b, running: found.running };
+          });
+          // 状态没变化时必须返回原引用，否则整页会跟着重渲染
+          return changed ? next : prev;
+        });
       } catch {
         /* ignore */
       }
@@ -2545,21 +2671,18 @@ export function PoolPrototypeProvider({
       setRawBindings(updatedBindings);
 
       const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
-      notify(
-        scopedList.length === 0
-          ? `已清空 ${toolLabel} 的开放模型`
-          : `已更新 ${toolLabel} 对该 Agent 开放 ${scopedList.length} 个模型`,
-        "success"
-      );
-
-      void syncWorkspaceCommand("set_agent_tool_models_cmd", {
+      queueModelWrite({
         agentId,
         toolId,
         modelIds: uniqueBare,
         defaultModelKey: computedDefaultKey,
+        message:
+          scopedList.length === 0
+            ? `已清空 ${toolLabel} 的开放模型`
+            : `已更新 ${toolLabel} 对该 Agent 开放 ${scopedList.length} 个模型`,
       });
     },
-    [candidates, notify, syncWorkspaceCommand]
+    [candidates, queueModelWrite]
   );
 
   const selectAllAgentToolModels = useCallback(
@@ -2973,6 +3096,7 @@ export function PoolPrototypeProvider({
       injectMemberCooldown,
       clearMemberCooldown,
       authorizeCodeArtsIsolated,
+      setAccountManualModels,
       updateAgentMountedPools,
       setAgentDefaultModel,
       mountPoolToAgents,
@@ -3040,6 +3164,7 @@ export function PoolPrototypeProvider({
       injectMemberCooldown,
       clearMemberCooldown,
       authorizeCodeArtsIsolated,
+      setAccountManualModels,
       updateAgentMountedPools,
       setAgentDefaultModel,
       mountPoolToAgents,

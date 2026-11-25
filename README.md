@@ -78,7 +78,7 @@ Qwitch 目前内置 7 个账号适配器，另支持一个通用 API Key 作为�
 
 说明：
 
-- 码道 CodeArts 目前只做额度监控，不支持切换桌面登录。
+- 码道 CodeArts 目前只做额度监控，不支持切换桌面登录；它没有可用的模型目录接口，模型列表需要在「Agent 接入 → 模型配置 → 手工维护」里按账号填写，不提供猜测值。
 - Trae 和 Qoder 的国际版没有每日签到，暂未内置适配器。
 - 码道 CodeArts 的 refreshToken 是一次性轮换的。Qwitch 默认只读，避免和官方 IDE 互相踢下线；要让它参与网关调度，需要在号池里单独完成一次 OAuth 授权。
 
@@ -320,8 +320,8 @@ npm run dev          # 浏览器 Mock 预览
 npm run tauri dev    # 桌面应用开发模式
 npm run build        # 类型检查 + 生产构建
 npm run lint         # ESLint，--max-warnings=0
-npm test             # 前端测试，23 个文件 / 132 个用例
-cd src-tauri && cargo test   # 后端测试，206 个用例
+npm test             # 前端测试，29 个文件 / 178 个用例
+cd src-tauri && cargo test   # 后端测试，236 个用例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
@@ -362,7 +362,7 @@ Qwitch/
 └─ .github/workflows/        # CI 双平台门禁 + Release 流水线
 ```
 
-后端注册了 73 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停、Agent 环境探测与热切/修复/重启、日志读取和更新检查所需的最小命令集。
+后端注册了 76 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停、Agent 环境探测与热切/修复/重启、日志读取和更新检查所需的最小命令集。
 
 发布前手工检查：空数据目录首装；备份恢复到冲突钥匙串环境；慢启动客户端切号；托盘和 Dock 行为；本地网关端到端路由与目标 Agent 重启生效。
 

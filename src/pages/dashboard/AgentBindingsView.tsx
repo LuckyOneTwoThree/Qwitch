@@ -13,6 +13,7 @@ import {
   FileCode2,
   Flame,
   Layers,
+  PencilLine,
   RefreshCw,
   RotateCcw,
   Search,
@@ -44,6 +45,7 @@ import { ToolBrandIcon } from "../../components/ToolBrandIcon";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
 import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
+import { ManualModelModal } from "../../components/pool/ManualModelModal";
 
 type ModelLike = { id: string; isFree?: boolean; creditMultiplier?: number };
 
@@ -166,6 +168,7 @@ export function AgentBindingsView({
     injectMemberCooldown,
     clearMemberCooldown,
     authorizeCodeArtsIsolated,
+    setAccountManualModels,
     getAgentToolModelOptions,
     getAgentToolEnabledModelIds,
     getAgentToolAccounts,
@@ -211,6 +214,7 @@ export function AgentBindingsView({
     agentId?: TargetAgentId;
   } | null>(null);
   const [portModalOpen, setPortModalOpen] = useState(false);
+  const [manualModelModalOpen, setManualModelModalOpen] = useState(false);
 
   useEffect(() => {
     if (highlightAgentId) {
@@ -425,7 +429,19 @@ export ANTHROPIC_BASE_URL=http://${gateway.host}:${gateway.port}
 export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desktop"}`;
 
   const activeToolName = TOOL_SHORT_LABELS[activeToolId] ?? activeToolId;
-  const hasLiveDiscovered = toolModelOptions.some((o) => o.source === "live");
+  // 模型目录的可信度必须如实展示：实时探测 / 手工维护 / 未探测（静态兜底）
+  const modelSourceBadge = (() => {
+    const sources = new Set(toolModelOptions.map((o) => o.source));
+    if (toolModelOptions.length === 0) return { label: "未探测", tone: "warn" as const };
+    if (sources.has("live")) {
+      return {
+        label: sources.size === 1 ? "实时接口探测" : "部分实时",
+        tone: "ok" as const,
+      };
+    }
+    if (sources.has("manual")) return { label: "手工维护", tone: "info" as const };
+    return { label: "未探测（静态兜底）", tone: "warn" as const };
+  })();
   const currentStrategy: PoolStrategy = activeAgentPool?.strategy ?? "order";
   const currentSkipActive = activeAgentPool?.skipActiveClientAccount ?? true;
   const currentCooldownSec = activeAgentPool?.cooldownSeconds ?? 60;
@@ -984,12 +1000,19 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         </h3>
                         <span
                           className={`badge ${
-                            hasLiveDiscovered
+                            modelSourceBadge.tone === "ok"
                               ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                              : "badge-neutral"
+                              : modelSourceBadge.tone === "info"
+                                ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                                : "border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-300"
                           }`}
+                          title={
+                            modelSourceBadge.tone === "warn"
+                              ? "该工具没有可用的探测接口，当前列表来自静态兜底表，可能与真实可用模型不一致；请点「手工维护」填写"
+                              : undefined
+                          }
                         >
-                          {hasLiveDiscovered ? "实时接口探测" : "真实协议目录"}
+                          {modelSourceBadge.label}
                         </span>
                       </div>
                       <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
@@ -1002,18 +1025,29 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       </p>
                     </div>
 
-                    <button
-                      type="button"
-                      disabled={isRefreshingModels}
-                      onClick={() => void refreshUpstreamModels()}
-                      className="btn btn-xs btn-secondary gap-1"
-                    >
-                      <RefreshCw
-                        className={`h-3 w-3 ${isRefreshingModels ? "animate-spin" : ""}`}
-                        aria-hidden="true"
-                      />
-                      刷新真实模型
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setManualModelModalOpen(true)}
+                        className="btn btn-xs btn-secondary gap-1"
+                        title="该工具没有可靠的自动探测时，按账号手工填写真实模型 ID"
+                      >
+                        <PencilLine className="h-3 w-3" aria-hidden="true" />
+                        手工维护
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isRefreshingModels}
+                        onClick={() => void refreshUpstreamModels()}
+                        className="btn btn-xs btn-secondary gap-1"
+                      >
+                        <RefreshCw
+                          className={`h-3 w-3 ${isRefreshingModels ? "animate-spin" : ""}`}
+                          aria-hidden="true"
+                        />
+                        刷新真实模型
+                      </button>
+                    </div>
                   </div>
 
                   {/* 搜索与快速筛选栏 */}
@@ -1131,9 +1165,28 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   {/* 双列宽松模型复选列表 */}
                   <div className="grid grid-cols-1 gap-1.5 @2xl:grid-cols-2">
                     {filteredToolModels.length === 0 ? (
-                      <div className="col-span-full rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
-                        当前筛选条件下无匹配模型
-                      </div>
+                      toolModelOptions.length === 0 ? (
+                        <div className="col-span-full flex flex-col items-center gap-2 rounded-xl border border-dashed border-zinc-200 py-8 text-center dark:border-zinc-800">
+                          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                            {activeToolName} 暂无模型目录：该工具没有可用的自动探测接口
+                          </span>
+                          <span className="text-[11px] text-zinc-400">
+                            请按客户端里真实可选的模型手工填写，避免展示猜测值
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setManualModelModalOpen(true)}
+                            className="btn btn-xs btn-secondary gap-1"
+                          >
+                            <PencilLine className="h-3 w-3" aria-hidden="true" />
+                            手工维护模型目录
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="col-span-full rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
+                          当前筛选条件下无匹配模型
+                        </div>
+                      )
                     ) : (
                       filteredToolModels.map((opt) => {
                         const checked = enabledModelSet.has(opt.id);
@@ -1189,6 +1242,18 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                   <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                                     {opt.family}
                                   </span>
+                                  {opt.source === "manual" ? (
+                                    <span className="rounded bg-sky-500/12 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+                                      手工
+                                    </span>
+                                  ) : opt.source !== "live" ? (
+                                    <span
+                                      className="rounded bg-amber-500/12 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-300"
+                                      title="该条目来自静态兜底表，未经过上游探测"
+                                    >
+                                      未探测
+                                    </span>
+                                  ) : null}
                                   {opt.isFree ? (
                                     <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
                                       免费
@@ -1789,6 +1854,14 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
       />
 
       <GatewayPortModal open={portModalOpen} onClose={() => setPortModalOpen(false)} />
+
+      <ManualModelModal
+        open={manualModelModalOpen}
+        onClose={() => setManualModelModalOpen(false)}
+        toolName={activeToolName}
+        candidates={candidates.filter((c) => c.toolId === activeToolId)}
+        onSave={(accountId, modelIds) => setAccountManualModels(accountId, modelIds)}
+      />
     </div>
   );
 }

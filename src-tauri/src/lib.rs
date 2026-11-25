@@ -653,6 +653,8 @@ pub fn run() {
             commands::delete_action_logs,
             commands::export_action_logs,
             commands::get_pool_workspace_state,
+            commands::detect_agent_running_cmd,
+            commands::set_account_manual_models_cmd,
             commands::refresh_upstream_models_cmd,
             commands::ensure_upstream_models_cmd,
             commands::toggle_gateway_server,

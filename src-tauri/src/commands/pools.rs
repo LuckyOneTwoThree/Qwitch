@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::agent_wiring::{
-    apply_agent_wiring, clear_agent_wiring, inspect_all_agent_bindings, restart_agent_process,
-    unbind_and_restore_agent,
+    apply_agent_wiring, clear_agent_wiring, collect_agent_running_states,
+    inspect_all_agent_bindings, restart_agent_process, unbind_and_restore_agent,
 };
 use crate::commands::{load_app_settings, AppState, SETTINGS_KEY};
 use crate::domain::{
@@ -24,6 +24,14 @@ pub struct ClearAllAgentsResult {
     pub workspace: PoolWorkspaceState,
     pub cleared: Vec<String>,
     pub failed: Vec<String>,
+}
+
+/// 单个 Agent 的运行状态（轻量轮询专用）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunningState {
+    pub agent_id: TargetAgentId,
+    pub running: bool,
 }
 
 #[derive(Serialize)]
@@ -83,11 +91,13 @@ fn build_workspace_state(
 ) -> Result<PoolWorkspaceState, String> {
     let gw_state = gateway.runtime_state();
     let cooldowns = gateway.cooldown_snapshot();
-    let pools = db
-        .list_pools(master_key, &cooldowns)
-        .map_err(|e| e.to_string())?;
+    // 候选账号只构建一次：`list_pools` 内部同样需要它，历史实现会重复构建两遍
+    // （每遍都要逐账号解密凭据），是工作区快照的主要成本之一。
     let candidates = db
         .list_upstream_candidates(master_key)
+        .map_err(|e| e.to_string())?;
+    let pools = db
+        .list_pools_with_candidates(&candidates, &cooldowns)
         .map_err(|e| e.to_string())?;
     let agent_bindings = inspect_all_agent_bindings(
         db,
@@ -113,7 +123,46 @@ fn emit_workspace_updated(app: &AppHandle) {
 }
 
 #[tauri::command]
-pub fn get_pool_workspace_state(state: State<'_, AppState>) -> Result<PoolWorkspaceState, String> {
+pub async fn get_pool_workspace_state(
+    state: State<'_, AppState>,
+) -> Result<PoolWorkspaceState, String> {
+    // async：Tauri 的同步命令在主线程执行，全量快照（含进程探测与磁盘读）
+    // 会直接冻结窗口；改为 async 后落到运行时的线程池。
+    build_workspace_state(&state.db, &state.master_key, &state.gateway)
+}
+
+/// 轻量运行状态轮询：只回 6 个 Agent 的 `运行/未运行`。
+///
+/// 前端每 6 秒刷新按钮状态时曾调用 `get_pool_workspace_state`，
+/// 每次都要构建 200KB 全量快照；此命令只做一次进程快照。
+#[tauri::command]
+pub fn detect_agent_running_cmd() -> Vec<AgentRunningState> {
+    collect_agent_running_states()
+        .into_iter()
+        .map(|(agent_id, running)| AgentRunningState { agent_id, running })
+        .collect()
+}
+
+/// 人工维护某账号的模型目录。
+///
+/// 用于没有可靠实时探测接口的工具（码道 CodeArts / 有道龙虾 / 豆包工作）：
+/// 与其展示静态猜测表，不如让用户按账号填入真实模型 ID。传空数组即清空。
+#[tauri::command]
+pub fn set_account_manual_models_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+    models: Vec<String>,
+) -> Result<PoolWorkspaceState, String> {
+    let summary = state
+        .db
+        .get_account_summary(&account_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .save_manual_account_models(&account_id, &summary.tool_id, &models)
+        .map_err(|e| e.to_string())?;
+    emit_workspace_updated(&app);
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }
 
@@ -1149,7 +1198,7 @@ pub fn run_pool_simulation_cmd(
 }
 
 #[tauri::command]
-pub fn set_agent_tool_models_cmd(
+pub async fn set_agent_tool_models_cmd(
     app: AppHandle,
     state: State<'_, AppState>,
     agent_id: TargetAgentId,
@@ -1190,7 +1239,7 @@ pub fn set_agent_tool_models_cmd(
 
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn update_agent_tool_schedule_cmd(
+pub async fn update_agent_tool_schedule_cmd(
     app: AppHandle,
     state: State<'_, AppState>,
     agent_id: TargetAgentId,

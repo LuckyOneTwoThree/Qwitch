@@ -47,6 +47,8 @@
     "allow-delete-action-logs",
     "allow-export-action-logs",
     "allow-get-pool-workspace-state",
+    "allow-detect-agent-running-cmd",
+    "allow-set-account-manual-models-cmd",
     "allow-refresh-upstream-models-cmd",
     "allow-toggle-gateway-server",
     "allow-update-gateway-port-cmd",

@@ -1058,12 +1058,12 @@ pub fn default_model_options_for_tool(tool_id: &str) -> Vec<UpstreamModelOption>
             catalog_opt(tool_id, "MiniMax-M2.7", Some(0.0), false),
             catalog_opt(tool_id, "MiniMax-M2.7-highspeed", Some(0.0), false),
         ],
-        "codearts" => vec![
-            catalog_opt(tool_id, "deepseek-v4-pro", None, false),
-            catalog_opt(tool_id, "glm-5.3", None, false),
-            catalog_opt(tool_id, "glm-5.2", None, false),
-            catalog_opt(tool_id, "openPangu-Coder-Pro", None, false),
-        ],
+        // 码道没有可靠的模型目录接口（本地内核 `/cag/model` 需要 IDE 私有令牌，
+        // 云端 inferhub 路径未公开），历史上这里写死了 4 个猜测模型，实测与该账号
+        // 真实可用模型（deepseek-v4.1-flash / glm-5.3-flash / kimi-k3.1-pro / kimi-k3）
+        // 几乎零交集，等于凭空展示不存在的模型。这里不再编造，改为空目录：
+        // 用户可在「Agent 接入 → 模型选择」里手工维护该账号的真实模型。
+        "codearts" => vec![],
         "doubaowork" => vec![
             catalog_opt(tool_id, "Doubao-Seed-2.1-Pro", None, false),
             catalog_opt(tool_id, "Doubao-Seed-Code", None, false),

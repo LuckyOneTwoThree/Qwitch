@@ -291,12 +291,62 @@ impl QwitchDatabase {
         Ok(())
     }
 
-    /// 读取账号的实时模型缓存。
+    /// 写入「人工维护」的模型目录。
     ///
-    /// 两道过滤：
-    /// 1. `source == "live"` —— 排除历史上误写入的静态兜底条目；
-    /// 2. TTL —— 超过 `MODEL_CACHE_TTL_HOURS` 的缓存视为过期并丢弃，
-    ///    避免一次失败探测把旧模型目录永久锁死。
+    /// 码道 / 有道龙虾 / 豆包工作目前没有可靠的实时模型目录接口，静态兜底表只能算猜测。
+    /// 与其继续展示猜测值，不如允许用户按账号填入真实模型 ID：
+    /// - 落库为 `source == "manual"`，不受 12 小时 TTL 约束；
+    /// - 一旦该账号实时探测成功，`live` 结果会覆盖它（实时优先）。
+    pub fn save_manual_account_models(
+        &self,
+        account_id: &str,
+        tool_id: &str,
+        model_ids: &[String],
+    ) -> Result<usize, StorageError> {
+        let mut seen = HashSet::new();
+        let models: Vec<UpstreamModelOption> = model_ids
+            .iter()
+            .map(|raw| raw.trim())
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| {
+                crate::domain::normalize_upstream_model(tool_id, raw, None, None, false, "manual")
+            })
+            .filter(|m| seen.insert(m.id.clone()))
+            .collect();
+        if models.is_empty() {
+            self.clear_account_models(account_id)?;
+            return Ok(0);
+        }
+        let now = Utc::now().to_rfc3339();
+        let json = serde_json::to_string(&models)?;
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        conn.execute(
+            "INSERT INTO account_discovered_models (account_id, tool_id, models_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id) DO UPDATE SET
+                tool_id = excluded.tool_id,
+                models_json = excluded.models_json,
+                updated_at = excluded.updated_at",
+            params![account_id, tool_id, json, now],
+        )?;
+        Ok(models.len())
+    }
+
+    /// 清空某账号的模型缓存（实时或人工），回到工具级兜底目录。
+    pub fn clear_account_models(&self, account_id: &str) -> Result<(), StorageError> {
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        conn.execute(
+            "DELETE FROM account_discovered_models WHERE account_id = ?1",
+            params![account_id],
+        )?;
+        Ok(())
+    }
+
+    /// 读取账号的模型缓存（实时 + 人工）。
+    ///
+    /// - `source == "live"`：受 `MODEL_CACHE_TTL_HOURS` 约束，过期即丢弃，
+    ///   避免一次失败探测把旧目录永久锁死；
+    /// - `source == "manual"`：人工维护，不设 TTL，由用户显式覆盖或清空。
     pub fn load_cached_models_map(
         &self,
     ) -> Result<HashMap<String, Vec<UpstreamModelOption>>, StorageError> {
@@ -314,13 +364,22 @@ impl QwitchDatabase {
             .collect::<Result<Vec<_>, _>>()?;
         let mut map = HashMap::new();
         for (aid, raw_json, updated_at) in rows {
+            let Ok(list) = serde_json::from_str::<Vec<UpstreamModelOption>>(&raw_json) else {
+                continue;
+            };
+            if list.is_empty() {
+                continue;
+            }
+            let all_manual = list.iter().all(|m| m.source == "manual");
+            if all_manual {
+                map.insert(aid, list);
+                continue;
+            }
             if !is_model_cache_fresh(&updated_at) {
                 continue;
             }
-            if let Ok(list) = serde_json::from_str::<Vec<UpstreamModelOption>>(&raw_json) {
-                if !list.is_empty() && list.iter().all(|m| m.source == "live") {
-                    map.insert(aid, list);
-                }
+            if list.iter().all(|m| m.source == "live") {
+                map.insert(aid, list);
             }
         }
         Ok(map)
@@ -384,8 +443,22 @@ impl QwitchDatabase {
         cooldowns: &HashMap<String, i64>,
     ) -> Result<Vec<AccountPool>, StorageError> {
         let candidates = self.list_upstream_candidates(master_key)?;
+        self.list_pools_with_candidates(&candidates, cooldowns)
+    }
+
+    /// 复用已构建的候选账号装配号池。
+    ///
+    /// `build_workspace_state` 需要同时返回 pools 与 candidates，直接调用
+    /// `list_pools` 会把候选账号（含逐账号凭据解密）整体构建两遍；此处支持
+    /// 外部传入一次性构建结果，避免重复开销。
+    pub fn list_pools_with_candidates(
+        &self,
+        candidates: &[UpstreamAccountCandidate],
+        cooldowns: &HashMap<String, i64>,
+    ) -> Result<Vec<AccountPool>, StorageError> {
         let candidate_map: HashMap<String, UpstreamAccountCandidate> = candidates
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|c| (c.account_id.clone(), c))
             .collect();
 
@@ -2285,5 +2358,78 @@ mod tests {
         assert!(!map.contains_key(&acc));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_models_persist_without_ttl_and_live_overrides_them() {
+        let (db, key, dir) = temp_db("manualmodels");
+        let acc = seed_account(&db, &key, "codearts", "ca_manual", "码道");
+
+        // 手工目录：去空行、去首尾空格、按账号落库
+        let count = db
+            .save_manual_account_models(
+                &acc,
+                "codearts",
+                &[
+                    "deepseek-v4.1-flash".into(),
+                    "  glm-5.3-flash  ".into(),
+                    "".into(),
+                ],
+            )
+            .expect("save manual models");
+        assert_eq!(count, 2);
+        let map = db.load_cached_models_map().expect("load map");
+        let list = map.get(&acc).expect("manual models must be visible");
+        assert_eq!(
+            list.iter()
+                .map(|m| m.vendor_wire_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deepseek-v4.1-flash", "glm-5.3-flash"]
+        );
+        assert!(list.iter().all(|m| m.source == "manual"));
+
+        // 人工目录不随 TTL 过期（用户显式维护的内容不该被时间清掉）
+        {
+            let conn = db.conn.lock().expect("lock");
+            conn.execute(
+                "UPDATE account_discovered_models SET updated_at = '2000-01-01T00:00:00+00:00' WHERE account_id = ?1",
+                rusqlite::params![acc],
+            )
+            .expect("age manual cache");
+        }
+        assert!(
+            db.load_cached_models_map()
+                .expect("load map")
+                .contains_key(&acc),
+            "manual catalog must not expire by TTL"
+        );
+
+        // 实时探测成功后覆盖人工目录（实时优先）
+        let live = vec![crate::domain::normalize_upstream_model(
+            "codearts",
+            "glm-5.3-flash",
+            None,
+            None,
+            false,
+            "live",
+        )];
+        db.save_cached_account_models(&acc, "codearts", &live)
+            .expect("save live");
+        let map = db.load_cached_models_map().expect("load map");
+        assert!(map
+            .get(&acc)
+            .expect("live map present")
+            .iter()
+            .all(|m| m.source == "live"));
+
+        // 空列表 = 清空，回到工具级兜底
+        db.save_manual_account_models(&acc, "codearts", &[])
+            .expect("clear manual");
+        assert!(!db
+            .load_cached_models_map()
+            .expect("load map")
+            .contains_key(&acc));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

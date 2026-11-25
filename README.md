@@ -78,7 +78,7 @@ Qwitch 目前内置 7 个账号适配器，另支持一个通用 API Key 作为�
 
 说明：
 
-- 码道 CodeArts 目前只做额度监控，不支持切换桌面登录，也**不在网关调度范围内**：它使用华为云 AK/SK + STS 签名，而网关只代理 Bearer 令牌类上游（WorkBuddy / Qoder / Trae / MiniMax / 自定义 API）。模型清单改为从本机客户端启动配置读取（需启动过一次 CodeArts），仅供对照，勾选不会生效。
+- 码道 CodeArts 支持网关调度：网关里有一条专用签名上游（SDK-HMAC-SHA256 → `/api/v2/chat/completions`），模型清单从本机客户端启动配置读取；本机导入的凭据不会自动刷新（避免与 IDE 互踢），STS 到期后重新导入即可。豆包工作没有任何面向第三方的模型接口，模型目录仅供对照、不参与调度。
 - Trae 和 Qoder 的国际版没有每日签到，暂未内置适配器。
 - 码道 CodeArts 的 refreshToken 是一次性轮换的。Qwitch 默认只读，避免和官方 IDE 互相踢下线；要让它参与网关调度，需要在号池里单独完成一次 OAuth 授权。
 
@@ -320,8 +320,8 @@ npm run dev          # 浏览器 Mock 预览
 npm run tauri dev    # 桌面应用开发模式
 npm run build        # 类型检查 + 生产构建
 npm run lint         # ESLint，--max-warnings=0
-npm test             # 前端测试，31 个文件 / 189 个用例
-cd src-tauri && cargo test   # 后端测试，251 个用例
+npm test             # 前端测试，31 个文件 / 190 个用例
+cd src-tauri && cargo test   # 后端测试，253 个用例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 

@@ -1347,10 +1347,14 @@ async fn send_upstream_stream(
     upstream_model: &str,
 ) -> Result<reqwest::Response, String> {
     let client = long_running_http_client();
-    let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
-    let base = base_url.trim_end_matches('/');
     let (_, bare) = crate::domain::split_scoped_model_id(upstream_model);
     let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare);
+    // 码道不接受 bearer：它用华为云 AK/SK 签名，只能在拿到 body 之后再签，因此单独走一条路
+    if member.tool_id == "codearts" {
+        return send_codearts_stream(client, member, cred, ir_req, &wire_model).await;
+    }
+    let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
+    let base = base_url.trim_end_matches('/');
     let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
     let (url, body, auth_x_api_key) = match protocol {
         WireProtocolKind::AnthropicMessages => (
@@ -1387,6 +1391,51 @@ async fn send_upstream_stream(
         req = req.header(*k, v);
     }
     req.send().await.map_err(|e| format!("上游请求失败: {e}"))
+}
+
+/// 码道 CodeArts 的对话上游。
+///
+/// 协议依据 magpie 的 `opencode-codearts-auth`：`POST {snap-access}/api/v2/chat/completions`，
+/// OpenAI 兼容，**上游始终流式**（码道只对流式计费），鉴权用 SDK-HMAC-SHA256
+/// 对「含请求体哈希」的规范请求签名。会话用 `x-ot-session-id` 区分，每账号 3 个并发。
+async fn send_codearts_stream(
+    client: &reqwest::Client,
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    wire_model: &str,
+) -> Result<reqwest::Response, String> {
+    use crate::adapter::codearts::CodeArtsAdapter;
+
+    let base = CodeArtsAdapter::snap_base_url(cred);
+    let url = format!("{base}/api/v2/chat/completions");
+    let mut body = to_upstream_openai_chat_body(ir_req, wire_model, true);
+    // 码道把思考单独放在 reasoning_content，不开 thinking 就拿不到
+    if body.get("thinking").is_none() {
+        body["thinking"] = serde_json::json!({ "type": "enabled" });
+    }
+    // 输出预算上限 65536（上游硬限制，超了会被拒）
+    if let Some(max) = body.get("max_tokens").and_then(Value::as_u64) {
+        if max > 65536 {
+            body["max_tokens"] = serde_json::json!(65536u64);
+        }
+    }
+    let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("序列化码道请求体失败: {e}"))?;
+    let signed = CodeArtsAdapter::signed_request_headers(cred, "POST", &url, &body_bytes)?;
+
+    let mut req = client
+        .post(&url)
+        .header("Accept", "text/event-stream")
+        .header("Content-Type", "application/json")
+        // 每账号一个稳定会话 id，避免同一账号被码道当成 3 个不同会话
+        .header("x-ot-session-id", member.account_id.clone())
+        .body(body_bytes);
+    for (k, v) in signed {
+        req = req.header(k, v);
+    }
+    req.send()
+        .await
+        .map_err(|e| format!("码道上游请求失败: {}", e.without_url()))
 }
 
 async fn write_sse_head(stream: &mut TcpStream) -> std::io::Result<()> {

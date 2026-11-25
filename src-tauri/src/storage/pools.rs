@@ -701,12 +701,8 @@ impl QwitchDatabase {
             if !seen_accounts.insert(cand.account_id.clone()) {
                 continue;
             }
-            if cand.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly) {
-                return Err(StorageError::Validation(format!(
-                    "{} 为只读客户端凭据，请先签发独立 OAuth 后再入池",
-                    cand.label
-                )));
-            }
+            // 码道现在由网关注入 SDK-HMAC-SHA256 签名直连，本机只读凭据也可入池；
+            // 它不会被 Qwitch 主动刷新（避免与 IDE 互踢），STS 过期后需重新导入。
             let tier = if cand.tool_id == "custom_api_key" {
                 MemberTier::T3Fallback
             } else {
@@ -1289,9 +1285,6 @@ impl QwitchDatabase {
             if !seen_acc.insert(cand.account_id.clone()) {
                 continue;
             }
-            if cand.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly) {
-                continue;
-            }
             built_members.push(PoolMember {
                 id: format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]),
                 account_id: cand.account_id.clone(),
@@ -1439,9 +1432,7 @@ impl QwitchDatabase {
         )?;
         let mut next_prio = max_prio + 1;
 
-        for cand in candidates.iter().filter(|c| {
-            c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly)
-        }) {
+        for cand in candidates.iter().filter(|c| c.tool_id == tool_id) {
             let existing: Option<String> = conn
                 .query_row(
                     "SELECT id FROM pool_members WHERE pool_id = ?1 AND account_id = ?2",
@@ -1531,9 +1522,7 @@ impl QwitchDatabase {
         }
         let mut next_prio = all_rows.iter().map(|r| r.3).max().unwrap_or(0) + 1;
 
-        for cand in candidates.iter().filter(|c| {
-            c.tool_id == tool_id && c.code_arts_mode != Some(CodeArtsAuthMode::ClientReadonly)
-        }) {
+        for cand in candidates.iter().filter(|c| c.tool_id == tool_id) {
             if !tool_member_by_acc.contains_key(&cand.account_id) {
                 let mid = format!("pm-{}", &Uuid::new_v4().simple().to_string()[..10]);
                 let tier = if tool_id == "custom_api_key" {
@@ -1619,12 +1608,7 @@ impl QwitchDatabase {
             let Some(cand) = candidate_map.get(&item.account_id) else {
                 continue;
             };
-            if cand.code_arts_mode == Some(CodeArtsAuthMode::ClientReadonly) {
-                return Err(StorageError::Validation(format!(
-                    "{} 为只读客户端凭据，请先签发独立 OAuth 授权",
-                    cand.label
-                )));
-            }
+            // 同上：只读凭据可入池，但不会被主动刷新
             let incoming_models: Vec<String> = if item.supported_models.is_empty() {
                 cand.default_models.clone()
             } else {
@@ -2050,13 +2034,13 @@ mod tests {
     }
 
     #[test]
-    fn pool_crud_merges_models_enforces_api_key_tier_and_guards_codearts() {
+    fn pool_crud_merges_models_enforces_api_key_tier_and_accepts_codearts() {
         let (db, key, dir) = temp_db("crud");
         let wb_id = seed_account(&db, &key, "workbuddy", "wb_uid_1", "WB主号");
         let ca_id = seed_account(&db, &key, "codearts", "ca_uid_1", "码道主号");
         let ak_id = seed_account(&db, &key, "custom_api_key", "sk_uid_1", "API兜底");
 
-        // client_readonly CodeArts 不允许直接入池
+        // 码道现在由网关注入签名直连，本机只读凭据也可入池
         let bad = db.create_pool(
             &key,
             &CreatePoolInput {
@@ -2078,7 +2062,7 @@ mod tests {
                 enabled_model_ids: None,
             },
         );
-        assert!(bad.is_err());
+        assert!(bad.is_ok(), "码道只读凭据可入池（网关用 AK/SK 签名调用）");
 
         // 签发独立 OAuth 后解锁
         db.authorize_codearts_isolated(&key, &ca_id)
@@ -2137,18 +2121,16 @@ mod tests {
         .expect("merge & add");
 
         let pools = db.list_pools(&key, &HashMap::new()).expect("list pools");
-        assert_eq!(pools.len(), 1);
-        assert_eq!(pools[0].members.len(), 3);
-        let wb_member = pools[0]
-            .members
-            .iter()
-            .find(|m| m.account_id == wb_id)
-            .unwrap();
+        // 只读凭据现在也能建池，所以这里有两个池：按 id 取主力池，避免下标串池
+        assert_eq!(pools.len(), 2);
+        let main = pools.iter().find(|p| p.id == pool.id).expect("main pool");
+        assert_eq!(main.members.len(), 3);
+        let wb_member = main.members.iter().find(|m| m.account_id == wb_id).unwrap();
         assert_eq!(
             wb_member.supported_models,
             vec!["deepseek-v4-pro".to_string(), "glm-5.3".to_string()]
         );
-        let ca_member = pools[0]
+        let ca_member = main
             .members
             .iter()
             .find(|m| m.tool_id == "codearts")

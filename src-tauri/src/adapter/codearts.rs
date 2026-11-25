@@ -435,12 +435,80 @@ impl CodeArtsAdapter {
         })
     }
 
+    /// 码道数据面（snap-access）的 host，按凭据里的 region 选择国内/国际站。
+    pub(crate) fn snap_base_url(cred: &CredentialEnvelope) -> String {
+        let region = match &cred.payload {
+            CredentialPayload::Token { extra, .. } => extra
+                .get(EXTRA_REGION)
+                .map(String::as_str)
+                .unwrap_or(DEFAULT_REGION),
+            _ => DEFAULT_REGION,
+        };
+        if region.starts_with("ap-") {
+            "https://snap-access.ap-southeast-1.myhuaweicloud.com".to_string()
+        } else {
+            "https://snap-access.cn-north-4.myhuaweicloud.com".to_string()
+        }
+    }
+
+    /// 为一次具体请求生成完整的签名头（含 `X-Security-Token`、`Content-Type`）。
+    ///
+    /// 供网关的对话上游复用：码道不接受 bearer，只认这套签名。
+    pub(crate) fn signed_request_headers(
+        cred: &CredentialEnvelope,
+        method: &str,
+        url: &str,
+        body: &[u8],
+    ) -> Result<Vec<(String, String)>, String> {
+        let creds = HuaweiCreds::from_envelope(cred).map_err(|e| e.to_string())?;
+        let parsed = reqwest::Url::parse(url).map_err(|e| format!("码道上游地址非法: {e}"))?;
+        let mut headers = Self::sign_headers_with_body(
+            method,
+            &parsed,
+            &creds,
+            &[
+                ("Content-Type", "application/json"),
+                ("X-Security-Token", creds.security_token.as_str()),
+            ],
+            body,
+        );
+        // 小写化会破坏 reqwest 的规范化；这里恢复成常见写法，值保持不变
+        for (k, _) in headers.iter_mut() {
+            if k.eq_ignore_ascii_case("authorization") {
+                *k = "Authorization".to_string();
+            } else if k.eq_ignore_ascii_case("x-sdk-date") {
+                *k = "X-Sdk-Date".to_string();
+            } else if k.eq_ignore_ascii_case("x-security-token") {
+                *k = "X-Security-Token".to_string();
+            } else if k.eq_ignore_ascii_case("content-type") {
+                *k = "Content-Type".to_string();
+            } else if k.eq_ignore_ascii_case("host") {
+                *k = "Host".to_string();
+            }
+        }
+        Ok(headers)
+    }
+
     /// 构造华为云 SDK-HMAC-SHA256 签名头。
     fn sign_headers(
         method: &str,
         url: &reqwest::Url,
         creds: &HuaweiCreds,
         extra_headers: &[(&str, &str)],
+    ) -> Vec<(String, String)> {
+        Self::sign_headers_with_body(method, url, creds, extra_headers, b"")
+    }
+
+    /// 同 [`sign_headers`]，但把**请求体哈希**算进签名串。
+    ///
+    /// 历史实现把 payload 哈希写死成 `sha256("")`，所以只能签 GET（额度查询）；
+    /// 对话接口是 POST，body 的哈希必须进 canonical request，否则服务端校验签名失败。
+    fn sign_headers_with_body(
+        method: &str,
+        url: &reqwest::Url,
+        creds: &HuaweiCreds,
+        extra_headers: &[(&str, &str)],
+        body: &[u8],
     ) -> Vec<(String, String)> {
         use hmac::{Hmac, Mac};
         use sha2::{Digest, Sha256};
@@ -507,7 +575,7 @@ impl CodeArtsAdapter {
             .collect::<Vec<_>>()
             .join(";");
 
-        let body_hash = hex::encode(Sha256::digest(b""));
+        let body_hash = hex::encode(Sha256::digest(body));
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
             method.to_uppercase(),
@@ -1868,6 +1936,78 @@ mod tests {
         env2.uid = "codearts_x".into();
         CodeArtsAdapter::apply_identity(&mut env2, &serde_json::json!({"principal_id": "p-9"}));
         assert_eq!(env2.uid, "p-9");
+    }
+
+    fn token_cred_with_extra(extra: HashMap<String, String>) -> CredentialEnvelope {
+        CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "u-1".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: String::new(),
+                refresh_token: None,
+                expires_at: None,
+                extra,
+            },
+        }
+    }
+
+    #[test]
+    fn snap_base_url_follows_region() {
+        let mut extra = HashMap::new();
+        extra.insert(EXTRA_REGION.to_string(), "cn-north-4".to_string());
+        assert_eq!(
+            CodeArtsAdapter::snap_base_url(&token_cred_with_extra(extra)),
+            "https://snap-access.cn-north-4.myhuaweicloud.com"
+        );
+
+        let mut intl = HashMap::new();
+        intl.insert(EXTRA_REGION.to_string(), "ap-southeast-1".to_string());
+        assert_eq!(
+            CodeArtsAdapter::snap_base_url(&token_cred_with_extra(intl)),
+            "https://snap-access.ap-southeast-1.myhuaweicloud.com"
+        );
+    }
+
+    /// 网关复用这套签名头：必须是 SDK-HMAC-SHA256，且把 security token 与
+    /// content-type 纳入 SignedHeaders（否则服务端校验会失败）。
+    #[test]
+    fn signed_request_headers_cover_token_and_content_type() {
+        let mut extra = HashMap::new();
+        extra.insert(EXTRA_ACCESS_KEY.to_string(), "AK-TEST".to_string());
+        extra.insert(EXTRA_SECRET_KEY.to_string(), "SK-TEST".to_string());
+        extra.insert(EXTRA_SECURITY_TOKEN.to_string(), "STS-TEST".to_string());
+        let cred = token_cred_with_extra(extra);
+        let body = br#"{"model":"deepseek-v4.1-flash","messages":[]}"#;
+        let headers = CodeArtsAdapter::signed_request_headers(
+            &cred,
+            "POST",
+            "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions",
+            body,
+        )
+        .expect("signed headers");
+
+        let auth = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone())
+            .expect("Authorization header");
+        assert!(auth.starts_with("SDK-HMAC-SHA256 Access=AK-TEST"));
+        let signed = auth
+            .split("SignedHeaders=")
+            .nth(1)
+            .and_then(|s| s.split(',').next())
+            .unwrap_or_default();
+        for required in ["content-type", "x-security-token", "x-sdk-date", "host"] {
+            assert!(
+                signed.contains(required),
+                "SignedHeaders 缺少 {required}: {signed}"
+            );
+        }
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-security-token") && v == "STS-TEST"));
     }
 
     #[test]

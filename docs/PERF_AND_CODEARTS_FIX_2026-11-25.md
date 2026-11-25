@@ -423,3 +423,50 @@ interface for other clients."** 它的做法是：
 4. 真机验证一次：签名串、`maas_type` 是否需要、流内错误映射。
 
 门禁：Rust 249 + ACL 2；前端 189 / 31 files。
+
+---
+
+## 十四、码道接入网关（本轮实现）
+
+依据 magpie `opencode-codearts-auth` 的协议说明实现，落点是三条：
+
+### 14.1 签名要覆盖请求体
+
+`adapter/codearts.rs::sign_headers` 历史实现把 payload 哈希写死为 `sha256("")`，只能签 GET。
+新增 `sign_headers_with_body(..., body)`，并对外提供
+`CodeArtsAdapter::signed_request_headers(cred, method, url, body)`：
+- SignedHeaders 含 `content-type` / `host` / `x-sdk-date` / `x-security-token`；
+- `X-Security-Token`、`Authorization`、`Host` 等头按规范写法回填。
+
+### 14.2 网关新增码道分支
+
+`gateway/mod.rs::send_codearts_stream`：
+- `POST {snap-access}/api/v2/chat/completions`（国内 `cn-north-4`、国际站 `ap-southeast-1`，
+  由凭据里的 region 决定）；
+- body 复用 `to_upstream_openai_chat_body(..., stream=true)`，额外补
+  `thinking: {type: "enabled"}`（码道只在流式下计费，思考落 `reasoning_content`）；
+- `max_tokens` 钳制到 65536；
+- 带 `x-ot-session-id`（每账号稳定），签名头由上面那个函数生成；
+- SSE 原样透传，不额外解析。
+
+### 14.3 放开只读凭据
+
+签名路径不消费 refresh token，不会与 IDE 互踢，因此：
+- 后端 4 处 `code_arts_mode != ClientReadonly` 过滤全部移除（建池、物化专属池、
+  `set_pool_tool_models` ×2、加成员）；
+- 前端 6 处 `client_readonly` 跳过逻辑移除（物化、入池、仿真、默认启用、批量启用）；
+- `isToolScopeReadonly` 不再用于禁用勾选；码道页改为一条提示：
+  「本机凭据不会被主动刷新，STS 到期后需重新导入」。
+
+### 14.4 豆包工作置灰
+
+`isToolGatewayRoutable("doubaowork") === false`，`gatewayUnsupportedReason()` 给出一句原因，
+模型区横幅如实说明「只能读菜单做对照，无法作为上游」，勾选与设为默认禁用。
+
+### 14.5 尚未验证
+
+- 签名串与服务端要求是否完全一致（`maas_type` 头是否需要）；
+- 流内错误（`TM.00001041` 限流、`APIG.0602` 过期）在网关侧的映射；
+- 实际对话（真机一次请求）。
+
+门禁：Rust 251 + ACL 2；前端 190 / 31 files。

@@ -46,7 +46,11 @@ import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
 import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
 import { ManualModelModal } from "../../components/pool/ManualModelModal";
-import { isToolGatewayRoutable, isToolScopeReadonly } from "../../domain/toolScope";
+import {
+  gatewayUnsupportedReason,
+  isToolGatewayRoutable,
+  isToolScopeReadonly,
+} from "../../domain/toolScope";
 import { formatModelSpec } from "../../domain/modelMeta";
 
 type ModelLike = { id: string; isFree?: boolean; creditMultiplier?: number };
@@ -440,8 +444,9 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
   const scopeReadonly = isToolScopeReadonly(candidates, activeToolId);
   // 网关侧根本没有该工具的上游实现（码道是 AK/SK 签名，无 bearer 令牌）
   const gatewayUnsupported = !isToolGatewayRoutable(activeToolId);
-  // 两者都会让「勾选模型」失去落点：直接禁用，而不是让用户点了没反应
-  const scopeNotSelectable = gatewayUnsupported || scopeReadonly;
+  // 只有「网关根本没有该工具的上游」才会让勾选失去落点；
+  // 只读凭据现在也能调度（码道走签名上游），不再阻止勾选
+  const scopeNotSelectable = gatewayUnsupported;
   const presetAvailable = TOOLS_WITH_PRESET.has(activeToolId);
 
   // 模型目录的可信度必须如实展示：实时 / 本机客户端 / 内置预设 / 手工 / 未探测
@@ -1092,18 +1097,18 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       <span className="min-w-0 flex-1">
                         <strong className="font-medium">{activeToolName} 暂不支持网关调度。</strong>
-                        Qwitch 网关目前只代理 Bearer 令牌类上游（WorkBuddy / Qoder / Trae / MiniMax /
-                        自定义 API），码道是华为云 AK/SK + STS 签名，凭据里没有 bearer 令牌，网关无法代它发请求。
-                        这里展示的模型目录仅用于和客户端对照，勾选不会生效。
+                        {gatewayUnsupportedReason(activeToolId)}
+                        这里展示的模型目录仅用于和客户端对照。
                       </span>
                     </div>
                   )}
 
-                  {!gatewayUnsupported && scopeReadonly && (
-                    <div className="flex flex-wrap items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:text-amber-300">
+                  {!gatewayUnsupported && scopeReadonly && activeToolId === "codearts" && (
+                    <div className="flex flex-wrap items-start gap-2 rounded-xl border border-sky-500/25 bg-sky-500/[0.07] px-3 py-2 text-[11px] leading-relaxed text-sky-800 dark:text-sky-300">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       <span className="min-w-0 flex-1">
-                        该工具当前只有「本机只读凭据」，不参与网关调度，因此模型无法勾选。
+                        当前使用本机导入的码道凭据：Qwitch 会用它签名直连，但<strong className="font-medium">不会主动刷新</strong>（刷新会与 IDE 互踢）。
+                        STS 到期后请求会失败，届时重新导入一次即可。
                       </span>
                     </div>
                   )}

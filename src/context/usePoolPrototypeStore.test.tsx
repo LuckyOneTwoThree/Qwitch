@@ -119,25 +119,31 @@ describe("usePoolPrototypeStore v2", () => {
     expect(claudeFinal.defaultModelKey).not.toBe(nextDefault);
   });
 
-  it("merges new models onto existing account members and guards client_readonly CodeArts", () => {
+  it("merges new models onto existing account members（码道只读凭据现在也可入池）", () => {
     const { result } = renderHook(() => usePoolPrototype(), {
       wrapper: createWrapper(),
     });
 
     const poolId = result.current.pools[0].id;
-    const beforeLen = result.current.pools[0].members.length;
+    // 按 id 取池：池数组的顺序可能因更新而变化，用下标会串池
+    const poolById = () => result.current.pools.find((p) => p.id === poolId)!;
+    const beforeLen = poolById().members.length;
     const wbPrimary = result.current.candidates.find((c) => c.accountId === "acc-wb-1")!;
     const readonlyCodeArts = result.current.candidates.find(
       (c) => c.accountId === "acc-codearts-1"
     )!;
+    const wbAlreadyMember = poolById().members.some((m) => m.accountId === "acc-wb-1");
 
-    // 尝试加入 client_readonly 应被拦截
+    // 码道现在由网关注入 AK/SK 签名直连，本机只读凭据也能入池（不再被拦截）
     act(() => {
       result.current.addMembersToPool(poolId, [
-        { candidate: readonlyCodeArts, supportedModels: ["openpangu-coder-pro"], tier: "t2_backup" },
+        { candidate: readonlyCodeArts, supportedModels: ["deepseek-v4.1-flash"], tier: "t2_backup" },
       ]);
     });
-    expect(result.current.pools[0].members.length).toBe(beforeLen);
+    expect(poolById().members.length).toBe(beforeLen + 1);
+    expect(
+      poolById().members.find((m) => m.accountId === "acc-codearts-1")?.supportedModels
+    ).toContain("deepseek-v4.1-flash");
 
     // 为已在池的 WorkBuddy 主号追加 kimi-k3 模型（合并槽位而不是重复行）
     act(() => {
@@ -145,25 +151,16 @@ describe("usePoolPrototypeStore v2", () => {
         { candidate: wbPrimary, supportedModels: ["kimi-k3"], tier: "t1_primary" },
       ]);
     });
-    expect(result.current.pools[0].members.length).toBe(beforeLen);
+    expect(poolById().members.length).toBe(beforeLen + 1);
     expect(
-      result.current.pools[0].members.find((m) => m.accountId === "acc-wb-1")
-        ?.supportedModels
+      poolById().members.find((m) => m.accountId === "acc-wb-1")?.supportedModels
     ).toContain("kimi-k3");
-
-    // 签发独立 OAuth 后 CodeArts 可安全入池
-    act(() => {
-      result.current.authorizeCodeArtsIsolated("acc-codearts-1");
-    });
-    const unlocked = result.current.candidates.find(
-      (c) => c.accountId === "acc-codearts-1"
-    )!;
-    act(() => {
-      result.current.addMembersToPool(poolId, [
-        { candidate: unlocked, supportedModels: ["openpangu-coder-pro"], tier: "t2_backup" },
-      ]);
-    });
-    expect(result.current.pools[0].members.length).toBe(beforeLen + 1);
+    if (wbAlreadyMember) {
+      // 同一账号再次加入只合并模型槽位，不新增成员
+      expect(
+        poolById().members.filter((m) => m.accountId === "acc-wb-1")
+      ).toHaveLength(1);
+    }
   });
 
   it("enforces strict model lock, intra-tool quota ordering, 429 cooldown failover, and session affinity", () => {
@@ -341,7 +338,7 @@ describe("usePoolPrototypeStore v2", () => {
     expect(finalAccs[1].enabled).toBe(false);
   });
 
-  it("只读码道账号不会成为号池成员——因此勾选模型无法落地，UI 必须前置禁用", () => {
+  it("只读码道账号会成为号池成员（签名上游可直接调度）", () => {
     const { result } = renderHook(() => usePoolPrototype(), {
       wrapper: createWrapper(),
     });
@@ -355,9 +352,9 @@ describe("usePoolPrototypeStore v2", () => {
       result.current.setAgentToolModels("codex_desktop", "codearts", ["deepseek-v4.1-flash"]);
     });
 
-    // 只读凭据不参与网关调度，永远不会被物化进 Agent 专属号池：
-    // 这正是历史实现「点了没反应 / 勾上又跳回」的原因。
+    // 历史实现把只读凭据排除在号池之外，导致「点了没反应」；
+    // 现在网关有码道签名上游，只读账号也会被物化进专属号池，勾选能落地。
     const pool = result.current.getAgentPrimaryPool("codex_desktop");
-    expect(pool?.members.some((m) => m.accountId === "acc-codearts-1")).toBe(false);
+    expect(pool?.members.some((m) => m.accountId === "acc-codearts-1")).toBe(true);
   });
 });

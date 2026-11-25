@@ -18,14 +18,22 @@ export function isToolScopeReadonly(
 /**
  * 该工具能否被 Qwitch 网关实际调度。
  *
- * 网关的 `resolve_upstream_auth` 只能走「Bearer 令牌 + Base URL」这一条路
- * （WorkBuddy / Qoder / Trae / MiniMax / 自定义 API）。码道的凭据是华为云
- * AK/SK + STS 签名，`access_token` 恒为空，网关既拿不到 bearer token，
- * 也没有 AK/SK 签名实现——即使把账号放进号池，请求也只会以
- * 「缺少有效 API Token」失败。因此码道的模型勾选没有落点。
+ * - WorkBuddy / Qoder / Trae / MiniMax / 自定义 API：Bearer 令牌 + Base URL；
+ * - 码道 CodeArts：华为云 AK/SK + STS 签名，走 `/api/v2/chat/completions`
+ *   专用上游（网关里单独一条签名分支），因此**可以**调度；
+ * - 豆包工作：没有任何面向第三方的模型接口（magpie 也是靠 CDP 驱动桌面端），
+ *   我们只能读它的模型菜单做对照，无法作为上游，勾选没有落点。
  */
-const GATEWAY_UNROUTABLE_TOOLS = new Set(["codearts"]);
+const GATEWAY_UNROUTABLE_TOOLS = new Set(["doubaowork"]);
 
 export function isToolGatewayRoutable(toolId: string): boolean {
   return !GATEWAY_UNROUTABLE_TOOLS.has(toolId);
+}
+
+/** 不可调度时给用户的原因（用于横幅与 tooltip），可调度返回 null。 */
+export function gatewayUnsupportedReason(toolId: string): string | null {
+  if (toolId === "doubaowork") {
+    return "豆包工作没有面向第三方的模型接口，Qwitch 只能读取它的模型菜单用于对照，无法作为网关上游调度（magpie 也是靠驱动桌面端实现的）。";
+  }
+  return null;
 }

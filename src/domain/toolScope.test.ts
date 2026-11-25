@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isToolGatewayRoutable, isToolScopeReadonly } from "./toolScope";
+import { gatewayUnsupportedReason, isToolGatewayRoutable, isToolScopeReadonly } from "./toolScope";
 import type { UpstreamAccountCandidate } from "../types/pool";
 
 function cand(overrides: Partial<UpstreamAccountCandidate> = {}): UpstreamAccountCandidate {
@@ -48,8 +48,14 @@ describe("工具作用域只读判定", () => {
 });
 
 describe("网关可调度性", () => {
-  it("码道使用 AK/SK 签名，没有 bearer 令牌，网关无法调度", () => {
-    expect(isToolGatewayRoutable("codearts")).toBe(false);
+  it("码道走专用签名上游，可以调度", () => {
+    expect(isToolGatewayRoutable("codearts")).toBe(true);
+  });
+
+  it("豆包工作没有模型接口，不可调度，且给出原因", () => {
+    expect(isToolGatewayRoutable("doubaowork")).toBe(false);
+    expect(gatewayUnsupportedReason("doubaowork")).toContain("没有面向第三方的模型接口");
+    expect(gatewayUnsupportedReason("codearts")).toBeNull();
   });
 
   it("Bearer 类上游仍然可以调度", () => {

@@ -507,9 +507,7 @@ function materializeDedicatedPoolForAgent(
 
   if (existing) {
     const existingAccIds = new Set(existing.members.map((m) => m.accountId));
-    const missingCandidates = allCandidates.filter(
-      (c) => !existingAccIds.has(c.accountId) && c.codeArtsMode !== "client_readonly"
-    );
+    const missingCandidates = allCandidates.filter((c) => !existingAccIds.has(c.accountId));
     let updatedPool = existing;
     if (missingCandidates.length > 0) {
       let nextPrio =
@@ -584,7 +582,6 @@ function materializeDedicatedPoolForAgent(
 
   for (const cand of allCandidates) {
     if (seenAccIds.has(cand.accountId)) continue;
-    if (cand.codeArtsMode === "client_readonly") continue;
     seenAccIds.add(cand.accountId);
     builtMembers.push({
       id: `pm-${agentId}-${cand.accountId}`,
@@ -1523,13 +1520,7 @@ export function PoolPrototypeProvider({
 
   const addMembersToPool = useCallback(
     (poolId: string, newMembers: CreatePoolMemberInput[]) => {
-      const valid = newMembers.filter(
-        (item) => item.candidate.codeArtsMode !== "client_readonly"
-      );
-      if (valid.length === 0) {
-        notify("所选账号均处于只读隔离受限状态，请先完成独立 OAuth 授权", "warning");
-        return;
-      }
+      const valid = newMembers;
 
       setPools((prev) =>
         prev.map((p) => {
@@ -2228,7 +2219,6 @@ export function PoolPrototypeProvider({
           if (!m.enabled) continue;
           if (m.toolId === "custom_api_key" && !pool.fallbackApiKeyEnabled) continue;
           if (m.accountStatus === "risk_paused" || m.accountStatus === "expired") continue;
-          if (m.codeArtsMode === "client_readonly") continue;
           if (typeof m.cooldownUntilMs === "number" && m.cooldownUntilMs > now) continue;
           if (pool.skipActiveClientAccount && m.isActiveOnClient) {
             collectAttempts.push({
@@ -2601,7 +2591,7 @@ export function PoolPrototypeProvider({
           supportedModels: candidateScopedModels(cand),
           tier: cand.toolId === "custom_api_key" ? "t3_fallback" : "t1_primary",
           channel: cand.channel,
-          enabled: result.length === 0 && cand.codeArtsMode !== "client_readonly",
+          enabled: result.length === 0,
           priority: nextPrio++,
           quotaPercent: cand.quotaPercent,
           quotaText: cand.quotaText,
@@ -3008,7 +2998,7 @@ export function PoolPrototypeProvider({
         (list) =>
           list.map((m, idx) => ({
             ...m,
-            enabled: onlyPrimary ? idx === 0 : m.codeArtsMode !== "client_readonly",
+            enabled: onlyPrimary ? idx === 0 : true,
           })),
         undefined,
         onlyPrimary ? "已切换为仅启用 #1 主账号（暂停备用号）" : "已启用该工具下全部可用账号参与调度"

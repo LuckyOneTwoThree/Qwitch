@@ -23,6 +23,7 @@ import { AccountStatusBadge, ClaimStatusBadge } from "./StatusBadge";
 import { ToolBrandIcon } from "./ToolBrandIcon";
 import { getToolBrandMeta } from "../domain/toolRegistry";
 import { getEffectiveClaimStatus } from "../domain/selectors";
+import { formatRelativeSyncTime, isSnapshotStale } from "../domain/time";
 import { useQwitch } from "../context/QwitchContext";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { OverflowMenu } from "./ui/OverflowMenu";
@@ -30,13 +31,6 @@ import { OverflowMenu } from "./ui/OverflowMenu";
 function formatQuotaNumber(value: number): string {
   const rounded = Math.round(value * 100) / 100;
   return rounded.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
-}
-
-function formatSyncTime(iso?: string): string {
-  if (!iso) return "尚未同步";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "已同步";
-  return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
 export const AccountCard = React.memo(function AccountCard({
@@ -103,6 +97,16 @@ export const AccountCard = React.memo(function AccountCard({
   const secondaryBuckets = buckets.slice(1);
   const isQoderClaimBucket =
     account.toolId === "qoder_cn" && primaryBucket?.key === "daily_credits";
+
+  // 额度快照新鲜度：只有今日同步过的快照才代表当前水位，
+  // 昨日快照必须在界面上明确标注，否则用户会把陈旧额度当成实时额度。
+  const quotaFetchedAt = account.latestQuota?.fetchedAt;
+  const quotaStale = isSnapshotStale(quotaFetchedAt);
+  const syncLabel = quotaFetchedAt
+    ? formatRelativeSyncTime(quotaFetchedAt)
+    : account.latestQuota
+      ? "已同步"
+      : "尚未查额";
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -328,7 +332,7 @@ export const AccountCard = React.memo(function AccountCard({
                     {hasCustomAlias && (
                       <span
                         title={`当前显示为本地别名，平台原用户名：${account.accountName}`}
-                        className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-[10px] leading-none font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                        className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-[11px] leading-none font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
                       >
                         别名
                       </span>
@@ -588,7 +592,7 @@ export const AccountCard = React.memo(function AccountCard({
                   return (
                     <span
                       title={expTitle}
-                      className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                      className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                     >
                       {modeLabel}
                     </span>
@@ -596,9 +600,19 @@ export const AccountCard = React.memo(function AccountCard({
                 })()
               )}
             </div>
-            <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 tabular-nums">
+            <span
+              className={`inline-flex shrink-0 whitespace-nowrap items-center gap-1 tabular-nums ${
+                quotaStale ? "text-amber-700 dark:text-amber-300" : ""
+              }`}
+              title={
+                quotaStale
+                  ? "该额度快照不是今天的同步结果，显示的额度水位可能已过期，建议重新查额"
+                  : "最近一次额度同步时间"
+              }
+            >
               <Clock className="h-3.5 w-3.5" aria-hidden="true" />
-              {formatSyncTime(account.latestQuota?.fetchedAt ?? account.updatedAt)}
+              {syncLabel}
+              {quotaStale && <span className="font-medium">· 已过期</span>}
             </span>
           </div>
         </div>

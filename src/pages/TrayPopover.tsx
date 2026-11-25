@@ -23,6 +23,7 @@ import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import { getEffectiveClaimStatus, selectScopedStats } from "../domain/selectors";
+import { isSnapshotStale } from "../domain/time";
 import { computeAgentExposedModels } from "../data/mockPoolData";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
 import { ColdSwitchModal } from "../components/ColdSwitchModal";
@@ -204,7 +205,7 @@ export function TrayPopover({
         <button
           type="button"
           disabled
-          className="inline-flex min-w-0 flex-1 shrink-0 whitespace-nowrap items-center justify-center gap-1.5 rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white opacity-75 dark:bg-zinc-100 dark:text-zinc-900"
+          className="btn btn-md btn-primary min-w-0 flex-1 shrink-0 gap-1.5 whitespace-nowrap disabled:opacity-75"
         >
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
           {batchProgress?.action === "refresh" ? "串行查额中..." : "串行领取中..."}
@@ -354,7 +355,7 @@ export function TrayPopover({
               onClick={toggleTheme}
               title="切换深色/浅色主题"
               aria-label="切换深色或浅色主题"
-              className="rounded-lg border border-zinc-200 bg-white p-1.5 text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+              className="btn btn-icon btn-secondary"
             >
               {theme === "dark" ? (
                 <Sun className="h-3.5 w-3.5" aria-hidden="true" />
@@ -614,13 +615,13 @@ export function TrayPopover({
                         )}
                         <span className="badge badge-neutral shrink-0">{exposed.length} 模</span>
                         {b.status === "drifted" && (
-                          <span className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-300">
+                          <span className="inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-300">
                             <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
                             漂移
                           </span>
                         )}
                         {b.status === "needs_restart" && (
-                          <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-300">
+                          <span className="shrink-0 text-[11px] font-medium text-sky-600 dark:text-sky-300">
                             待重启
                           </span>
                         )}
@@ -667,7 +668,7 @@ export function TrayPopover({
                             setAgentDefaultModel(b.agentId, val);
                           }
                         }}
-                        className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-800 focus:border-brand-500 focus:outline-none disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-800 focus:border-brand-500 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                       >
                         {exposed.length === 0 ? (
                           <option value="">-- 暂无可用模型，点右侧配置 --</option>
@@ -755,7 +756,7 @@ export function TrayPopover({
             <button
               type="button"
               onClick={() => onOpenMain?.()}
-              className="mt-3.5 inline-flex items-center gap-1.5 rounded-xl bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+              className="btn btn-md btn-primary mt-3.5 gap-1.5"
             >
               打开主面板导入
               <ExternalLink className="h-3 w-3" aria-hidden="true" />
@@ -828,6 +829,10 @@ export function TrayPopover({
                         !missingApiToken &&
                         effectiveClaim === "available";
 
+                      // 托盘是「快速判断」入口：额度数字必须自带新鲜度信号，
+                      // 否则用户会把昨天的水位当成今天的水位。
+                      const quotaStale = isSnapshotStale(acc.latestQuota?.fetchedAt);
+
                       return (
                         <div
                           key={acc.id}
@@ -874,26 +879,38 @@ export function TrayPopover({
                           {!missingApiToken && firstBucket ? (
                             <div className="mt-2">
                               <div className="flex items-center justify-between gap-2 text-[11px]">
-                                <span className="truncate text-zinc-600 dark:text-zinc-400">
-                                  {firstBucket.label}
+                                <span className="flex min-w-0 items-center gap-1">
+                                  <span className="truncate text-zinc-600 dark:text-zinc-400">
+                                    {firstBucket.label}
+                                  </span>
                                   {pct !== null && !isQoderClaimed && !isQoderClaimBucket && (
-                                    <span className="ml-1 font-semibold text-zinc-800 tabular-nums dark:text-zinc-200">
+                                    <span className="shrink-0 font-semibold text-zinc-800 tabular-nums dark:text-zinc-200">
                                       剩余 {pct}%
                                     </span>
                                   )}
                                 </span>
-                                <span className="shrink-0 font-medium tabular-nums text-zinc-800 dark:text-zinc-200">
-                                  {isQoderClaimBucket ? (
-                                    <>
-                                      {formatCompactQuota(firstBucket.remaining)}{" "}
-                                      {firstBucket.unit}
-                                    </>
-                                  ) : (
-                                    <>
-                                      {formatCompactQuota(firstBucket.remaining)} /{" "}
-                                      {formatCompactQuota(firstBucket.total)} {firstBucket.unit}
-                                    </>
+                                <span className="flex shrink-0 items-center gap-1">
+                                  {quotaStale && (
+                                    <span
+                                      className="rounded bg-amber-500/15 px-1 py-0.5 font-medium text-amber-800 dark:text-amber-300"
+                                      title="该额度快照不是今天的同步结果，建议在主面板重新查额"
+                                    >
+                                      已过期
+                                    </span>
                                   )}
+                                  <span className="shrink-0 font-medium tabular-nums text-zinc-800 dark:text-zinc-200">
+                                    {isQoderClaimBucket ? (
+                                      <>
+                                        {formatCompactQuota(firstBucket.remaining)}{" "}
+                                        {firstBucket.unit}
+                                      </>
+                                    ) : (
+                                      <>
+                                        {formatCompactQuota(firstBucket.remaining)} /{" "}
+                                        {formatCompactQuota(firstBucket.total)} {firstBucket.unit}
+                                      </>
+                                    )}
+                                  </span>
                                 </span>
                               </div>
                               {pct !== null && (
@@ -948,7 +965,7 @@ export function TrayPopover({
                                   type="button"
                                   disabled={isBusy}
                                   onClick={() => void claimDailyBatch([acc.id])}
-                                  className="btn btn-xs shrink-0 gap-1 whitespace-nowrap border border-sky-500/30 bg-sky-500/12 text-sky-800 transition hover:bg-sky-500/20 disabled:opacity-45 dark:text-sky-300"
+                                  className="btn btn-xs btn-sky-soft shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
                                 >
                                   <Sparkles className="h-2.5 w-2.5 shrink-0" aria-hidden="true" />
                                   领取

@@ -461,4 +461,31 @@ describe("TrayPopover", () => {
     fireEvent.click(screen.getByRole("button", { name: "去接入" }));
     expect(onOpenMain).toHaveBeenCalledWith({ nav: "agents", agentId: "codex_desktop" });
   });
+
+  it("全部额度快照均为今日时不在托盘显示过期标记", () => {
+    const freshFetchedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    ctx.accounts = INITIAL_ACCOUNTS.map((acc) =>
+      acc.latestQuota
+        ? { ...acc, latestQuota: { ...acc.latestQuota, fetchedAt: freshFetchedAt } }
+        : acc
+    );
+
+    render(<TrayPopover onOpenMain={vi.fn()} />);
+    expect(screen.queryAllByText("已过期")).toHaveLength(0);
+  });
+
+  it("额度快照跨日时在托盘显式标记「已过期」", () => {
+    const staleFetchedAt = new Date(Date.now() - 48 * 60 * 60_000).toISOString();
+    const stale = {
+      ...INITIAL_ACCOUNTS[0],
+      latestQuota: {
+        ...INITIAL_ACCOUNTS[0].latestQuota!,
+        fetchedAt: staleFetchedAt,
+      },
+    };
+    ctx.accounts = [stale, ...INITIAL_ACCOUNTS.slice(1)];
+
+    render(<TrayPopover onOpenMain={vi.fn()} />);
+    expect(screen.getAllByText("已过期").length).toBeGreaterThan(0);
+  });
 });

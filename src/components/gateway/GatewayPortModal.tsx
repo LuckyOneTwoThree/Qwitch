@@ -106,7 +106,7 @@ export function GatewayPortModal({ open, onClose }: { open: boolean; onClose: ()
                 setPort(e.target.value);
                 setResult(null);
               }}
-              className="w-40 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-900 focus:border-brand-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              className="w-40 rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-900 focus:border-brand-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
             />
             <button
               type="button"

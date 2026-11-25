@@ -106,16 +106,27 @@
     overflow: hidden;
   }
 
-  /* 焦点环统一为品牌色，比默认 outline 更精致且与主题一致 */
+  /* 焦点环统一为品牌色，比默认 outline 更精致且与主题一致。
+     控件（按钮/链接）与表单字段分两组处理：
+     - 控件额外补 border-radius，保证 outline 形状贴合小圆角元素；
+     - 表单字段**不覆盖** border-radius（避免把 rounded-lg 输入框的圆角改写成
+       --radius-inner 而引发布局抖动），仅用 1px 偏移避免压住边框。 */
   button:focus-visible,
   a:focus-visible,
-  input:focus-visible,
-  textarea:focus-visible,
-  select:focus-visible,
+  [role="button"]:focus-visible,
+  [role="menuitem"]:focus-visible,
+  [role="tab"]:focus-visible,
   [tabindex]:focus-visible {
     outline: 2px solid var(--color-brand-500);
     outline-offset: 2px;
     border-radius: var(--radius-inner);
+  }
+
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 1px;
   }
 
   ::selection {

@@ -104,7 +104,7 @@ const AGENT_STRATEGY_OPTIONS: ReadonlyArray<{
 ];
 
 function renderStatusBadge(status: AgentBinding["status"], compact = false) {
-  const padClass = compact ? "px-1.5 py-0.5 text-[10px]" : "";
+  const padClass = compact ? "px-1.5 py-0.5 text-[11px]" : "";
   switch (status) {
     case "bound":
       return (
@@ -491,7 +491,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       />
                     )}
                     <span
-                      className={`text-[10px] font-normal tabular-nums ${
+                      className={`text-[11px] font-normal tabular-nums ${
                         selectedToolCount > 0
                           ? "font-semibold text-brand-700 dark:text-brand-300"
                           : "text-zinc-400"
@@ -500,7 +500,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                       {selectedToolCount}/{totalToolModels}
                     </span>
                   </div>
-                  <div className="text-[10px] font-normal text-zinc-500 dark:text-zinc-400">
+                  <div className="text-[11px] font-normal text-zinc-500 dark:text-zinc-400">
                     {toolAccs.length > 0 ? `${toolAccs.length} 账号` : "未导入"}
                   </div>
                 </div>
@@ -644,7 +644,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                         {binding.name}
                       </h2>
                       <span
-                        className={`mt-0.5 inline-flex shrink-0 whitespace-nowrap rounded px-1 py-0.2 text-[10px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
+                        className={`mt-0.5 inline-flex shrink-0 whitespace-nowrap rounded px-1 py-0.2 text-[11px] ${WIRE_PROTOCOL_META[binding.protocol].badgeClass}`}
                       >
                         {WIRE_PROTOCOL_META[binding.protocol].label}
                       </span>
@@ -670,7 +670,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                   ) : (
                     <span className="text-zinc-400">未配置模型</span>
                   )}
-                  <span className="shrink-0 rounded bg-white px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                  <span className="shrink-0 rounded bg-white px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                     {exposed.length} 模型
                   </span>
                 </div>
@@ -892,7 +892,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
               >
                 <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>模型配置</span>
-                <span className="rounded px-1 py-0.2 font-mono text-[10px] opacity-85">
+                <span className="rounded px-1 py-0.2 font-mono text-[11px] opacity-85">
                   {activeExposedModels.length}
                 </span>
               </button>
@@ -910,7 +910,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
               >
                 <Crown className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>账号调度</span>
-                <span className="rounded px-1 py-0.2 font-mono text-[10px] opacity-85">
+                <span className="rounded px-1 py-0.2 font-mono text-[11px] opacity-85">
                   {toolAccounts.filter((a) => a.enabled).length}/{toolAccounts.length}
                 </span>
               </button>
@@ -1151,16 +1151,16 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                   <span className="truncate font-mono font-semibold text-zinc-900 dark:text-zinc-100">
                                     {opt.displayName}
                                   </span>
-                                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                                     {opt.family}
                                   </span>
                                   {opt.isFree ? (
-                                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
                                       免费
                                     </span>
                                   ) : typeof opt.creditMultiplier === "number" ? (
                                     <span
-                                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums ${
+                                      className={`rounded px-1.5 py-0.5 font-mono text-[11px] tabular-nums ${
                                         opt.creditMultiplier <= 0.2
                                           ? "bg-sky-500/12 text-sky-700 dark:text-sky-300"
                                           : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
@@ -1376,7 +1376,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                             <div className="min-w-0 flex-1">
                               <div className="flex flex-wrap items-center gap-1.5">
                                 <span
-                                  className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${
+                                  className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
                                     isPrimary
                                       ? "bg-brand-600 text-white dark:bg-brand-500"
                                       : "bg-zinc-200/80 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
@@ -1387,10 +1387,10 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                 <span className="truncate text-xs font-semibold text-zinc-900 dark:text-zinc-100">
                                   {acc.label}
                                 </span>
-                                <code className="text-[10px] text-zinc-400">{acc.uidMasked}</code>
+                                <code className="text-[11px] text-zinc-400">{acc.uidMasked}</code>
                               </div>
 
-                              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px]">
+                              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
                                 {acc.isActiveOnClient && (
                                   <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-800 dark:text-amber-300">
                                     桌面端挂载中
@@ -1479,7 +1479,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                   style={{ width: `${Math.min(100, Math.max(0, acc.quotaPercent))}%` }}
                                 />
                               </div>
-                              <span className="truncate font-mono text-[10px] tabular-nums text-zinc-500 dark:text-zinc-400">
+                              <span className="truncate font-mono text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
                                 {acc.quotaPercent}% · {acc.quotaText}
                               </span>
                             </div>
@@ -1502,7 +1502,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                         onClick={() =>
                                           clearMemberCooldown(activeAgentPool.id, acc.id)
                                         }
-                                        className="rounded-lg border border-emerald-500/40 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
+                                        className="rounded-lg border border-emerald-500/40 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
                                       >
                                         解除冷却
                                       </button>
@@ -1512,7 +1512,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                         onClick={() =>
                                           injectMemberCooldown(activeAgentPool.id, acc.id)
                                         }
-                                        className="rounded-lg border border-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                                        className="rounded-lg border border-zinc-200 px-1.5 py-0.5 text-[11px] text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                                       >
                                         临时冷却
                                       </button>
@@ -1529,7 +1529,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                         acc.accountId
                                       )
                                     }
-                                    className={`rounded-lg px-2 py-0.5 text-[10px] font-medium transition ${
+                                    className={`rounded-lg px-2 py-0.5 text-[11px] font-medium transition ${
                                       acc.enabled
                                         ? "bg-emerald-500/15 text-emerald-800 hover:bg-emerald-500/25 dark:text-emerald-300"
                                         : "bg-zinc-200 text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-800 dark:text-zinc-400"

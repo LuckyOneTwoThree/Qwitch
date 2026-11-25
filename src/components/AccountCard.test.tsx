@@ -196,4 +196,46 @@ describe("AccountCard", () => {
     expect(screen.queryByText("待关联")).toBeNull();
     expect(screen.queryByRole("button", { name: /关联本机/ })).toBeNull();
   });
+
+  it("今日快照显示相对时间且不标记过期", () => {
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          latestQuota: {
+            ...account.latestQuota!,
+            fetchedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+          },
+        }}
+      />
+    );
+
+    expect(screen.getByText("5 分钟前")).toBeTruthy();
+    expect(screen.queryByText("· 已过期")).toBeNull();
+  });
+
+  it("跨日快照显式标记「已过期」，避免昨日额度被误读为当前水位", () => {
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          latestQuota: {
+            ...account.latestQuota!,
+            // 前天快照：必然不属于今日 CST 自然日
+            fetchedAt: new Date(Date.now() - 48 * 60 * 60_000).toISOString(),
+          },
+        }}
+      />
+    );
+
+    expect(screen.getByText("· 已过期")).toBeTruthy();
+    expect(
+      screen.getByTitle(/该额度快照不是今天的同步结果/)
+    ).toBeTruthy();
+  });
+
+  it("从未查额的账号显示「尚未查额」而非具体时刻", () => {
+    render(<AccountCard account={{ ...account, latestQuota: undefined }} />);
+    expect(screen.getByText("尚未查额")).toBeTruthy();
+  });
 });

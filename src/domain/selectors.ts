@@ -6,6 +6,10 @@ import type {
   ToolId,
 } from "../types/qwitch";
 import { getVisibleTools } from "./toolRegistry";
+import { isSameCstDay, toCstDayKey } from "./time";
+
+// CST 日界计算已收敛到 domain/time.ts，此处转出以保持既有引用不变。
+export { isSameCstDay, toCstDayKey };
 
 export type AccountFilter = "all" | "active_client" | "claimable" | "attention";
 export type ClaimActionState =
@@ -13,23 +17,6 @@ export type ClaimActionState =
   | "verify_and_claim"
   | "all_claimed"
   | "no_eligible";
-
-const CST_OFFSET_MS = 8 * 60 * 60 * 1000;
-
-export function toCstDayKey(timestampMs: number): string {
-  const d = new Date(timestampMs + CST_OFFSET_MS);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-export function isSameCstDay(iso?: string): boolean {
-  if (!iso) return false;
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return false;
-  return toCstDayKey(ms) === toCstDayKey(Date.now());
-}
 
 export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
   const raw = acc.latestQuota?.claimStatus;

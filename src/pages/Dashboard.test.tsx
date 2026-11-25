@@ -215,3 +215,94 @@ describe("Dashboard navigation", () => {
     expect(computeVisibleToolCount(150, 100, [100, 100], 96, 6)).toBe(0);
   });
 });
+
+describe("Dashboard 导航可达性", () => {
+  it("从工具子页点击侧栏「账号资产」可回到全部账号视图（不再出现点击无响应的死路）", () => {
+    render(<Dashboard />);
+
+    const toolNav = within(screen.getByRole("navigation", { name: "账号视图导航" }));
+    const toolBtn = toolNav.getByRole("button", { name: /豆包工作/ });
+    fireEvent.click(toolBtn);
+    expect(toolBtn.getAttribute("aria-current")).toBe("page");
+
+    // 工具子页下侧栏「账号资产」同样高亮为当前分区，
+    // 此时点击必须回到该分区根作用域，否则用户无法从侧栏回到全部账号。
+    const mainNav = within(screen.getByRole("navigation", { name: "主功能导航" }));
+    const accountAssets = mainNav.getAllByRole("button")[0];
+    expect(accountAssets.textContent).toContain("账号资产");
+    fireEvent.click(accountAssets);
+
+    const allBtn = within(
+      screen.getByRole("navigation", { name: "账号视图导航" })
+    ).getAllByRole("button")[0];
+    expect(allBtn.textContent).toContain("全部账号");
+    expect(allBtn.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("从日志页点击侧栏「账号资产」同样回到全部账号视图", () => {
+    render(<Dashboard />);
+    fireEvent.click(navButton(/操作日志/));
+    fireEvent.click(navButton(/账号资产/));
+
+    const allBtn = within(
+      screen.getByRole("navigation", { name: "账号视图导航" })
+    ).getAllByRole("button")[0];
+    expect(allBtn.getAttribute("aria-current")).toBe("page");
+  });
+});
+
+describe("Dashboard 指标口径自洽", () => {
+  /** 取文本中的第一个数字（KPI 卡主指标） */
+  const firstNumber = (s: string) => s.match(/\d+/)?.[0];
+  /** 取文本中的最后一个数字（筛选芯片计数） */
+  const lastNumber = (s: string) => [...s.matchAll(/\d+/g)].pop()?.[0];
+
+  /** 定位筛选芯片：其第一个 span 文本即芯片标签 */
+  const chipByLabel = (label: string) =>
+    screen
+      .getAllByRole("button")
+      .find((b) => b.querySelector("span")?.textContent?.trim() === label)!;
+
+  it("四张 KPI 卡的主指标与其对应筛选芯片的计数完全一致", () => {
+    render(<Dashboard />);
+
+    const pairs: Array<[string, string]> = [
+      ["显示全部账号", "全部"],
+      ["仅显示本机客户端正在使用的账号", "使用中"],
+      ["仅显示今日待领取额度的账号", "待领"],
+      ["仅显示凭据过期、风险暂停或待授权的账号", "待完善"],
+    ];
+
+    for (const [title, chipLabel] of pairs) {
+      const card = screen.getByTitle(title);
+      const chip = chipByLabel(chipLabel);
+      expect(firstNumber(card.textContent ?? "")).toBe(lastNumber(chip.textContent ?? ""));
+    }
+  });
+
+  it("KPI 卡标签与筛选芯片标签一一对应，卡片数字即点击后可见的集合大小", () => {
+    render(<Dashboard />);
+
+    // 卡片标题即「点击后要看到的集合」的语义
+    expect(screen.getByTitle("仅显示今日待领取额度的账号")).toBeTruthy();
+    expect(screen.getByTitle("仅显示凭据过期、风险暂停或待授权的账号")).toBeTruthy();
+    // 旧标题（与筛选语义不符）不再出现
+    expect(screen.queryByText("凭据健康")).toBeNull();
+    expect(screen.queryByText("今日签到")).toBeNull();
+  });
+
+  it("KPI 卡主指标与徽章数字之间不得连写，避免「2」+「10」被读成「210」", () => {
+    render(<Dashboard />);
+    const card = screen.getByTitle("仅显示凭据过期、风险暂停或待授权的账号");
+    // 主指标后必须紧跟非数字字符，确保文本层不会出现歧义数字串
+    expect(card.textContent).toMatch(/^待完善\d+正常/);
+  });
+
+  it("KPI 卡采用可换行布局：窄容器下标签换行而非被截断成不可读片段", () => {
+    render(<Dashboard />);
+    const card = screen.getByTitle("仅显示今日待领取额度的账号");
+    // 值区（数字 + 徽章）为 shrink-0，标签区会被压扁；
+    // 卡片必须允许换行，否则窄容器下「今日待领」会变成「≯」这类碎片
+    expect(card.className).toContain("flex-wrap");
+  });
+});

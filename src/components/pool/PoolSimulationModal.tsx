@@ -214,7 +214,7 @@ export function PoolSimulationModal({
                   id="sim-pool-select"
                   value={poolId}
                   onChange={(e) => handlePoolChange(e.target.value)}
-                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-brand-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-brand-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                 >
                   {pools.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -269,7 +269,7 @@ export function PoolSimulationModal({
                       }`}
                     >
                       <span>{item.modelId}</span>
-                      <span className="rounded bg-zinc-100 px-1 py-0.5 font-sans text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                      <span className="rounded bg-zinc-100 px-1 py-0.5 font-sans text-[11px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                         {item.serving.healthy}/{item.serving.total}号 ({item.serving.tierSummary})
                       </span>
                     </button>
@@ -306,7 +306,7 @@ export function PoolSimulationModal({
               type="text"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-3 py-2 text-xs text-zinc-900 focus:border-brand-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-100"
+              className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 px-3 py-2 text-xs text-zinc-900 focus:border-brand-500 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-100"
             />
 
             <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-3">
@@ -403,7 +403,7 @@ export function PoolSimulationModal({
                           : "border-zinc-200 bg-white text-zinc-400 dark:border-zinc-800 dark:bg-zinc-900"
                       }`}
                     >
-                      <div className="font-mono text-[10px] opacity-75">STEP {idx + 1}</div>
+                      <div className="font-mono text-[11px] opacity-75">STEP {idx + 1}</div>
                       <div className="mt-0.5 leading-snug font-medium">{label}</div>
                     </div>
                   );

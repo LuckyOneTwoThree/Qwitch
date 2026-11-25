@@ -186,7 +186,7 @@ export function RoutingTraceView({
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索号池、命中账号或模型..."
               aria-label="搜索路由决策记录"
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 py-1.5 pr-7 pl-8 text-xs focus:border-brand-500 focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-zinc-800/70"
+              className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 py-1.5 pr-7 pl-8 text-xs focus:border-brand-500 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/70"
             />
             {search && (
               <button
@@ -228,7 +228,7 @@ export function RoutingTraceView({
                     }`}
                   >
                     <span>{item.label}</span>
-                    <span className="text-[10px] tabular-nums opacity-70">{item.count}</span>
+                    <span className="text-[11px] tabular-nums opacity-70">{item.count}</span>
                   </button>
                 );
               })}
@@ -388,7 +388,7 @@ export function RoutingTraceView({
                         key={idx}
                         className="flex items-start gap-2.5 rounded-xl border border-zinc-200/80 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900"
                       >
-                        <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-100 font-mono text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                        <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-100 font-mono text-[11px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                           {idx + 1}
                         </span>
                         <UpstreamMemberIcon toolId={att.toolId} size="xs" className="mt-0.5 shrink-0" />

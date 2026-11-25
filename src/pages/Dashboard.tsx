@@ -706,7 +706,10 @@ export function Dashboard({
                   type="button"
                   onClick={() => {
                     setHighlightAgentId(null);
-                    if (!isAccountSection) setNav("all");
+                    // 始终回到该分区的根作用域（全部账号）。
+                    // 旧实现在工具子页（isAccountSection 仍为 true）时不会切换，
+                    // 导致侧栏「账号资产」变成死路：点击无反应却仍显示为当前页。
+                    setNav("all");
                   }}
                   aria-current={isAccountSection ? "page" : undefined}
                   className={`nav-item ${isAccountSection ? "nav-item-active" : ""}`}
@@ -883,7 +886,7 @@ export function Dashboard({
                   disabled={updateInstalling}
                   title={updatePrimaryLabel}
                   aria-label={updatePrimaryLabel}
-                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60 dark:bg-indigo-500"
                 >
                   {updateInstalling ? (
                     <Loader2 className="h-2.5 w-2.5 animate-spin" aria-hidden="true" />
@@ -1161,7 +1164,7 @@ export function Dashboard({
                     >
                       <Layers className="h-3.5 w-3.5 shrink-0" />
                       <span>全部账号</span>
-                      <span className="rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums">
+                      <span className="rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums">
                         {accounts.length}
                       </span>
                     </div>
@@ -1173,7 +1176,7 @@ export function Dashboard({
                       >
                         <ToolBrandIcon toolId={tool.id} size="xs" decorative />
                         <span>{tool.name}</span>
-                        <span className="rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums">
+                        <span className="rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums">
                           {accountCountByTool.get(tool.id) ?? 0}
                         </span>
                       </div>
@@ -1200,7 +1203,7 @@ export function Dashboard({
                       <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       <span>全部账号</span>
                       <span
-                        className={`rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums ${
+                        className={`rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums ${
                           nav === "all"
                             ? "bg-white/20 text-white dark:bg-zinc-950/15 dark:text-zinc-950"
                             : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
@@ -1239,7 +1242,7 @@ export function Dashboard({
                             />
                           )}
                           <span
-                            className={`rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums ${
+                            className={`rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums ${
                               active
                                 ? "bg-white/20 text-white dark:bg-zinc-950/15 dark:text-zinc-950"
                                 : count > 0
@@ -1273,7 +1276,7 @@ export function Dashboard({
                       <span>{toolNavExpanded ? "收起" : "展开"}</span>
                       {!toolNavExpanded && (
                         <span
-                          className={`rounded-md px-1.5 py-0.5 text-[10px] leading-none font-semibold tabular-nums ${
+                          className={`rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums ${
                             activeOverflowTool
                               ? "bg-white/20 text-white dark:bg-zinc-950/15 dark:text-zinc-950"
                               : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
@@ -1301,7 +1304,8 @@ export function Dashboard({
                     type="button"
                     onClick={() => setStatusFilter("all")}
                     aria-pressed={statusFilter === "all"}
-                    className={`surface-card surface-interactive flex min-w-0 items-center justify-between gap-2 rounded-xl px-3 py-2 text-left ${
+                    title="显示全部账号"
+                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
                       statusFilter === "all" ? "border-brand-500/60 ring-1 ring-brand-500/20" : ""
                     }`}
                   >
@@ -1317,7 +1321,7 @@ export function Dashboard({
                       <span className="text-sm leading-none font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-100">
                         {scopedStats.total}
                       </span>
-                      <span className="text-[10px] text-zinc-500 dark:text-zinc-400">个</span>
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">个</span>
                     </div>
                   </button>
 
@@ -1327,7 +1331,8 @@ export function Dashboard({
                       setStatusFilter((prev) => (prev === "active_client" ? "all" : "active_client"))
                     }
                     aria-pressed={statusFilter === "active_client"}
-                    className={`surface-card surface-interactive flex min-w-0 items-center justify-between gap-2 rounded-xl px-3 py-2 text-left ${
+                    title="仅显示本机客户端正在使用的账号"
+                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
                       statusFilter === "active_client"
                         ? "border-emerald-500/60 ring-1 ring-emerald-500/20"
                         : ""
@@ -1344,7 +1349,7 @@ export function Dashboard({
                     <div className="flex shrink-0 items-center gap-1.5">
                       <span className="text-xs font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
                         {scopedStats.activeClientsCount}
-                        <span className="text-[10px] font-normal text-zinc-500 dark:text-zinc-400">
+                        <span className="text-[11px] font-normal text-zinc-500 dark:text-zinc-400">
                           /{scopedStats.scopeToolCapacity}
                         </span>
                       </span>
@@ -1370,7 +1375,8 @@ export function Dashboard({
                       setStatusFilter((prev) => (prev === "claimable" ? "all" : "claimable"))
                     }
                     aria-pressed={statusFilter === "claimable"}
-                    className={`surface-card surface-interactive flex min-w-0 items-center justify-between gap-2 rounded-xl px-3 py-2 text-left ${
+                    title="仅显示今日待领取额度的账号"
+                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
                       statusFilter === "claimable"
                         ? "border-sky-500/60 ring-1 ring-sky-500/20"
                         : ""
@@ -1381,17 +1387,12 @@ export function Dashboard({
                         <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
                       </span>
                       <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                        今日签到
+                        今日待领
                       </span>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
                       <span className="text-xs font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                        {scopedStats.claimedCount}
-                        {scopedStats.eligibleClaimTotal > 0 && (
-                          <span className="text-[10px] font-normal text-zinc-500 dark:text-zinc-400">
-                            /{scopedStats.eligibleClaimTotal}
-                          </span>
-                        )}
+                        {scopedStats.claimableCount}
                       </span>
                       <span
                         className={`badge shrink-0 whitespace-nowrap ${
@@ -1407,7 +1408,9 @@ export function Dashboard({
                         {scopedStats.unclaimedAuthMissingCount > 0 &&
                         scopedStats.eligibleClaimTotal === 0
                           ? "授权后可签"
-                          : scopedStats.claimBadgeText}
+                          : scopedStats.eligibleClaimTotal > 0
+                            ? `已签 ${scopedStats.claimedCount}/${scopedStats.eligibleClaimTotal}`
+                            : "无可签"}
                       </span>
                     </div>
                   </button>
@@ -1418,7 +1421,8 @@ export function Dashboard({
                       setStatusFilter((prev) => (prev === "attention" ? "all" : "attention"))
                     }
                     aria-pressed={statusFilter === "attention"}
-                    className={`surface-card surface-interactive flex min-w-0 items-center justify-between gap-2 rounded-xl px-3 py-2 text-left ${
+                    title="仅显示凭据过期、风险暂停或待授权的账号"
+                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
                       statusFilter === "attention"
                         ? "border-amber-500/60 ring-1 ring-amber-500/20"
                         : ""
@@ -1435,12 +1439,12 @@ export function Dashboard({
                         <Activity className="h-3.5 w-3.5" aria-hidden="true" />
                       </span>
                       <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                        凭据健康
+                        待完善
                       </span>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
                       <span className="text-xs font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                        {scopedStats.healthyCount}
+                        {scopedStats.attentionCount}
                       </span>
                       <span
                         className={`badge shrink-0 whitespace-nowrap ${
@@ -1450,10 +1454,10 @@ export function Dashboard({
                         }`}
                       >
                         {scopedStats.attentionCount > 0
-                          ? `${scopedStats.attentionCount} 待修`
+                          ? `正常 ${scopedStats.healthyCount}`
                           : scopedStats.disabledCount > 0
-                            ? `${scopedStats.disabledCount} 停用`
-                            : "完好"}
+                            ? `停用 ${scopedStats.disabledCount}`
+                            : "全部正常"}
                       </span>
                     </div>
                   </button>
@@ -1472,7 +1476,7 @@ export function Dashboard({
                         onChange={(e) => setSearchQuery(e.target.value)}
                         placeholder="搜索昵称、UID、手机号或套餐..."
                         aria-label="搜索账号"
-                        className="w-full rounded-lg border border-zinc-200 bg-white py-1 pr-7 pl-8 text-xs text-zinc-900 transition focus:border-brand-400 focus:outline-none dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-brand-500"
+                        className="w-full rounded-lg border border-zinc-200 bg-white py-1 pr-7 pl-8 text-xs text-zinc-900 transition focus:border-brand-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-brand-500"
                       />
                       {searchQuery && (
                         <button
@@ -1554,10 +1558,7 @@ export function Dashboard({
               </div>
 
               <div className="px-5 py-3.5">
-                <div className="mb-2.5 space-y-2.5">
-                  <UpdateBanner onOpenSettings={() => setNav("settings")} />
-                  <BatchClaimBanner />
-                </div>
+                <UpdateBanner onOpenSettings={() => setNav("settings")} />
 
                 {isInitializing && scopeAccounts.length === 0 ? (
                 <div

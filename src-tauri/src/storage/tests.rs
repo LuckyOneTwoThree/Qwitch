@@ -1672,7 +1672,7 @@ fn backfill_empty_tool_members_repairs_stale_and_respects_clear() {
         let p = pools.iter().find(|p| p.id == "pool-agent-dsh").expect("pool");
         crate::domain::compute_agent_exposed_models(
             crate::domain::TargetAgentId::Dsh,
-            &[p.id.clone()],
+            std::slice::from_ref(&p.id),
             None,
             &pools,
             0,

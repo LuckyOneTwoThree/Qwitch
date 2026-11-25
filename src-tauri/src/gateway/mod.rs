@@ -1369,10 +1369,59 @@ fn is_workbuddy_channel_blocked(status: u16, body: &str) -> bool {
 
 /// 解析账号的上游 base_url / token / 额外请求头（统一校验 base_url）。
 #[allow(clippy::type_complexity)]
+const MAX_UPSTREAM_BODY: u64 = 64 * 1024 * 1024;
+
+fn validate_custom_base_url(
+    label: &str,
+    custom_base: Option<String>,
+    default_base: String,
+) -> Result<String, String> {
+    match custom_base {
+        Some(b) => {
+            let is_loopback_http = b.starts_with("http://127.0.0.1")
+                || b.starts_with("http://localhost")
+                || b.starts_with("http://[::1]");
+            if !(b.starts_with("https://") || is_loopback_http) {
+                return Err(format!(
+                    "账号 {} 的 base_url 非法（仅支持 https 或本机 http）",
+                    label
+                ));
+            }
+            Ok(b)
+        }
+        None => Ok(default_base),
+    }
+}
+
+async fn read_bounded_response_text(resp: reqwest::Response, label: &str) -> Result<String, String> {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > MAX_UPSTREAM_BODY)
+    {
+        return Err(format!(
+            "{label} 上游响应体过大（>{} MB）已拒绝",
+            MAX_UPSTREAM_BODY / (1024 * 1024)
+        ));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取 {label} 响应失败: {}", e.without_url()))?;
+    if bytes.len() as u64 > MAX_UPSTREAM_BODY {
+        return Err(format!(
+            "{label} 上游响应体过大（>{} MB）已拒绝",
+            MAX_UPSTREAM_BODY / (1024 * 1024)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+type UpstreamAuthResult = (String, String, Vec<(&'static str, String)>);
+
 fn resolve_upstream_auth(
     member: &PoolMember,
     cred: &CredentialEnvelope,
-) -> Result<(String, String, Vec<(&'static str, String)>), String> {
+) -> Result<UpstreamAuthResult, String> {
     let (token_opt, custom_base, extra_headers) = extract_bearer_and_base_url(cred);
     let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
     let default_base = match member.tool_id.as_str() {
@@ -1384,21 +1433,7 @@ fn resolve_upstream_auth(
         "lobsterai" => "https://lobsterai-server.youdao.com/api/proxy".to_string(),
         _ => "https://api.openai.com".to_string(),
     };
-    let base_url = match custom_base {
-        Some(b) => {
-            let is_loopback_http = b.starts_with("http://127.0.0.1")
-                || b.starts_with("http://localhost")
-                || b.starts_with("http://[::1]");
-            if !(b.starts_with("https://") || is_loopback_http) {
-                return Err(format!(
-                    "账号 {} 的 base_url 非法（仅支持 https 或本机 http）",
-                    member.label
-                ));
-            }
-            b
-        }
-        None => default_base,
-    };
+    let base_url = validate_custom_base_url(&member.label, custom_base, default_base)?;
     Ok((base_url, token, extra_headers))
 }
 
@@ -1454,8 +1489,6 @@ async fn send_upstream_stream(
         req = req
             .header("x-api-key", &token)
             .header("anthropic-version", "2023-06-01");
-    } else if member.tool_id == "trae_cn" {
-        req = req.header("Authorization", format!("Cloud-IDE-JWT {token}"));
     } else {
         req = req.bearer_auth(&token);
     }
@@ -1498,7 +1531,6 @@ async fn send_codearts_stream(
     let mut req = client
         .post(&url)
         .header("Accept", "text/event-stream")
-        .header("Content-Type", "application/json")
         // 每账号一个稳定会话 id，避免同一账号被码道当成 3 个不同会话
         .header("x-ot-session-id", member.account_id.clone())
         .body(body_bytes);
@@ -1534,7 +1566,11 @@ async fn send_trae_stream(
 
     let (token_opt, custom_base, _extra) = extract_bearer_and_base_url(cred);
     let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
-    let host = custom_base.unwrap_or_else(|| "https://trae-api-cn.mchost.guru".to_string());
+    let host = validate_custom_base_url(
+        &member.label,
+        custom_base,
+        "https://trae-api-cn.mchost.guru".to_string(),
+    )?;
     let host = host.trim_end_matches('/').to_string();
     let identity = TraeAdapter::chat_request_identity(cred, &token);
 
@@ -1583,7 +1619,7 @@ async fn send_trae_stream(
     let app_version = if identity.app_version.trim().is_empty() {
         "0.1.69".to_string()
     } else {
-        "0.1.69".to_string()
+        identity.app_version.clone()
     };
     let device_id = identity.device_id.clone();
     let uid = identity.uid.clone();
@@ -1619,14 +1655,10 @@ async fn send_trae_stream(
 
     let resp = req.send().await.map_err(|e| format!("Trae 上游请求失败: {}", e.without_url()))?;
     let status = resp.status();
-    // Trae 无论成败基本都 200，读到全量文本再判定；SSE 体量小，一次读完
-    let raw = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取 Trae 响应失败: {}", e.without_url()))?;
+    let raw = read_bounded_response_text(resp, "Trae").await?;
 
-    // 若首个有效事件是 event:error，则合成一个非 2xx 响应喂给上层的失败分支
-    if let Some((code, msg)) = trae_first_error(&raw) {
+    // 若 HTTP 非 2xx 或首个有效事件是 event:error，则合成一个非 2xx 响应喂给上层的失败分支
+    if let Some((code, msg)) = trae_first_error(status.as_u16(), &raw) {
         let http_status = match code.as_deref() {
             Some("429") | Some("4290") => reqwest::StatusCode::TOO_MANY_REQUESTS,
             Some("401") | Some("403") => reqwest::StatusCode::UNAUTHORIZED,
@@ -1646,7 +1678,7 @@ async fn send_trae_stream(
     }
 
     // 正常：把 Trae 原生 SSE 转成 OpenAI chat.completion.chunk SSE 字节
-    let openai_sse = trae_sse_to_openai(&raw, &ir_req.model, &wire_model);
+    let openai_sse = trae_sse_to_openai(&raw, &ir_req.model, wire_model);
     Ok(synthetic_response(
         reqwest::StatusCode::OK,
         "text/event-stream; charset=utf-8",
@@ -1659,6 +1691,7 @@ async fn send_trae_stream(
 /// - 请求体是 `encodeBody(JSON)`（打乱 base64 + 首尾三分之一互换）；
 /// - 鉴权 `Authorization: Bearer COSY.{payload}.{sig}`，`Cosy-Key` 包裹 AES 密钥；
 /// - 响应 SSE 每帧 `data: {statusCodeValue, body:"<OpenAI chunk JSON 字符串>"}`。
+///
 /// 这里读全量后：`statusCodeValue != 200` 或帧内 error 即合成非 2xx 交给上层失败分支；
 /// 正常则把内层 chunk 还原成 OpenAI SSE 再合成 200 响应。
 async fn send_qoder_stream(
@@ -1672,7 +1705,11 @@ async fn send_qoder_stream(
 
     let (token_opt, custom_base, _extra) = extract_bearer_and_base_url(cred);
     let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
-    let api = custom_base.unwrap_or_else(|| "https://gateway.qoder.com.cn".to_string());
+    let api = validate_custom_base_url(
+        &member.label,
+        custom_base,
+        "https://gateway.qoder.com.cn".to_string(),
+    )?;
     let api = api.trim_end_matches('/').to_string();
 
     // machine_id / 身份信息从凭据里取
@@ -1705,10 +1742,7 @@ async fn send_qoder_stream(
         Some(model_source),
     )?;
 
-    let mut req = client
-        .post(&url)
-        .header("Accept", "text/event-stream")
-        .body(wire_body);
+    let mut req = client.post(&url).body(wire_body);
     for (k, v) in headers {
         req = req.header(k, v);
     }
@@ -1718,10 +1752,7 @@ async fn send_qoder_stream(
         .await
         .map_err(|e| format!("Qoder 上游请求失败: {}", e.without_url()))?;
     let status = resp.status();
-    let raw = resp
-        .text()
-        .await
-        .map_err(|e| format!("读取 Qoder 响应失败: {}", e.without_url()))?;
+    let raw = read_bounded_response_text(resp, "Qoder").await?;
 
     // 先判定是否整体失败（HTTP 非 2xx，或 SSE 帧里 statusCodeValue != 200 / 帧内 error）
     if let Some((code, msg)) = qoder_first_error(status.as_u16(), &raw) {
@@ -1814,7 +1845,30 @@ fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)>
                     .or_else(|| chunk.get("message").and_then(Value::as_str))
                     .unwrap_or("Qoder 返回错误")
                     .to_string();
-                let code = chunk.get("code").map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+                let code = chunk
+                    .get("code")
+                    .or_else(|| chunk.pointer("/error/code"))
+                    .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+                return Some((code, msg));
+            }
+        }
+    }
+    // 非 SSE 纯 JSON 错误响应（如网关返回 HTTP 200 但 body 为 {"code":105,"message":"..."} 或 {"error":{...}}）
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+            let has_choices = v.get("choices").is_some_and(Value::is_array);
+            if !has_choices && (v.get("error").is_some() || (v.get("code").is_some() && v.get("message").is_some())) {
+                let msg = v
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .or_else(|| v.get("message").and_then(Value::as_str))
+                    .unwrap_or("Qoder 返回错误")
+                    .to_string();
+                let code = v
+                    .get("code")
+                    .or_else(|| v.pointer("/error/code"))
+                    .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
                 return Some((code, msg));
             }
         }
@@ -1881,7 +1935,10 @@ fn qoder_sse_to_openai(raw: &str, model: &str) -> String {
                 out_delta.insert("reasoning_content".into(), json!(r));
             }
         }
-        if let Some(tc) = delta.get("tool_calls") {
+        if let Some(tc) = delta
+            .get("tool_calls")
+            .filter(|v| v.as_array().is_some_and(|arr| !arr.is_empty()))
+        {
             out_delta.insert("tool_calls".into(), tc.clone());
         }
         if !out_delta.is_empty() {
@@ -1924,9 +1981,35 @@ fn synthetic_response(status: reqwest::StatusCode, content_type: &str, body: Vec
     reqwest::Response::from(resp)
 }
 
-/// 从 Trae 原生 SSE 文本里提取首个错误事件的 (code, message)。
-fn trae_first_error(raw: &str) -> Option<(Option<String>, String)> {
-    for block in raw.split("\n\n") {
+/// 从 Trae 原生 SSE 文本（或非 2xx / 纯 JSON 错误响应）里提取首个错误的 (code, message)。
+fn trae_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)> {
+    let normalized = raw.replace("\r\n", "\n");
+    if !(200..300).contains(&status) {
+        if let Ok(v) = serde_json::from_str::<Value>(normalized.trim()) {
+            let code = v
+                .get("code")
+                .or_else(|| v.pointer("/error/code"))
+                .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()))
+                .or_else(|| Some(status.to_string()));
+            let msg = v
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .or_else(|| v.get("message").and_then(Value::as_str))
+                .unwrap_or_else(|| normalized.trim())
+                .chars()
+                .take(512)
+                .collect();
+            return Some((code, msg));
+        }
+        let msg = normalized.trim();
+        let msg = if msg.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            msg.chars().take(512).collect()
+        };
+        return Some((Some(status.to_string()), msg));
+    }
+    for block in normalized.split("\n\n") {
         let mut event = "";
         let mut data_line = "";
         for line in block.lines() {
@@ -1956,6 +2039,29 @@ fn trae_first_error(raw: &str) -> Option<(Option<String>, String)> {
             return Some((code, msg));
         }
     }
+    // 非 SSE 纯 JSON 错误响应
+    let trimmed = normalized.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+            if v.get("error").is_some()
+                || (v.get("code").is_some()
+                    && v.get("message").is_some()
+                    && v.get("content").is_none())
+            {
+                let code = v
+                    .get("code")
+                    .or_else(|| v.pointer("/error/code"))
+                    .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+                let msg = v
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .or_else(|| v.get("message").and_then(Value::as_str))
+                    .unwrap_or("Trae 返回错误")
+                    .to_string();
+                return Some((code, msg));
+            }
+        }
+    }
     None
 }
 
@@ -1963,6 +2069,7 @@ fn trae_first_error(raw: &str) -> Option<(Option<String>, String)> {
 /// 逐事件读取：文本字段合并为增量 delta，token_usage→usage 收尾，
 /// done/finish_reason→结束并发送 [DONE]。
 fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n");
     let id = format!("chatcmpl-trae-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let created = chrono::Utc::now().timestamp();
     let mut out = String::new();
@@ -1986,7 +2093,7 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
         out.push_str("\n\n");
     };
 
-    for block in raw.split("\n\n") {
+    for block in normalized.split("\n\n") {
         let mut event = String::new();
         let mut data_line = String::new();
         for line in block.lines() {
@@ -2013,7 +2120,7 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
                 }
             }
             if event == "done" || event == "response_done" || event == "stream_done" {
-                if let Some(u) = v.get("usage").and_then(|u| tokens_of_trae(u)) {
+                if let Some(u) = v.get("usage").and_then(tokens_of_trae) {
                     usage_obj = Some(u);
                 }
             }
@@ -2040,7 +2147,7 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
             .or_else(|| v.get("delta").and_then(Value::as_str))
             .unwrap_or("")
             .to_string();
-        if wrote_any == false {
+        if !wrote_any {
             push_chunk(&mut out, json!({ "role": "assistant", "content": "" }), None, &usage_obj);
             wrote_any = true;
         }
@@ -2061,12 +2168,6 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
                 }));
             }
         }
-        // 直接挂在事件上的 usage（token_usage 事件）
-        if event == "token_usage" {
-            if let Some(u) = tokens_of_trae(&v) {
-                usage_obj = Some(u);
-            }
-        }
         if let Some(fr) = v.get("finish_reason").and_then(Value::as_str) {
             finish_reason = match fr.to_lowercase().as_str() {
                 "length" | "max_tokens" | "max_output_tokens" | "max_length" => "length".to_string(),
@@ -2074,13 +2175,8 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
                 _ => "stop".to_string(),
             };
         }
-        if event == "done" || event == "response_done" || event == "stream_done" {
-            if let Some(u) = v.get("usage").and_then(|u| tokens_of_trae(u)) {
-                usage_obj = Some(u);
-            }
-        }
     }
-    if wrote_any == false {
+    if !wrote_any {
         push_chunk(&mut out, json!({ "role": "assistant", "content": "" }), None, &usage_obj);
     }
     // 结束帧
@@ -2907,6 +3003,18 @@ async fn call_upstream_member(
     ir_req: &IrRequest,
     upstream_model: &str,
 ) -> Result<(u16, String), String> {
+    // 码道 / Trae CN / Qoder CN 统一走各自专用协议通道（返回标准 OpenAI SSE 或 JSON 错误），
+    // 非流式调用方由 parse_upstream_response_body 自动聚合 SSE 为完整 IrResponse。
+    if matches!(
+        member.tool_id.as_str(),
+        "codearts" | "trae_cn" | "qoder_cn"
+    ) {
+        let resp = send_upstream_stream(member, cred, ir_req, upstream_model).await?;
+        let code = resp.status().as_u16();
+        let text = read_bounded_response_text(resp, &member.tool_id).await?;
+        return Ok((code, text));
+    }
+
     let client = long_running_http_client();
     let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
 
@@ -3924,7 +4032,51 @@ async fn handle_http_connection(
             None
         };
         if let Some(kind) = stream_kind {
-            match send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model).await {
+            let mut stream_res =
+                send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model).await;
+            if let Ok(ref resp) = stream_res {
+                if resp.status().as_u16() == 401
+                    && pool.auto_refresh_on_401
+                    && cand.tool_id != "custom_api_key"
+                {
+                    if let Some(adapter) = adapters.get(&cand.tool_id) {
+                        let lock = runtime.refresh_lock_for(&cand.account_id);
+                        let _guard = lock.lock().await;
+                        if let Ok((_, fresh)) =
+                            db.get_account_credential(&master_key, &cand.account_id)
+                        {
+                            cred = fresh;
+                        }
+                        if let Ok(Some(refreshed)) = adapter.force_refresh_credential(&cred).await
+                        {
+                            let _ = db.bind_account_credential(
+                                &master_key,
+                                &cand.account_id,
+                                None,
+                                &refreshed,
+                            );
+                            cred = refreshed;
+                            attempts.push(RoutingAttempt {
+                                account_label: cand.label.clone(),
+                                tool_id: cand.tool_id.clone(),
+                                model: plan.effective_model.clone(),
+                                tier: Some(cand.tier),
+                                outcome: RoutingAttemptOutcome::Refreshed401,
+                                latency_ms: t_hop.elapsed().as_millis() as u64,
+                                detail: "401 单飞强制刷新凭据并回写加密库".into(),
+                            });
+                            stream_res = send_upstream_stream(
+                                cand,
+                                &cred,
+                                &ir_req,
+                                &plan.effective_model,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            match stream_res {
                 Ok(resp) if resp.status().is_success() => {
                     let detail = match kind {
                         StreamKind::Passthrough => "网关实时流式透传成功（首字节后锁定上游）",
@@ -4036,7 +4188,7 @@ async fn handle_http_connection(
                             latency_ms: t_hop.elapsed().as_millis() as u64,
                             detail: format!("凭据失效(HTTP {code})：{reason}"),
                         });
-                        break;
+                        continue;
                     } else {
                         attempts.push(RoutingAttempt {
                             account_label: cand.label.clone(),
@@ -4136,7 +4288,7 @@ async fn handle_http_connection(
                 });
             }
             Ok((code, err_body)) if is_auth_expired_response(code, &err_body) => {
-                // 永久性鉴权失败（401 / 华为云 APIG.0301）：标记账号过期并短路。
+                // 永久性鉴权失败（401 / 华为云 APIG.0301）：标记当前账号过期后继续 Failover 下一健康备号。
                 let _ = db.update_account_status(
                     &cand.account_id,
                     crate::domain::AccountStatus::Expired,
@@ -4152,7 +4304,7 @@ async fn handle_http_connection(
                     latency_ms: t_hop.elapsed().as_millis() as u64,
                     detail: format!("凭据失效(HTTP {code})：{reason}"),
                 });
-                break;
+                continue;
             }
             Ok((code, err_body)) => {
                 attempts.push(RoutingAttempt {
@@ -4160,7 +4312,7 @@ async fn handle_http_connection(
                     tool_id: cand.tool_id.clone(),
                     model: plan.effective_model.clone(),
                     tier: Some(cand.tier),
-                    outcome: RoutingAttemptOutcome::Cooldown429,
+                    outcome: RoutingAttemptOutcome::HttpError,
                     latency_ms: t_hop.elapsed().as_millis() as u64,
                     detail: format!(
                         "HTTP {code}: {}",
@@ -4174,7 +4326,7 @@ async fn handle_http_connection(
                     tool_id: cand.tool_id.clone(),
                     model: plan.effective_model.clone(),
                     tier: Some(cand.tier),
-                    outcome: RoutingAttemptOutcome::Cooldown429,
+                    outcome: RoutingAttemptOutcome::HttpError,
                     latency_ms: t_hop.elapsed().as_millis() as u64,
                     detail: e,
                 });
@@ -4216,7 +4368,7 @@ async fn handle_http_connection(
             let first_label = &auth_expired_hits[0].0;
             let first_reason = &auth_expired_hits[0].1;
             let payload = serde_json::json!({
-                "error": "凭据失效：码道等上游账号的 AK/SK 已过期或不存在，需重新登录/导入",
+                "error": "凭据失效：上游账号凭据已过期或不存在，且无可用备号接管，需重新登录/导入",
                 "error_type": "auth_expired",
                 "account": first_label,
                 "reason": first_reason,
@@ -4343,12 +4495,12 @@ mod tests {
     #[test]
     fn trae_first_error_detects_error_event() {
         let raw = "event: error\ndata: {\"code\":4001,\"message\":\"param is invalid\"}\n\n";
-        let (code, msg) = trae_first_error(raw).expect("应识别错误事件");
+        let (code, msg) = trae_first_error(200, raw).expect("应识别错误事件");
         assert_eq!(code.as_deref(), Some("4001"));
         assert!(msg.contains("param is invalid"));
         // 正常输出不算错误
         let ok = "event: output\ndata: {\"response\":\"hi\"}\n\nevent: done\ndata: {}\n\n";
-        assert!(trae_first_error(ok).is_none());
+        assert!(trae_first_error(200, ok).is_none());
     }
 
     #[test]
@@ -4369,7 +4521,7 @@ mod tests {
         assert!(sse.contains("世界"));
         assert!(sse.contains("\"finish_reason\":\"stop\""));
         assert!(sse.contains("\"total_tokens\":13"));
-        assert!(sse.contains("\"tool_calls\":null") == false);
+        assert!(!sse.contains("\"tool_calls\":null"));
         assert!(sse.trim_end().ends_with("data: [DONE]"));
     }
 

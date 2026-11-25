@@ -62,7 +62,7 @@ fn segment_encode(bytes: &[u8]) -> String {
     if nb > 0 {
         s.push(ALPHABET[((acc << (6 - nb)) & 63) as usize] as char);
     }
-    while s.len() % 4 != 0 {
+    while !s.len().is_multiple_of(4) {
         s.push('$');
     }
     s
@@ -113,6 +113,19 @@ pub fn decode_body(wire: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+static CACHED_RSA_PUBKEY: std::sync::OnceLock<Result<RsaPublicKey, String>> =
+    std::sync::OnceLock::new();
+
+fn qoder_rsa_pubkey() -> Result<&'static RsaPublicKey, String> {
+    CACHED_RSA_PUBKEY
+        .get_or_init(|| {
+            RsaPublicKey::from_public_key_pem(QODER_RSA_PUBLIC_KEY)
+                .map_err(|e| format!("解析 Qoder RSA 公钥失败: {e}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 /// 账号 blob：AES-128-CBC（key=iv=16 字节随机）加密账号 JSON，AES 密钥用 RSA 公钥包裹。
 /// 返回 `(info_base64, wrapped_key_base64)`。
 fn user_blob(uid: &str, name: &str, email: &str, access: &str) -> Result<(String, String), String> {
@@ -136,8 +149,7 @@ fn user_blob(uid: &str, name: &str, email: &str, access: &str) -> Result<(String
     let ciphertext = cipher.encrypt_padded_vec_mut::<Pkcs7>(raw.as_bytes());
     let info = BASE64.encode(ciphertext);
 
-    let pubkey = RsaPublicKey::from_public_key_pem(QODER_RSA_PUBLIC_KEY)
-        .map_err(|e| format!("解析 Qoder RSA 公钥失败: {e}"))?;
+    let pubkey = qoder_rsa_pubkey()?;
     let mut rng = rand::thread_rng();
     let wrapped = pubkey
         .encrypt(&mut rng, Pkcs1v15Encrypt, &key)
@@ -172,7 +184,7 @@ pub fn cosy_headers(
 
     // path：取 url 的 pathname，去掉开头 /algo
     let path = {
-        let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
+        let after_scheme = url.split_once("://").map(|x| x.1).unwrap_or(url);
         let path = match after_scheme.find('/') {
             Some(i) => &after_scheme[i..],
             None => "/",
@@ -213,9 +225,12 @@ pub fn cosy_headers(
     ];
 
     if is_chat {
-        // 对话头：去掉 ClientIp / MachineToken / MachineType，改带 hostname，并附模型键
+        // 对话头：去掉 ClientIp / MachineToken / MachineType / 默认 Accept，改带 hostname，并附模型键
         headers.retain(|(k, _)| {
-            k != "Cosy-ClientIp" && k != "Cosy-MachineToken" && k != "Cosy-MachineType"
+            k != "Accept"
+                && k != "Cosy-ClientIp"
+                && k != "Cosy-MachineToken"
+                && k != "Cosy-MachineType"
         });
         headers.push(("Accept".into(), "text/event-stream".into()));
         headers.push(("Cache-Control".into(), "no-cache".into()));
@@ -233,11 +248,7 @@ pub fn cosy_headers(
 }
 
 fn machine_os() -> String {
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        other => other,
-    };
+    let arch = std::env::consts::ARCH;
     let platform = match std::env::consts::OS {
         "windows" => "win32",
         "macos" => "darwin",
@@ -280,10 +291,12 @@ fn short_hash(v: &str) -> String {
 }
 
 fn hostname_string() -> Option<String> {
-    // 优先环境变量（跨平台稳定），回退 /etc/hostname；取不到则不带头
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.trim().is_empty() {
-            return Some(h);
+    // 优先环境变量（macOS/Linux HOSTNAME、Windows COMPUTERNAME），回退 /etc/hostname；取不到则不带头
+    for key in ["HOSTNAME", "COMPUTERNAME"] {
+        if let Ok(h) = std::env::var(key) {
+            if !h.trim().is_empty() {
+                return Some(h);
+            }
         }
     }
     if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
@@ -340,16 +353,26 @@ pub fn build_qoder_messages(
             IrRole::System => {}
             IrRole::User => {
                 let mut blocks: Vec<Value> = Vec::new();
+                let mut tool_results: Vec<(String, String)> = Vec::new();
                 for p in &m.parts {
                     match p {
                         IrPart::Text(t) if !t.is_empty() => {
                             blocks.push(json!({ "type": "text", "text": t }))
                         }
-                        IrPart::ToolResult { content, .. } if !content.is_empty() => {
-                            blocks.push(json!({ "type": "text", "text": content }))
+                        IrPart::ToolResult {
+                            call_id, content, ..
+                        } => {
+                            tool_results.push((call_id.clone(), content.clone()));
                         }
                         _ => {}
                     }
+                }
+                for (call_id, content) in tool_results {
+                    out.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": content
+                    }));
                 }
                 if !blocks.is_empty() {
                     out.push(json!({ "role": "user", "content": blocks }));
@@ -480,14 +503,31 @@ pub fn build_qoder_body(
             .tools
             .iter()
             .filter_map(|t| {
-                let f = t.get("function")?;
-                let name = f.get("name")?.as_str()?;
+                // 1) OpenAI Chat: { type: "function", function: { name, description, parameters } }
+                if let Some(f) = t.get("function") {
+                    let name = f.get("name")?.as_str()?;
+                    return Some(json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": f.get("description").and_then(Value::as_str).unwrap_or(""),
+                            "parameters": f.get("parameters").cloned().unwrap_or(json!({"type":"object","properties":{}})),
+                        }
+                    }));
+                }
+                // 2) Anthropic: { name, description, input_schema } 或 OpenAI Responses: { type: "function", name, description, parameters }
+                let name = t.get("name")?.as_str()?;
+                let params = t
+                    .get("input_schema")
+                    .or_else(|| t.get("parameters"))
+                    .cloned()
+                    .unwrap_or(json!({"type":"object","properties":{}}));
                 Some(json!({
                     "type": "function",
                     "function": {
                         "name": name,
-                        "description": f.get("description").and_then(Value::as_str).unwrap_or(""),
-                        "parameters": f.get("parameters").cloned().unwrap_or(json!({"type":"object","properties":{}})),
+                        "description": t.get("description").and_then(Value::as_str).unwrap_or(""),
+                        "parameters": params,
                     }
                 }))
             })

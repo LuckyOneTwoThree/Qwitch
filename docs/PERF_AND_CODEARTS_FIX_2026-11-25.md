@@ -181,3 +181,46 @@ npx tsc --noEmit / npm run lint           ✅
 npm test                                  ✅ 185 passed / 30 files（+7）
 npm run build                             ✅
 ```
+
+---
+
+## 九、同一码道账号出现两条：OAuth 导入没有稳定身份
+
+### 9.1 现象与证据
+
+用户先「内置授权导入」再「本机导入」同一个码道账号，账号列表出现两条。操作日志（脱敏后）直接暴露了两种 uid：
+
+```
+14:31:36 通过内置授权导入  code****81
+14:31:56 从本机导入        c02b****f7
+```
+
+- 本机导入：`uid = session.userId` → `c02b6539a92f4027bc7b95945aba38f7`（与客户端 userInfo.id 一致）；
+- 内置授权：STS 响应里没有 `principal_id` / `user_id` / `userId`，于是退化到
+  `hash_fallback_uid("codearts", access_key)` → `codearts_<sha256前12位>`（掩码后 `code****81`）。
+
+账号去重键是 `(tool_id, uid_hash)`，两者不同 → 必然新建一条。
+
+更糟的是：STS 的 access key 是**一次性**的，同一个账号再授权一次又会得到新的兜底 uid，
+所以即使不做本机导入，重复授权也会持续堆号。
+
+### 9.2 修复
+
+1. `exchange_authorization_code` 换完 token 后，若 uid 是兜底值，调用
+   `verify_identity`（`/v5/caller-identity`）取稳定身份：
+   优先 `user.id` → `principal_id` → `account_id`，并补 `display_name` / `domain_id`。
+2. `is_fallback_uid` 增加 `codearts_` 前缀，避免兜底值被当成真实身份参与合并。
+3. 合并边界：本机快照账号用 OAuth 重新授权时，`merge_from` 会保留快照形态而丢掉
+   incoming 的 `codearts_mode=isolated_oauth`；现在 `upsert_account` 会把
+   `isolated_oauth.json` 标记补进快照，账号才能从「只读」升级为可调度。
+
+### 9.3 回归
+
+- `authorization_import_uses_stable_identity_instead_of_ephemeral_access_key`
+  （wiremock 模拟 STS + caller-identity，断言 uid 落在 IAM user id）
+- `sts_response_without_identity_falls_back_to_ephemeral_uid`（记录历史行为，说明为何必须补 identity）
+- `apply_identity_prefers_iam_user_id_and_keeps_existing_name`
+- `codearts_oauth_reauth_marks_existing_local_snapshot_as_isolated`
+  （同一账号不新增第二条 + 快照补回标记 + 模式升级为 isolated_oauth）
+
+`cargo test` 全量 **242 通过**。

@@ -13,8 +13,23 @@ use uuid::Uuid;
 
 use crate::domain::{
     AccountStatus, AccountSummary, ActionLogCleanupRequest, ActionLogItem, ActionLogStats,
-    ClaimStatus, CredentialEnvelope, LogScope, QuotaBucket, QuotaSnapshot, UnifiedErrorCode,
+    ClaimStatus, CredentialEnvelope, CredentialPayload, LogScope, QuotaBucket, QuotaSnapshot,
+    UnifiedErrorCode,
 };
+
+/// 码道独立授权标记在凭据 extra 中的键（与 adapter/codearts.rs 保持一致）。
+const CODEARTS_MODE_EXTRA_KEY: &str = "codearts_mode";
+/// LocalSnapshot 形态下承载该标记的文件名。
+const ISOLATED_OAUTH_MARKER_FILE: &str = "isolated_oauth.json";
+
+fn incoming_codearts_isolated(envelope: &CredentialEnvelope) -> bool {
+    match &envelope.payload {
+        CredentialPayload::Token { extra, .. } => {
+            extra.get(CODEARTS_MODE_EXTRA_KEY).map(String::as_str) == Some("isolated_oauth")
+        }
+        _ => false,
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -359,10 +374,29 @@ impl QwitchDatabase {
             Some((id, stored_label, old_blob)) => {
                 let aad = crypto::credential_aad(&envelope.tool_id, &id);
                 let old_env = crypto::decrypt_credential(master_key, &aad, &old_blob).ok();
-                let merged = match &old_env {
+                let mut merged = match &old_env {
                     Some(old_env) => old_env.merge_from(envelope),
                     None => envelope.clone(),
                 };
+                // 码道：本机快照 + OAuth 授权重新导入时，合并会保留快照形态，
+                // 「独立授权」标记只存在于 incoming 的 extra 里；不补回来账号会一直是
+                // 只读凭据（不参与网关），用户会以为授权没生效。
+                if merged.tool_id == "codearts" && incoming_codearts_isolated(envelope) {
+                    if let CredentialPayload::LocalSnapshot { files } = &mut merged.payload {
+                        if !files.contains_key(ISOLATED_OAUTH_MARKER_FILE) {
+                            let marker = serde_json::json!({
+                                "mode": "isolated_oauth",
+                                "authorized_at": now,
+                            });
+                            if let Ok(bytes) = serde_json::to_vec(&marker) {
+                                files.insert(ISOLATED_OAUTH_MARKER_FILE.to_string(), {
+                                    use base64::Engine as _;
+                                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                                });
+                            }
+                        }
+                    }
+                }
                 let uid_masked = crypto::mask_uid(&merged.uid);
                 let email_masked = merged.display_email.as_deref().map(crypto::mask_email);
                 let encrypted_cred = crypto::encrypt_credential(master_key, &aad, &merged)?;

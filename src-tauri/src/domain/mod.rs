@@ -464,6 +464,7 @@ impl CredentialEnvelope {
             || uid.starts_with("minimax_cn_")
             || uid.starts_with("lobsterai_")
             || uid.starts_with("doubaowork_")
+            || uid.starts_with("codearts_")
     }
 
     pub fn merge_from(&self, incoming: &CredentialEnvelope) -> CredentialEnvelope {

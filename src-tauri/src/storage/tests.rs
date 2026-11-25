@@ -1548,3 +1548,74 @@ fn account_alias_preserves_platform_name_and_restores_on_empty() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 回归：码道本机快照账号用 OAuth 重新授权时，合并会保留快照形态，
+/// 必须把「独立授权」标记补进快照，否则账号仍是只读、无法参与网关，
+/// 用户会以为授权没生效（同账号还会被当成两条）。
+#[test]
+fn codearts_oauth_reauth_marks_existing_local_snapshot_as_isolated() {
+    let db = QwitchDatabase::open(&temp_db_path("codearts_reauth")).expect("open db");
+    let mk = [7u8; 32];
+    let uid = "c02b6539a92f4027bc7b95945aba38f7";
+
+    let mut files = HashMap::new();
+    files.insert(
+        "decrypted_token.txt".to_string(),
+        BASE64.encode(b"client-token"),
+    );
+    let local = CredentialEnvelope {
+        tool_id: "codearts".to_string(),
+        uid: uid.to_string(),
+        display_name: Some("码道".to_string()),
+        display_email: None,
+        payload: CredentialPayload::LocalSnapshot { files },
+    };
+    let acc = db.upsert_account(&mk, None, &local).expect("seed local");
+
+    let mut extra = HashMap::new();
+    extra.insert("codearts_mode".to_string(), "isolated_oauth".to_string());
+    extra.insert("codearts_code_verifier".to_string(), "v".to_string());
+    let oauth = CredentialEnvelope {
+        tool_id: "codearts".to_string(),
+        uid: uid.to_string(),
+        display_name: Some("码道".to_string()),
+        display_email: None,
+        payload: CredentialPayload::Token {
+            access_token: String::new(),
+            refresh_token: Some("rt".to_string()),
+            expires_at: None,
+            extra,
+        },
+    };
+    let merged = db.upsert_account(&mk, None, &oauth).expect("reauth");
+
+    // 同一个账号：不能新增第二条
+    assert_eq!(merged.id, acc.id);
+    let count: i64 = {
+        let conn = db.conn.lock().expect("lock");
+        conn.query_row(
+            "SELECT COUNT(*) FROM accounts WHERE tool_id = 'codearts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(count, 1, "重复授权不得产生第二个账号");
+
+    // 快照形态保留，但必须带上独立授权标记
+    let (_, env) = db.get_account_credential(&mk, &acc.id).expect("load");
+    match env.payload {
+        CredentialPayload::LocalSnapshot { files } => {
+            assert!(
+                files.contains_key(ISOLATED_OAUTH_MARKER_FILE),
+                "快照必须补回独立授权标记"
+            );
+            assert!(files.contains_key("decrypted_token.txt"));
+        }
+        other => panic!("期望保留快照形态，实际为 {other:?}"),
+    }
+    assert_eq!(
+        db.detect_codearts_auth_mode(&mk, &acc.id),
+        crate::domain::CodeArtsAuthMode::IsolatedOauth
+    );
+}

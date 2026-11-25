@@ -831,6 +831,45 @@ impl CodeArtsAdapter {
         Ok(body)
     }
 
+    /// 用 `caller-identity` 的返回补齐真实身份。
+    ///
+    /// 华为云 STS 的授权码换 token 响应**通常不含用户身份**，历史实现直接退化成
+    /// `codearts_<hash(一次性 accessKey)>` 作为 uid：既与本机导入的 `userId` 对不上，
+    /// 又因为 accessKey 每次授权都变，同一账号会被反复新建（用户看到「同一个账号两条」）。
+    /// 这里用稳定身份（IAM user id）覆盖 uid，并补上显示名与 domain id。
+    fn apply_identity(env: &mut CredentialEnvelope, identity: &Value) {
+        let user = identity.get("user");
+        let pick = |v: Option<&Value>| {
+            v.and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let uid = pick(user.and_then(|u| u.get("id")))
+            .or_else(|| pick(identity.get("principal_id")))
+            .or_else(|| pick(identity.get("account_id")));
+        if let Some(uid) = uid {
+            env.uid = uid;
+        }
+        let name = pick(user.and_then(|u| u.get("name")));
+        if env
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
+            if let Some(name) = name {
+                env.display_name = Some(name);
+            }
+        }
+        if let Some(domain_id) = pick(user.and_then(|u| u.get("domain_id"))) {
+            if let CredentialPayload::Token { extra, .. } = &mut env.payload {
+                extra.insert(EXTRA_DOMAIN_ID.to_string(), domain_id);
+            }
+        }
+    }
+
     fn envelope_from_sts_response(
         body: &Value,
         code_verifier: &str,
@@ -957,7 +996,25 @@ impl CodeArtsAdapter {
             )
             .await?;
         let dpop_b64 = BASE64.encode(dpop_pkcs8);
-        Self::envelope_from_sts_response(&body, code_verifier, &dpop_b64, None, None, None, None)
+        let mut env = Self::envelope_from_sts_response(
+            &body,
+            code_verifier,
+            &dpop_b64,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        // STS 响应没有用户身份时，uid 会退化成基于一次性 accessKey 的哈希 →
+        // 与本机导入对不上、重复授权还会再建一条。这里换成 IAM 的稳定身份。
+        if CredentialEnvelope::is_fallback_uid(&env.uid) || env.uid.trim().is_empty() {
+            if let Ok(creds) = HuaweiCreds::from_envelope(&env) {
+                if let Ok(identity) = self.verify_identity(&creds).await {
+                    Self::apply_identity(&mut env, &identity);
+                }
+            }
+        }
+        Ok(env)
     }
 
     async fn refresh_credential_inner(
@@ -1641,6 +1698,122 @@ mod tests {
 
         // 未记录有效期（手工粘贴 AK/SK）→ 放行，交服务端判定
         assert!(CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(None)).is_ok());
+    }
+
+    /// 回归：授权码换 token 的响应不含用户身份时，uid 会退化成基于一次性 accessKey
+    /// 的哈希（`codearts_<hash>`）。这既与本机导入的 userId 对不上，重复授权还会再建
+    /// 一条账号——用户看到「同一个账号两条」。修复方式是换完 token 再用
+    /// caller-identity 拿稳定身份。
+    #[tokio::test]
+    async fn authorization_import_uses_stable_identity_instead_of_ephemeral_access_key() {
+        use ring::rand::SystemRandom;
+        use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth2/tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credentials": {
+                    "access_key_id": "AK-EPHEMERAL",
+                    "secret_access_key": "SK",
+                    "security_token": "ST",
+                    "expires_at": 4102444800000i64
+                },
+                "refresh_token": "RT"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v5/caller-identity"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "user": {
+                    "id": "c02b6539a92f4027bc7b95945aba38f7",
+                    "name": "GT-HeQiLucky",
+                    "domain_id": "132872383cea43eeb25fbcec37b4c07c"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .expect("generate dpop key");
+
+        let env = adapter
+            .exchange_authorization_code("code", "verifier", 4321, pkcs8.as_ref())
+            .await
+            .expect("exchange authorization code");
+
+        assert_eq!(
+            env.uid, "c02b6539a92f4027bc7b95945aba38f7",
+            "OAuth 导入必须落在稳定身份上，否则与本机导入无法合并"
+        );
+        assert!(!CredentialEnvelope::is_fallback_uid(&env.uid));
+        assert_eq!(env.display_name.as_deref(), Some("GT-HeQiLucky"));
+        if let CredentialPayload::Token { extra, .. } = &env.payload {
+            assert_eq!(
+                extra.get(EXTRA_DOMAIN_ID).map(String::as_str),
+                Some("132872383cea43eeb25fbcec37b4c07c")
+            );
+        } else {
+            panic!("expected token payload");
+        }
+    }
+
+    #[test]
+    fn sts_response_without_identity_falls_back_to_ephemeral_uid() {
+        // 记录历史行为：没有身份字段时只能退化，因此上层必须补 identity
+        let body = serde_json::json!({
+            "credentials": {
+                "access_key_id": "AK1",
+                "secret_access_key": "SK1",
+                "security_token": "ST1"
+            }
+        });
+        let env = CodeArtsAdapter::envelope_from_sts_response(
+            &body, "verifier", "dpop", None, None, None, None,
+        )
+        .expect("envelope");
+        assert!(
+            CredentialEnvelope::is_fallback_uid(&env.uid),
+            "uid 应为 codearts_ 前缀的兜底值"
+        );
+    }
+
+    #[test]
+    fn apply_identity_prefers_iam_user_id_and_keeps_existing_name() {
+        let mut env = CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "codearts_abc123def456".into(),
+            display_name: Some("已有昵称".into()),
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: String::new(),
+                refresh_token: None,
+                expires_at: None,
+                extra: HashMap::new(),
+            },
+        };
+        CodeArtsAdapter::apply_identity(
+            &mut env,
+            &serde_json::json!({
+                "principal_id": "should-not-win",
+                "user": {"id": "u-1", "name": "新名字", "domain_id": "d-1"}
+            }),
+        );
+        assert_eq!(env.uid, "u-1", "优先取 IAM user.id");
+        assert_eq!(
+            env.display_name.as_deref(),
+            Some("已有昵称"),
+            "不覆盖已有显示名"
+        );
+
+        // 没有 user 字段时退回 principal_id
+        let mut env2 = env.clone();
+        env2.uid = "codearts_x".into();
+        CodeArtsAdapter::apply_identity(&mut env2, &serde_json::json!({"principal_id": "p-9"}));
+        assert_eq!(env2.uid, "p-9");
     }
 
     #[tokio::test]

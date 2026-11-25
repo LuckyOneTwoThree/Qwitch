@@ -561,6 +561,8 @@ fn is_auth_expired_response(code: u16, body: &str) -> bool {
     }
     let lower = body.to_ascii_lowercase();
     lower.contains("apig.0301")
+        || lower.contains("apig.0602")
+        || lower.contains("security token has expired")
         || lower.contains("verify ak sk signature")
         || lower.contains("access key") && lower.contains("not found")
         || lower.contains("sts.0601")
@@ -4041,6 +4043,7 @@ async fn handle_http_connection(
             None
         };
         if let Some(kind) = stream_kind {
+            let mut did_auth_refresh = false;
             let mut stream_res =
                 send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model).await;
             if let Ok(ref resp) = stream_res {
@@ -4058,6 +4061,7 @@ async fn handle_http_connection(
                         }
                         if let Ok(Some(refreshed)) = adapter.force_refresh_credential(&cred).await
                         {
+                            did_auth_refresh = true;
                             let _ = db.bind_account_credential(
                                 &master_key,
                                 &cand.account_id,
@@ -4085,120 +4089,183 @@ async fn handle_http_connection(
                     }
                 }
             }
-            match stream_res {
-                Ok(resp) if resp.status().is_success() => {
-                    let detail = match kind {
-                        StreamKind::Passthrough => "网关实时流式透传成功（首字节后锁定上游）",
-                        StreamKind::OpenAiClientAnthropicUpstream => {
-                            "跨协议增量流式（Anthropic 上游 → OpenAI 客户端）"
-                        }
-                        StreamKind::AnthropicClientOpenAiUpstream => {
-                            "跨协议增量流式（OpenAI 上游 → Anthropic 客户端）"
-                        }
-                        StreamKind::ResponsesFromOpenAi => {
-                            "跨协议增量流式（OpenAI 上游 → Responses 客户端）"
-                        }
-                        StreamKind::ResponsesFromAnthropic => {
-                            "跨协议增量流式（Anthropic 上游 → Responses 客户端）"
-                        }
-                    };
-                    attempts.push(RoutingAttempt {
-                        account_label: cand.label.clone(),
-                        tool_id: cand.tool_id.clone(),
-                        model: plan.effective_model.clone(),
-                        tier: Some(cand.tier),
-                        outcome: RoutingAttemptOutcome::Ok,
-                        latency_ms: t_hop.elapsed().as_millis() as u64,
-                        detail: detail.into(),
-                    });
-                    let trace = RoutingTraceItem {
-                        id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
-                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                        agent_id: caller_agent.unwrap_or(TargetAgentId::Opencode),
-                        pool_id: pool.id.clone(),
-                        pool_name: pool.name.clone(),
-                        incoming_protocol: ir_req.incoming_protocol,
-                        upstream_protocol: upstream_proto,
-                        requested_model: ir_req.model.clone(),
-                        final_account_label: cand.label.clone(),
-                        final_tool_id: cand.tool_id.clone(),
-                        final_model: plan.effective_model.clone(),
-                        status: if attempts.len() > 1 {
-                            RoutingTraceStatus::FailoverSuccess
-                        } else {
-                            RoutingTraceStatus::Success
-                        },
-                        cache_affinity_hit: plan.cache_affinity_hit,
-                        ttft_ms: t_hop.elapsed().as_millis() as u64,
-                        total_tokens: 0,
-                        attempts,
-                    };
-                    log_db_result("append_routing_trace", db.append_routing_trace(&trace));
-                    log_db_result(
-                        "increment_pool_stats",
-                        db.increment_pool_stats(
-                            &pool.id,
-                            trace.status == RoutingTraceStatus::FailoverSuccess,
-                            plan.cache_affinity_hit,
-                        ),
-                    );
-                    return match kind {
-                        StreamKind::Passthrough => forward_sse_passthrough(resp, stream).await,
-                        StreamKind::OpenAiClientAnthropicUpstream => {
-                            relay_anthropic_to_openai_chat(resp, &ir_req.model, stream).await
-                        }
-                        StreamKind::AnthropicClientOpenAiUpstream => {
-                            relay_openai_chat_to_anthropic(resp, &ir_req.model, stream).await
-                        }
-                        StreamKind::ResponsesFromOpenAi => {
-                            relay_openai_chat_to_responses(resp, &ir_req.model, stream).await
-                        }
-                        StreamKind::ResponsesFromAnthropic => {
-                            relay_anthropic_to_responses(resp, &ir_req.model, stream).await
-                        }
-                    };
-                }
-                Ok(resp) => {
-                    let code = resp.status().as_u16();
-                    let body_txt = resp.text().await.unwrap_or_default();
-                    if code == 429 {
-                        runtime.set_member_cooldown(
-                            &cand.account_id,
-                            chrono::Utc::now().timestamp_millis()
-                                + (pool.cooldown_seconds as i64) * 1000,
-                        );
+            loop {
+                match stream_res {
+                    Ok(resp) if resp.status().is_success() => {
+                        let detail = match kind {
+                            StreamKind::Passthrough => "网关实时流式透传成功（首字节后锁定上游）",
+                            StreamKind::OpenAiClientAnthropicUpstream => {
+                                "跨协议增量流式（Anthropic 上游 → OpenAI 客户端）"
+                            }
+                            StreamKind::AnthropicClientOpenAiUpstream => {
+                                "跨协议增量流式（OpenAI 上游 → Anthropic 客户端）"
+                            }
+                            StreamKind::ResponsesFromOpenAi => {
+                                "跨协议增量流式（OpenAI 上游 → Responses 客户端）"
+                            }
+                            StreamKind::ResponsesFromAnthropic => {
+                                "跨协议增量流式（Anthropic 上游 → Responses 客户端）"
+                            }
+                        };
                         attempts.push(RoutingAttempt {
                             account_label: cand.label.clone(),
                             tool_id: cand.tool_id.clone(),
                             model: plan.effective_model.clone(),
                             tier: Some(cand.tier),
-                            outcome: RoutingAttemptOutcome::Cooldown429,
+                            outcome: RoutingAttemptOutcome::Ok,
                             latency_ms: t_hop.elapsed().as_millis() as u64,
-                            detail: format!(
-                                "HTTP 429 限流，置入 {}s 冷却并切换下一账号",
-                                pool.cooldown_seconds
+                            detail: detail.into(),
+                        });
+                        let trace = RoutingTraceItem {
+                            id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            agent_id: caller_agent.unwrap_or(TargetAgentId::Opencode),
+                            pool_id: pool.id.clone(),
+                            pool_name: pool.name.clone(),
+                            incoming_protocol: ir_req.incoming_protocol,
+                            upstream_protocol: upstream_proto,
+                            requested_model: ir_req.model.clone(),
+                            final_account_label: cand.label.clone(),
+                            final_tool_id: cand.tool_id.clone(),
+                            final_model: plan.effective_model.clone(),
+                            status: if attempts.len() > 1 {
+                                RoutingTraceStatus::FailoverSuccess
+                            } else {
+                                RoutingTraceStatus::Success
+                            },
+                            cache_affinity_hit: plan.cache_affinity_hit,
+                            ttft_ms: t_hop.elapsed().as_millis() as u64,
+                            total_tokens: 0,
+                            attempts,
+                        };
+                        log_db_result("append_routing_trace", db.append_routing_trace(&trace));
+                        log_db_result(
+                            "increment_pool_stats",
+                            db.increment_pool_stats(
+                                &pool.id,
+                                trace.status == RoutingTraceStatus::FailoverSuccess,
+                                plan.cache_affinity_hit,
                             ),
-                        });
-                    } else if is_auth_expired_response(code, &body_txt) {
-                        // 永久性鉴权失败（401 / 华为云 APIG.0301）：不冷却、不重试，
-                        // 直接标记账号过期并短路，避免抖动空转成 502。
-                        let _ = db.update_account_status(
-                            &cand.account_id,
-                            crate::domain::AccountStatus::Expired,
                         );
-                        let reason = auth_expired_reason(&cand.tool_id, &body_txt);
-                        auth_expired_hits.push((cand.label.clone(), reason.clone()));
-                        attempts.push(RoutingAttempt {
-                            account_label: cand.label.clone(),
-                            tool_id: cand.tool_id.clone(),
-                            model: plan.effective_model.clone(),
-                            tier: Some(cand.tier),
-                            outcome: RoutingAttemptOutcome::AuthExpired,
-                            latency_ms: t_hop.elapsed().as_millis() as u64,
-                            detail: format!("凭据失效(HTTP {code})：{reason}"),
-                        });
-                        continue;
-                    } else {
+                        return match kind {
+                            StreamKind::Passthrough => forward_sse_passthrough(resp, stream).await,
+                            StreamKind::OpenAiClientAnthropicUpstream => {
+                                relay_anthropic_to_openai_chat(resp, &ir_req.model, stream).await
+                            }
+                            StreamKind::AnthropicClientOpenAiUpstream => {
+                                relay_openai_chat_to_anthropic(resp, &ir_req.model, stream).await
+                            }
+                            StreamKind::ResponsesFromOpenAi => {
+                                relay_openai_chat_to_responses(resp, &ir_req.model, stream).await
+                            }
+                            StreamKind::ResponsesFromAnthropic => {
+                                relay_anthropic_to_responses(resp, &ir_req.model, stream).await
+                            }
+                        };
+                    }
+                    Ok(resp) => {
+                        let code = resp.status().as_u16();
+                        let body_txt = resp.text().await.unwrap_or_default();
+                        if code == 429 {
+                            runtime.set_member_cooldown(
+                                &cand.account_id,
+                                chrono::Utc::now().timestamp_millis()
+                                    + (pool.cooldown_seconds as i64) * 1000,
+                            );
+                            attempts.push(RoutingAttempt {
+                                account_label: cand.label.clone(),
+                                tool_id: cand.tool_id.clone(),
+                                model: plan.effective_model.clone(),
+                                tier: Some(cand.tier),
+                                outcome: RoutingAttemptOutcome::Cooldown429,
+                                latency_ms: t_hop.elapsed().as_millis() as u64,
+                                detail: format!(
+                                    "HTTP 429 限流，置入 {}s 冷却并切换下一账号",
+                                    pool.cooldown_seconds
+                                ),
+                            });
+                            break;
+                        } else if is_auth_expired_response(code, &body_txt) {
+                            // 部分上游（如华为云 APIG.0602）用 HTTP 400 返回 token 过期；
+                            // 首次命中时尝试单飞刷新/本机回吸并重试一次，仍失效再标过期。
+                            if !did_auth_refresh
+                                && pool.auto_refresh_on_401
+                                && cand.tool_id != "custom_api_key"
+                            {
+                                if let Some(adapter) = adapters.get(&cand.tool_id) {
+                                    let lock = runtime.refresh_lock_for(&cand.account_id);
+                                    let _guard = lock.lock().await;
+                                    if let Ok((_, fresh)) =
+                                        db.get_account_credential(&master_key, &cand.account_id)
+                                    {
+                                        cred = fresh;
+                                    }
+                                    if let Ok(Some(refreshed)) =
+                                        adapter.force_refresh_credential(&cred).await
+                                    {
+                                        did_auth_refresh = true;
+                                        let _ = db.bind_account_credential(
+                                            &master_key,
+                                            &cand.account_id,
+                                            None,
+                                            &refreshed,
+                                        );
+                                        cred = refreshed;
+                                        attempts.push(RoutingAttempt {
+                                            account_label: cand.label.clone(),
+                                            tool_id: cand.tool_id.clone(),
+                                            model: plan.effective_model.clone(),
+                                            tier: Some(cand.tier),
+                                            outcome: RoutingAttemptOutcome::Refreshed401,
+                                            latency_ms: t_hop.elapsed().as_millis() as u64,
+                                            detail: format!(
+                                                "HTTP {code} 凭据过期单飞刷新并回写加密库"
+                                            ),
+                                        });
+                                        stream_res = send_upstream_stream(
+                                            cand,
+                                            &cred,
+                                            &ir_req,
+                                            &plan.effective_model,
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+                            }
+                            let _ = db.update_account_status(
+                                &cand.account_id,
+                                crate::domain::AccountStatus::Expired,
+                            );
+                            let reason = auth_expired_reason(&cand.tool_id, &body_txt);
+                            auth_expired_hits.push((cand.label.clone(), reason.clone()));
+                            attempts.push(RoutingAttempt {
+                                account_label: cand.label.clone(),
+                                tool_id: cand.tool_id.clone(),
+                                model: plan.effective_model.clone(),
+                                tier: Some(cand.tier),
+                                outcome: RoutingAttemptOutcome::AuthExpired,
+                                latency_ms: t_hop.elapsed().as_millis() as u64,
+                                detail: format!("凭据失效(HTTP {code})：{reason}"),
+                            });
+                            break;
+                        } else {
+                            attempts.push(RoutingAttempt {
+                                account_label: cand.label.clone(),
+                                tool_id: cand.tool_id.clone(),
+                                model: plan.effective_model.clone(),
+                                tier: Some(cand.tier),
+                                outcome: RoutingAttemptOutcome::HttpError,
+                                latency_ms: t_hop.elapsed().as_millis() as u64,
+                                detail: format!(
+                                    "上游 HTTP {code}（非限流）: {}",
+                                    body_txt.chars().take(120).collect::<String>()
+                                ),
+                            });
+                            break;
+                        }
+                    }
+                    Err(e) => {
                         attempts.push(RoutingAttempt {
                             account_label: cand.label.clone(),
                             tool_id: cand.tool_id.clone(),
@@ -4206,32 +4273,21 @@ async fn handle_http_connection(
                             tier: Some(cand.tier),
                             outcome: RoutingAttemptOutcome::HttpError,
                             latency_ms: t_hop.elapsed().as_millis() as u64,
-                            detail: format!(
-                                "上游 HTTP {code}（非限流）: {}",
-                                body_txt.chars().take(120).collect::<String>()
-                            ),
+                            detail: format!("上游请求未到达/传输失败: {e}"),
                         });
+                        break;
                     }
-                    continue;
-                }
-                Err(e) => {
-                    attempts.push(RoutingAttempt {
-                        account_label: cand.label.clone(),
-                        tool_id: cand.tool_id.clone(),
-                        model: plan.effective_model.clone(),
-                        tier: Some(cand.tier),
-                        outcome: RoutingAttemptOutcome::HttpError,
-                        latency_ms: t_hop.elapsed().as_millis() as u64,
-                        detail: format!("上游请求未到达/传输失败: {e}"),
-                    });
-                    continue;
                 }
             }
+            continue;
         }
         let mut res = call_upstream_member(cand, &cred, &ir_req, &plan.effective_model).await;
 
-        if let Ok((401, _)) = res {
-            if pool.auto_refresh_on_401 {
+        if let Ok((code, ref body_txt)) = res {
+            if is_auth_expired_response(code, body_txt)
+                && pool.auto_refresh_on_401
+                && cand.tool_id != "custom_api_key"
+            {
                 if let Some(adapter) = adapters.get(&cand.tool_id) {
                     let lock = runtime.refresh_lock_for(&cand.account_id);
                     let _guard = lock.lock().await;
@@ -5880,5 +5936,13 @@ mod tests {
         decoder2.finish(&mut out2);
         assert!(!out2.contains('\u{FFFD}'));
         assert_eq!(out2, sample.replace("\r\n", "\n"));
+    }
+
+    #[test]
+    fn is_auth_expired_response_recognizes_codearts_apig_0602() {
+        assert!(is_auth_expired_response(
+            400,
+            r#"{"error_msg":"Bad request: the security token has expired","error_code":"APIG.0602","request_id":"abc"}"#,
+        ));
     }
 }

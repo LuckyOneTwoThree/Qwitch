@@ -1167,9 +1167,48 @@ impl CodeArtsAdapter {
         else {
             return Ok(None);
         };
-        // 防互踢保护：仅独立 OAuth（isolated_oauth）且自带 PKCE verifier + DPoP 私钥的账号允许主动刷新；
-        // 本机客户端导入的账号沿用客户端刷新与静默回吸，绝不消费客户端一次性 refresh token。
+        // 防互踢保护：仅独立 OAuth（isolated_oauth）且自带 PKCE verifier + DPoP 私钥的账号允许走网络刷新；
+        // 本机客户端导入的账号绝不消费客户端一次性 refresh token，只做只读回吸本机客户端磁盘中已更新的 STS 凭据。
         if extra.get(EXTRA_CODEARTS_MODE).map(String::as_str) != Some("isolated_oauth") {
+            let now_ms = Utc::now().timestamp_millis();
+            let expired_or_near = expires_at.is_none_or(|exp| exp - now_ms < CODEARTS_REFRESH_LEAD_MS);
+            if !force && !expired_or_near {
+                return Ok(None);
+            }
+            let Some(host) = self.host.as_deref() else {
+                return Ok(None);
+            };
+            let Ok(incoming) = self.import_from_local(host).await else {
+                return Ok(None);
+            };
+            let stored_real =
+                !cred.uid.trim().is_empty() && !CredentialEnvelope::is_fallback_uid(&cred.uid);
+            let incoming_real = !incoming.uid.trim().is_empty()
+                && !CredentialEnvelope::is_fallback_uid(&incoming.uid);
+            if stored_real && incoming_real && cred.uid != incoming.uid {
+                return Ok(None);
+            }
+            let (old_tok, old_exp) = match &cred.payload {
+                CredentialPayload::Token {
+                    expires_at, extra, ..
+                } => (extra.get(EXTRA_SECURITY_TOKEN).cloned(), *expires_at),
+                _ => (None, None),
+            };
+            let (new_tok, new_exp) = match &incoming.payload {
+                CredentialPayload::Token {
+                    expires_at, extra, ..
+                } => (extra.get(EXTRA_SECURITY_TOKEN).cloned(), *expires_at),
+                _ => (None, None),
+            };
+            let fresher_exp = match (old_exp, new_exp) {
+                (Some(o), Some(n)) => n > o + 60_000,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            let tok_changed = new_tok.is_some() && new_tok != old_tok;
+            if fresher_exp || tok_changed {
+                return Ok(Some(incoming));
+            }
             return Ok(None);
         }
         let Some(rt) = refresh_token

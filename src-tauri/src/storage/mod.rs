@@ -212,6 +212,11 @@ impl QwitchDatabase {
             "ALTER TABLE accounts ADD COLUMN device_id_masked TEXT",
         )?;
         exec_add_column(&conn, "ALTER TABLE accounts ADD COLUMN device_type TEXT")?;
+        exec_add_column(
+            &conn,
+            "ALTER TABLE accounts ADD COLUMN credential_expires_at TEXT",
+        )?;
+        exec_add_column(&conn, "ALTER TABLE accounts ADD COLUMN renewal_mode TEXT")?;
         exec_add_column(&conn, "ALTER TABLE action_logs ADD COLUMN archived_at TEXT")?;
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_archived_id ON action_logs(archived_at, id DESC)",
@@ -361,6 +366,7 @@ impl QwitchDatabase {
                 let email_masked = merged.display_email.as_deref().map(crypto::mask_email);
                 let encrypted_cred = crypto::encrypt_credential(master_key, &aad, &merged)?;
                 let (has_snap, has_tok) = merged.capability_flags();
+                let (cred_expires_at, renewal_mode) = merged.renewal_metadata();
                 let (dev_masked, dev_type) = merged
                     .device_identity()
                     .map(|(m, t)| (Some(m), t))
@@ -395,8 +401,9 @@ impl QwitchDatabase {
                      SET label = ?1, uid_masked = ?2, email_masked = ?3,
                          status = {status_sql},
                          encrypted_credential = ?4, has_local_snapshot = ?5, has_api_token = ?6,
-                         device_id_masked = ?7, device_type = ?8, updated_at = ?9
-                     WHERE id = ?10"
+                         device_id_masked = ?7, device_type = ?8,
+                         credential_expires_at = ?9, renewal_mode = ?10, updated_at = ?11
+                     WHERE id = ?12"
                 );
                 conn.execute(
                     &update_sql,
@@ -409,6 +416,8 @@ impl QwitchDatabase {
                         has_tok as i64,
                         dev_masked,
                         dev_type,
+                        cred_expires_at,
+                        renewal_mode,
                         now,
                         id
                     ],
@@ -424,6 +433,7 @@ impl QwitchDatabase {
                 let aad = crypto::credential_aad(&envelope.tool_id, &id);
                 let encrypted_cred = crypto::encrypt_credential(master_key, &aad, envelope)?;
                 let (has_snap, has_tok) = envelope.capability_flags();
+                let (cred_expires_at, renewal_mode) = envelope.renewal_metadata();
                 let (dev_masked, dev_type) = envelope
                     .device_identity()
                     .map(|(m, t)| (Some(m), t))
@@ -434,8 +444,9 @@ impl QwitchDatabase {
                         id, tool_id, label, uid_masked, uid_hash, email_masked,
                         status, is_active_on_client, has_local_snapshot, has_api_token,
                         device_id_masked, device_type,
-                        encrypted_credential, last_claimed_at, created_at, updated_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?12)",
+                        encrypted_credential, last_claimed_at,
+                        credential_expires_at, renewal_mode, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, ?14, ?14)",
                     params![
                         id,
                         envelope.tool_id,
@@ -448,6 +459,8 @@ impl QwitchDatabase {
                         dev_masked,
                         dev_type,
                         encrypted_cred,
+                        cred_expires_at,
+                        renewal_mode,
                         now
                     ],
                 )?;
@@ -533,6 +546,7 @@ impl QwitchDatabase {
         let aad = crypto::credential_aad(&merged.tool_id, account_id);
         let encrypted_cred = crypto::encrypt_credential(master_key, &aad, &merged)?;
         let (has_snap, has_tok) = merged.capability_flags();
+        let (cred_expires_at, renewal_mode) = merged.renewal_metadata();
         let (dev_masked, dev_type) = merged
             .device_identity()
             .map(|(m, t)| (Some(m), t))
@@ -564,8 +578,9 @@ impl QwitchDatabase {
                  status = {status_sql},
                  encrypted_credential = ?5,
                  has_local_snapshot = ?6, has_api_token = ?7,
-                 device_id_masked = ?8, device_type = ?9, updated_at = ?10
-             WHERE id = ?11"
+                 device_id_masked = ?8, device_type = ?9,
+                 credential_expires_at = ?10, renewal_mode = ?11, updated_at = ?12
+             WHERE id = ?13"
         );
         conn.execute(
             &update_sql,
@@ -579,6 +594,8 @@ impl QwitchDatabase {
                 has_tok as i64,
                 dev_masked,
                 dev_type,
+                cred_expires_at,
+                renewal_mode,
                 now,
                 account_id
             ],
@@ -594,7 +611,8 @@ impl QwitchDatabase {
             "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                     a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                     a.last_claimed_at, a.updated_at,
-                    q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type
+                    q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type,
+                    a.credential_expires_at, a.renewal_mode
              FROM accounts a
              LEFT JOIN quota_snapshots q ON q.id = (
                  SELECT q2.id FROM quota_snapshots q2
@@ -622,7 +640,8 @@ impl QwitchDatabase {
                 "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
-                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type
+                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type,
+                        a.credential_expires_at, a.renewal_mode
                  FROM accounts a
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
@@ -642,7 +661,8 @@ impl QwitchDatabase {
                 "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
-                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type
+                        q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type,
+                        a.credential_expires_at, a.renewal_mode
                  FROM accounts a
                  LEFT JOIN quota_snapshots q ON q.id = (
                      SELECT q2.id FROM quota_snapshots q2
@@ -1324,6 +1344,8 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
         device_type: row.get(16)?,
         latest_quota,
         last_claimed_at,
+        credential_expires_at: row.get(17)?,
+        renewal_mode: row.get(18)?,
         updated_at,
     })
 }

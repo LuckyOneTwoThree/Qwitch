@@ -83,6 +83,8 @@ pub struct AccountSummary {
     pub device_type: Option<String>,
     pub latest_quota: Option<QuotaSnapshot>,
     pub last_claimed_at: Option<String>,
+    pub credential_expires_at: Option<String>,
+    pub renewal_mode: Option<String>,
     pub updated_at: String,
 }
 
@@ -275,6 +277,87 @@ impl CredentialEnvelope {
             }
             CredentialPayload::Cookies { .. } => (false, true),
         }
+    }
+
+    /// 返回 `(credential_expires_at_rfc3339, renewal_mode)` 用于前端安全展示续期方式与有效期。
+    /// 不包含任何明文令牌。
+    pub fn renewal_metadata(&self) -> (Option<String>, String) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
+
+        fn jwt_exp_ms(tok: &str) -> Option<i64> {
+            let seg = tok.split('.').nth(1)?;
+            let bytes = BASE64_URL.decode(seg.as_bytes()).ok()?;
+            let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            let exp = v.get("exp").and_then(|x| x.as_i64())?;
+            Some(if exp < 10_000_000_000 {
+                exp.saturating_mul(1000)
+            } else {
+                exp
+            })
+        }
+
+        let (has_snap, has_tok) = self.capability_flags();
+        let exp_ms = match &self.payload {
+            CredentialPayload::Token {
+                access_token,
+                expires_at,
+                ..
+            } => expires_at
+                .map(|e| {
+                    if e < 10_000_000_000 {
+                        e.saturating_mul(1000)
+                    } else {
+                        e
+                    }
+                })
+                .or_else(|| jwt_exp_ms(access_token)),
+            CredentialPayload::LocalSnapshot { files } => files
+                .get("decrypted_token.txt")
+                .and_then(|b64| BASE64.decode(b64).ok())
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .and_then(|tok| jwt_exp_ms(tok.trim())),
+            CredentialPayload::Cookies { .. } => None,
+        };
+        let exp_rfc3339 = exp_ms
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|dt| dt.to_rfc3339());
+
+        let has_rt = match &self.payload {
+            CredentialPayload::Token { refresh_token, .. } => refresh_token
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty()),
+            CredentialPayload::LocalSnapshot { files } => {
+                files.contains_key("decrypted_refresh_token.txt")
+            }
+            CredentialPayload::Cookies { .. } => false,
+        };
+
+        let mode = if self.tool_id == "doubaowork" && has_tok {
+            "cookie_keepalive"
+        } else if self.tool_id == "codearts" {
+            let is_isolated = matches!(
+                &self.payload,
+                CredentialPayload::Token { extra, .. }
+                    if extra.get("codearts_mode").map(String::as_str) == Some("isolated_oauth")
+            );
+            if is_isolated && has_rt {
+                "auto_refresh"
+            } else {
+                "client_sync"
+            }
+        } else if matches!(
+            self.tool_id.as_str(),
+            "minimax_code_cn" | "lobsterai" | "workbuddy" | "qoder_cn" | "trae_cn" | "trae"
+        ) && has_rt
+        {
+            "auto_refresh"
+        } else if has_snap {
+            "client_sync"
+        } else {
+            "manual"
+        };
+
+        (exp_rfc3339, mode.to_string())
     }
 
     /// 从快照提取账号绑定设备身份（仅多设备适配器写入 `trae_device.json`）。

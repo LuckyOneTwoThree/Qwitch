@@ -4,8 +4,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::adapter::{
-    doubaowork::DoubaoWorkAdapter, lobsterai::LobsterAiAdapter, minimax::MiniMaxAdapter,
-    qoder::QoderAdapter, workbuddy::WorkBuddyAdapter, AdapterError, ToolAdapter,
+    codearts::CodeArtsAdapter, doubaowork::DoubaoWorkAdapter, lobsterai::LobsterAiAdapter,
+    minimax::MiniMaxAdapter, qoder::QoderAdapter, workbuddy::WorkBuddyAdapter, AdapterError,
+    ToolAdapter,
 };
 use crate::domain::UnifiedErrorCode;
 use crate::platform::PlatformHost;
@@ -421,6 +422,12 @@ fn allowed_oauth_hosts(tool_id: &str) -> &'static [&'static str] {
             "wx.qq.com",
             "apple.com",
         ],
+        "codearts" => &[
+            "huaweicloud.com",
+            "myhuaweicloud.com",
+            "hwclouds-dns.com",
+            "hc-cdn.com",
+        ],
         _ => &[],
     }
 }
@@ -490,12 +497,16 @@ async fn persist_oauth_envelope(
     }
 
     let mut matched_local = false;
-    let envelope_to_save = match adapter.import_from_local(host.as_ref()).await {
-        Ok(local_env) if !local_env.uid.trim().is_empty() && local_env.uid == envelope.uid => {
-            matched_local = true;
-            local_env.merge_from(&envelope)
+    let envelope_to_save = if tool_id == "codearts" {
+        envelope
+    } else {
+        match adapter.import_from_local(host.as_ref()).await {
+            Ok(local_env) if !local_env.uid.trim().is_empty() && local_env.uid == envelope.uid => {
+                matched_local = true;
+                local_env.merge_from(&envelope)
+            }
+            _ => envelope,
         }
-        _ => envelope,
     };
 
     if flow_seq.load(Ordering::SeqCst) != flow_id {
@@ -651,6 +662,9 @@ pub async fn start_webview_oauth(
         MiniMaxDevicePoll {
             auth: crate::adapter::minimax::MiniMaxDeviceAuth,
         },
+        CodeArtsCallback {
+            flow: crate::adapter::codearts::CodeArtsOAuthFlow,
+        },
     }
 
     let (login_url, mode) = match tool_id.as_str() {
@@ -691,6 +705,11 @@ pub async fn start_webview_oauth(
             let auth_url = auth.login_url().to_string();
             (auth_url, OAuthMode::MiniMaxDevicePoll { auth })
         }
+        "codearts" => {
+            let flow = CodeArtsAdapter::create_oauth_flow().map_err(|e| format!("{e}"))?;
+            let auth_url = flow.auth_url.clone();
+            (auth_url, OAuthMode::CodeArtsCallback { flow })
+        }
         _ => return Err(format!("工具 {tool_id} 暂不支持内置 WebView 授权")),
     };
 
@@ -725,8 +744,10 @@ pub async fn start_webview_oauth(
         OAuthMode::LobsterAiCallback
         | OAuthMode::WorkBuddyPoll { .. }
         | OAuthMode::QoderPkcePoll { .. } => POPUP_REDIRECT_JS.to_string(),
-        // MiniMax / 豆包工作官方登录页依赖自身 window.open / 验证码及安全脚本，不注入自定义 JS
-        OAuthMode::MiniMaxDevicePoll { .. } | OAuthMode::DoubaoCookiePoll => String::new(),
+        // MiniMax / 豆包工作 / CodeArts 官方登录页依赖自身安全脚本，不注入自定义 JS
+        OAuthMode::MiniMaxDevicePoll { .. }
+        | OAuthMode::DoubaoCookiePoll
+        | OAuthMode::CodeArtsCallback { .. } => String::new(),
     };
 
     let blank_url: tauri::Url = "about:blank"
@@ -980,6 +1001,105 @@ pub async fn start_webview_oauth(
             }
             nav_url.as_str() == "about:blank" || is_allowed_oauth_url(nav_url, allowed_hosts)
         });
+    } else if let OAuthMode::CodeArtsCallback { flow } = &mode {
+        let app_nav = app_handle.clone();
+        let db_nav = Arc::clone(&db);
+        let scheduler_nav = Arc::clone(&scheduler_arc);
+        let host_nav = Arc::clone(&host_arc);
+        let adapter_nav = Arc::clone(&adapter);
+        let flow_seq_nav = Arc::clone(&flow_seq);
+        let tid_nav = tool_id_owned.clone();
+        let lbl_nav = label_owned.clone();
+        let target_nav = target_id_owned.clone();
+        let win_label_nav = win_label.clone();
+        let expected_port = flow.port;
+        let code_verifier = flow.code_verifier.clone();
+        let dpop_pkcs8 = flow.dpop_pkcs8.clone();
+
+        builder = builder.on_navigation(move |nav_url| {
+            let is_cb = nav_url.scheme() == "http"
+                && nav_url.host_str() == Some("127.0.0.1")
+                && nav_url.port() == Some(expected_port)
+                && nav_url.path() == "/oauth/callback";
+            if is_cb {
+                if flow_seq_nav.load(Ordering::SeqCst) != flow_id {
+                    return false;
+                }
+                let find_param = |key: &str| -> Option<String> {
+                    nav_url
+                        .query_pairs()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                };
+                let Some(code) = find_param("code") else {
+                    let err_msg = find_param("error_description")
+                        .or_else(|| find_param("error"))
+                        .unwrap_or_else(|| "CodeArts 授权回调缺少 code 参数，请重试".into());
+                    let _ = app_nav.emit("qwitch://oauth-error", err_msg);
+                    if flow_seq_nav.load(Ordering::SeqCst) == flow_id {
+                        if let Some(win) = app_nav.get_webview_window(&win_label_nav) {
+                            let _ = win.close();
+                        }
+                    }
+                    return false;
+                };
+
+                let app_clone = app_nav.clone();
+                let db_clone = Arc::clone(&db_nav);
+                let scheduler_clone = Arc::clone(&scheduler_nav);
+                let host_clone = Arc::clone(&host_nav);
+                let adapter_clone = Arc::clone(&adapter_nav);
+                let flow_seq_clone = Arc::clone(&flow_seq_nav);
+                let tid = tid_nav.clone();
+                let lbl = lbl_nav.clone();
+                let target_id = target_nav.clone();
+                let win_l = win_label_nav.clone();
+                let verifier = code_verifier.clone();
+                let dpop = dpop_pkcs8.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    match CodeArtsAdapter::new()
+                        .exchange_authorization_code(&code, &verifier, expected_port, &dpop)
+                        .await
+                    {
+                        Ok(envelope) => {
+                            persist_oauth_envelope(
+                                &app_clone,
+                                &db_clone,
+                                &host_clone,
+                                &master_key,
+                                &adapter_clone,
+                                &scheduler_clone,
+                                &flow_seq_clone,
+                                flow_id,
+                                &win_l,
+                                &tid,
+                                &lbl,
+                                target_id.as_deref(),
+                                envelope,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            let _ = app_clone.emit(
+                                "qwitch://oauth-error",
+                                crate::storage::crypto::sanitize_log_message(&format!(
+                                    "交换 CodeArts 授权令牌失败: {e}"
+                                )),
+                            );
+                            if flow_seq_clone.load(Ordering::SeqCst) == flow_id {
+                                if let Some(win) = app_clone.get_webview_window(&win_l) {
+                                    let _ = win.close();
+                                }
+                            }
+                        }
+                    }
+                });
+                return false;
+            }
+            nav_url.as_str() == "about:blank" || is_allowed_oauth_url(nav_url, allowed_hosts)
+        });
     } else {
         builder = builder.on_navigation(move |nav_url| {
             nav_url.as_str() == "about:blank" || is_allowed_oauth_url(nav_url, allowed_hosts)
@@ -1000,7 +1120,9 @@ pub async fn start_webview_oauth(
         .map_err(|e| format!("导航至授权页失败: {e}"))?;
 
     match mode {
-        OAuthMode::TraeCapture | OAuthMode::LobsterAiCallback => {}
+        OAuthMode::TraeCapture
+        | OAuthMode::LobsterAiCallback
+        | OAuthMode::CodeArtsCallback { .. } => {}
         OAuthMode::WorkBuddyPoll { state_token } => {
             tauri::async_runtime::spawn(async move {
                 let mut consecutive_errors = 0u32;

@@ -36,10 +36,16 @@
 //! `all_credit_package`（合计）/ `basic_package`（基础）/ `bonus_credit_package`（赠送）。
 
 use async_trait::async_trait;
-use base64::Engine as _;
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
+    Engine as _,
+};
 use chrono::Utc;
 use reqwest::header::{ACCEPT, USER_AGENT};
+use ring::rand::{SecureRandom as _, SystemRandom};
+use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -74,6 +80,16 @@ const EXTRA_SECRET_KEY: &str = "secret_key";
 const EXTRA_SECURITY_TOKEN: &str = "security_token";
 const EXTRA_REGION: &str = "region";
 const EXTRA_DOMAIN_ID: &str = "domain_id";
+const EXTRA_CODEARTS_MODE: &str = "codearts_mode";
+const EXTRA_CODE_VERIFIER: &str = "code_verifier";
+const EXTRA_DPOP_PKCS8_B64: &str = "dpop_pkcs8_b64";
+
+const CODEARTS_PORTAL_URL: &str = "https://codearts.huaweicloud.com/portal";
+const CODEARTS_OAUTH_CLIENT_ID: &str = "codearts-agent";
+const CODEARTS_OAUTH_REDIRECT_PATH: &str = "/oauth/callback";
+const CODEARTS_LOGIN_PLUGIN_NAME: &str = "snap_AIIDE";
+const CODEARTS_LOGIN_PLUGIN_VERSION: &str = "5.2.0";
+const CODEARTS_REFRESH_LEAD_MS: i64 = 30 * 60 * 1000;
 
 /// 凭据剩余有效期低于该阈值即视为「需要刷新」，提前拦截避免发出注定 401 的请求。
 ///
@@ -185,7 +201,11 @@ impl CodeArtsAdapter {
                 version: "0.1.0".to_string(),
                 is_builtin: true,
                 capabilities: AdapterCapabilities {
-                    auth_methods: vec![AuthMethod::LocalImport, AuthMethod::TokenPaste],
+                    auth_methods: vec![
+                        AuthMethod::LocalImport,
+                        AuthMethod::WebviewOauth,
+                        AuthMethod::TokenPaste,
+                    ],
                     supports_quota_query: true,
                     // CodeArts 无每日签到机制，见模块文档
                     supports_daily_claim: false,
@@ -628,6 +648,403 @@ impl CodeArtsAdapter {
         }
         Ok(())
     }
+
+    pub fn create_oauth_flow() -> Result<CodeArtsOAuthFlow, AdapterError> {
+        let rng = SystemRandom::new();
+        let mut verifier_raw = [0u8; 32];
+        rng.fill(&mut verifier_raw)
+            .map_err(|_| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: "生成 CodeArts PKCE 随机串失败".into(),
+            })?;
+        let code_verifier = BASE64_URL.encode(verifier_raw);
+        let code_challenge = BASE64_URL.encode(Sha256::digest(code_verifier.as_bytes()));
+
+        let mut port_raw = [0u8; 2];
+        rng.fill(&mut port_raw).map_err(|_| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: "生成 CodeArts 回调端口失败".into(),
+        })?;
+        let port = 10_000 + (u16::from_be_bytes(port_raw) % 50_000);
+
+        let dpop_doc = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .map_err(|_| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: "生成 CodeArts DPoP 密钥对失败".into(),
+            })?;
+        let ticket_id = uuid::Uuid::new_v4().to_string();
+
+        let auth_url = reqwest::Url::parse_with_params(
+            &format!("{CODEARTS_PORTAL_URL}/authorize"),
+            &[
+                ("theme", "2"),
+                ("locale", "zh-cn"),
+                ("uri_scheme", CODEARTS_OAUTH_CLIENT_ID),
+                ("client_id", CODEARTS_OAUTH_CLIENT_ID),
+                ("port", &port.to_string()),
+                ("code_challenge", &code_challenge),
+                ("code_challenge_method", "SHA-256"),
+                ("ticket_id", &ticket_id),
+                ("plugin-name", CODEARTS_LOGIN_PLUGIN_NAME),
+                ("plugin-version", CODEARTS_LOGIN_PLUGIN_VERSION),
+            ],
+        )
+        .map(|u| u.to_string())
+        .map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("构造 CodeArts 授权地址失败: {e}"),
+        })?;
+
+        Ok(CodeArtsOAuthFlow {
+            auth_url,
+            port,
+            code_verifier,
+            dpop_pkcs8: dpop_doc.as_ref().to_vec(),
+        })
+    }
+
+    pub(crate) fn sign_dpop_jws(
+        pkcs8: &[u8],
+        htm: &str,
+        htu: &str,
+    ) -> Result<String, AdapterError> {
+        let rng = SystemRandom::new();
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8, &rng)
+            .map_err(|_| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "CodeArts DPoP 私钥格式无效".into(),
+            })?;
+        let pub_bytes = key_pair.public_key().as_ref();
+        if pub_bytes.len() != 65 || pub_bytes[0] != 0x04 {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: "CodeArts DPoP 公钥格式异常".into(),
+            });
+        }
+        let x_b64 = BASE64_URL.encode(&pub_bytes[1..33]);
+        let y_b64 = BASE64_URL.encode(&pub_bytes[33..65]);
+
+        let header = serde_json::json!({
+            "alg": "ES256",
+            "typ": "dpop+jwt",
+            "jwk": {
+                "crv": "P-256",
+                "kty": "EC",
+                "x": x_b64,
+                "y": y_b64,
+            }
+        });
+        let mut jti_raw = [0u8; 16];
+        rng.fill(&mut jti_raw).map_err(|_| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: "生成 DPoP jti 失败".into(),
+        })?;
+        let payload = serde_json::json!({
+            "htm": htm,
+            "htu": htu,
+            "iat": Utc::now().timestamp(),
+            "jti": hex::encode(jti_raw),
+        });
+
+        let header_b64 =
+            BASE64_URL.encode(
+                serde_json::to_vec(&header).map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: e.to_string(),
+                })?,
+            );
+        let payload_b64 =
+            BASE64_URL.encode(
+                serde_json::to_vec(&payload).map_err(|e| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: e.to_string(),
+                })?,
+            );
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig =
+            key_pair
+                .sign(&rng, signing_input.as_bytes())
+                .map_err(|_| AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: "CodeArts DPoP 签名失败".into(),
+                })?;
+        Ok(format!(
+            "{signing_input}.{}",
+            BASE64_URL.encode(sig.as_ref())
+        ))
+    }
+
+    async fn exchange_sts_token(
+        &self,
+        form: &[(&str, &str)],
+        dpop_pkcs8: &[u8],
+    ) -> Result<Value, AdapterError> {
+        let url = format!("{}/v1/oauth2/tokens", self.iam_sts);
+        let dpop = Self::sign_dpop_jws(dpop_pkcs8, "POST", &url)?;
+
+        let resp = self
+            .http
+            .post(&url)
+            .header(ACCEPT, "application/json")
+            .header("DPoP", dpop)
+            .form(form)
+            .send()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("请求 CodeArts STS 令牌接口失败: {}", e.without_url()),
+            })?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let has_creds = body.get("credentials").is_some_and(Value::is_object);
+
+        if !status.is_success() || !has_creds {
+            let err_code = body
+                .get("error")
+                .or_else(|| body.get("error_code"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let is_dead = err_code.eq_ignore_ascii_case("invalid_grant")
+                || text.contains("ExpiredRefreshToken")
+                || text.contains("STS5.1806")
+                || text.to_ascii_lowercase().contains("invalid refresh token")
+                || text
+                    .to_ascii_lowercase()
+                    .contains("refresh token has been used");
+            if is_dead {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::AuthExpired,
+                    message: "CodeArts 独立 OAuth 刷新令牌已失效，请重新授权".into(),
+                });
+            }
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!(
+                    "CodeArts STS 令牌交换失败 (HTTP {}): {}",
+                    status.as_u16(),
+                    text.chars().take(160).collect::<String>()
+                ),
+            });
+        }
+        Ok(body)
+    }
+
+    fn envelope_from_sts_response(
+        body: &Value,
+        code_verifier: &str,
+        dpop_pkcs8_b64: &str,
+        fallback_refresh_token: Option<&str>,
+        prev_uid: Option<&str>,
+        prev_name: Option<&str>,
+        prev_domain_id: Option<&str>,
+    ) -> Result<CredentialEnvelope, AdapterError> {
+        let creds = body
+            .get("credentials")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "CodeArts STS 响应缺少 credentials".into(),
+            })?;
+        let get_str = |keys: &[&str]| -> Option<String> {
+            keys.iter().find_map(|k| {
+                creds
+                    .get(*k)
+                    .or_else(|| body.get(*k))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+        };
+        let access_key = get_str(&["access_key_id", "accessKey", "access"]).ok_or_else(|| {
+            AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "CodeArts STS 响应缺少 access_key_id".into(),
+            }
+        })?;
+        let secret_key =
+            get_str(&["secret_access_key", "secretKey", "secret"]).ok_or_else(|| {
+                AdapterError::Unified {
+                    code: UnifiedErrorCode::InvalidCredential,
+                    message: "CodeArts STS 响应缺少 secret_access_key".into(),
+                }
+            })?;
+        let security_token =
+            get_str(&["security_token", "securityToken"]).ok_or_else(|| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "CodeArts STS 响应缺少 security_token".into(),
+            })?;
+        let refresh_token = get_str(&["refresh_token", "refreshToken"])
+            .or_else(|| fallback_refresh_token.map(str::to_string));
+
+        let expires_at = creds
+            .get("expires_at")
+            .or_else(|| creds.get("expiresAt"))
+            .or_else(|| body.get("expires_at"))
+            .and_then(|v| {
+                v.as_i64()
+                    .map(|n| {
+                        if n < 10_000_000_000 {
+                            n.saturating_mul(1000)
+                        } else {
+                            n
+                        }
+                    })
+                    .or_else(|| {
+                        v.as_str()
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.trim()).ok())
+                            .map(|dt| dt.timestamp_millis())
+                    })
+            });
+
+        let uid = get_str(&["principal_id", "user_id", "userId"])
+            .or_else(|| prev_uid.map(str::to_string))
+            .unwrap_or_else(|| hash_fallback_uid("codearts", access_key.as_bytes()));
+        let display_name = get_str(&["user_name", "userName", "principal_name"])
+            .or_else(|| prev_name.map(str::to_string));
+        let domain_id =
+            get_str(&["domain_id", "domainId"]).or_else(|| prev_domain_id.map(str::to_string));
+
+        let mut extra = HashMap::new();
+        extra.insert(EXTRA_ACCESS_KEY.to_string(), access_key);
+        extra.insert(EXTRA_SECRET_KEY.to_string(), secret_key);
+        extra.insert(EXTRA_SECURITY_TOKEN.to_string(), security_token);
+        extra.insert(EXTRA_REGION.to_string(), DEFAULT_REGION.to_string());
+        extra.insert(
+            EXTRA_CODEARTS_MODE.to_string(),
+            "isolated_oauth".to_string(),
+        );
+        extra.insert(EXTRA_CODE_VERIFIER.to_string(), code_verifier.to_string());
+        extra.insert(EXTRA_DPOP_PKCS8_B64.to_string(), dpop_pkcs8_b64.to_string());
+        if let Some(d) = domain_id {
+            extra.insert(EXTRA_DOMAIN_ID.to_string(), d);
+        }
+
+        Ok(CredentialEnvelope {
+            tool_id: "codearts".to_string(),
+            uid,
+            display_name,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: String::new(),
+                refresh_token,
+                expires_at,
+                extra,
+            },
+        })
+    }
+
+    pub async fn exchange_authorization_code(
+        &self,
+        code: &str,
+        code_verifier: &str,
+        port: u16,
+        dpop_pkcs8: &[u8],
+    ) -> Result<CredentialEnvelope, AdapterError> {
+        let redirect_uri = format!("http://127.0.0.1:{port}{CODEARTS_OAUTH_REDIRECT_PATH}");
+        let body = self
+            .exchange_sts_token(
+                &[
+                    ("client_id", CODEARTS_OAUTH_CLIENT_ID),
+                    ("code", code),
+                    ("code_verifier", code_verifier),
+                    ("grant_type", "authorization_code"),
+                    ("redirect_uri", &redirect_uri),
+                ],
+                dpop_pkcs8,
+            )
+            .await?;
+        let dpop_b64 = BASE64.encode(dpop_pkcs8);
+        Self::envelope_from_sts_response(&body, code_verifier, &dpop_b64, None, None, None, None)
+    }
+
+    async fn refresh_credential_inner(
+        &self,
+        cred: &CredentialEnvelope,
+        force: bool,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        let CredentialPayload::Token {
+            refresh_token,
+            expires_at,
+            extra,
+            ..
+        } = &cred.payload
+        else {
+            return Ok(None);
+        };
+        // 防互踢保护：仅独立 OAuth（isolated_oauth）且自带 PKCE verifier + DPoP 私钥的账号允许主动刷新；
+        // 本机客户端导入的账号沿用客户端刷新与静默回吸，绝不消费客户端一次性 refresh token。
+        if extra.get(EXTRA_CODEARTS_MODE).map(String::as_str) != Some("isolated_oauth") {
+            return Ok(None);
+        }
+        let Some(rt) = refresh_token
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+        let Some(code_verifier) = extra
+            .get(EXTRA_CODE_VERIFIER)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+        let Some(dpop_b64) = extra
+            .get(EXTRA_DPOP_PKCS8_B64)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+        let Ok(dpop_pkcs8) = BASE64.decode(dpop_b64) else {
+            return Ok(None);
+        };
+
+        let now_ms = Utc::now().timestamp_millis();
+        if !force {
+            if let Some(exp) = expires_at {
+                if exp - now_ms >= CODEARTS_REFRESH_LEAD_MS {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+
+        let body = self
+            .exchange_sts_token(
+                &[
+                    ("client_id", CODEARTS_OAUTH_CLIENT_ID),
+                    ("code_verifier", code_verifier),
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", rt.as_str()),
+                ],
+                &dpop_pkcs8,
+            )
+            .await?;
+
+        let updated = Self::envelope_from_sts_response(
+            &body,
+            code_verifier,
+            dpop_b64,
+            Some(&rt),
+            Some(&cred.uid),
+            cred.display_name.as_deref(),
+            extra.get(EXTRA_DOMAIN_ID).map(String::as_str),
+        )?;
+        Ok(Some(updated))
+    }
+}
+
+pub struct CodeArtsOAuthFlow {
+    pub auth_url: String,
+    pub port: u16,
+    pub code_verifier: String,
+    pub dpop_pkcs8: Vec<u8>,
 }
 
 impl Default for CodeArtsAdapter {
@@ -845,6 +1262,20 @@ impl ToolAdapter for CodeArtsAdapter {
             reward_summary: "码道 CodeArts 无每日签到机制，仅监控额度".into(),
             updated_quota: None,
         })
+    }
+
+    async fn refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, false).await
+    }
+
+    async fn force_refresh_credential(
+        &self,
+        cred: &CredentialEnvelope,
+    ) -> Result<Option<CredentialEnvelope>, AdapterError> {
+        self.refresh_credential_inner(cred, true).await
     }
 
     async fn apply_session(
@@ -1256,5 +1687,155 @@ mod tests {
     #[allow(dead_code)]
     fn _assert_scoped_host_available(h: Arc<dyn PlatformHost>) -> ScopedPlatformHost {
         ScopedPlatformHost::new(h, "codearts", PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn dpop_jws_has_valid_es256_header_payload_and_64_byte_signature() {
+        let flow = CodeArtsAdapter::create_oauth_flow().expect("oauth flow");
+        assert!(flow.port >= 10_000);
+        assert!(flow.auth_url.contains("client_id=codearts-agent"));
+        assert!(flow.auth_url.contains("code_challenge_method=SHA-256"));
+
+        let jws = CodeArtsAdapter::sign_dpop_jws(
+            &flow.dpop_pkcs8,
+            "POST",
+            "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens",
+        )
+        .expect("dpop jws");
+        let parts: Vec<&str> = jws.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        let hdr: Value = serde_json::from_slice(&BASE64_URL.decode(parts[0]).unwrap()).unwrap();
+        assert_eq!(hdr["alg"], "ES256");
+        assert_eq!(hdr["typ"], "dpop+jwt");
+        assert_eq!(hdr["jwk"]["crv"], "P-256");
+        assert_eq!(hdr["jwk"]["kty"], "EC");
+        let pay: Value = serde_json::from_slice(&BASE64_URL.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(pay["htm"], "POST");
+        assert_eq!(
+            pay["htu"],
+            "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens"
+        );
+        let sig_bytes = BASE64_URL.decode(parts[2]).unwrap();
+        assert_eq!(sig_bytes.len(), 64, "ES256 JWS signature must be raw r||s");
+    }
+
+    #[tokio::test]
+    async fn client_readonly_account_never_refreshes_to_avoid_kicking_desktop_client() {
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        let expired = cred_with_expiry(Some(chrono::Utc::now().timestamp_millis() - 60_000));
+        assert!(adapter
+            .refresh_credential(&expired)
+            .await
+            .expect("skip readonly")
+            .is_none());
+        assert!(adapter
+            .force_refresh_credential(&expired)
+            .await
+            .expect("skip readonly force")
+            .is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn isolated_oauth_codearts_refreshes_with_dpop_and_maps_sts5_1806_to_expired() {
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        let flow = CodeArtsAdapter::create_oauth_flow().expect("oauth flow");
+
+        let next_exp = (chrono::Utc::now() + chrono::Duration::hours(6)).to_rfc3339();
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth2/tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credentials": {
+                    "access_key_id": "AK_NEW",
+                    "secret_access_key": "SK_NEW",
+                    "security_token": "STS_NEW",
+                    "refresh_token": "RT_NEW",
+                    "expires_at": next_exp,
+                    "principal_id": "uid-ca-1",
+                    "user_name": "CodeArtsDev"
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let mut env = adapter
+            .exchange_authorization_code(
+                "auth-code-1",
+                &flow.code_verifier,
+                flow.port,
+                &flow.dpop_pkcs8,
+            )
+            .await
+            .expect("exchange code");
+        assert_eq!(env.uid, "uid-ca-1");
+        // 将 expires_at 调近以触发刷新
+        if let CredentialPayload::Token {
+            ref mut expires_at, ..
+        } = env.payload
+        {
+            *expires_at = Some(chrono::Utc::now().timestamp_millis() + 60_000);
+        }
+
+        let rotated_exp = (chrono::Utc::now() + chrono::Duration::hours(8)).to_rfc3339();
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth2/tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credentials": {
+                    "access_key_id": "AK_2",
+                    "secret_access_key": "SK_2",
+                    "security_token": "STS_2",
+                    "refresh_token": "RT_2",
+                    "expires_at": rotated_exp
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let refreshed = adapter
+            .refresh_credential(&env)
+            .await
+            .expect("refresh ok")
+            .expect("updated envelope");
+        match &refreshed.payload {
+            CredentialPayload::Token {
+                refresh_token,
+                extra,
+                ..
+            } => {
+                assert_eq!(refresh_token.as_deref(), Some("RT_2"));
+                assert_eq!(extra.get("access_key").map(String::as_str), Some("AK_2"));
+                assert_eq!(
+                    extra.get("codearts_mode").map(String::as_str),
+                    Some("isolated_oauth")
+                );
+            }
+            _ => panic!("expected Token"),
+        }
+
+        // STS5.1806 / invalid_grant -> AuthExpired
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth2/tokens"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "STS5.1806: refresh token has been used"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let err = adapter
+            .force_refresh_credential(&refreshed)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
     }
 }

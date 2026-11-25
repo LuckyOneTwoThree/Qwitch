@@ -89,9 +89,10 @@ export const AccountCard = React.memo(function AccountCard({
   const supportsWebviewOAuth =
     adapter?.capabilities.authMethods.includes("webview_oauth") ?? false;
   const needsRecovery = account.status === "expired" || account.status === "risk_paused";
-  /// 凭据由官方客户端托管并自行轮换的工具（如码道 CodeArts 的一次性
-  /// refresh token）。这类工具过期时应引导用户拉起客户端，而非由 Qwitch 代刷。
-  const clientManagedCredential = account.toolId === "codearts";
+  /// 凭据由官方客户端托管并自行轮换的工具（如本机导入的码道 CodeArts）。
+  /// 走独立 OAuth 授权的 CodeArts 账号由 Qwitch 自动续期，不再提示仅客户端托管。
+  const clientManagedCredential =
+    account.toolId === "codearts" && account.renewalMode !== "auto_refresh";
   const missingApiToken = account.hasApiToken === false;
   const missingLocalSnapshot = account.hasLocalSnapshot === false;
   const isBatchRunning = Boolean(batchProgress?.running);
@@ -528,6 +529,30 @@ export const AccountCard = React.memo(function AccountCard({
                     return caps.length ? `${caps.join(" · ")}就绪` : "就绪";
                   })()}
                 </span>
+              )}
+              {!needsRecovery && !isDisabled && !missingApiToken && account.renewalMode && (
+                (() => {
+                  const modeLabel =
+                    account.renewalMode === "auto_refresh"
+                      ? "自动续期"
+                      : account.renewalMode === "cookie_keepalive"
+                        ? "Cookie 保活"
+                        : account.renewalMode === "client_sync"
+                          ? "跟随客户端"
+                          : null;
+                  if (!modeLabel) return null;
+                  const expTitle = account.credentialExpiresAt
+                    ? `当前令牌有效期至 ${new Date(account.credentialExpiresAt).toLocaleString("zh-CN")}`
+                    : modeLabel;
+                  return (
+                    <span
+                      title={expTitle}
+                      className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                    >
+                      {modeLabel}
+                    </span>
+                  );
+                })()
               )}
             </div>
             <span className="inline-flex shrink-0 whitespace-nowrap items-center gap-1 tabular-nums">

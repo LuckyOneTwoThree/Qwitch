@@ -32,6 +32,7 @@ sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
 hex = "0.4"
+ring = "0.17"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

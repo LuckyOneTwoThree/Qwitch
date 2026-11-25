@@ -75,6 +75,8 @@ export interface AccountSummary {
   deviceType?: string;
   latestQuota?: QuotaSnapshot;
   lastClaimedAt?: string;
+  credentialExpiresAt?: string;
+  renewalMode?: "auto_refresh" | "cookie_keepalive" | "client_sync" | "manual";
   updatedAt: string;
 }
 

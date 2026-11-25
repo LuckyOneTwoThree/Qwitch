@@ -145,4 +145,17 @@ describe("AccountCard", () => {
     expect(screen.getByText("待关联")).toBeTruthy();
     expect(screen.queryByText("正常")).toBeNull();
   });
+
+  it("健康账号展示凭据续期模式徽章", () => {
+    render(
+      <AccountCard
+        account={{
+          ...account,
+          renewalMode: "auto_refresh",
+          credentialExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }}
+      />
+    );
+    expect(screen.getByText("自动续期")).toBeTruthy();
+  });
 });

@@ -470,6 +470,7 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
     }
     if (sources.has("preset")) return { label: "内置预设", tone: "info" as const };
     if (sources.has("manual")) return { label: "手工维护", tone: "info" as const };
+    if (sources.has("cache")) return { label: "本机缓存目录", tone: "info" as const };
     return { label: "未探测（静态兜底）", tone: "warn" as const };
   })();
   const currentStrategy: PoolStrategy = activeAgentPool?.strategy ?? "order";

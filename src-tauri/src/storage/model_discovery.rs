@@ -30,6 +30,16 @@ const DECRYPTED_TOKEN_FILE: &str = "decrypted_token.txt";
 const WORKBUDDY_USER_AGENT: &str = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0";
 /// Trae CN 客户端版本号（与 adapter 中的 DEFAULT_TRAE_APP_VERSION 对齐）。
 const TRAE_APP_VERSION: &str = "3.4.22";
+const TRAE_SOLO_CLIENT_VERSION: &str = "0.1.69";
+const TRAE_SOLO_CLIENT_VERSION_CODE: &str = "20260917";
+const TRAE_APP_ID: &str = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
+const TRAE_CHAT_FUNCTIONS: &[&str] = &[
+    "chat_v3",
+    "solo_work_lite",
+    "solo_agent",
+    "solo_agent_lite",
+    "solo_coder",
+];
 /// 有道龙虾服务端（与 adapter/lobsterai.rs 保持一致）
 const LOBSTERAI_SERVER_BASE: &str = "https://lobsterai-server.youdao.com";
 const LOBSTERAI_USER_AGENT: &str = "LobsterAI/2026.11.20";
@@ -417,8 +427,16 @@ fn collect_trae_model_objects(val: &Value, out: &mut Vec<UpstreamModelOption>) {
         Value::Array(arr) => {
             for item in arr {
                 if let Some(obj) = item.as_object() {
+                    if obj
+                        .get("is_custom_model")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     let id_opt = obj
-                        .get("model_name")
+                        .get("config_name")
+                        .or_else(|| obj.get("model_name"))
                         .or_else(|| obj.get("model"))
                         .or_else(|| obj.get("id"))
                         .or_else(|| obj.get("name"))
@@ -476,52 +494,104 @@ pub fn parse_trae_detail_param(body: &Value) -> Vec<UpstreamModelOption> {
 
 /// 解析 MiniMax Code CN `/mavis/api/v1/models` 响应。
 ///
-/// 历史实现要求 `provider.name` 必须为空或等于 `minimax`，且只接受
-/// `data.providers[].config.models` 这一种嵌套结构；上游一旦返回其它 provider
-/// 名或扁平 `data.models`，全部模型被丢弃。现改为：接受任意 provider，
-/// 并同时支持「provider.config.models」与「data.models」两种结构。
+/// 实际线上接口返回 `providers[].config.models` 为 JSON Object（以模型 id 为 key，
+/// 配合可选 `model_order` 排序数组）；同时兼容历史/测试的 JSON Array 与扁平 `data.models`。
 pub fn parse_minimax_models(body: &Value) -> Vec<UpstreamModelOption> {
     let root = body.get("data").unwrap_or(body);
     let mut out = Vec::new();
 
-    let push_models = |models: &Value, out: &mut Vec<UpstreamModelOption>| {
-        let Some(arr) = models.as_array() else {
+    let push_entry = |raw_id: &str, m: &Value, out: &mut Vec<UpstreamModelOption>| {
+        let raw_id = raw_id.trim();
+        if is_noise_variant_id(raw_id) {
             return;
-        };
-        for m in arr {
-            let Some(raw_id) = m.get("id").and_then(|v| v.as_str()).map(str::trim) else {
-                continue;
-            };
-            if is_noise_variant_id(raw_id) {
-                continue;
+        }
+        let kind = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(kind, "image" | "video" | "speech" | "audio") {
+            return;
+        }
+        let display = m.get("name").and_then(|v| v.as_str());
+        let mut opt = normalize_upstream_model(
+            "minimax_code_cn",
+            raw_id,
+            display,
+            Some(0.0),
+            false,
+            "live",
+        );
+        if let Some(ctx) = m
+            .pointer("/limit/context")
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0)
+        {
+            opt.context_window = Some(ctx);
+        }
+        if let Some(max_out) = m
+            .pointer("/limit/output")
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0)
+        {
+            opt.max_output_tokens = Some(max_out);
+        }
+        out.push(opt);
+    };
+
+    let push_models = |models: &Value, order_val: Option<&Value>, out: &mut Vec<UpstreamModelOption>| {
+        if let Some(obj) = models.as_object() {
+            let mut ordered_keys: Vec<String> = Vec::new();
+            let mut seen = HashSet::new();
+            if let Some(order_arr) = order_val.and_then(|v| v.as_array()) {
+                for k in order_arr.iter().filter_map(|v| v.as_str()) {
+                    if obj.contains_key(k) && seen.insert(k.to_string()) {
+                        ordered_keys.push(k.to_string());
+                    }
+                }
             }
-            let kind = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if matches!(kind, "image" | "video" | "speech" | "audio") {
-                continue;
+            for k in obj.keys() {
+                if seen.insert(k.clone()) {
+                    ordered_keys.push(k.clone());
+                }
             }
-            let display = m.get("name").and_then(|v| v.as_str());
-            out.push(normalize_upstream_model(
-                "minimax_code_cn",
-                raw_id,
-                display,
-                Some(0.0),
-                false,
-                "live",
-            ));
+            for k in ordered_keys {
+                if let Some(m) = obj.get(&k) {
+                    push_entry(&k, m, out);
+                }
+            }
+            return;
+        }
+        if let Some(arr) = models.as_array() {
+            for m in arr {
+                let Some(raw_id) = m.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                push_entry(raw_id, m, out);
+            }
         }
     };
 
     if let Some(providers) = root.get("providers").and_then(|v| v.as_array()) {
-        for prov in providers {
+        // 若存在 providerId == "minimax" 的主条目则优先解析它，否则回退遍历全部 provider
+        let minimax_providers: Vec<&Value> = providers
+            .iter()
+            .filter(|p| {
+                p.get("providerId").and_then(|v| v.as_str()) == Some("minimax")
+                    || p.get("name").and_then(|v| v.as_str()) == Some("minimax")
+            })
+            .collect();
+        let target_providers: Vec<&Value> = if minimax_providers.is_empty() {
+            providers.iter().collect()
+        } else {
+            minimax_providers
+        };
+        for prov in target_providers {
             if let Some(models) = prov.pointer("/config/models") {
-                push_models(models, &mut out);
+                push_models(models, prov.pointer("/config/model_order"), &mut out);
             }
         }
     }
     // 扁平结构：`data.models` / 根级 `models`
     for key in ["models", "model_list"] {
         if let Some(models) = root.get(key) {
-            push_models(models, &mut out);
+            push_models(models, root.get("model_order"), &mut out);
         }
     }
 
@@ -1210,68 +1280,134 @@ async fn try_probe_live_models(
         "trae_cn" => {
             let (token_opt, _, _) = extract_token_and_extra(cred);
             let token = token_opt.ok_or_else(|| "Trae CN 凭据缺少 access token".to_string())?;
-            let url = "https://trae-api-cn.mchost.guru/api/ide/v1/batch_get_detail_param";
-            let mut req = client
-                .post(url)
-                .header("Authorization", format!("Cloud-IDE-JWT {token}"))
-                .header("Accept", "application/json")
-                .header("X-User-Region", "CN");
-            // 服务端按客户端版本隐藏新模型，版本号需与 adapter 对齐；避免与设备头重复追加 x-app-version
-            let mut has_app_ver = false;
-            if let CredentialPayload::LocalSnapshot { files } = &cred.payload {
-                for (name, value) in extract_trae_device_headers(files) {
-                    if name.eq_ignore_ascii_case("x-app-version") {
-                        has_app_ver = true;
-                        req = req.header(name, TRAE_APP_VERSION);
-                    } else {
-                        req = req.header(name, value);
+            let device_headers = if let CredentialPayload::LocalSnapshot { files } = &cred.payload {
+                extract_trae_device_headers(files)
+            } else {
+                Vec::new()
+            };
+            let build_trae_req = |url: &str| {
+                let mut req = client
+                    .post(url)
+                    .header("Authorization", format!("Cloud-IDE-JWT {token}"))
+                    .header("X-Cloudide-Token", &token)
+                    .header("x-ide-token", &token)
+                    .header("x-uid", &cred.uid)
+                    .header("x-app-id", TRAE_APP_ID)
+                    .header("x-request-id", uuid::Uuid::new_v4().to_string())
+                    .header("x-app-version", TRAE_SOLO_CLIENT_VERSION)
+                    .header("x-app-version-code", TRAE_SOLO_CLIENT_VERSION_CODE)
+                    .header("x-ide-version", TRAE_SOLO_CLIENT_VERSION)
+                    .header("x-ide-version-code", TRAE_SOLO_CLIENT_VERSION_CODE)
+                    .header("x-ide-version-type", "stable")
+                    .header("Accept", "application/json")
+                    .header("X-User-Region", "CN");
+                for (name, value) in &device_headers {
+                    if name.eq_ignore_ascii_case("x-app-version")
+                        || name.eq_ignore_ascii_case("x-app-version-code")
+                        || name.eq_ignore_ascii_case("x-ide-version")
+                        || name.eq_ignore_ascii_case("x-ide-version-code")
+                        || name.eq_ignore_ascii_case("x-app-id")
+                        || name.eq_ignore_ascii_case("x-uid")
+                        || name.eq_ignore_ascii_case("x-request-id")
+                    {
+                        continue;
                     }
+                    req = req.header(*name, value);
                 }
-            }
-            if !has_app_ver {
-                req = req.header("x-app-version", TRAE_APP_VERSION);
-            }
-            let resp = req
+                req
+            };
+
+            let batch_url = "https://trae-api-cn.mchost.guru/api/ide/v1/batch_get_detail_param";
+            let batch_resp = build_trae_req(batch_url)
                 .json(&json!({
-                    "ide_version": TRAE_APP_VERSION,
-                    "function_names": ["IDE", "SOLO"]
+                    "functions": TRAE_CHAT_FUNCTIONS,
+                    "agent_type": "",
+                    "current_config_info": { "config_name": "", "is_custom_model": false },
+                    "mode_type": 0,
+                    "access_type": 0,
+                    "ab_force_vids": "",
+                    "ab_autotest_advanced_mode": 0,
+                    "show_custom_model": true
                 }))
                 .send()
                 .await
                 .map_err(|e| format!("请求 Trae CN 模型目录失败: {}", e.without_url()))?;
-            if !resp.status().is_success() {
-                return Err(format!("Trae CN 模型目录返回 HTTP {}", resp.status()));
-            }
-            let json: Value = resp
-                .json()
-                .await
-                .map_err(|e| format!("解析 Trae CN 模型目录失败: {e}"))?;
-            let parsed = parse_trae_detail_param(&json);
+            let batch_status = batch_resp.status();
+            let mut parsed = if batch_status.is_success() {
+                let json: Value = batch_resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("解析 Trae CN 模型目录失败: {e}"))?;
+                parse_trae_detail_param(&json)
+            } else {
+                Vec::new()
+            };
+
+            // batch_get_detail_param 无结果时，按 Magpie 同款方式逐个拉取 get_detail_param
             if parsed.is_empty() {
+                let single_url = "https://trae-api-cn.mchost.guru/api/ide/v1/get_detail_param";
+                let mut combined = Vec::new();
+                for func_name in TRAE_CHAT_FUNCTIONS {
+                    let Ok(resp) = build_trae_req(single_url)
+                        .json(&json!({
+                            "function": func_name,
+                            "config_names": Value::Null,
+                            "need_prompt": false,
+                            "current_config_info": Value::Null,
+                            "poly_prompt": true,
+                            "mode_type": Value::Null,
+                            "agent_type": Value::Null
+                        }))
+                        .send()
+                        .await
+                    else {
+                        continue;
+                    };
+                    if !resp.status().is_success() {
+                        continue;
+                    }
+                    if let Ok(json) = resp.json::<Value>().await {
+                        combined.extend(parse_trae_detail_param(&json));
+                    }
+                }
+                parsed = dedup_model_options(combined);
+            }
+
+            if parsed.is_empty() {
+                if !batch_status.is_success() {
+                    return Err(format!("Trae CN 模型目录返回 HTTP {batch_status}"));
+                }
                 Err("Trae CN 模型目录解析结果为空".into())
             } else {
+                let _ = TRAE_APP_VERSION;
                 Ok(parsed)
             }
         }
         "minimax_code_cn" => {
             let (token_opt, _, _) = extract_token_and_extra(cred);
-            let url = "https://agent.minimax.cn/mavis/api/v1/models";
-            let mut req = client
-                .get(url)
-                .header("Accept", "application/json")
-                .header("User-Agent", "MiniMaxAgent")
-                .header("X-Mavis-Agent-Id", "main")
-                .header("X-Mavis-Timezone-Offset", "28800");
-            // 缺少 token 时不再发匿名请求：匿名只会拿到缩减后的公开列表，
-            // 反而造成「模型不完整」的假象。
-            let token = token_opt.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
-                "MiniMax 凭据缺少 access token（需先完成一次在线授权）".to_string()
-            })?;
-            req = req.bearer_auth(token);
-            let resp = req
-                .send()
+            let url = "https://agent.minimax.cn/mavis/api/v1/models?region=cn&buildEnv=prod";
+            let send_minimax = |token: Option<&str>| {
+                let mut req = client
+                    .get(url)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "MiniMaxAgent")
+                    .header("X-Mavis-Agent-Id", "main")
+                    .header("X-Mavis-Timezone-Offset", "28800");
+                if let Some(t) = token.filter(|s| !s.trim().is_empty()) {
+                    req = req.bearer_auth(t);
+                }
+                req.send()
+            };
+            let mut resp = send_minimax(token_opt.as_deref())
                 .await
                 .map_err(|e| format!("请求 MiniMax 模型目录失败: {}", e.without_url()))?;
+            if matches!(resp.status().as_u16(), 401 | 403)
+                && token_opt.as_deref().is_some_and(|s| !s.trim().is_empty())
+            {
+                resp = send_minimax(None)
+                    .await
+                    .map_err(|e| format!("匿名回退请求 MiniMax 模型目录失败: {}", e.without_url()))?;
+            }
             if !resp.status().is_success() {
                 return Err(format!("MiniMax 模型目录返回 HTTP {}", resp.status()));
             }
@@ -1694,5 +1830,71 @@ mod tests {
         };
         let (token, _, _) = extract_token_and_extra(&cred);
         assert_eq!(token.as_deref(), Some("trae-jwt"));
+    }
+
+    #[test]
+    fn parse_trae_detail_param_reads_config_name_and_skips_custom_models() {
+        let body = json!({
+            "function_configs": [
+                {
+                    "function": "solo_agent",
+                    "config_info_list": [
+                        {
+                            "config_name": "DeepSeek-V4.1-Flash",
+                            "display_name": "DeepSeek V4.1 Flash",
+                            "is_custom_model": false,
+                            "enabled": true
+                        },
+                        {
+                            "config_name": "my-custom-slot",
+                            "display_name": "Custom",
+                            "is_custom_model": true,
+                            "enabled": true
+                        }
+                    ]
+                }
+            ]
+        });
+        let parsed = parse_trae_detail_param(&body);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "deepseek-v4.1-flash");
+        assert_eq!(parsed[0].vendor_wire_id, "DeepSeek-V4.1-Flash");
+        assert_eq!(parsed[0].source, "live");
+    }
+
+    #[test]
+    fn parse_minimax_models_reads_object_map_and_model_order() {
+        let body = json!({
+            "providers": [
+                {
+                    "providerId": "minimax",
+                    "config": {
+                        "model_order": ["MiniMax-M3.1-Flash", "MiniMax-M3"],
+                        "models": {
+                            "MiniMax-M3": {
+                                "name": "MiniMax M3",
+                                "limit": { "context": 512000, "output": 64000 }
+                            },
+                            "MiniMax-M3.1-Flash": {
+                                "name": "MiniMax M3.1 Flash",
+                                "limit": { "context": 256000, "output": 32000 }
+                            },
+                            "hailuo-video-01": {
+                                "name": "Video",
+                                "type": "video"
+                            }
+                        }
+                    }
+                }
+            ]
+        });
+        let parsed = parse_minimax_models(&body);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "minimax-m3.1-flash");
+        assert_eq!(parsed[0].vendor_wire_id, "MiniMax-M3.1-Flash");
+        assert_eq!(parsed[0].context_window, Some(256000));
+        assert_eq!(parsed[0].max_output_tokens, Some(32000));
+        assert_eq!(parsed[1].id, "minimax-m3");
+        assert_eq!(parsed[1].context_window, Some(512000));
     }
 }

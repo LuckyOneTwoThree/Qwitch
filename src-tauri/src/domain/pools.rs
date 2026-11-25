@@ -1098,6 +1098,38 @@ pub fn default_models_for_tool(tool_id: &str) -> Vec<String> {
         .collect()
 }
 
+/// 内置「推荐目录」：给没有自动探测能力的工具做一键套用。
+///
+/// 与 `default_model_options_for_tool`（静态兜底）的区别：
+/// - 兜底是系统**自动**展示的猜测，来源标记 `catalog`，UI 标「未探测」；
+/// - 推荐目录必须由用户显式点一次「套用」，来源标记 `preset`，UI 标「内置预设」，
+///   语义是「我认可这组模型可用」，可随时改成手工维护。
+pub fn recommended_model_options_for_tool(tool_id: &str) -> Vec<UpstreamModelOption> {
+    match tool_id {
+        // 经真实码道账号核验的一组模型（取自客户端内核下发的 multimodalModels），
+        // 不同账号/套餐可能略有差异，套用后仍可编辑。
+        "codearts" => [
+            "deepseek-v4.1-flash",
+            "deepseek-v4.1-flash-1017",
+            "glm-5.3-flash",
+            "kimi-k3.1-pro",
+            "kimi-k3",
+        ]
+        .iter()
+        .map(|id| normalize_upstream_model(tool_id, id, None, None, false, "preset"))
+        .collect(),
+        // 这两个工具目前只沿用既有目录，改标 preset 以免冒充实时探测
+        "lobsterai" | "doubaowork" => default_model_options_for_tool(tool_id)
+            .into_iter()
+            .map(|mut m| {
+                m.source = "preset".into();
+                m
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn upstream_model_protocol(tool_id: &str, model_id: &str) -> WireProtocolKind {
     if tool_id == "minimax_code_cn"
         || is_anthropic_model_name(model_id) && tool_id == "custom_api_key"

@@ -271,9 +271,12 @@ impl QwitchDatabase {
         if models.is_empty() {
             return Ok(());
         }
-        if !models.iter().all(|m| m.source == "live") {
+        if !models
+            .iter()
+            .all(|m| matches!(m.source.as_str(), "live" | "client"))
+        {
             return Err(StorageError::Validation(
-                "拒绝写入非实时探测的模型目录（source 必须为 live）".into(),
+                "拒绝写入非权威来源的模型目录（source 必须为 live / client）".into(),
             ));
         }
         let now = Utc::now().to_rfc3339();
@@ -332,6 +335,33 @@ impl QwitchDatabase {
         Ok(models.len())
     }
 
+    /// 套用工具级「内置推荐目录」（source = preset）。
+    pub fn save_preset_account_models(
+        &self,
+        account_id: &str,
+        tool_id: &str,
+    ) -> Result<usize, StorageError> {
+        let models = crate::domain::recommended_model_options_for_tool(tool_id);
+        if models.is_empty() {
+            return Err(StorageError::Validation(format!(
+                "工具 {tool_id} 暂无内置推荐目录，请手工维护"
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        let json = serde_json::to_string(&models)?;
+        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+        conn.execute(
+            "INSERT INTO account_discovered_models (account_id, tool_id, models_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(account_id) DO UPDATE SET
+                tool_id = excluded.tool_id,
+                models_json = excluded.models_json,
+                updated_at = excluded.updated_at",
+            params![account_id, tool_id, json, now],
+        )?;
+        Ok(models.len())
+    }
+
     /// 清空某账号的模型缓存（实时或人工），回到工具级兜底目录。
     pub fn clear_account_models(&self, account_id: &str) -> Result<(), StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
@@ -370,15 +400,21 @@ impl QwitchDatabase {
             if list.is_empty() {
                 continue;
             }
-            let all_manual = list.iter().all(|m| m.source == "manual");
-            if all_manual {
+            // 人工维护 / 内置预设：由用户显式确定，不随时间失效
+            if list
+                .iter()
+                .all(|m| matches!(m.source.as_str(), "manual" | "preset"))
+            {
                 map.insert(aid, list);
                 continue;
             }
             if !is_model_cache_fresh(&updated_at) {
                 continue;
             }
-            if list.iter().all(|m| m.source == "live") {
+            if list
+                .iter()
+                .all(|m| matches!(m.source.as_str(), "live" | "client"))
+            {
                 map.insert(aid, list);
             }
         }
@@ -2429,6 +2465,46 @@ mod tests {
             .load_cached_models_map()
             .expect("load map")
             .contains_key(&acc));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preset_models_apply_per_tool_and_do_not_expire() {
+        let (db, key, dir) = temp_db("presetmodels");
+        let acc = seed_account(&db, &key, "codearts", "ca_preset", "码道");
+
+        let count = db
+            .save_preset_account_models(&acc, "codearts")
+            .expect("apply preset");
+        assert_eq!(count, 5, "码道内置推荐目录应有 5 个模型");
+
+        let map = db.load_cached_models_map().expect("load map");
+        let list = map.get(&acc).expect("preset visible");
+        assert!(list.iter().all(|m| m.source == "preset"));
+        assert!(list
+            .iter()
+            .any(|m| m.vendor_wire_id == "deepseek-v4.1-flash"));
+
+        // 预设由用户显式套用，不随 TTL 失效
+        {
+            let conn = db.conn.lock().expect("lock");
+            conn.execute(
+                "UPDATE account_discovered_models SET updated_at = '2000-01-01T00:00:00+00:00' WHERE account_id = ?1",
+                rusqlite::params![acc],
+            )
+            .expect("age preset cache");
+        }
+        assert!(
+            db.load_cached_models_map()
+                .expect("load map")
+                .contains_key(&acc),
+            "preset catalog must not expire by TTL"
+        );
+
+        // 没有内置预设的工具必须报错，而不是写入空目录
+        let wb = seed_account(&db, &key, "workbuddy", "wb_preset", "WB");
+        assert!(db.save_preset_account_models(&wb, "workbuddy").is_err());
 
         let _ = std::fs::remove_dir_all(dir);
     }

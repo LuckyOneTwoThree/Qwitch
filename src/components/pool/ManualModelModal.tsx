@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, PencilLine, Save, Trash2 } from "lucide-react";
+import { AlertTriangle, PencilLine, Save, Sparkles, Trash2 } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import type { UpstreamAccountCandidate } from "../../types/pool";
 
@@ -8,6 +8,16 @@ const SOURCE_META: Record<string, { label: string; className: string; hint: stri
     label: "实时探测",
     className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
     hint: "来自上游真实接口，最可信",
+  },
+  client: {
+    label: "本机客户端",
+    className: "border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300",
+    hint: "从本机客户端读取到的真实模型清单",
+  },
+  preset: {
+    label: "内置预设",
+    className: "border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300",
+    hint: "内置推荐目录，未与上游核对；可一键套用后再修改",
   },
   manual: {
     label: "手工维护",
@@ -25,7 +35,9 @@ function resolveSource(candidate: UpstreamAccountCandidate): string {
   const options = candidate.modelOptions ?? [];
   if (options.length === 0) return "catalog";
   if (options.every((m) => m.source === "live")) return "live";
+  if (options.every((m) => m.source === "client")) return "client";
   if (options.every((m) => m.source === "manual")) return "manual";
+  if (options.every((m) => m.source === "preset")) return "preset";
   return "catalog";
 }
 
@@ -35,12 +47,16 @@ export function ManualModelModal({
   toolName,
   candidates,
   onSave,
+  onApplyPreset,
+  presetAvailable,
 }: {
   open: boolean;
   onClose: () => void;
   toolName: string;
   candidates: UpstreamAccountCandidate[];
   onSave: (accountId: string, modelIds: string[]) => void;
+  onApplyPreset: (accountId: string) => void;
+  presetAvailable: boolean;
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
@@ -137,7 +153,18 @@ export function ManualModelModal({
                     className="field-input mt-2 w-full resize-y font-mono text-[11px] leading-relaxed"
                   />
 
-                  <div className="mt-1.5 flex items-center justify-end gap-1.5">
+                  <div className="mt-1.5 flex flex-wrap items-center justify-end gap-1.5">
+                    {presetAvailable && (
+                      <button
+                        type="button"
+                        onClick={() => onApplyPreset(account.accountId)}
+                        className="btn btn-xs btn-secondary gap-1"
+                        title="用内置推荐目录覆盖该账号（来源标记为「内置预设」）"
+                      >
+                        <Sparkles className="h-3 w-3" aria-hidden="true" />
+                        套用推荐目录
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => {

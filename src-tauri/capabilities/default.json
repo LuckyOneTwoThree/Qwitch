@@ -49,6 +49,7 @@
     "allow-get-pool-workspace-state",
     "allow-detect-agent-running-cmd",
     "allow-set-account-manual-models-cmd",
+    "allow-apply-account-preset-models-cmd",
     "allow-refresh-upstream-models-cmd",
     "allow-toggle-gateway-server",
     "allow-update-gateway-port-cmd",

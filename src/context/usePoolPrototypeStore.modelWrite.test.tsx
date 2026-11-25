@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from "react";
-import { act, renderHook } from "@testing-library/react";
+import { cleanup, act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PoolPrototypeProvider, usePoolPrototype } from "./usePoolPrototypeStore";
 import { INITIAL_GATEWAY_STATE } from "../data/mockPoolData";
@@ -39,12 +39,14 @@ describe("Agent 页高频操作的往返开销", () => {
       }
       if (cmd === "set_agent_tool_models_cmd") return EMPTY_WORKSPACE;
       if (cmd === "set_account_manual_models_cmd") return EMPTY_WORKSPACE;
+      if (cmd === "apply_account_preset_models_cmd") return EMPTY_WORKSPACE;
       throw new Error(`unexpected command: ${cmd}`);
     });
     vi.doMock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
   });
 
   afterEach(() => {
+    cleanup();
     vi.doUnmock("@tauri-apps/api/core");
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
   });
@@ -137,5 +139,25 @@ describe("Agent 页高频操作的往返开销", () => {
       accountId: "acc-codearts-1",
       models: ["deepseek-v4.1-flash", "glm-5.3-flash"],
     });
+  });
+
+  it("一键套用推荐目录会调用后端命令，而不是只在前端改状态", async () => {
+    const { result } = renderHook(() => usePoolPrototype(), {
+      wrapper: createWrapper(),
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    invokeMock.mockClear();
+
+    await act(async () => {
+      result.current.applyAccountPresetModels("acc-codearts-1");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    const call = invokeMock.mock.calls.find(
+      ([cmd]) => cmd === "apply_account_preset_models_cmd"
+    );
+    expect(call?.[1]).toMatchObject({ accountId: "acc-codearts-1" });
   });
 });

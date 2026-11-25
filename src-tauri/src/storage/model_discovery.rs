@@ -89,6 +89,16 @@ impl ProbeOutcome {
         }
     }
 
+    /// 来自本机客户端的权威目录（例如码道的内核配置）。
+    /// 它不是 HTTP 实时探测，但同样是该账号的真实可用模型，允许落库。
+    fn from_client(models: Vec<UpstreamModelOption>) -> Self {
+        Self {
+            models,
+            source: "client",
+            error: None,
+        }
+    }
+
     fn fallback(
         models: Vec<UpstreamModelOption>,
         source: &'static str,
@@ -104,6 +114,12 @@ impl ProbeOutcome {
     /// 是否为本次实时探测的真实结果（只有它才允许写入 live 缓存）。
     pub fn is_live(&self) -> bool {
         self.source == "live"
+    }
+
+    /// 是否为「可落库的权威目录」：实时探测，或本机客户端自带的真实清单。
+    /// 回退的 cache / catalog 永远不算。
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self.source, "live" | "client")
     }
 }
 
@@ -785,7 +801,11 @@ pub async fn probe_models_for_account(cred: &CredentialEnvelope) -> ProbeOutcome
             // 实时结果登记到 wire-id 注册表：静态映射表未收录的模型，
             // 只有这里能拿到上游真实 ID（大小写敏感的 wire id）。
             crate::domain::register_live_wire_ids(&cred.tool_id, &models);
-            ProbeOutcome::live(models)
+            if models.iter().all(|m| m.source == "client") {
+                ProbeOutcome::from_client(models)
+            } else {
+                ProbeOutcome::live(models)
+            }
         }
         Ok(_) => {
             let err = Some("上游返回了空模型列表".to_string());
@@ -808,6 +828,113 @@ fn fallback_models(cred: &CredentialEnvelope) -> (Vec<UpstreamModelOption>, &'st
         return (cached, "cache");
     }
     (default_model_options_for_tool(&cred.tool_id), "catalog")
+}
+
+/// 码道 CodeArts 的模型清单：从本机客户端内核日志里读取。
+///
+/// 码道没有对外可用的模型目录接口（本地内核 `/cag/model` 需要 IDE 私有的
+/// `auth_token`，云端 inferhub 路径未公开），但 IDE 每次启动都会把完整配置
+/// POST 给内核，其中 `multimodalModels` 就是该账号当前可用的模型列表。
+/// 这份日志是本机明文、只读的，取模型名不涉及任何凭据。
+fn probe_codearts_client_models() -> Result<Vec<UpstreamModelOption>, String> {
+    let mut logs: Vec<PathBuf> = Vec::new();
+    for dir in codearts_log_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("txt") {
+                logs.push(path);
+            }
+        }
+    }
+    if logs.is_empty() {
+        return Err("未找到码道客户端日志：请先启动一次 CodeArts 客户端".into());
+    }
+    // 新日志优先：配置在每次启动时写入
+    logs.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(std::cmp::Reverse)
+    });
+
+    for path in logs.iter().take(5) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(models) = codearts_models_from_kernel_log(&text) {
+            return Ok(models);
+        }
+    }
+    Err("码道客户端日志中未找到模型清单（请打开一次客户端后再刷新）".into())
+}
+
+fn codearts_log_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(
+            PathBuf::from(home).join("Library/Application Support/codearts/app-logs/logs/kernel"),
+        );
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        dirs.push(PathBuf::from(appdata).join("codearts/app-logs/logs/kernel"));
+    }
+    dirs
+}
+
+/// 从内核日志里抽出模型清单（纯函数，便于单测）。
+///
+/// 日志行形如：`[init_post] config: {"multimodalModels":[...], ...}`。
+/// 取最后一次出现的那行，解析失败则视为没有。
+fn codearts_models_from_kernel_log(text: &str) -> Option<Vec<UpstreamModelOption>> {
+    const MARKER: &str = "[init_post] config: ";
+    let start = text.rfind(MARKER)? + MARKER.len();
+    let rest = &text[start..];
+    let line_end = rest.find('\n').unwrap_or(rest.len());
+    let cfg: Value = serde_json::from_str(rest[..line_end].trim_end()).ok()?;
+
+    let mut raw_ids: Vec<String> = Vec::new();
+    if let Some(list) = cfg.get("multimodalModels").and_then(Value::as_array) {
+        raw_ids.extend(
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    // 部分版本会把模型放在 provider.models（map 或数组）
+    if let Some(models) = cfg.get("provider").and_then(|p| p.get("models")) {
+        match models {
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(id) = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.as_str())
+                    {
+                        raw_ids.push(id.trim().to_string());
+                    }
+                }
+            }
+            Value::Object(map) => raw_ids.extend(map.keys().map(|k| k.trim().to_string())),
+            _ => {}
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let models: Vec<UpstreamModelOption> = raw_ids
+        .into_iter()
+        .filter(|id| !id.is_empty() && seen.insert(id.clone()))
+        .map(|id| normalize_upstream_model("codearts", &id, None, None, false, "client"))
+        .collect();
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
 }
 
 async fn try_probe_live_models(
@@ -1029,6 +1156,8 @@ async fn try_probe_live_models(
                 Ok(deduped)
             }
         }
+        // 码道没有可调用的模型接口，改从本机客户端读取真实清单
+        "codearts" => probe_codearts_client_models(),
         other => Err(format!("工具 {other} 暂不支持实时模型目录探测")),
     }
 }
@@ -1036,6 +1165,28 @@ async fn try_probe_live_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codearts_models_parsed_from_kernel_init_config() {
+        // 码道没有模型接口，只能从内核启动配置里取真实清单
+        let log = concat!(
+            "2026-11-25 13:34:26 [INFO] [MainServe]: [init_post] config: ",
+            r#"{"userName":"u","multimodalModels":["deepseek-v4.1-flash","glm-5.3-flash","kimi-k3"],"agent":{}}"#,
+            "\n2026-11-25 13:34:27 [INFO] something else\n"
+        );
+        let models = codearts_models_from_kernel_log(log).expect("models");
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["deepseek-v4.1-flash", "glm-5.3-flash", "kimi-k3"]
+        );
+        assert!(models.iter().all(|m| m.source == "client"));
+        // vendor wire id 必须原样保留（大小写敏感）
+        assert_eq!(models[0].vendor_wire_id, "deepseek-v4.1-flash");
+
+        // 没有 marker / JSON 损坏 → None，绝不返回猜测值
+        assert!(codearts_models_from_kernel_log("no config here").is_none());
+        assert!(codearts_models_from_kernel_log("[init_post] config: {not json}\n").is_none());
+    }
 
     #[test]
     fn noise_filter_keeps_legitimate_max_models() {

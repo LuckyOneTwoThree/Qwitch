@@ -121,6 +121,8 @@ export interface PoolPrototypeContextValue {
   authorizeCodeArtsIsolated: (accountId: string) => void;
   /** 人工维护某账号的模型目录（无实时探测能力的工具使用；传空数组即清空） */
   setAccountManualModels: (accountId: string, modelIds: string[]) => void;
+  /** 一键套用该工具的内置推荐目录（source = preset，明确区别于实时探测） */
+  applyAccountPresetModels: (accountId: string) => void;
   updateAgentMountedPools: (
     agentId: TargetAgentId,
     mountedPoolIds: string[],
@@ -241,15 +243,19 @@ interface EnsureUpstreamModelsResult {
  */
 function describeProbeResult(result: RefreshUpstreamModelsResult, accountId?: string): string {
   const scope = accountId ? "该账号" : "全部上游账号";
-  const { probedCount, liveCount, failedCount, items } = result;
+  const { probedCount, failedCount, items } = result;
   if (probedCount === 0) {
     return `未探测到${scope}的模型目录：账号缺少可用的访问凭据`;
   }
 
+  // 按真实来源分档，避免把「本机客户端目录」说成「实时探测」
+  const liveCount = items.filter((i) => i.source === "live").length;
+  const clientCount = items.filter((i) => i.source === "client").length;
   const cacheCount = items.filter((i) => i.source === "cache").length;
   const catalogCount = items.filter((i) => i.source === "catalog").length;
   const parts: string[] = [];
   if (liveCount > 0) parts.push(`实时探测成功 ${liveCount} 个`);
+  if (clientCount > 0) parts.push(`从本机客户端读到 ${clientCount} 个`);
   if (cacheCount > 0) parts.push(`回退本地目录 ${cacheCount} 个`);
   if (catalogCount > 0) parts.push(`回退内置目录 ${catalogCount} 个`);
   if (failedCount > 0) parts.push(`失败 ${failedCount} 个`);
@@ -266,7 +272,10 @@ function describeProbeResult(result: RefreshUpstreamModelsResult, accountId?: st
 function probeTone(result: RefreshUpstreamModelsResult): ToastTone {
   if (result.probedCount === 0) return "warning";
   if (result.failedCount === result.probedCount) return "error";
-  if (result.liveCount === result.probedCount) return "success";
+  const authoritative = result.items.filter(
+    (i) => i.source === "live" || i.source === "client"
+  ).length;
+  if (authoritative === result.probedCount) return "success";
   return "warning";
 }
 
@@ -313,6 +322,7 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   clearMemberCooldown: () => {},
   authorizeCodeArtsIsolated: () => {},
   setAccountManualModels: () => {},
+  applyAccountPresetModels: () => {},
   updateAgentMountedPools: () => {},
   setAgentDefaultModel: () => {},
   mountPoolToAgents: () => {},
@@ -1713,6 +1723,34 @@ export function PoolPrototypeProvider({
     [candidates, notify, syncWorkspaceCommand]
   );
 
+  const applyAccountPresetModels = useCallback(
+    (accountId: string) => {
+      if (!isTauriRuntime) {
+        notify("浏览器预览模式不支持套用真实目录，请在桌面端操作", "info");
+        return;
+      }
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const ws = await invoke<PoolWorkspaceState>("apply_account_preset_models_cmd", {
+            accountId,
+          });
+          selfEventGuardRef.current = markSelfEvent(selfEventGuardRef.current, Date.now());
+          applyWorkspaceState(ws);
+          const count =
+            ws.candidates.find((c) => c.accountId === accountId)?.modelOptions?.length ?? 0;
+          notify(`已套用内置推荐目录（${count} 个模型），如与实际不符可继续修改`, "success");
+        } catch (err) {
+          notify(
+            `套用推荐目录失败：${err instanceof Error ? err.message : String(err)}`,
+            "error"
+          );
+        }
+      })();
+    },
+    [applyWorkspaceState, isTauriRuntime, notify]
+  );
+
   const applyMountedPoolsLocally = useCallback(
     (
       agentId: TargetAgentId,
@@ -3097,6 +3135,7 @@ export function PoolPrototypeProvider({
       clearMemberCooldown,
       authorizeCodeArtsIsolated,
       setAccountManualModels,
+      applyAccountPresetModels,
       updateAgentMountedPools,
       setAgentDefaultModel,
       mountPoolToAgents,
@@ -3165,6 +3204,7 @@ export function PoolPrototypeProvider({
       clearMemberCooldown,
       authorizeCodeArtsIsolated,
       setAccountManualModels,
+      applyAccountPresetModels,
       updateAgentMountedPools,
       setAgentDefaultModel,
       mountPoolToAgents,

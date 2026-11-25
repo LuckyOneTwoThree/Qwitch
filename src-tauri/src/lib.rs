@@ -655,6 +655,7 @@ pub fn run() {
             commands::get_pool_workspace_state,
             commands::detect_agent_running_cmd,
             commands::set_account_manual_models_cmd,
+            commands::apply_account_preset_models_cmd,
             commands::refresh_upstream_models_cmd,
             commands::ensure_upstream_models_cmd,
             commands::toggle_gateway_server,

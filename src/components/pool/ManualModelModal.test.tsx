@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManualModelModal } from "./ManualModelModal";
 import type { UpstreamAccountCandidate } from "../../types/pool";
 
@@ -33,6 +33,8 @@ function makeCandidate(
   };
 }
 
+afterEach(cleanup);
+
 describe("ManualModelModal", () => {
   it("回填当前模型、按行解析后保存、清空时提交空数组", () => {
     const onSave = vi.fn();
@@ -43,6 +45,8 @@ describe("ManualModelModal", () => {
         toolName="码道 CodeArts"
         candidates={[makeCandidate()]}
         onSave={onSave}
+        onApplyPreset={vi.fn()}
+        presetAvailable
       />
     );
 
@@ -83,6 +87,8 @@ describe("ManualModelModal", () => {
           }),
         ]}
         onSave={vi.fn()}
+        onApplyPreset={vi.fn()}
+        presetAvailable={false}
       />
     );
 
@@ -97,8 +103,56 @@ describe("ManualModelModal", () => {
         toolName="码道 CodeArts"
         candidates={[]}
         onSave={vi.fn()}
+        onApplyPreset={vi.fn()}
+        presetAvailable={false}
       />
     );
     expect(screen.getByText("该工具下还没有账号")).toBeTruthy();
+  });
+
+  it("有内置预设时可一键套用，并如实标注「内置预设」来源", () => {
+    const onApplyPreset = vi.fn();
+    render(
+      <ManualModelModal
+        open
+        onClose={vi.fn()}
+        toolName="码道 CodeArts"
+        candidates={[
+          makeCandidate({
+            modelOptions: [
+              {
+                id: "deepseek-v4.1-flash",
+                displayName: "deepseek-v4.1-flash",
+                vendorWireId: "deepseek-v4.1-flash",
+                family: "DeepSeek",
+                source: "preset",
+              },
+            ],
+          }),
+        ]}
+        onSave={vi.fn()}
+        onApplyPreset={onApplyPreset}
+        presetAvailable
+      />
+    );
+
+    expect(screen.getByText("内置预设")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /套用推荐目录/ }));
+    expect(onApplyPreset).toHaveBeenCalledWith("acc-codearts-1");
+  });
+
+  it("没有预设的工具不显示套用按钮", () => {
+    render(
+      <ManualModelModal
+        open
+        onClose={vi.fn()}
+        toolName="WorkBuddy"
+        candidates={[makeCandidate({ toolId: "workbuddy" })]}
+        onSave={vi.fn()}
+        onApplyPreset={vi.fn()}
+        presetAvailable={false}
+      />
+    );
+    expect(screen.queryByRole("button", { name: /套用推荐目录/ })).toBeNull();
   });
 });

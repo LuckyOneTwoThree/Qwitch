@@ -340,4 +340,24 @@ describe("usePoolPrototypeStore v2", () => {
     expect(finalAccs[0].enabled).toBe(true);
     expect(finalAccs[1].enabled).toBe(false);
   });
+
+  it("只读码道账号不会成为号池成员——因此勾选模型无法落地，UI 必须前置禁用", () => {
+    const { result } = renderHook(() => usePoolPrototype(), {
+      wrapper: createWrapper(),
+    });
+
+    const readonlyCodeArts = result.current.candidates.find(
+      (c) => c.accountId === "acc-codearts-1"
+    )!;
+    expect(readonlyCodeArts.codeArtsMode).toBe("client_readonly");
+
+    act(() => {
+      result.current.setAgentToolModels("codex_desktop", "codearts", ["deepseek-v4.1-flash"]);
+    });
+
+    // 只读凭据不参与网关调度，永远不会被物化进 Agent 专属号池：
+    // 这正是历史实现「点了没反应 / 勾上又跳回」的原因。
+    const pool = result.current.getAgentPrimaryPool("codex_desktop");
+    expect(pool?.members.some((m) => m.accountId === "acc-codearts-1")).toBe(false);
+  });
 });

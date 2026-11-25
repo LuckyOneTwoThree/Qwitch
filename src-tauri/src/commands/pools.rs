@@ -143,6 +143,25 @@ pub fn detect_agent_running_cmd() -> Vec<AgentRunningState> {
         .collect()
 }
 
+/// 套用工具级「内置推荐目录」（码道 / 有道龙虾 / 豆包工作等无探测接口的工具）。
+#[tauri::command]
+pub fn apply_account_preset_models_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<PoolWorkspaceState, String> {
+    let summary = state
+        .db
+        .get_account_summary(&account_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .db
+        .save_preset_account_models(&account_id, &summary.tool_id)
+        .map_err(|e| e.to_string())?;
+    emit_workspace_updated(&app);
+    build_workspace_state(&state.db, &state.master_key, &state.gateway)
+}
+
 /// 人工维护某账号的模型目录。
 ///
 /// 用于没有可靠实时探测接口的工具（码道 CodeArts / 有道龙虾 / 豆包工作）：
@@ -232,7 +251,7 @@ async fn probe_account_models(
     }
 }
 
-/// 把探测结果落库（**只落 live**）并统计真实结果。
+/// 把探测结果落库（**只落权威来源**：实时探测 / 本机客户端）并统计真实结果。
 ///
 /// 回退到静态目录 / 本机二级目录的结果一律不入库：
 /// 一旦入库，「探测失败」会被固化成「探测成功」，模型目录从此锁死在旧版本。
@@ -246,7 +265,7 @@ fn persist_probe_results(
     let mut items = Vec::with_capacity(results.len());
 
     for (account_id, tool_id, outcome) in results {
-        if outcome.is_live() && !outcome.models.is_empty() {
+        if outcome.is_authoritative() && !outcome.models.is_empty() {
             live_count += 1;
             if let Err(err) =
                 state

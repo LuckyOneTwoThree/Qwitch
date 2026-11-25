@@ -18,9 +18,9 @@ import {
   RotateCcw,
   Search,
   ShieldAlert,
+  Sparkles,
   ShieldCheck,
   SlidersHorizontal,
-  Sparkles,
   Square,
   Star,
   Terminal,
@@ -46,8 +46,12 @@ import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
 import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
 import { ManualModelModal } from "../../components/pool/ManualModelModal";
+import { isToolScopeReadonly } from "../../domain/toolScope";
 
 type ModelLike = { id: string; isFree?: boolean; creditMultiplier?: number };
+
+/// 与 Rust `recommended_model_options_for_tool` 保持一致的「有内置推荐目录」工具集
+const TOOLS_WITH_PRESET = new Set(["codearts", "lobsterai", "doubaowork"]);
 
 function isLowRateModel(opt: ModelLike) {
   return (
@@ -169,6 +173,7 @@ export function AgentBindingsView({
     clearMemberCooldown,
     authorizeCodeArtsIsolated,
     setAccountManualModels,
+    applyAccountPresetModels,
     getAgentToolModelOptions,
     getAgentToolEnabledModelIds,
     getAgentToolAccounts,
@@ -429,7 +434,12 @@ export ANTHROPIC_BASE_URL=http://${gateway.host}:${gateway.port}
 export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desktop"}`;
 
   const activeToolName = TOOL_SHORT_LABELS[activeToolId] ?? activeToolId;
-  // 模型目录的可信度必须如实展示：实时探测 / 手工维护 / 未探测（静态兜底）
+  // 该工具的账号是否全部为「本机只读凭据」：这类账号不参与网关，勾选模型不会生效
+  const toolAccountsForScope = candidates.filter((c) => c.toolId === activeToolId);
+  const scopeReadonly = isToolScopeReadonly(candidates, activeToolId);
+  const presetAvailable = TOOLS_WITH_PRESET.has(activeToolId);
+
+  // 模型目录的可信度必须如实展示：实时 / 本机客户端 / 内置预设 / 手工 / 未探测
   const modelSourceBadge = (() => {
     const sources = new Set(toolModelOptions.map((o) => o.source));
     if (toolModelOptions.length === 0) return { label: "未探测", tone: "warn" as const };
@@ -439,6 +449,13 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
         tone: "ok" as const,
       };
     }
+    if (sources.has("client")) {
+      return {
+        label: sources.size === 1 ? "本机客户端目录" : "部分来自客户端",
+        tone: "ok" as const,
+      };
+    }
+    if (sources.has("preset")) return { label: "内置预设", tone: "info" as const };
     if (sources.has("manual")) return { label: "手工维护", tone: "info" as const };
     return { label: "未探测（静态兜底）", tone: "warn" as const };
   })();
@@ -1050,6 +1067,26 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                     </div>
                   </div>
 
+                  {scopeReadonly && (
+                    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:text-amber-300">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                      <span className="min-w-0 flex-1">
+                        该工具当前只有「本机只读凭据」，不参与网关调度，所以模型无法勾选。
+                        如需纳入网关，请先签发独立 OAuth 授权。
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = toolAccountsForScope[0];
+                          if (target) authorizeCodeArtsIsolated(target.accountId);
+                        }}
+                        className="btn btn-xs btn-secondary shrink-0"
+                      >
+                        签发独立 OAuth
+                      </button>
+                    </div>
+                  )}
+
                   {/* 搜索与快速筛选栏 */}
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="relative min-w-[200px] flex-1">
@@ -1173,14 +1210,28 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                           <span className="text-[11px] text-zinc-400">
                             请按客户端里真实可选的模型手工填写，避免展示猜测值
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => setManualModelModalOpen(true)}
-                            className="btn btn-xs btn-secondary gap-1"
-                          >
-                            <PencilLine className="h-3 w-3" aria-hidden="true" />
-                            手工维护模型目录
-                          </button>
+                          <div className="flex flex-wrap items-center justify-center gap-1.5">
+                            {presetAvailable && toolAccountsForScope[0] && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  applyAccountPresetModels(toolAccountsForScope[0].accountId)
+                                }
+                                className="btn btn-xs btn-primary gap-1"
+                              >
+                                <Sparkles className="h-3 w-3" aria-hidden="true" />
+                                套用推荐目录
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setManualModelModalOpen(true)}
+                              className="btn btn-xs btn-secondary gap-1"
+                            >
+                              <PencilLine className="h-3 w-3" aria-hidden="true" />
+                              手工维护模型目录
+                            </button>
+                          </div>
                         </div>
                       ) : (
                         <div className="col-span-full rounded-xl border border-dashed border-zinc-200 py-8 text-center text-xs text-zinc-400 dark:border-zinc-800">
@@ -1216,6 +1267,12 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                               role="checkbox"
                               aria-checked={checked}
                               aria-label={`选择模型 ${opt.displayName}`}
+                              disabled={scopeReadonly}
+                              title={
+                                scopeReadonly
+                                  ? "该工具账号为本机只读凭据，不参与网关调度，需先签发独立 OAuth"
+                                  : undefined
+                              }
                               onClick={() => {
                                 const next = checked
                                   ? enabledBareModelIds.filter((id) => id !== opt.id)
@@ -1243,8 +1300,25 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                     {opt.family}
                                   </span>
                                   {opt.source === "manual" ? (
-                                    <span className="rounded bg-sky-500/12 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+                                    <span
+                                      className="rounded bg-sky-500/12 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300"
+                                      title="由你手工填写"
+                                    >
                                       手工
+                                    </span>
+                                  ) : opt.source === "preset" ? (
+                                    <span
+                                      className="rounded bg-indigo-500/12 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 dark:text-indigo-300"
+                                      title="内置推荐目录，未与上游核对；如与实际不符请修改"
+                                    >
+                                      预设
+                                    </span>
+                                  ) : opt.source === "client" ? (
+                                    <span
+                                      className="rounded bg-teal-500/12 px-1.5 py-0.5 text-[11px] font-medium text-teal-700 dark:text-teal-300"
+                                      title="从本机客户端读取的真实模型清单"
+                                    >
+                                      本机
                                     </span>
                                   ) : opt.source !== "live" ? (
                                     <span
@@ -1281,6 +1355,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                             ) : (
                               <button
                                 type="button"
+                                disabled={scopeReadonly}
                                 onClick={() =>
                                   setAgentDefaultToolModel(
                                     activeBinding.agentId,
@@ -1288,7 +1363,7 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
                                     opt.id
                                   )
                                 }
-                                className="shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium text-brand-700 transition hover:bg-brand-500/10 dark:text-brand-300"
+                                className="shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium text-brand-700 transition hover:bg-brand-500/10 disabled:opacity-40 disabled:hover:bg-transparent dark:text-brand-300"
                               >
                                 设为默认
                               </button>
@@ -1861,6 +1936,8 @@ export ANTHROPIC_AUTH_TOKEN=qwitch-bind-${activeBinding?.agentId ?? "claude-desk
         toolName={activeToolName}
         candidates={candidates.filter((c) => c.toolId === activeToolId)}
         onSave={(accountId, modelIds) => setAccountManualModels(accountId, modelIds)}
+        onApplyPreset={(accountId) => applyAccountPresetModels(accountId)}
+        presetAvailable={presetAvailable}
       />
     </div>
   );

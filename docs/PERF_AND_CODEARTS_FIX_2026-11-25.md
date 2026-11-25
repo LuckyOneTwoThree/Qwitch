@@ -122,3 +122,62 @@ npm run build                              ✅ 388 KB（gzip 103 KB）
 - 码道 / 有道龙虾 / 豆包工作的**自动**模型探测仍缺协议依据；在有真实抓包前，手工维护是唯一不撒谎的方案。
 - `set_pool_tool_models` 仍会把该工具**所有成员**重写为同一模型集（原 P2-10）；本轮未动，属语义设计取舍。
 - 其余低频变更命令（挂载 / 解绑 / 删池）仍是同步命令，单次冻结约 100 ms；若后续继续收敛，可按本报告方式统一转 async。
+
+---
+
+## 八、第二轮补充（同日）：从「手工维护」升级为「自动读取 + 一键套用」
+
+第一版把码道模型目录改成纯手工填写，实测反馈是「学习成本高、体验差」。本轮在不撒谎的前提下把交互成本降到最低。
+
+### 8.1 码道：改为从本机客户端读取真实清单（无需任何操作）
+
+码道没有可调用的模型接口，但 IDE 每次启动都会把完整配置 POST 给内核，日志里形如
+`[init_post] config: {"multimodalModels":[...]}`。`storage/model_discovery.rs` 新增
+`probe_codearts_client_models()`：按修改时间从新到旧扫描 `app-logs/logs/kernel/*.txt`，
+取最后一次配置行，解析 `multimodalModels`（并兼容 `provider.models`），
+来源标记为 **`client`**（UI 显示「本机客户端」）。
+
+- 它是本机明文、只读、不含凭据的模型名列表；
+- 允许落库（与 `live` 同级），受 12 小时 TTL 约束（客户端升级后自动刷新）；
+- 代码：`codearts_models_from_kernel_log()` 为纯函数并有单测。
+
+### 8.2 无探测能力的工具：内置「推荐目录」一键套用
+
+新增 `recommended_model_options_for_tool()`（`domain/pools.rs`）与
+`apply_account_preset_models_cmd`：来源标记 `preset`，UI 显示「内置预设」，
+不进 TTL、不会被当作实时探测。码道预设取真实账号核验过的 5 个模型，
+有道龙虾 / 豆包工作沿用既有目录但**不再冒充探测结果**。
+
+入口：模型列表空态的首个按钮「套用推荐目录」，以及手工维护弹窗里每个账号的同一按钮。
+
+### 8.3 「码道点了选不中」的根因与修复
+
+根因（静默失败）：码道账号为 `client_readonly`（本机只读凭据）时——
+
+1. 前端 `materializeDedicatedPoolForAgent` 明确跳过只读账号，它永远不会成为号池成员；
+2. 后端 `set_pool_tool_models` 同样以 `code_arts_mode != ClientReadonly` 过滤；
+3. 而勾选态由「号池成员的 supportedModels ∩ 已启用策略」推导。
+
+于是每次点击：乐观更新让复选框短暂打勾 → 命令返回的快照里没有这条记录 → 立即跳回未勾选。
+表现为「怎么点都选不中」。
+
+修复：
+- 新增 `domain/toolScope.ts::isToolScopeReadonly()`（带单测）；
+- 该工具账号全部只读时，模型勾选与「设为默认」直接禁用，并在列表上方给出说明卡片，
+  内嵌「签发独立 OAuth」按钮（沿用既有命令），不再让用户对着无反应的复选框猜。
+
+### 8.4 关于「有道龙虾 / 豆包工作也显示未探测」
+
+它们和之前的码道一样：`try_probe_live_models` 没有实现它们的协议，
+只能回退静态表，而静态表在上一轮之后被如实标成「未探测」。
+本轮给它们提供了一键套用入口；真正的自动探测仍需真实客户端抓包。
+
+### 8.5 门禁与回归
+
+```
+cargo fmt --check / clippy -D warnings   ✅
+cargo test                                ✅ 238 passed（+2：码道日志解析、预设目录）
+npx tsc --noEmit / npm run lint           ✅
+npm test                                  ✅ 185 passed / 30 files（+7）
+npm run build                             ✅
+```

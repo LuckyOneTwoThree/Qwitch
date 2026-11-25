@@ -357,4 +357,33 @@ describe("usePoolPrototypeStore v2", () => {
     const pool = result.current.getAgentPrimaryPool("codex_desktop");
     expect(pool?.members.some((m) => m.accountId === "acc-codearts-1")).toBe(true);
   });
+
+  it("解绑后的 Agent 再次仅勾选某工具 1 个模型时，不会连带点亮其他工具的残留模型", () => {
+    const { result } = renderHook(() => usePoolPrototype(), {
+      wrapper: createWrapper(),
+    });
+
+    act(() => {
+      result.current.setAgentToolModels("mimo", "qoder_cn", ["qwen3.8-max"]);
+    });
+    expect(result.current.getAgentToolEnabledModelIds("mimo", "qoder_cn")).toEqual([
+      "qwen3.8-max",
+    ]);
+
+    act(() => {
+      result.current.unbindAgent("mimo");
+    });
+    expect(result.current.getAgentToolEnabledModelIds("mimo", "qoder_cn")).toEqual([]);
+
+    act(() => {
+      result.current.setAgentToolModels("mimo", "workbuddy", ["deepseek-v4-pro"]);
+    });
+
+    expect(result.current.getAgentToolEnabledModelIds("mimo", "workbuddy")).toEqual([
+      "deepseek-v4-pro",
+    ]);
+    expect(result.current.getAgentToolEnabledModelIds("mimo", "qoder_cn")).toEqual([]);
+    expect(result.current.getAgentToolEnabledModelIds("mimo", "trae_cn")).toEqual([]);
+    expect(result.current.getAgentToolEnabledModelIds("mimo", "minimax_code_cn")).toEqual([]);
+  });
 });

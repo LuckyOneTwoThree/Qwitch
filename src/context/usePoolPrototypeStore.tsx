@@ -506,12 +506,20 @@ function materializeDedicatedPoolForAgent(
   const existing = prevPools.find((p) => p.id === dedicatedId);
 
   if (existing) {
-    const existingAccIds = new Set(existing.members.map((m) => m.accountId));
+    const wasUnbound = !binding || binding.mountedPoolIds.length === 0;
+    const basePool: AccountPool = wasUnbound
+      ? {
+          ...existing,
+          members: existing.members.map((m) => ({ ...m, supportedModels: [] })),
+          modelPolicies: [],
+        }
+      : existing;
+    const existingAccIds = new Set(basePool.members.map((m) => m.accountId));
     const missingCandidates = allCandidates.filter((c) => !existingAccIds.has(c.accountId));
-    let updatedPool = existing;
+    let updatedPool = basePool;
     if (missingCandidates.length > 0) {
       let nextPrio =
-        existing.members.reduce((max, m) => Math.max(max, m.priority), 0) + 1;
+        basePool.members.reduce((max, m) => Math.max(max, m.priority), 0) + 1;
       const appended: PoolMember[] = missingCandidates.map((cand) => ({
         id: `pm-${agentId}-${cand.accountId}`,
         accountId: cand.accountId,
@@ -531,17 +539,25 @@ function materializeDedicatedPoolForAgent(
         lastLatencyMs: 540,
       }));
       updatedPool = {
-        ...existing,
-        members: [...existing.members, ...appended],
+        ...basePool,
+        members: [...basePool.members, ...appended],
       };
     }
 
     const nextPools = prevPools.map((p) => (p.id === dedicatedId ? updatedPool : p));
     const nextBindings =
-      binding?.mountedPoolIds.length === 1 && binding.mountedPoolIds[0] === dedicatedId
+      !wasUnbound &&
+      binding?.mountedPoolIds.length === 1 &&
+      binding.mountedPoolIds[0] === dedicatedId
         ? prevBindings
         : prevBindings.map((b) =>
-            b.agentId === agentId ? { ...b, mountedPoolIds: [dedicatedId] } : b
+            b.agentId === agentId
+              ? {
+                  ...b,
+                  mountedPoolIds: [dedicatedId],
+                  defaultModelKey: wasUnbound ? null : b.defaultModelKey,
+                }
+              : b
           );
     return { dedicatedId, nextPools, nextBindings };
   }
@@ -1957,6 +1973,18 @@ export function PoolPrototypeProvider({
   const unbindAgent = useCallback(
     (agentId: TargetAgentId) => {
       cancelPendingModelWrites(agentId);
+      const dedicatedId = `pool-agent-${agentId}`;
+      const nextPools = poolsRef.current.map((p) =>
+        p.id === dedicatedId
+          ? {
+              ...p,
+              members: p.members.map((m) => ({ ...m, supportedModels: [] })),
+              modelPolicies: [],
+            }
+          : p
+      );
+      poolsRef.current = nextPools;
+      setPools(nextPools);
       setRawBindings((prev) =>
         prev.map((b) => {
           if (b.agentId !== agentId) return b;

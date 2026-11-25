@@ -2245,6 +2245,7 @@ pub fn clear_agent_wiring(
     };
     db.upsert_agent_binding(&stored)
         .map_err(|e| e.to_string())?;
+    let _ = db.clear_agent_dedicated_pool_models(agent_id);
     Ok(build_agent_binding_dto(
         &stored,
         all_pools,
@@ -2339,6 +2340,7 @@ pub fn unbind_and_restore_agent(
     };
     db.upsert_agent_binding(&stored)
         .map_err(|e| e.to_string())?;
+    let _ = db.clear_agent_dedicated_pool_models(agent_id);
 
     Ok(build_agent_binding_dto(
         &stored,

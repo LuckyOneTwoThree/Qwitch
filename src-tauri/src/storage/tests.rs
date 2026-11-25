@@ -1620,11 +1620,11 @@ fn codearts_oauth_reauth_marks_existing_local_snapshot_as_isolated() {
     );
 }
 
-/// 回归：早期建池时上游无模型导致后加入订阅工具成员为空、永不暴露的问题。
-/// 一次性迁移应回填实时模型目录并开放策略；且用户显式清空后不得被复活。
+/// 回归：Agent 解绑后专属池休眠，再次为某个订阅工具勾选 1 个模型时，
+/// 必须清空该休眠池内其他工具的历史残留模型；启动清理也应清除未绑定专属池与 doubaowork 残留。
 #[test]
-fn backfill_empty_tool_members_repairs_stale_and_respects_clear() {
-    let db = QwitchDatabase::open(&temp_db_path("backfill")).expect("open db");
+fn unbound_dedicated_pool_clears_stale_models_on_remount_and_cleanup() {
+    let db = QwitchDatabase::open(&temp_db_path("unbound-pool-cleanup")).expect("open db");
     let mk = [7u8; 32];
     let env = |tool: &str, uid: &str| CredentialEnvelope {
         tool_id: tool.to_string(),
@@ -1638,60 +1638,75 @@ fn backfill_empty_tool_members_repairs_stale_and_respects_clear() {
             extra: HashMap::new(),
         },
     };
-    // 一个「已有模型」的老工具 + 一个「成员被落成 []」的新订阅工具
-    let old = db.upsert_account(&mk, None, &env("workbuddy", "u_old")).expect("old");
+    let wb = db.upsert_account(&mk, None, &env("workbuddy", "u_wb")).expect("wb");
     let qoder = db.upsert_account(&mk, None, &env("qoder_cn", "u_qoder")).expect("qoder");
+    let doubao = db.upsert_account(&mk, None, &env("doubaowork", "u_db")).expect("doubao");
 
     let now = Utc::now().to_rfc3339();
     {
         let conn = db.conn.lock().expect("lock");
         conn.execute(
             "INSERT INTO account_pools (id, slug, name, description, scene_tag, strategy, affinity_mode, skip_active_client_account, cooldown_seconds, auto_refresh_on_401, fallback_api_key_enabled, enabled, today_requests, today_failovers, cache_hit_rate, created_at, updated_at)
-             VALUES ('pool-agent-dsh','dsh','dsh','','','order','auto_cache',1,60,1,1,1,0,0,0,?1,?1)",
+             VALUES ('pool-agent-dsh','dsh','dsh','','','order','auto_cache',1,60,1,1,1,0,0,0,?1,?1),
+                    ('pool-agent-mimo','mimo','mimo','','','order','auto_cache',1,60,1,1,1,0,0,0,?1,?1)",
             rusqlite::params![now],
-        ).expect("pool");
-        // 老工具成员带模型 + 策略
+        ).expect("pools");
+        // dsh 已绑定，mimo 已解绑（无 agent_bindings 或 mounted_pool_ids=[]）
         conn.execute(
-            "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled) VALUES ('m-old','pool-agent-dsh',?1,'[\"workbuddy/deepseek-v4-pro\"]','t1_primary',1,1)",
-            rusqlite::params![old.id],
-        ).expect("m-old");
+            "INSERT INTO agent_bindings (agent_id, mounted_pool_ids_json, default_model_key, options_json, status, updated_at)
+             VALUES ('dsh','[\"pool-agent-dsh\"]',NULL,'{}','bound',?1),
+                    ('mimo','[]',NULL,'{}','unbound',?1)",
+            rusqlite::params![now],
+        ).expect("bindings");
         conn.execute(
-            "INSERT INTO pool_model_policies (pool_id, model_id, enabled) VALUES ('pool-agent-dsh','workbuddy/deepseek-v4-pro',1)",
+            "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled)
+             VALUES ('m-dsh-wb','pool-agent-dsh',?1,'[\"workbuddy/deepseek-v4-pro\"]','t1_primary',1,1),
+                    ('m-dsh-db','pool-agent-dsh',?2,'[\"doubaowork/auto\"]','t1_primary',2,1),
+                    ('m-mimo-wb','pool-agent-mimo',?1,'[\"workbuddy/deepseek-v4-pro\"]','t1_primary',1,1),
+                    ('m-mimo-qo','pool-agent-mimo',?3,'[\"qoder_cn/qwen3.8-max\"]','t1_primary',2,1)",
+            rusqlite::params![wb.id, doubao.id, qoder.id],
+        ).expect("members");
+        conn.execute(
+            "INSERT INTO pool_model_policies (pool_id, model_id, enabled)
+             VALUES ('pool-agent-dsh','workbuddy/deepseek-v4-pro',1),
+                    ('pool-agent-dsh','doubaowork/auto',1),
+                    ('pool-agent-mimo','workbuddy/deepseek-v4-pro',1),
+                    ('pool-agent-mimo','qoder_cn/qwen3.8-max',1)",
             [],
-        ).expect("pol-old");
-        // 新工具成员：空模型、无策略（历史遗留形态）
-        conn.execute(
-            "INSERT INTO pool_members (id, pool_id, account_id, supported_models_json, tier, priority, enabled) VALUES ('m-qoder','pool-agent-dsh',?1,'[]','t1_primary',2,1)",
-            rusqlite::params![qoder.id],
-        ).expect("m-qoder");
+        ).expect("policies");
     }
 
-    let exposed_tools = |db: &QwitchDatabase| -> std::collections::BTreeSet<String> {
-        let cands = db.list_upstream_candidates(&mk).expect("cands");
-        let pools = db.list_pools_with_candidates(&cands, &HashMap::new()).expect("pools");
-        let p = pools.iter().find(|p| p.id == "pool-agent-dsh").expect("pool");
-        crate::domain::compute_agent_exposed_models(
-            crate::domain::TargetAgentId::Dsh,
-            std::slice::from_ref(&p.id),
-            None,
-            &pools,
-            0,
-        )
+    // 启动清理：清除未绑定池 mimo 全部模型与已绑定池 dsh 的 doubaowork 残留，保留 dsh 的 workbuddy 模型
+    db.cleanup_unbound_dedicated_pools().expect("cleanup");
+    let cands = db.list_upstream_candidates(&mk).expect("cands");
+    let pools = db.list_pools_with_candidates(&cands, &HashMap::new()).expect("pools");
+    let dsh_pool = pools.iter().find(|p| p.id == "pool-agent-dsh").expect("dsh");
+    assert_eq!(dsh_pool.model_policies.len(), 1);
+    assert_eq!(dsh_pool.model_policies[0].model_id, "workbuddy/deepseek-v4-pro");
+    let mimo_pool = pools.iter().find(|p| p.id == "pool-agent-mimo").expect("mimo");
+    assert!(mimo_pool.model_policies.is_empty());
+
+    // 模拟未绑定池仍带脏数据（例如内存/外部写入），ensure_agent_dedicated_pool 从未绑定恢复时必须清空旧模型
+    {
+        let conn = db.conn.lock().expect("lock");
+        conn.execute(
+            "UPDATE pool_members SET supported_models_json = '[\"qoder_cn/qwen3.8-max\"]' WHERE id = 'm-mimo-qo'",
+            [],
+        ).expect("dirty");
+    }
+    let (pool_id, _) = db
+        .ensure_agent_dedicated_pool(&mk, crate::domain::TargetAgentId::Mimo)
+        .expect("ensure");
+    db.set_pool_tool_models(&mk, &pool_id, "workbuddy", &["deepseek-v4-pro".into()])
+        .expect("set wb");
+
+    let pools_after = db.list_pools_with_candidates(&cands, &HashMap::new()).expect("pools_after");
+    let mimo_after = pools_after.iter().find(|p| p.id == "pool-agent-mimo").expect("mimo_after");
+    let enabled_ids: Vec<&str> = mimo_after
+        .model_policies
         .iter()
-        .map(|e| crate::domain::split_scoped_model_id(&e.model_id).0.unwrap_or("").to_string())
-        .collect()
-    };
-
-    assert!(!exposed_tools(&db).contains("qoder_cn"), "迁移前 qoder 不应暴露");
-    db.backfill_empty_tool_members(&mk).expect("migrate");
-    assert!(exposed_tools(&db).contains("qoder_cn"), "迁移后 qoder 应暴露");
-    // 幂等
-    db.backfill_empty_tool_members(&mk).expect("migrate2");
-    assert!(exposed_tools(&db).contains("qoder_cn"));
-
-    // 用户显式清空 qoder → 再迁移不得复活
-    db.set_pool_tool_models(&mk, "pool-agent-dsh", "qoder_cn", &[]).expect("clear");
-    assert!(!exposed_tools(&db).contains("qoder_cn"), "清空后不应暴露");
-    db.backfill_empty_tool_members(&mk).expect("migrate3");
-    assert!(!exposed_tools(&db).contains("qoder_cn"), "清空后重跑迁移不得复活");
+        .filter(|mp| mp.enabled)
+        .map(|mp| mp.model_id.as_str())
+        .collect();
+    assert_eq!(enabled_ids, vec!["workbuddy/deepseek-v4-pro"]);
 }

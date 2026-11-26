@@ -13,23 +13,40 @@ import {
   Zap,
 } from "lucide-react";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
-import { MEMBER_TIER_META, WIRE_PROTOCOL_META } from "../../data/mockPoolData";
-import type { TargetAgentId } from "../../types/pool";
+import {
+  MEMBER_TIER_META,
+  TOOL_SHORT_LABELS,
+  WIRE_PROTOCOL_META,
+  splitScopedModelId,
+} from "../../data/mockPoolData";
+import { BUILTIN_TOOL_ORDER } from "../../domain/toolRegistry";
+import type { RoutingTraceItem, TargetAgentId } from "../../types/pool";
 import { AgentBrandIcon, UpstreamMemberIcon } from "../../components/AgentBrandIcon";
+
+function traceMatchesTool(trace: RoutingTraceItem, toolId: string): boolean {
+  if (trace.finalToolId === toolId) return true;
+  if (splitScopedModelId(trace.requestedModel).toolId === toolId) return true;
+  return trace.attempts.some((a) => a.toolId === toolId);
+}
 
 export function RoutingTraceView({
   onOpenSimulation,
 }: {
   onOpenSimulation: (poolId?: string) => void;
 }) {
-  const { traces, pools, agentBindings, candidates } = usePoolPrototype();
+  const { traces, pools, agentBindings, candidates, refreshWorkspace } = usePoolPrototype();
   const [agentFilter, setAgentFilter] = useState<"all" | TargetAgentId>("all");
+  const [toolFilter, setToolFilter] = useState<"all" | string>("all");
   const [statusFilter, setStatusFilter] = useState<
     "all" | "failover_success" | "failed" | "success"
   >("all");
   const [search, setSearch] = useState("");
   const userToggledRef = useRef(false);
   const [expandedId, setExpandedId] = useState<string | null>(traces[0]?.id ?? null);
+
+  useEffect(() => {
+    void refreshWorkspace?.();
+  }, [refreshWorkspace]);
 
   useEffect(() => {
     if (traces.length > 0 && expandedId === null && !userToggledRef.current) {
@@ -60,20 +77,49 @@ export function RoutingTraceView({
     };
   }, [traces, candidates]);
 
+  const toolFilterItems = useMemo(() => {
+    const ordered: string[] = [...BUILTIN_TOOL_ORDER];
+    const extras = new Set<string>();
+    for (const c of candidates) {
+      if (!ordered.includes(c.toolId)) extras.add(c.toolId);
+    }
+    for (const t of traces) {
+      if (t.finalToolId && !ordered.includes(t.finalToolId)) extras.add(t.finalToolId);
+      const scopedTid = splitScopedModelId(t.requestedModel).toolId;
+      if (scopedTid && !ordered.includes(scopedTid)) extras.add(scopedTid);
+    }
+    const allIds = [...ordered, ...Array.from(extras)];
+    return allIds
+      .map((tid) => ({
+        toolId: tid,
+        label: TOOL_SHORT_LABELS[tid] ?? tid,
+        count: traces.filter((t) => traceMatchesTool(t, tid)).length,
+      }))
+      .filter(
+        (item) =>
+          item.count > 0 ||
+          candidates.some((c) => c.toolId === item.toolId) ||
+          toolFilter === item.toolId
+      );
+  }, [candidates, traces, toolFilter]);
+
   const filteredTraces = useMemo(() => {
     const q = search.trim().toLowerCase();
     return traces.filter((t) => {
       if (agentFilter !== "all" && t.agentId !== agentFilter) return false;
+      if (toolFilter !== "all" && !traceMatchesTool(t, toolFilter)) return false;
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (!q) return true;
+      const toolName = (TOOL_SHORT_LABELS[t.finalToolId] ?? t.finalToolId).toLowerCase();
       return (
         t.poolName.toLowerCase().includes(q) ||
         t.finalAccountLabel.toLowerCase().includes(q) ||
         t.finalModel.toLowerCase().includes(q) ||
-        t.requestedModel.toLowerCase().includes(q)
+        t.requestedModel.toLowerCase().includes(q) ||
+        toolName.includes(q)
       );
     });
-  }, [traces, agentFilter, statusFilter, search]);
+  }, [traces, agentFilter, toolFilter, statusFilter, search]);
 
   const agentById = useMemo(
     () => new Map(agentBindings.map((b) => [b.agentId, b])),
@@ -81,7 +127,10 @@ export function RoutingTraceView({
   );
 
   const hasActiveFilter =
-    Boolean(search.trim()) || agentFilter !== "all" || statusFilter !== "all";
+    Boolean(search.trim()) ||
+    agentFilter !== "all" ||
+    toolFilter !== "all" ||
+    statusFilter !== "all";
 
   return (
     <div className="space-y-3.5">
@@ -245,6 +294,7 @@ export function RoutingTraceView({
                 onClick={() => {
                   setSearch("");
                   setAgentFilter("all");
+                  setToolFilter("all");
                   setStatusFilter("all");
                 }}
                 className="btn btn-xs btn-secondary whitespace-nowrap"
@@ -252,6 +302,15 @@ export function RoutingTraceView({
                 重置
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => void refreshWorkspace?.()}
+              className="btn btn-xs btn-secondary gap-1 whitespace-nowrap"
+              title="立即刷新最新路由记录"
+            >
+              <RefreshCw className="h-3 w-3" aria-hidden="true" />
+              刷新
+            </button>
             <button
               type="button"
               onClick={() => onOpenSimulation()}
@@ -287,6 +346,37 @@ export function RoutingTraceView({
             >
               <AgentBrandIcon agentId={ab.agentId} size="xs" />
               <span>{ab.name}</span>
+            </button>
+          ))}
+        </div>
+
+        <div
+          role="group"
+          aria-label="按订阅工具筛选"
+          className="flex flex-wrap items-center gap-1.5 border-t border-zinc-200/70 pt-2 dark:border-zinc-800/80"
+        >
+          <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+            订阅工具：
+          </span>
+          <button
+            type="button"
+            aria-pressed={toolFilter === "all"}
+            onClick={() => setToolFilter("all")}
+            className={`chip ${toolFilter === "all" ? "chip-active" : ""}`}
+          >
+            全部工具
+          </button>
+          {toolFilterItems.map((item) => (
+            <button
+              key={item.toolId}
+              type="button"
+              aria-pressed={toolFilter === item.toolId}
+              onClick={() => setToolFilter(item.toolId)}
+              className={`chip gap-1.5 ${toolFilter === item.toolId ? "chip-active" : ""}`}
+            >
+              <UpstreamMemberIcon toolId={item.toolId} size="xs" />
+              <span>{item.label}</span>
+              <span className="text-[10px] tabular-nums opacity-70">{item.count}</span>
             </button>
           ))}
         </div>

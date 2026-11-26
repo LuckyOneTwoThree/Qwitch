@@ -498,7 +498,7 @@ impl GatewayRuntime {
 
         let trace = RoutingTraceItem {
             id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
-            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            timestamp: now_beijing_hms(),
             agent_id: input.agent_id,
             pool_id: pool.id.clone(),
             pool_name: pool.name.clone(),
@@ -540,6 +540,30 @@ impl GatewayRuntime {
             cooled_member_id,
         })
     }
+}
+
+/// 统一按北京时间（UTC+8）输出时分秒，避免部分环境时区不一致或直接截 UTC 串。
+fn now_beijing_hms() -> String {
+    let bj = chrono::FixedOffset::east_opt(8 * 3600).expect("valid UTC+8 offset");
+    chrono::Utc::now()
+        .with_timezone(&bj)
+        .format("%H:%M:%S")
+        .to_string()
+}
+
+/// 失败或无候选成员时，从请求模型前缀或最后一次尝试推断归属订阅工具 ID，
+/// 避免所有失败记录在「路由观测」里都被错标成 `custom_api_key`。
+fn infer_trace_tool_id(
+    requested_model: &str,
+    attempts: &[RoutingAttempt],
+) -> String {
+    if let (Some(tid), _) = crate::domain::split_scoped_model_id(requested_model) {
+        return tid.to_string();
+    }
+    if let Some(last) = attempts.last() {
+        return last.tool_id.clone();
+    }
+    "custom_api_key".to_string()
 }
 
 /// 记录 best-effort 持久化失败（路由 trace / 统计），避免 `let _` 完全吞错。
@@ -3882,7 +3906,7 @@ async fn handle_http_connection(
                                 let latency_ms = t_start.elapsed().as_millis() as u64;
                                 let trace = RoutingTraceItem {
                                     id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
-                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                    timestamp: now_beijing_hms(),
                                     agent_id: TargetAgentId::CodexDesktop,
                                     pool_id: "codex-native".into(),
                                     pool_name: "Codex 自有账号直通".into(),
@@ -3998,6 +4022,39 @@ async fn handle_http_connection(
         let msg = plan
             .diagnostic_reason
             .unwrap_or_else(|| "号池内暂无可用成员".into());
+        let tool_id = infer_trace_tool_id(&requested_model, &plan.skipped_attempts);
+        let attempts = if plan.skipped_attempts.is_empty() {
+            vec![RoutingAttempt {
+                account_label: "号池调度".into(),
+                tool_id: tool_id.clone(),
+                model: requested_model.clone(),
+                tier: None,
+                outcome: RoutingAttemptOutcome::HttpError,
+                latency_ms: 0,
+                detail: msg.clone(),
+            }]
+        } else {
+            plan.skipped_attempts
+        };
+        let trace = RoutingTraceItem {
+            id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
+            timestamp: now_beijing_hms(),
+            agent_id: caller_agent.unwrap_or(TargetAgentId::Opencode),
+            pool_id: pool.id.clone(),
+            pool_name: pool.name.clone(),
+            incoming_protocol: ir_req.incoming_protocol,
+            upstream_protocol: WireProtocolKind::OpenaiChat,
+            requested_model,
+            final_account_label: "无可用候选账号".into(),
+            final_tool_id: tool_id,
+            final_model: "—".into(),
+            status: RoutingTraceStatus::Failed,
+            cache_affinity_hit: false,
+            ttft_ms: 0,
+            total_tokens: 0,
+            attempts,
+        };
+        log_db_result("append_routing_trace", db.append_routing_trace(&trace));
         let err = json!({ "error": { "message": msg } });
         return write_http_response(
             stream,
@@ -4132,7 +4189,7 @@ async fn handle_http_connection(
                         });
                         let trace = RoutingTraceItem {
                             id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
-                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            timestamp: now_beijing_hms(),
                             agent_id: caller_agent.unwrap_or(TargetAgentId::Opencode),
                             pool_id: pool.id.clone(),
                             pool_name: pool.name.clone(),
@@ -4440,9 +4497,10 @@ async fn handle_http_connection(
             .map(|a| format!("{}@{}: {}", a.tool_id, a.account_label, a.detail.clone()))
             .or_else(|| attempts.iter().find(|a| a.outcome == RoutingAttemptOutcome::Cooldown429).map(|a| a.detail.clone()))
             .unwrap_or_else(|| "无可用候选账号".to_string());
+        let final_tool_id = infer_trace_tool_id(&requested_model, &attempts);
         let trace = RoutingTraceItem {
             id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
-            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            timestamp: now_beijing_hms(),
             agent_id: caller_agent.unwrap_or(TargetAgentId::Opencode),
             pool_id: pool.id.clone(),
             pool_name: pool.name.clone(),
@@ -4450,7 +4508,7 @@ async fn handle_http_connection(
             upstream_protocol: WireProtocolKind::OpenaiChat,
             requested_model,
             final_account_label: "全部候选均失败".into(),
-            final_tool_id: "custom_api_key".into(),
+            final_tool_id,
             final_model: "—".into(),
             status: RoutingTraceStatus::Failed,
             cache_affinity_hit: false,
@@ -4513,7 +4571,7 @@ async fn handle_http_connection(
 
     let trace = RoutingTraceItem {
         id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
-        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+        timestamp: now_beijing_hms(),
         agent_id: caller_agent.unwrap_or(TargetAgentId::Opencode),
         pool_id: pool.id.clone(),
         pool_name: pool.name.clone(),

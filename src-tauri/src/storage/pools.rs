@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -2042,6 +2042,25 @@ impl QwitchDatabase {
         Ok(())
     }
 
+    pub(crate) fn format_beijing_trace_timestamp(
+        created_at_rfc3339: &str,
+        now_utc: chrono::DateTime<Utc>,
+    ) -> String {
+        let bj = chrono::FixedOffset::east_opt(8 * 3600).expect("valid UTC+8 offset");
+        let Ok(dt) = chrono::DateTime::parse_from_rfc3339(created_at_rfc3339.trim()) else {
+            return created_at_rfc3339.to_string();
+        };
+        let dt_bj = dt.with_timezone(&bj);
+        let now_bj = now_utc.with_timezone(&bj);
+        if dt_bj.date_naive() == now_bj.date_naive() {
+            dt_bj.format("%H:%M:%S").to_string()
+        } else if dt_bj.year() == now_bj.year() {
+            dt_bj.format("%m-%d %H:%M:%S").to_string()
+        } else {
+            dt_bj.format("%Y-%m-%d %H:%M:%S").to_string()
+        }
+    }
+
     pub fn list_routing_traces(&self, limit: usize) -> Result<Vec<RoutingTraceItem>, StorageError> {
         let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
         let mut stmt = conn.prepare(
@@ -2059,10 +2078,7 @@ impl QwitchDatabase {
                 let agent_id =
                     TargetAgentId::from_id(&agent_raw).unwrap_or(TargetAgentId::Opencode);
                 let created_at: String = r.get(1)?;
-                let timestamp = created_at
-                    .get(11..19)
-                    .map(str::to_string)
-                    .unwrap_or(created_at);
+                let timestamp = Self::format_beijing_trace_timestamp(&created_at, Utc::now());
                 let status = match r.get::<_, String>(11)?.as_str() {
                     "failover_success" => RoutingTraceStatus::FailoverSuccess,
                     "failed" => RoutingTraceStatus::Failed,
@@ -2591,5 +2607,37 @@ mod tests {
         assert!(db.save_preset_account_models(&wb, "workbuddy").is_err());
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn beijing_trace_timestamp_formats_today_same_year_and_cross_year() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-26T01:45:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // 当日（北京时间 2026-11-26 09:45:08）只显示时分秒
+        assert_eq!(
+            QwitchDatabase::format_beijing_trace_timestamp("2026-11-26T01:45:08Z", now),
+            "09:45:08"
+        );
+        // UTC 前一天 17:00 已经是北京时间 2026-11-26 01:00，属于今日
+        assert_eq!(
+            QwitchDatabase::format_beijing_trace_timestamp("2026-11-25T17:00:00Z", now),
+            "01:00:00"
+        );
+        // 昨日（北京时间 2026-11-25 18:19:17）带月-日
+        assert_eq!(
+            QwitchDatabase::format_beijing_trace_timestamp("2026-11-25T10:19:17Z", now),
+            "11-25 18:19:17"
+        );
+        // 2025-12-31T20:00:00Z 转成北京时间是 2026-01-01 04:00:00（同一年，显示 MM-DD）
+        assert_eq!(
+            QwitchDatabase::format_beijing_trace_timestamp("2025-12-31T20:00:00Z", now),
+            "01-01 04:00:00"
+        );
+        // 2025-12-31T15:00:00Z 转成北京时间是 2025-12-31 23:00:00（跨年，显示 YYYY-MM-DD）
+        assert_eq!(
+            QwitchDatabase::format_beijing_trace_timestamp("2025-12-31T15:00:00Z", now),
+            "2025-12-31 23:00:00"
+        );
     }
 }

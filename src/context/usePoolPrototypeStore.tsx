@@ -82,6 +82,7 @@ export interface PoolPrototypeContextValue {
   traces: RoutingTraceItem[];
   nowMs: number;
   isRefreshingModels: boolean;
+  refreshWorkspace: () => Promise<void>;
   refreshUpstreamModels: (accountId?: string) => Promise<void>;
   /** TTL 感知的自动探测：只探测缓存已过期/缺失的账号，静默失败 */
   ensureUpstreamModels: (accountId?: string) => Promise<void>;
@@ -293,6 +294,7 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   traces: [],
   nowMs: Date.now(),
   isRefreshingModels: false,
+  refreshWorkspace: async () => {},
   refreshUpstreamModels: async () => {},
   ensureUpstreamModels: async () => {},
   toggleGateway: async () => {},
@@ -3173,6 +3175,7 @@ export function PoolPrototypeProvider({
       traces,
       nowMs,
       isRefreshingModels,
+      refreshWorkspace,
       refreshUpstreamModels,
       ensureUpstreamModels,
       toggleGateway,
@@ -3242,6 +3245,7 @@ export function PoolPrototypeProvider({
       traces,
       nowMs,
       isRefreshingModels,
+      refreshWorkspace,
       refreshUpstreamModels,
       ensureUpstreamModels,
       toggleGateway,

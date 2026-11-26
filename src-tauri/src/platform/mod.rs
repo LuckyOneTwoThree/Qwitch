@@ -14,15 +14,37 @@ const KEYRING_MASTER_USER: &str = "master_key_v1";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[cfg(target_os = "windows")]
-fn hide_console_std(cmd: &mut Command) -> &mut Command {
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(CREATE_NO_WINDOW)
+/// 为子进程隐藏控制台窗口（仅在 Windows 生效，其他平台为空操作）。
+///
+/// release 构建使用 `windows_subsystem = "windows"`，进程本身没有控制台。此时 spawn
+/// 控制台程序（`tasklist` / `taskkill` / `node` / `bun` 等）会让 Windows 为子进程
+/// **新建**一个控制台窗口并闪一下黑框。凡是只读取输出、不面向用户的探测型子进程，
+/// 都必须经过本函数，否则会出现周期性闪窗。
+///
+/// 统一收口到 platform，避免各模块各自写 `creation_flags` 时漏掉某一处。
+pub fn hide_console_std(cmd: &mut Command) -> &mut Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        cmd
+    }
 }
 
-#[cfg(target_os = "windows")]
-fn hide_console_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    cmd.creation_flags(CREATE_NO_WINDOW)
+/// [`hide_console_std`] 的 tokio 版本。
+pub fn hide_console_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        // tokio::process::Command 自带 CreationFlags 支持，无需再导入 CommandExt
+        cmd.creation_flags(CREATE_NO_WINDOW)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        cmd
+    }
 }
 
 #[cfg(target_os = "macos")]

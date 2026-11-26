@@ -96,7 +96,11 @@ pub fn detect_bridge_runtime() -> (String, String) {
         if bin.is_empty() {
             continue;
         }
-        if let Ok(out) = Command::new(&bin).arg("--version").output() {
+        let mut cmd = Command::new(&bin);
+        cmd.arg("--version");
+        // 探测型子进程：Windows 下不能弹控制台黑框（release 构建无父控制台可继承）
+        crate::platform::hide_console_std(&mut cmd);
+        if let Ok(out) = cmd.output() {
             if out.status.success() {
                 let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 return ("bun_ready".into(), format!("Bun {ver}"));
@@ -110,7 +114,10 @@ pub fn detect_bridge_runtime() -> (String, String) {
         "/usr/local/bin/node".to_string(),
     ];
     for bin in node_candidates {
-        if let Ok(out) = Command::new(&bin).arg("--version").output() {
+        let mut cmd = Command::new(&bin);
+        cmd.arg("--version");
+        crate::platform::hide_console_std(&mut cmd);
+        if let Ok(out) = cmd.output() {
             if out.status.success() {
                 let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 return ("node_ready".into(), format!("Node {ver} (回退)"));
@@ -271,8 +278,10 @@ fn resolve_agent_paths(
                 .map(|name| dir.join(name))
                 .find(|p| p.exists())
                 .unwrap_or_else(|| dir.join("opencode.jsonc"));
-            let version = Command::new("opencode")
-                .arg("--version")
+            let mut version_cmd = Command::new("opencode");
+            version_cmd.arg("--version");
+            crate::platform::hide_console_std(&mut version_cmd);
+            let version = version_cmd
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
@@ -806,12 +815,32 @@ fn process_snapshot() -> String {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Command::new("tasklist")
-            .args(["/NH"])
-            .output()
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/NH"]);
+        // 该函数被前端每 6s 轮询一次；Windows 上若弹控制台黑框会形成周期性闪烁
+        crate::platform::hide_console_std(&mut cmd);
+        cmd.output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default()
     }
+}
+
+/// ASCII 大小写不敏感的子串查找（零分配）。
+///
+/// Windows 的 `tasklist` 输出的进程名大小写取决于磁盘上的实际文件名，未必与
+/// `running_exe_name` 的常量写法一致（例如安装包落地为 `zcode.exe`，常量为
+/// `ZCode.exe`）。Windows 文件系统本身大小写不敏感，判定也必须一致，否则会漏报
+/// 「未运行」，进而跳过重启。
+#[cfg(not(target_os = "macos"))]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let n = needle.as_bytes();
+    if n.is_empty() || haystack.len() < n.len() {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(n.len())
+        .any(|w| w.eq_ignore_ascii_case(n))
 }
 
 /// 在给定快照里判定某 Agent 是否在运行（纯函数，便于单测）。
@@ -827,7 +856,7 @@ fn agent_running_in_snapshot(agent_id: TargetAgentId, snapshot: &str) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        snapshot.contains(running_exe_name(agent_id))
+        contains_ignore_ascii_case(snapshot, running_exe_name(agent_id))
     }
 }
 
@@ -2493,6 +2522,87 @@ fn restart_macos_app(app_name: &str, bundle_id: &str, app_path: &str) {
     }
 }
 
+/// 查询 Windows 进程的可执行文件路径。
+///
+/// `tasklist` 只给进程名，不给路径；要"重启"就必须先拿到原 exe 路径，否则无法拉起。
+/// 仅在用户点「重启客户端」这类低频操作时调用，单次约 300~800ms，可接受。
+#[cfg(target_os = "windows")]
+fn windows_process_exe_path(exe_name: &str) -> Option<PathBuf> {
+    // Get-Process 的 -Name 不带 .exe 后缀
+    let stem = exe_name.strip_suffix(".exe").unwrap_or(exe_name);
+    // exe 名来自内置常量表（running_exe_name），不含引号，可安全内插；
+    // 仍用单引号包裹，避免名称中的空格/括号破坏 PowerShell 语法。
+    let script = format!(
+        "Get-Process -Name '{stem}' -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.Path }} | Select-Object -First 1 -ExpandProperty Path"
+    );
+    // 优先用绝对路径的 powershell.exe：GUI 进程的 PATH 未必包含 System32
+    let ps = std::env::var_os("SystemRoot")
+        .map(|root| {
+            PathBuf::from(root)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        })
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("powershell"));
+    let mut cmd = Command::new(ps);
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    crate::platform::hide_console_std(&mut cmd);
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// 结束指定进程名的全部实例：先优雅关闭，等待退出，超时后强制结束。
+#[cfg(target_os = "windows")]
+fn terminate_windows_process(exe_name: &str) {
+    let mut graceful = Command::new("taskkill");
+    graceful.args(["/IM", exe_name]);
+    crate::platform::hide_console_std(&mut graceful);
+    // 进程不存在时 taskkill 返回非 0，属正常情况，无需区分
+    let _ = graceful.output();
+    for _ in 0..24 {
+        if !contains_ignore_ascii_case(&process_snapshot(), exe_name) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let mut force = Command::new("taskkill");
+    force.args(["/F", "/IM", exe_name]);
+    crate::platform::hide_console_std(&mut force);
+    let _ = force.output();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+/// Windows 下重启桌面客户端：取原 exe 路径 → 结束旧实例 → 用同一路径重新拉起。
+///
+/// 与 macOS 的差异：Windows 没有 `open -a <bundle-id>` 这种按应用标识启动的机制，
+/// 只能依赖进程自身的可执行文件路径；因此**仅在客户端正在运行时**才能完成重启。
+/// 若取不到路径，退化为只结束不拉起（不谎报成功），由用户手动打开。
+#[cfg(target_os = "windows")]
+fn restart_windows_app(agent_id: TargetAgentId) {
+    let exe_name = running_exe_name(agent_id);
+    if !contains_ignore_ascii_case(&process_snapshot(), exe_name) {
+        return;
+    }
+    let exe_path = windows_process_exe_path(exe_name);
+    terminate_windows_process(exe_name);
+    if let Some(path) = exe_path.filter(|p| p.is_file()) {
+        let mut cmd = Command::new(path);
+        crate::platform::hide_console_std(&mut cmd);
+        let _ = cmd.spawn();
+    }
+}
+
 pub fn restart_agent_process(
     db: &QwitchDatabase,
     agent_id: TargetAgentId,
@@ -2555,6 +2665,11 @@ pub fn restart_agent_process(
                 .args(["-f", "codex.*app-server"])
                 .output();
         }
+
+        // Windows：此前完全没有分支，导致「重启客户端」只重写了配置文件、进程没重启，
+        // UI 却返回成功 —— 用户误以为新端口/新号池已生效。
+        #[cfg(target_os = "windows")]
+        restart_windows_app(agent_id);
     }
 
     stored.status = if stored.mounted_pool_ids.is_empty() {
@@ -2623,6 +2738,25 @@ mod tests {
             snapshot
         ));
         assert!(!agent_running_in_snapshot(TargetAgentId::Zcode, ""));
+    }
+
+    /// 回归：tasklist 输出的进程名大小写取决于磁盘实际文件名（安装包可能落地小写），
+    /// 大小写敏感比较会漏判「已运行」，导致重启流程被跳过。
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn process_snapshot_match_is_case_insensitive() {
+        let snapshot = "\"zcode.exe\",\"7\",\"Console\",\"1\",\"90,000 K\"\r\n";
+        assert!(agent_running_in_snapshot(TargetAgentId::Zcode, snapshot));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn contains_ignore_ascii_case_handles_edges() {
+        assert!(contains_ignore_ascii_case("ChatGPT.exe", "chatgpt.exe"));
+        assert!(contains_ignore_ascii_case("a ZCode.exe b", "zcode.exe"));
+        // 更长的必需串不能被子串误判
+        assert!(!contains_ignore_ascii_case("Chat", "ChatGPT"));
+        assert!(!contains_ignore_ascii_case("anything", ""));
     }
 
     #[test]

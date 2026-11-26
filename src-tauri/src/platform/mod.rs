@@ -229,8 +229,13 @@ pub fn validate_client_executable(tool_id: &str, executable: &Path) -> Result<()
             .map(|r| canonical.starts_with(&r))
             .unwrap_or(false)
     }) {
+        // 保留白名单（这是防「设置里写入任意二进制即可执行」的关键约束），但把
+        // 可操作指引写清楚：Windows 上装到 D:\Software 之类会命中这里，而 macOS
+        // 上 /Applications 几乎天然覆盖，所以文案必须显式告诉用户该放哪里。
         return Err(format!(
-            "客户端路径不在受信任的安装目录内：{}（允许的根目录：{}）",
+            "客户端路径不在受信任的安装目录内：{}\n允许的根目录：{}\n\
+             请把客户端安装在上述目录之一（Windows 默认安装位置通常是 \
+             %LOCALAPPDATA%\\Programs），或将其移动到用户主目录下后重试。",
             canonical.display(),
             allowed_roots
                 .iter()

@@ -1,0 +1,48 @@
+# 换行符与二进制归一化。
+#
+# 背景：仓库在 macOS 上开发，此前没有 .gitattributes，Windows 检出时
+# `core.autocrlf=true` 会把工作区文本全部转成 CRLF。对 Rust/TS 无影响，但会把
+# scripts/*.sh 的 shebang 变成 `#!/usr/bin/env bash\r`，在 WSL / Linux / CI 里
+# 直接执行会报 `bad interpreter: /usr/bin/env: 'bash\r': No such file or directory`。
+# 这里显式声明 eol，让所有平台的检出结果一致。
+
+* text=auto
+
+# 脚本：必须 LF
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# 源码与配置：统一 LF（rustfmt / ESLint / tsc 均按 LF 校验）
+*.rs    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.cjs   text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.jsonc text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Windows 批处理必须 CRLF（当前没有，预留以免将来踩坑）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：禁止任何换行/编码转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.icns binary
+*.zip  binary
+*.dmg  binary
+*.exe  binary
+*.msi  binary
+*.dll  binary
+*.pdb  binary

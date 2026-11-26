@@ -50,6 +50,11 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
 objc2-foundation = { version = "0.3", features = ["NSData"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# 设备指纹：从注册表读 OEM 厂商名与 Windows 版本（避免 spawn 子进程造成控制台闪烁，
+# 也避免 `reg query` 在中文系统下按 GBK 输出导致乱码）
+winreg = "0.56"
+
 [dev-dependencies]
 # HTTP 层集成测试：为适配器的 21 处 .send() 提供可编排的 7 态响应矩阵
 # （200 正常 / 400 业务码 / 401 过期 / 403 风控 / 429 限流 / 5xx / 非 JSON）

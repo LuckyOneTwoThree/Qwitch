@@ -253,7 +253,19 @@ impl TraeAdapter {
         Self::sanitize_header_value(&String::from_utf8_lossy(&output.stdout))
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    fn detect_device_brand() -> Option<String> {
+        // 与 macOS 的 `hw.model` 对应：取 OEM 厂商名（LENOVO / Dell Inc. 等）。
+        // 只读注册表，不 spawn 子进程，避免在 GPU 指纹链路里引入控制台闪烁。
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let bios = hklm.open_subkey(r"HARDWARE\DESCRIPTION\System\BIOS").ok()?;
+        let brand: String = bios.get_value("SystemManufacturer").ok()?;
+        Self::sanitize_header_value(&brand)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn detect_device_brand() -> Option<String> {
         None
     }
@@ -274,7 +286,33 @@ impl TraeAdapter {
         Some(format!("macOS {version}"))
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    fn detect_os_version() -> Option<String> {
+        // 只取 ASCII 字段拼装（`DisplayVersion` = 23H2，`CurrentBuildNumber` = 22631）。
+        // `ProductName` 在中文系统是本地化文本（"Windows 11 专业版"），直接塞进
+        // HTTP header 会因非 ASCII 被上游判成畸形请求，故不用。
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let current = hklm
+            .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+            .ok()?;
+        let display: String = current.get_value("DisplayVersion").unwrap_or_default();
+        let build: String = current.get_value("CurrentBuildNumber").unwrap_or_default();
+        if display.trim().is_empty() && build.trim().is_empty() {
+            return None;
+        }
+        let mut parts = vec!["Windows".to_string()];
+        if !display.trim().is_empty() {
+            parts.push(display.trim().to_string());
+        }
+        if !build.trim().is_empty() {
+            parts.push(build.trim().to_string());
+        }
+        Self::sanitize_header_value(&parts.join(" "))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn detect_os_version() -> Option<String> {
         None
     }
@@ -1408,8 +1446,17 @@ impl TraeAdapter {
         let trace_id = uuid::Uuid::new_v4().to_string();
         let callback_url = format!("http://127.0.0.1:{callback_port}/authorize");
 
-        let device_brand = Self::detect_device_brand().unwrap_or_else(|| "Apple".to_string());
-        let os_version = Self::detect_os_version().unwrap_or_else(|| "macOS".to_string());
+        // 探测失败时的兜底必须与真实平台一致：此前不分平台一律回落 Apple/macOS，
+        // 会让 Windows 上的授权请求同时带 `x_device_type=win` 与 `x_device_brand=Apple`，
+        // 自相矛盾，比不伪装更容易被判异常。
+        #[cfg(target_os = "macos")]
+        let (default_brand, default_os) = ("Apple", "macOS");
+        #[cfg(target_os = "windows")]
+        let (default_brand, default_os) = ("Generic", "Windows");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let (default_brand, default_os) = ("Generic", "Linux");
+        let device_brand = Self::detect_device_brand().unwrap_or_else(|| default_brand.to_string());
+        let os_version = Self::detect_os_version().unwrap_or_else(|| default_os.to_string());
 
         let mut url = reqwest::Url::parse("https://www.trae.cn/authorization").map_err(|e| {
             AdapterError::Unified {
@@ -2418,6 +2465,25 @@ impl ToolAdapter for TraeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows 设备指纹要原样进 HTTP header，因此只允许 ASCII，且 OS 版本必须以
+    /// `Windows` 开头。回归：早期实现仅在 macOS 上探测，其他平台返回 None，调用方
+    /// 又回落成 Apple/macOS，导致 Windows 请求同时声明 win 平台与 Apple 品牌。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_device_fingerprint_is_ascii_when_available() {
+        if let Some(brand) = TraeAdapter::detect_device_brand() {
+            assert!(!brand.trim().is_empty());
+            assert!(brand.is_ascii(), "device brand must be ASCII: {brand}");
+        }
+        if let Some(os_version) = TraeAdapter::detect_os_version() {
+            assert!(
+                os_version.is_ascii(),
+                "os version must be ASCII: {os_version}"
+            );
+            assert!(os_version.starts_with("Windows"), "got: {os_version}");
+        }
+    }
 
     struct TestHost(std::path::PathBuf);
 

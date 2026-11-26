@@ -121,14 +121,31 @@ pub fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), Adapte
     }
     drop(file);
 
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(AdapterError::Unified {
-            code: UnifiedErrorCode::InternalError,
-            message: format!("替换会话文件失败 {}: {e}", path.display()),
-        });
+    // 覆盖式 rename：POSIX 允许替换仍被其他进程打开的文件，Windows 则会直接返回
+    // ERROR_ACCESS_DENIED（客户端还握着 storage.json，或杀软正在扫临时文件）。
+    // 切号是用户可感知的高频操作，这里做短重试而不是一次失败就放弃；成功路径
+    // 第一次就返回，不引入额外延迟。
+    let mut last_err = None;
+    for attempt in 0..4 {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                }
+            }
+        }
     }
-    Ok(())
+    let _ = std::fs::remove_file(&tmp);
+    let err = last_err.map(|e| e.to_string()).unwrap_or_default();
+    Err(AdapterError::Unified {
+        code: UnifiedErrorCode::InternalError,
+        message: format!(
+            "替换会话文件失败 {}: {err}（若客户端仍在运行，请先完全退出后重试）",
+            path.display()
+        ),
+    })
 }
 
 fn sqlite_sidecar_base(path: &Path) -> Option<std::path::PathBuf> {

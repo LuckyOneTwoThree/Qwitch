@@ -20,6 +20,9 @@ Thumbs.db
 !.vscode/extensions.json
 .idea/
 
+# 本地 Agent 工作区数据（对话记忆、临时产物），不随仓库分发
+.workbuddy/
+
 # 探针输出
 probe-out/
 

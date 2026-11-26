@@ -382,6 +382,8 @@ Qwitch/
 
 | 文档 | 内容 |
 | --- | --- |
+| [变更记录](CHANGELOG.md) | 每个版本的 新增 / 修复 / 破坏性变更 / 升级注意（发布说明据此自动生成） |
+| [v0.7.0 发版审查](docs/RELEASE_AUDIT_2026-11-26.md) | 发版前深度审查：阻断项、风险分级、验证清单 |
 | [架构与基线设计](docs/ARCHITECTURE.md) | 项目定位、模块划分、防风控规范、非目标与路线图 |
 | [核心契约与数据模型](docs/CORE_DESIGN.md) | 领域模型、Rust trait、JSON-RPC 协议、SQLite Schema、IPC 契约 |
 | [内置适配器规范](docs/ADAPTER_SPEC.md) | 各工具的本机路径、加密格式、服务端接口与幂等约定 |

@@ -349,12 +349,27 @@ impl DoubaoWorkAdapter {
     /// 只改这一个字段：`Local State` 里还有设备标识等机器级状态，整份替换风险更大。
     fn set_active_profile(profile_root: &Path, profile: &str) -> Result<(), AdapterError> {
         let state_path = profile_root.join("Local State");
-        let mut val: Value = std::fs::read(&state_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
+        let mut val: Value = match std::fs::read(&state_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!(
+                    "Local State 结构损坏（{e}），为免覆盖设备标识已中止切号；请在客户端启动一次后重试"
+                ),
+            })?,
+            // 文件不存在（从未启动过）才允许新建
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(e) => {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::InternalError,
+                    message: format!("读取 Local State 失败: {e}"),
+                })
+            }
+        };
         if !val.is_object() {
-            val = serde_json::json!({});
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "Local State 不是 JSON 对象，已中止切号以免覆盖设备标识".into(),
+            });
         }
         if val.get("profile").map(|v| v.is_object()) != Some(true) {
             val["profile"] = serde_json::json!({});
@@ -1959,6 +1974,14 @@ impl ToolAdapter for DoubaoWorkAdapter {
         // 多账号客户端：只认 `Local State` 指向的那个 profile
         let profile = Self::active_profile_name(&profile_root);
         let profile_dir = profile_root.join(&profile);
+        if !profile_dir.join("Preferences").is_file() {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::ClientNotFound,
+                message: format!(
+                    "未检测到豆包工作客户端登录数据（profile「{profile}」下没有 Preferences），请先启动并登录客户端"
+                ),
+            });
+        }
         let last_user = Self::read_last_user(&profile_dir);
         let cookie = Self::read_client_cookie_header(&profile_dir).ok();
 

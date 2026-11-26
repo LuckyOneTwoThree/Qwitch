@@ -594,6 +594,32 @@ impl CredentialEnvelope {
 mod tests {
     use super::*;
 
+    /// v0.6.3 及更早的历史额度快照没有 `hasTotal` 字段，反序列化必须按 true 处理，
+    /// 否则老快照会被当成「余额型」，UI 直接不画进度条。
+    #[test]
+    fn legacy_quota_bucket_json_defaults_has_total_true() {
+        let legacy = r#"{"key":"window_4_0_0","label":"每月额度","used":19.0,
+            "total":2142.0,"remaining":2123.0,"unit":"额度","resetAt":null}"#;
+        let bucket: QuotaBucket = serde_json::from_str(legacy).expect("deserialize");
+        assert!(bucket.has_total, "旧快照缺少 hasTotal 时必须默认 true");
+        assert_eq!(bucket.total, 2142.0);
+
+        // 新写入的余额型桶要能往返
+        let balance = QuotaBucket {
+            key: "credits".into(),
+            label: "可用积分".into(),
+            used: 0.0,
+            total: 361.5,
+            remaining: 361.5,
+            unit: "积分".into(),
+            reset_at: None,
+            has_total: false,
+        };
+        let json = serde_json::to_string(&balance).unwrap();
+        let back: QuotaBucket = serde_json::from_str(&json).unwrap();
+        assert!(!back.has_total);
+    }
+
     #[test]
     fn bidirectional_merge_preserves_snapshot_and_token_and_flags() {
         let mut snap_files = HashMap::new();

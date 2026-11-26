@@ -70,6 +70,24 @@ jobs:
               exit 1
             fi
           fi
+      - name: Verify CHANGELOG has an entry for this tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+          VER="${TAG#v}"
+          if ! grep -qE "^## \[${VER}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md 缺少 ## [${VER}] 段落；请先补写该版本的变更记录再发版。" >&2
+            exit 1
+          fi
+          echo "CHANGELOG.md 已包含 ${VER} 的变更记录"
       - run: npm ci
       - run: npm audit --omit=dev
       - run: npm run lint
@@ -209,6 +227,35 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract changelog section for this release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+          VER="${TAG#v}"
+          awk -v ver="$VER" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "## [" ver "]") == 1) { found=1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > changelog-section.md
+          if [ ! -s changelog-section.md ]; then
+            echo "CHANGELOG.md 缺少 ## [${VER}] 段落" >&2
+            exit 1
+          fi
+          echo "----- changelog-section.md -----"
+          cat changelog-section.md
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -240,7 +287,11 @@ jobs:
             RELEASE_FLAG="--latest"
           fi
 
-          cat <<'EOF' > release-notes.md
+          # 变更记录优先：来自 CHANGELOG.md 的对应版本段落
+          cp changelog-section.md release-notes.md
+          printf '\n' >> release-notes.md
+
+          cat <<'EOF' >> release-notes.md
           ### 下载说明 / Downloads
 
           - **macOS Apple Silicon (`*aarch64.dmg`)**：适用于 M1/M2/M3/M4 等 Apple Silicon Mac，原生 arm64，无需 Rosetta 2。
@@ -257,26 +308,24 @@ jobs:
           - **完整性校验**：下载后可对照 `SHA256SUMS.txt` 校验安装包哈希值。
           EOF
 
+          PREV_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          if [ -n "$PREV_TAG" ]; then
+            printf '\n**完整差异**：https://github.com/%s/compare/%s...%s\n' \
+              "${{ github.repository }}" "$PREV_TAG" "$TAG" >> release-notes.md
+          fi
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            EXISTING_BODY="$(gh release view "$TAG" --json body -q .body || true)"
             gh release upload "$TAG" release-assets/* --clobber
-            if [ -z "$EXISTING_BODY" ]; then
-              gh release edit "$TAG" \
-                --draft=false \
-                "$RELEASE_FLAG" \
-                --title "Qwitch $TAG" \
-                --notes-file release-notes.md
-            else
-              gh release edit "$TAG" \
-                --draft=false \
-                "$RELEASE_FLAG" \
-                --title "Qwitch $TAG"
-            fi
+            # 重跑发布时也让说明与 CHANGELOG 保持一致
+            gh release edit "$TAG" \
+              --draft=false \
+              "$RELEASE_FLAG" \
+              --title "Qwitch $TAG" \
+              --notes-file release-notes.md
           else
             gh release create "$TAG" release-assets/* \
               --target "${{ github.sha }}" \
               --title "Qwitch $TAG" \
-              --notes "$(cat release-notes.md)" \
-              --generate-notes \
+              --notes-file release-notes.md \
               "$RELEASE_FLAG"
           fi

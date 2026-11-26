@@ -73,14 +73,15 @@ Qwitch 目前内置 7 个账号适配器，另支持一个通用 API Key 作为�
 | **MiniMax Code CN** | 积分水位；每日签到 | 本机读取 / 内置设备码授权 / Token | 支持 | 支持 |
 | **LobsterAI（有道龙虾）** | 积分水位；每日签到 | 内置 OAuth 授权 / 本机读取 / Token | 支持 | 支持 |
 | **豆包工作** | 多类额度与额度包；每日签到 | 内置网页登录（Cookie） / 本机读取 / Cookie 或 cURL | 支持 | 支持 |
-| **码道 CodeArts** | 积分水位（华为云 AK/SK 签名） | 本机读取 / Token | 不支持 | 需单独授权 |
+| **码道 CodeArts** | 积分水位（华为云 AK/SK 签名） | 本机读取 / 独立 OAuth / Token | 不支持 | 支持（本机只读 / 独立 OAuth） |
 | **通用 API Key** | 不提供额度和签到 | 手动填写 Key 与 Base URL | — | 作为最后兜底 |
 
 说明：
 
-- 码道 CodeArts 支持网关调度：网关里有一条专用签名上游（SDK-HMAC-SHA256 → `/api/v2/chat/completions`），模型清单从本机客户端启动配置读取；本机导入的凭据不会自动刷新（避免与 IDE 互踢），STS 到期后重新导入即可。豆包工作没有任何面向第三方的模型接口，模型目录仅供对照、不参与调度。
+- **全部 7 个内置账号工具均已通过 Rust 原生协议接入本地网关调度**。
+- **豆包工作**：已接入原生 HTTP/SSE 网关上游（支持流式与非流式对话、自动会话初始化与临时会话清理），模型目录支持从本机缓存目录读取。
+- **码道 CodeArts**：使用华为云 `SDK-HMAC-SHA256` 签名上游（支持 `.myhuaweicloud.cn` 回退与并发限流短冷却），模型目录从本机客户端配置读取；本机导入的 `client_readonly` 凭据可直接参与网关调度，但绝不主动消耗客户端一次性 `refreshToken`（STS 到期时尝试从本机磁盘只读重同步）；如需网关内自动刷新，可在号池入口单独完成一次 `isolated_oauth` 授权。
 - Trae 和 Qoder 的国际版没有每日签到，暂未内置适配器。
-- 码道 CodeArts 的 refreshToken 是一次性轮换的。Qwitch 默认只读，避免和官方 IDE 互相踢下线；要让它参与网关调度，需要在号池里单独完成一次 OAuth 授权。
 
 ### 接入的 Agent
 
@@ -155,15 +156,16 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 ### 本地网关与号池
 
 - 支持 OpenAI Chat、OpenAI Responses、Anthropic Messages，包含流式返回和工具调用。工具调用指 Agent 读写文件、执行命令时使用的那类请求。
+- 全部 7 个内置订阅工具均走 Rust 原生上游协议（含 Qoder CN Cosy 签名与工具调用、Trae CN SSE、豆包工作原生 HTTP/SSE、码道 CodeArts 华为云签名与 `APIG.0602` 自动刷新/本机只读重同步、`TM.00001041` 并发限流短冷却）。
 - 同一个工具的多个账号可以组成号池，按主备顺序、剩余额度、单号耗尽或轮询选择。
-- 主账号返回 429 时自动冷却并换下一个；401 时按账号刷新 Token 并写回加密库；可以配置一个通用 API Key 作为最后兜底。
-- 同一会话会尽量留在同一个账号，利用上游的 Prompt Cache，也就是同一会话的缓存；可以跳过正在桌面端使用的账号，避免互相踢下线。
+- 主账号返回 429 时自动冷却并换下一个；401 时按账号刷新 Token 并写回加密库；502/503 响应会透传真实上游错误摘要便于排查；可以配置一个通用 API Key 作为最后兜底。
+- 同一会话会尽量留在同一个账号，利用上游的 Prompt Cache，也就是同一会话的缓存；活跃桌面端互斥按工具精细控制（如 `lobsterai`、`qoder_cn` 免除活跃端跳过），避免互相踢下线。
 
 ### Agent 接入与还原
 
 - 按工具勾选要开放的模型，设置 `★` 默认模型和主备顺序，一次同步到所有已挂载的 Agent。
-- 可以拉取上游真实模型目录，按「已勾选 / 免费低倍率 / 主力旗舰」筛选。
-- 修改前显示配置差异，原文件加密备份；支持配置漂移检测（配置文件被其他程序改动）、一键修复、解绑还原、按 Agent 或全部强制清除 Qwitch 写入。
+- 支持自动探测上游真实模型目录（含 `trae_cn`、`minimax_code_cn`、`qoder_cn`、`lobsterai` 实时探测，以及 `doubaowork` / `codearts` 本机缓存目录），在界面标注目录来源（上游实时 / 本机缓存目录 / 推荐目录），并支持按「已勾选 / 免费低倍率 / 主力旗舰」筛选。
+- 修改前显示配置差异，原文件加密备份；支持配置漂移检测（配置文件被其他程序改动）、一键修复、解绑还原（同时清理休眠专属号池的残留模型，防止跨工具串选）、按 Agent 或全部强制清除 Qwitch 写入。
 - 修改网关端口后，可以一键重启 Claude、Codex、MiMo Code、ZCode 等正在运行的客户端。
 - 可以重新探测本机 Agent 的安装路径和运行状态；未安装的客户端不会显示重启按钮。
 
@@ -171,7 +173,7 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 
 ### 路由观测
 
-每次经过网关的请求都会记录来源 Agent、请求模型、最终账号、协议转换、每一跳的尝试结果、耗时和 token 用量。可以按来源、关键词、「只看失败」或「只看 Failover」筛选，点开任意一条查看完整链路。
+每次经过网关的请求（含 503 无可用候选账号，且准确归因目标订阅工具）都会记录来源 Agent、订阅工具、请求模型、最终账号、协议转换、每一跳的尝试结果、耗时和 token 用量。时间统一按北京时间（UTC+8）显示，非今日记录自动附带日期；支持按来源 Agent、订阅工具、关键词、「只看失败」或「只看 Failover」筛选，支持自动轮询与手动刷新，点开任意一条可查看完整链路。
 
 内置一个连通性测试：正常直连、注入首号 429、注入 401 刷新，以及同一会话连续发包，用来确认冷却跳过和缓存亲和是否符合预期。
 
@@ -320,12 +322,12 @@ npm run dev          # 浏览器 Mock 预览
 npm run tauri dev    # 桌面应用开发模式
 npm run build        # 类型检查 + 生产构建
 npm run lint         # ESLint，--max-warnings=0
-npm test             # 前端测试，31 个文件 / 190 个用例
-cd src-tauri && cargo test   # 后端测试，253 个用例
+npm test             # 前端测试，31 个文件 / 191 个用例
+cd src-tauri && cargo test   # 后端测试，282 个用例
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
-CI 在 macOS 和 Windows 上运行依赖审计、ESLint、前端构建与测试、Tauri `--no-bundle` 构建冒烟，以及 Rust `cargo audit`、fmt、clippy 和测试。当前 `npm audit` 为 0 漏洞。
+CI 在 macOS 和 Windows 上运行依赖审计、ESLint、前端构建与测试、Tauri `--no-bundle` 构建冒烟，以及 Rust `cargo audit`、fmt、clippy 和测试。当前 `npm audit` 与 `cargo audit`（含 `rsa 0.10` 升级修复）均为 0 漏洞。
 
 发布由 `v*` 标签触发，生成 macOS Apple Silicon、macOS Intel 和 Windows x64 三个安装包。
 
@@ -362,7 +364,7 @@ Qwitch/
 └─ .github/workflows/        # CI 双平台门禁 + Release 流水线
 ```
 
-后端注册了 77 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停、Agent 环境探测与热切/修复/重启、日志读取和更新检查所需的最小命令集。
+后端注册了 76 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停、Agent 环境探测与热切/修复/重启、日志读取和更新检查所需的最小命令集。
 
 发布前手工检查：空数据目录首装；备份恢复到冲突钥匙串环境；慢启动客户端切号；托盘和 Dock 行为；本地网关端到端路由与目标 Agent 重启生效。
 
@@ -389,7 +391,7 @@ Qwitch/
 - macOS 安装包尚未签名和公证，首次打开需要手动放行。Windows 安装包也没有代码签名。
 - OpenAI Responses 的跨协议增量流式默认关闭。需要时设置 `QWITCH_GATEWAY_RESPONSES_STREAMING=1`；关闭时会把完整回复收完再返回，功能不受影响，只是首字节更慢。
 - 暂不支持云端同步、团队共享、远程访问网关或无人值守批量注册。
-- 码道 CodeArts 默认只读监控，需要单独授权后才能参与号池调度。
+- 码道 CodeArts 不支持桌面端切号；本机导入的只读凭据可参与网关调度，但不会自动消耗客户端一次性 refreshToken（到期时自动尝试重读本机缓存，如需网关内自动刷新可走独立 OAuth 授权）。
 
 ## 贡献
 

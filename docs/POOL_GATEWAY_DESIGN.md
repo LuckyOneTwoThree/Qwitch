@@ -148,16 +148,16 @@ pub enum IrPart {
 
 全部 7 个内置工具账号均可直接作为号池成员源，同时支持「通用标准 API Key（OpenAI / Anthropic / Gemini 兼容）」作为稳态兜底：
 
-| 上游工具 (`tool_id`) | 通道策略 | 社区插件参考来源 | Qwitch 凭据桥接字段 | 关键约束与工程对策 |
+| 上游工具 (`tool_id`) | 通道策略 | 参考来源 / 模块 | Qwitch 凭据桥接字段 | 关键约束与工程对策 |
 | --- | --- | --- | --- | --- |
-| **MiniMax Code CN** (`minimax_code_cn`) | **Rust 原生优先**（或桥接） | `@magpie-community/opencode-minimax-auth` | `auth.json` 明文 `accessToken` + `refresh_credential` | Token ~1h 过期，依赖 `RefreshSingleFlight` 提前 5 分钟刷新；最适合首批作为原生稳定通道 |
-| **WorkBuddy** (`workbuddy`) | **OpenCode 桥接** | `@magpie-community/opencode-workbuddy-auth` | `decrypted_token.txt` / `workbuddy-desktop.info` + `uid` | `copilot.tencent.com` 强制校验 `User-Agent: WorkBuddy/<ver>`（错误码 `10085`）；需处理加密快照未解密时的状态引导 |
-| **有道龙虾** (`lobsterai`) | **OpenCode 桥接** | `Jasery/opencode-lobster-auth` | `decrypted_token.txt` + `refreshToken` + `yid` | 已有提前 5 分钟刷新能力，桥接时同步回传新 Token 入库 |
-| **Qoder CN** (`qoder_cn`) | **OpenCode 桥接** | `@magpie-community/opencode-qoder-auth` | `decrypted_token.txt` + `device_token` + `machine_id` | 对话推理强依赖 `device_token` 与 `Cosy-MachineId` 一致性（参考 `magpie/internal/qoder/endpoints.go`），桥接 Auth Mapper 需补齐设备凭据映射 |
-| **Trae CN** (`trae_cn`) | **OpenCode 桥接** | `@magpie-community/opencode-trae-auth` | `Cloud-IDE-JWT` + `trae_device.json` | 强绑定账号级设备身份（`x-device-*`）；桥接严格复用 `trae_device.json`，禁止随机伪造/轮换设备指纹；建议默认开启活跃号互斥 |
-| **豆包工作** (`doubaowork`) | **OpenCode 桥接** | `doubao-work` 社区插件 | Cookie (`sessionid` / `sid_tt`) + `UniParams` | 字节 AGW 私有流式协议 + 风控敏感；仅建议作为非高频或兜底池成员，冷却阈值需调宽 |
-| **华为云码道** (`codearts`) | **OpenCode 桥接（强制隔离）** | `@magpie-community/opencode-codearts-auth` | 仅允许「独立 OAuth」会话 | **高危互斥防护**：[ADAPTER_SPEC.md](ADAPTER_SPEC.md#L182-L199) 已证实客户端 `refreshToken` 为一次性轮换，若网关拿本机客户端导入的凭据去刷会直接废掉 IDE 登录态！**架构强制规定**：客户端导入的 `codearts` 账号标记 `codeArtsMode = client_readonly`，**禁止加入任何推理号池**；必须通过号池授权入口单独走一次 OAuth 取得 `isolated_oauth` 独立会话后方可入池 |
-| **通用标准 API Key** (`custom_api_key`) | **Rust 原生** | — | API Key + Base URL + Protocol | 零外部依赖、零风控风险；支持放号池末位做免费额度耗尽后的自动兜底 |
+| **MiniMax Code CN** (`minimax_code_cn`) | **Rust 原生** | `gateway/mod.rs` + `storage/models.rs` | `auth.json` 明文 `accessToken` + `refresh_credential` | Token ~1h 过期，依赖 `RefreshSingleFlight` 提前 5 分钟刷新；实时模型探测对齐 `?region=cn&buildEnv=prod` 与对象映射解析 |
+| **WorkBuddy** (`workbuddy`) | **Rust 原生** | `gateway/mod.rs` | `decrypted_token.txt` / `workbuddy-desktop.info` + `uid` | `copilot.tencent.com` 强制校验 `User-Agent: WorkBuddy/<ver>`（错误码 `10085`）；需处理加密快照未解密时的状态引导 |
+| **有道龙虾** (`lobsterai`) | **Rust 原生** | `gateway/mod.rs` + `storage/models.rs` | `decrypted_token.txt` + `refreshToken` + `yid` | 已有提前 5 分钟刷新能力并同步回传新 Token 入库；免除活跃桌面端跳过，支持实时模型目录探测 |
+| **Qoder CN** (`qoder_cn`) | **Rust 原生** | `adapter/qoder_cosy.rs` + `gateway/mod.rs` | `decrypted_token.txt` + `device_token` + `machine_id` | 对话推理强依赖 `device_token`、`Cosy-MachineId` 与 `rsa 0.10` PKCS#1 v1.5 加密封装及 Cosy 签名；支持工具调用与实时模型目录探测，免除活跃桌面端跳过 |
+| **Trae CN** (`trae_cn`) | **Rust 原生 SSE** | `gateway/mod.rs` + `storage/models.rs` | `Cloud-IDE-JWT` + `trae_device.json` | 强绑定账号级设备身份（`x-device-*`），严格复用 `trae_device.json`；实时模型探测对齐 `batch_get_detail_param` / `get_detail_param` 回退；建议开启活跃号互斥 |
+| **豆包工作** (`doubaowork`) | **Rust 原生 HTTP/SSE** | `gateway/doubao.rs` | Cookie (`sessionid` / `sid_tt`) + `UniParams` | 字节 AGW 私有流式协议；原生支持会话初始化、增量 SSE/非流式响应、响应后异步清理临时会话，并从本机缓存目录读取模型清单 |
+| **华为云码道** (`codearts`) | **Rust 原生签名上游** | `adapter/codearts.rs` + `gateway/mod.rs` | `accessKey` / `secretKey` / `securityToken`（区分 `client_readonly` / `isolated_oauth`） | 华为云 `SDK-HMAC-SHA256` 签名上游（支持 `.myhuaweicloud.cn` 回退）；`client_readonly` 可入池但不主动消耗客户端一次性 `refreshToken`（遇到 `APIG.0602` 过期仅尝试本机磁盘只读重同步），`isolated_oauth` 走单飞 DPoP 刷新；遇到 `TM.00001041` 并发限流做短冷却 |
+| **通用标准 API Key** (`custom_api_key`) | **Rust 原生** | `gateway/mod.rs` | API Key + Base URL + Protocol | 零外部依赖、零风控风险；支持放号池末位做免费额度耗尽后的自动兜底 |
 
 ---
 

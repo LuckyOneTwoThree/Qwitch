@@ -128,6 +128,11 @@
 * 活动为定向开放，账号未被投放签到任务时 `v3/detail` 无 `daily_signin` 任务，
   适配器据此返回 `Unsupported`，不发起写请求。
 
+### 本地网关推理通道
+
+* 已通过 `src-tauri/src/gateway/doubao.rs` 接入原生 HTTP/SSE 网关上游：自动完成会话初始化，支持流式 SSE 与非流式响应转换，并在响应结束后异步清理临时会话。
+* 模型目录支持直接从本机插件/客户端缓存目录读取真实模型清单。
+
 ---
 
 ## 2.6 码道 CodeArts（`codearts`）—— 额度监控型
@@ -202,3 +207,9 @@
   * 实测账号在 `benefit/claim` 上返回
     `error_code=4000 invalid channel, group not found`（不在任何权益组），
     与额度查询无关，不影响本适配器。
+
+### 本地网关推理通道
+
+* 已通过华为云 `SDK-HMAC-SHA256` 签名上游接入 `/api/v2/chat/completions`（支持 `.myhuaweicloud.cn` 域名回退）。
+* 遇到 `APIG.0602` 令牌过期时：`isolated_oauth` 账号走单飞 DPoP 刷新；`client_readonly` 账号绝不消耗客户端一次性 `refreshToken`，仅尝试从本机磁盘只读重同步最新 STS。
+* 遇到 `TM.00001041` 并发限流时触发短冷却，交由号池自动切换候选账号。

@@ -18,22 +18,17 @@ export function isToolScopeReadonly(
 /**
  * 该工具能否被 Qwitch 网关实际调度。
  *
- * - WorkBuddy / Qoder / Trae / MiniMax / 自定义 API：Bearer 令牌 + Base URL；
- * - 码道 CodeArts：华为云 AK/SK + STS 签名，走 `/api/v2/chat/completions`
- *   专用上游（网关里单独一条签名分支），因此**可以**调度；
- * - 豆包工作：没有任何面向第三方的模型接口（magpie 也是靠 CDP 驱动桌面端），
- *   我们只能读它的模型菜单做对照，无法作为上游，勾选没有落点。
+ * - WorkBuddy / Qoder / Trae / MiniMax / 有道龙虾 / 自定义 API：HTTP/Bearer 或私有签名协议；
+ * - 码道 CodeArts：华为云 AK/SK + STS 签名，走 `/api/v2/chat/completions`；
+ * - 豆包工作：Cookie 会话直连 `https://www.doubao.com/chat/completion` + SSE 块解析，同样可调度。
  */
-const GATEWAY_UNROUTABLE_TOOLS = new Set(["doubaowork"]);
+const GATEWAY_UNROUTABLE_TOOLS = new Set<string>();
 
 export function isToolGatewayRoutable(toolId: string): boolean {
   return !GATEWAY_UNROUTABLE_TOOLS.has(toolId);
 }
 
 /** 不可调度时给用户的原因（用于横幅与 tooltip），可调度返回 null。 */
-export function gatewayUnsupportedReason(toolId: string): string | null {
-  if (toolId === "doubaowork") {
-    return "豆包工作没有面向第三方的模型接口，Qwitch 只能读取它的模型菜单用于对照，无法作为网关上游调度（magpie 也是靠驱动桌面端实现的）。";
-  }
+export function gatewayUnsupportedReason(_toolId: string): string | null {
   return null;
 }

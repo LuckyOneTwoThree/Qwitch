@@ -112,7 +112,7 @@ fn collect_for_model(
             && m.is_active_on_client.unwrap_or(false)
             && !matches!(
                 m.tool_id.as_str(),
-                "codearts" | "lobsterai" | "qoder_cn"
+                "codearts" | "lobsterai" | "qoder_cn" | "doubaowork"
             )
         {
             skipped_attempts.push(RoutingAttempt {

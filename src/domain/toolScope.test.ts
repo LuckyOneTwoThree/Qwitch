@@ -52,9 +52,9 @@ describe("网关可调度性", () => {
     expect(isToolGatewayRoutable("codearts")).toBe(true);
   });
 
-  it("豆包工作没有模型接口，不可调度，且给出原因", () => {
-    expect(isToolGatewayRoutable("doubaowork")).toBe(false);
-    expect(gatewayUnsupportedReason("doubaowork")).toContain("没有面向第三方的模型接口");
+  it("豆包工作已接入原生 HTTP/SSE 会话上游，可以调度", () => {
+    expect(isToolGatewayRoutable("doubaowork")).toBe(true);
+    expect(gatewayUnsupportedReason("doubaowork")).toBeNull();
     expect(gatewayUnsupportedReason("codearts")).toBeNull();
   });
 

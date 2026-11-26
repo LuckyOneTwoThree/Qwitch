@@ -1538,17 +1538,6 @@ impl QwitchDatabase {
             }
         }
 
-        tx.execute(
-            "UPDATE pool_members
-             SET supported_models_json = '[]'
-             WHERE account_id IN (SELECT id FROM accounts WHERE tool_id = 'doubaowork')",
-            [],
-        )?;
-        tx.execute(
-            "DELETE FROM pool_model_policies WHERE model_id LIKE 'doubaowork/%'",
-            [],
-        )?;
-
         tx.commit()?;
         Ok(())
     }

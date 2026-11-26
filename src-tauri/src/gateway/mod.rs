@@ -1,3 +1,4 @@
+mod doubao;
 pub mod ir;
 pub mod scheduler;
 
@@ -1404,7 +1405,7 @@ fn validate_custom_base_url(
     }
 }
 
-async fn read_bounded_response_text(resp: reqwest::Response, label: &str) -> Result<String, String> {
+pub(super) async fn read_bounded_response_text(resp: reqwest::Response, label: &str) -> Result<String, String> {
     if resp
         .content_length()
         .is_some_and(|len| len > MAX_UPSTREAM_BODY)
@@ -1470,6 +1471,10 @@ async fn send_upstream_stream(
     // Qoder CN 走 COSY 签名私有协议 `/algo/api/v2/service/pro/sse/agent_chat_generation`
     if member.tool_id == "qoder_cn" {
         return send_qoder_stream(client, member, cred, ir_req, &wire_model).await;
+    }
+    // 豆包工作走网页/桌面端 Cookie 会话协议 `POST https://www.doubao.com/chat/completion`
+    if member.tool_id == "doubaowork" {
+        return doubao::send_doubao_stream(client, member, cred, ir_req, &wire_model).await;
     }
     let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
     let base = base_url.trim_end_matches('/');
@@ -3027,7 +3032,7 @@ async fn call_upstream_member(
     // 非流式调用方由 parse_upstream_response_body 自动聚合 SSE 为完整 IrResponse。
     if matches!(
         member.tool_id.as_str(),
-        "codearts" | "trae_cn" | "qoder_cn"
+        "codearts" | "trae_cn" | "qoder_cn" | "doubaowork"
     ) {
         let resp = send_upstream_stream(member, cred, ir_req, upstream_model).await?;
         let code = resp.status().as_u16();

@@ -1017,6 +1017,19 @@ pub fn resolve_vendor_wire_model_id(tool_id: &str, canonical_or_raw_model_id: &s
             "deepseek-v4-pro" => Some("deepseek-v4-pro".into()),
             _ => None,
         },
+        "doubaowork" => match cid {
+            "auto" => Some("9".into()),
+            "doubao-2.1-pro" => Some("5".into()),
+            "doubao-2.1-lite" => Some("seed-lite-7b".into()),
+            "deepseek-v4.1-flash" => Some("person-deepseek-v4-1-flash-261017".into()),
+            "deepseek-v4-pro" => Some("person-deepseek-v4-pro-ga-260813".into()),
+            "kimi-k3.1-pro" => Some("person-kimi-k3-1-pro-261111".into()),
+            "kimi-k3.1-pro-fast" => Some("person-kimi-k3-1-pro-highspeed-261111".into()),
+            "kimi-k3" => Some("person-kimi-k3-261111".into()),
+            "glm-5.3" => Some("person-glm-5-3-261111".into()),
+            "glm-5.3-flash" => Some("person-glm-5-3-flash-261111".into()),
+            _ => None,
+        },
         _ => None,
     }
     // 静态映射表未命中时，退回实时探测登记的 wire ID：

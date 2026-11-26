@@ -1676,13 +1676,12 @@ fn unbound_dedicated_pool_clears_stale_models_on_remount_and_cleanup() {
         ).expect("policies");
     }
 
-    // 启动清理：清除未绑定池 mimo 全部模型与已绑定池 dsh 的 doubaowork 残留，保留 dsh 的 workbuddy 模型
+    // 启动清理：清除未绑定池 mimo 全部模型，保留已绑定池 dsh 的模型（含已接入网关的 doubaowork）
     db.cleanup_unbound_dedicated_pools().expect("cleanup");
     let cands = db.list_upstream_candidates(&mk).expect("cands");
     let pools = db.list_pools_with_candidates(&cands, &HashMap::new()).expect("pools");
     let dsh_pool = pools.iter().find(|p| p.id == "pool-agent-dsh").expect("dsh");
-    assert_eq!(dsh_pool.model_policies.len(), 1);
-    assert_eq!(dsh_pool.model_policies[0].model_id, "workbuddy/deepseek-v4-pro");
+    assert_eq!(dsh_pool.model_policies.len(), 2);
     let mimo_pool = pools.iter().find(|p| p.id == "pool-agent-mimo").expect("mimo");
     assert!(mimo_pool.model_policies.is_empty());
 

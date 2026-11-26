@@ -541,6 +541,10 @@ impl DoubaoWorkAdapter {
         }
     }
 
+    pub(crate) fn extract_cookie_header(cred: &CredentialEnvelope) -> Result<String, String> {
+        Self::extract_cookie(cred).map_err(|e| e.to_string())
+    }
+
     async fn get_with_cookie(
         &self,
         base: &str,

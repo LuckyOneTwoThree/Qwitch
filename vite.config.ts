@@ -17,7 +17,11 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // 显式绑定 127.0.0.1。`host: false` 等价于 `localhost`，而 Node 在 Windows 上
+    // 会按解析结果只监听一个地址族——实测只绑到 [::1]:1420，`127.0.0.1:1420`
+    // 直接不可达，任何按 IPv4 探测 dev server 的工具（脚本、健康检查、部分 WebView
+    // 回退路径）都会失败。真机/局域网调试仍通过 TAURI_DEV_HOST 覆盖。
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",

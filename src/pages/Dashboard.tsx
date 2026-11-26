@@ -551,6 +551,14 @@ export function Dashboard({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [nav]);
 
+  // 只有 macOS 走 `titleBarStyle: "Overlay"`（见 tauri.conf.json），窗口没有原生标题栏，
+  // 因此需要为左上角红绿灯按钮预留高度并自绘拖拽区。Windows / Linux 仍是原生装饰，
+  // 再预留这 40px 就变成「原生标题栏 + 一条空白」的双层标题。
+  const reservesTrafficLightSpace = useMemo(() => {
+    if (typeof navigator === "undefined") return true;
+    return !/windows|linux/i.test(navigator.userAgent);
+  }, []);
+
   const autoStartDescription = useMemo(() => {
     const ua = typeof navigator !== "undefined" ? navigator.userAgent.toLowerCase() : "";
     if (ua.includes("windows")) {
@@ -742,7 +750,9 @@ export function Dashboard({
     <div className="relative flex h-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
 
       <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200 bg-white px-2.5 pb-3 pt-0 dark:border-zinc-800 dark:bg-zinc-900">
-        <div onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="h-10 shrink-0 -mx-2.5" />
+        {reservesTrafficLightSpace && (
+          <div onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="h-10 shrink-0 -mx-2.5" />
+        )}
         <div className="flex min-h-0 flex-1 flex-col justify-between">
         <div className="overflow-y-auto">
           <div className="mb-4 flex items-center gap-2.5 px-1.5">

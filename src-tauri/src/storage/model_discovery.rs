@@ -144,7 +144,39 @@ fn as_opt_f64(v: Option<&Value>) -> Option<f64> {
     }
 }
 
-/// 从本地 `~/.config/magpie/plugin-providers.json` 读取已探测的线上模型目录（二级真实目录缓存）
+/// magpie 的 provider 目录缓存候选路径。
+///
+/// magpie 在 macOS/Linux 上写 `~/.config/magpie/`；Windows 原生构建按 Electron 惯例
+/// 落在 `%APPDATA%\magpie\`（个别版本用 `%LOCALAPPDATA%`）。此前只拼 `~/.config`，
+/// 导致 Windows 上这条「二级真实目录缓存」永远命不中，模型列表只能退回内置/在线探测。
+fn magpie_provider_cache_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        paths.push(
+            PathBuf::from(home)
+                .join(".config")
+                .join("magpie")
+                .join("plugin-providers.json"),
+        );
+    }
+    if let Some(roaming) = std::env::var_os("APPDATA") {
+        paths.push(
+            PathBuf::from(roaming)
+                .join("magpie")
+                .join("plugin-providers.json"),
+        );
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        paths.push(
+            PathBuf::from(local)
+                .join("magpie")
+                .join("plugin-providers.json"),
+        );
+    }
+    paths
+}
+
+/// 从本地 magpie provider 缓存读取已探测的线上模型目录（二级真实目录缓存）
 pub fn load_magpie_provider_models(tool_id: &str) -> Option<Vec<UpstreamModelOption>> {
     let provider_id = match tool_id {
         "workbuddy" => "workbuddy",
@@ -154,11 +186,9 @@ pub fn load_magpie_provider_models(tool_id: &str) -> Option<Vec<UpstreamModelOpt
         _ => return None,
     };
 
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))?;
-    let path = home.join(".config/magpie/plugin-providers.json");
-    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = magpie_provider_cache_paths()
+        .into_iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())?;
     let root: Value = serde_json::from_str(&raw).ok()?;
     let providers = root.as_array()?;
 

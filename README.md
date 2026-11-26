@@ -253,8 +253,8 @@ Qwitch 没有云端账号，也不收集使用统计。账号、凭据、会话�
 **保存在本机的内容**
 
 - 业务凭据和 Agent 原文件备份使用 AES-256-GCM 加密。
-- 主密钥优先存放在 macOS Keychain / Windows Credential Manager，同时在数据目录保留一份权限为 `0600` 的 `master.key` 备份，方便重装或迁移。
-- 数据库和导出文件默认只有当前用户可读，数据目录同理；在 macOS 上对应权限位为 `0600` / `0700`。SQLite 开启 WAL。
+- 主密钥优先存放在 macOS Keychain / Windows Credential Manager，同时在数据目录保留一份 `master.key` 备份，方便重装或迁移。
+- 数据库和导出文件默认只有当前用户可读。macOS / Linux 上通过 `0600` / `0700` 权限位强制；Windows 上依赖 `%APPDATA%` 本身的用户专属 ACL（代码不会额外调用 `icacls` 收紧），因此同一台机器上的其他管理员账户仍可能读取数据目录。SQLite 开启 WAL。
 - 默认日志会脱敏邮箱、手机号、UID、Cookie 和 Token 片段。
 
 **网关和配置文件的保护**
@@ -316,14 +316,19 @@ Qwitch 默认全手动触发，批量操作串行并带随机抖动，遇到限�
 
 需要 Node.js 22+、Rust 1.88+，以及 macOS 或 Windows 桌面环境。
 
+> Windows 注意：Rust 安装后请确认 `cargo --version` 在**新开的终端**里可用，
+> 否则 `npm run tauri dev` / `npm run tauri build` 会报
+> `failed to run 'cargo metadata' ... program not found`。
+> 另外建议把 `src-tauri/target` 加入杀软实时扫描排除项，可显著减少首次编译卡顿。
+
 ```bash
 npm install
 npm run dev          # 浏览器 Mock 预览
 npm run tauri dev    # 桌面应用开发模式
 npm run build        # 类型检查 + 生产构建
 npm run lint         # ESLint，--max-warnings=0
-npm test             # 前端测试，31 个文件 / 191 个用例
-cd src-tauri && cargo test   # 后端测试，282 个用例
+npm test             # 前端测试（31 个文件）
+cd src-tauri && cargo test   # 后端测试
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 

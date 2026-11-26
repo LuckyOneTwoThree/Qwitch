@@ -182,6 +182,27 @@ fn format_quota_stats(summary: &crate::domain::AccountSummary) -> (u8, String) {
     (0, "尚未刷新额度".to_string())
 }
 
+/// 同一工具内可比的额度排序值。
+///
+/// - 有可信总量（`has_total`）→ 剩余百分比（0~100）；
+/// - 只有余额没有总量（LobsterAI 跨池积分等）→ 绝对剩余值。
+///
+/// 排序发生在「同一工具」的候选之间，因此两种口径不会混在一起比较。
+fn quota_sort_value(summary: &crate::domain::AccountSummary) -> f64 {
+    let Some(bucket) = summary
+        .latest_quota
+        .as_ref()
+        .and_then(|q| q.buckets.first())
+    else {
+        return 0.0;
+    };
+    if bucket.has_total && bucket.total > 0.0 {
+        ((bucket.remaining / bucket.total) * 100.0).clamp(0.0, 100.0)
+    } else {
+        bucket.remaining.max(0.0)
+    }
+}
+
 fn stash_aad(agent_id: TargetAgentId, file_path: &str) -> Vec<u8> {
     format!("stash:{}:{file_path}", agent_id.as_str()).into_bytes()
 }
@@ -393,6 +414,7 @@ impl QwitchDatabase {
         let mut out = Vec::with_capacity(accounts.len());
         for acc in accounts {
             let (quota_percent, quota_text) = format_quota_stats(&acc);
+            let quota_sort = quota_sort_value(&acc);
             let code_arts_mode = if acc.tool_id == "codearts" {
                 Some(self.detect_codearts_auth_mode(master_key, &acc.id))
             } else {
@@ -433,6 +455,7 @@ impl QwitchDatabase {
                 default_tier,
                 quota_percent,
                 quota_text,
+                quota_sort_value: quota_sort,
                 is_active_on_client: Some(acc.is_active_on_client),
                 account_status: account_status_to_str(&acc.status).to_string(),
                 code_arts_mode,
@@ -589,6 +612,7 @@ impl QwitchDatabase {
                 priority: priority.max(1) as usize,
                 quota_percent: cand.quota_percent,
                 quota_text: cand.quota_text.clone(),
+                quota_sort_value: cand.quota_sort_value,
                 cooldown_until_ms: cooldowns.get(&cand.account_id).copied(),
                 is_active_on_client: cand.is_active_on_client,
                 account_status: Some(cand.account_status.clone()),
@@ -693,6 +717,7 @@ impl QwitchDatabase {
                 priority: built_members.len() + 1,
                 quota_percent: cand.quota_percent,
                 quota_text: cand.quota_text.clone(),
+                quota_sort_value: cand.quota_sort_value,
                 cooldown_until_ms: None,
                 is_active_on_client: cand.is_active_on_client,
                 account_status: Some(cand.account_status.clone()),
@@ -1288,6 +1313,7 @@ impl QwitchDatabase {
                 priority: built_members.len() + 1,
                 quota_percent: cand.quota_percent,
                 quota_text: cand.quota_text.clone(),
+                quota_sort_value: cand.quota_sort_value,
                 cooldown_until_ms: None,
                 is_active_on_client: cand.is_active_on_client,
                 account_status: Some(cand.account_status.clone()),

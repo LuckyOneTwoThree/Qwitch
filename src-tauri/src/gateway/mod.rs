@@ -6060,6 +6060,7 @@ mod tests {
             priority: 0,
             quota_percent: 100,
             quota_text: "100%".into(),
+            quota_sort_value: 100.0,
             cooldown_until_ms: None,
             is_active_on_client: None,
             account_status: None,

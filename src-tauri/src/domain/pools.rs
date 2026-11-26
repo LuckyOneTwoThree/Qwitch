@@ -209,6 +209,10 @@ pub struct PoolMember {
     pub priority: usize,
     pub quota_percent: u8,
     pub quota_text: String,
+    /// 同工具内可比的排序值：有可信总量时=剩余百分比，否则=绝对剩余。
+    /// 余额型额度（如 LobsterAI 跨池积分）没有总量，只按百分比排序会全部并列。
+    #[serde(default)]
+    pub quota_sort_value: f64,
     pub cooldown_until_ms: Option<i64>,
     pub is_active_on_client: Option<bool>,
     pub account_status: Option<String>,
@@ -404,6 +408,8 @@ pub struct UpstreamAccountCandidate {
     pub default_tier: MemberTier,
     pub quota_percent: u8,
     pub quota_text: String,
+    #[serde(default)]
+    pub quota_sort_value: f64,
     pub is_active_on_client: Option<bool>,
     pub account_status: String,
     pub code_arts_mode: Option<CodeArtsAuthMode>,
@@ -1564,6 +1570,7 @@ mod tests {
                     priority: 1,
                     quota_percent: 80,
                     quota_text: "".into(),
+                    quota_sort_value: 80.0,
                     cooldown_until_ms: None,
                     is_active_on_client: Some(false),
                     account_status: Some("active".into()),
@@ -1583,6 +1590,7 @@ mod tests {
                     priority: 2,
                     quota_percent: 60,
                     quota_text: "".into(),
+                    quota_sort_value: 60.0,
                     cooldown_until_ms: None,
                     is_active_on_client: Some(false),
                     account_status: Some("active".into()),

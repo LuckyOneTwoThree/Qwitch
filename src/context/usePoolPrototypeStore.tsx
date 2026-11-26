@@ -2587,10 +2587,13 @@ export function PoolPrototypeProvider({
 
   const getAgentToolEnabledModelIds = useCallback(
     (agentId: TargetAgentId, toolId: string): string[] => {
-      const binding = rawBindings.find((b) => b.agentId === agentId);
+      // 读 ref 而不是 state：批量复制在同一 tick 内连续「设置来源 → 复制」，
+      // state 尚未重新渲染，读 state 会拿到空集合导致整批静默失败。
+      // refs 在每次 setter 里同步更新，且每帧与 state 对齐。
+      const binding = rawBindingsRef.current.find((b) => b.agentId === agentId);
       if (!binding) return [];
       const mountedPools = binding.mountedPoolIds
-        .map((id) => pools.find((p) => p.id === id))
+        .map((id) => poolsRef.current.find((p) => p.id === id))
         .filter((p): p is AccountPool => Boolean(p && p.enabled));
       const enabled = new Set<string>();
       for (const pool of mountedPools) {
@@ -2614,7 +2617,7 @@ export function PoolPrototypeProvider({
       }
       return Array.from(enabled);
     },
-    [pools, rawBindings]
+    []
   );
 
   const getAgentToolAccounts = useCallback(
@@ -2671,7 +2674,12 @@ export function PoolPrototypeProvider({
       agentId: TargetAgentId,
       toolId: string,
       modelIds: string[],
-      opts?: { preferredDefaultModelId?: string | null; silent?: boolean }
+      opts?: {
+        preferredDefaultModelId?: string | null;
+        silent?: boolean;
+        /** 由调用方统一提交（批量命令），本次只更新前端状态 */
+        skipWrite?: boolean;
+      }
     ) => {
       const uniqueBare = Array.from(
         new Set(modelIds.map((m) => splitScopedModelId(m).modelId).filter(Boolean))
@@ -2774,6 +2782,7 @@ export function PoolPrototypeProvider({
       setRawBindings(updatedBindings);
 
       const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
+      if (opts?.skipWrite) return;
       queueModelWrite({
         agentId,
         toolId,
@@ -3091,8 +3100,12 @@ export function PoolPrototypeProvider({
         agentId,
         toolId,
         (list) =>
+          // 余额型额度（LobsterAI 跨池积分）的 quotaPercent 恒为 100，
+          // 直接按它排序会全部并列；改用后端给的 quotaSortValue（余额=绝对剩余）。
           [...list].sort(
-            (a, b) => b.quotaPercent - a.quotaPercent || a.priority - b.priority
+            (a, b) =>
+              (b.quotaSortValue ?? b.quotaPercent) -
+                (a.quotaSortValue ?? a.quotaPercent) || a.priority - b.priority
           ),
         undefined,
         "已按当前剩余额度降序重排主备顺位"
@@ -3188,18 +3201,55 @@ export function PoolPrototypeProvider({
    * 它必然是空的，用户只能把同一批模型重新勾一遍。这里把「勾选集合 + 默认模型」
    * 作为一个整体方案复制过去，复制后仍然走原有的 debounce 写命令落盘。
    */
+  /**
+   * 解析「把 from 的方案套到 to」所需的最小信息（模型集合 + 默认模型）。
+   *
+   * 单订阅复制与批量复制共用这段逻辑，批量侧据此拼装一次 batch 命令。
+   */
+  const resolveAgentToolModelPlan = useCallback(
+    (
+      fromAgentId: TargetAgentId,
+      toAgentId: TargetAgentId,
+      toolId: string
+    ): { models: string[]; defaultModelId: string | null } | null => {
+      if (fromAgentId === toAgentId) return null;
+      const sourceModels = getAgentToolEnabledModelIds(fromAgentId, toolId);
+      if (sourceModels.length === 0) return null;
+      const catalog = new Set(
+        getCatalogModelsForTool(toolId, candidates).map((m) => m.id)
+      );
+      const models = catalog.size
+        ? sourceModels.filter((id) => catalog.has(id))
+        : sourceModels;
+      if (models.length === 0) return null;
+      const sourceDefaultKey = rawBindings.find((b) => b.agentId === fromAgentId)
+        ?.defaultModelKey;
+      let defaultModelId: string | null = null;
+      if (sourceDefaultKey) {
+        const rawModelKey = sourceDefaultKey.split("::")[1] ?? sourceDefaultKey;
+        const parsed = splitScopedModelId(rawModelKey);
+        const candidate =
+          parsed.toolId === null || parsed.toolId === toolId ? parsed.modelId : null;
+        if (candidate && models.includes(candidate)) {
+          defaultModelId = candidate;
+        }
+      }
+      return { models, defaultModelId };
+    },
+    [candidates, getAgentToolEnabledModelIds, rawBindings]
+  );
+
   const copyAgentToolModelPlan = useCallback(
     (
       fromAgentId: TargetAgentId,
       toAgentId: TargetAgentId,
       toolId: string,
-      opts?: { silent?: boolean }
+      opts?: { silent?: boolean; skipWrite?: boolean }
     ): number => {
       if (fromAgentId === toAgentId) return 0;
       const silent = opts?.silent ?? false;
       const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
-      const sourceModels = getAgentToolEnabledModelIds(fromAgentId, toolId);
-      if (sourceModels.length === 0) {
+      if (getAgentToolEnabledModelIds(fromAgentId, toolId).length === 0) {
         if (!silent) {
           const fromName =
             rawBindings.find((b) => b.agentId === fromAgentId)?.name ?? fromAgentId;
@@ -3207,38 +3257,16 @@ export function PoolPrototypeProvider({
         }
         return 0;
       }
-
-      // 只复制目标目录里确实存在的模型，避免把已下架的 ID 写进新 Agent 的配置
-      const catalog = new Set(
-        getCatalogModelsForTool(toolId, candidates).map((m) => m.id)
-      );
-      const copyable = catalog.size
-        ? sourceModels.filter((id) => catalog.has(id))
-        : sourceModels;
-      if (copyable.length === 0) {
+      const plan = resolveAgentToolModelPlan(fromAgentId, toAgentId, toolId);
+      if (!plan) {
         if (!silent) notify("来源方案的模型在当前目录中已不存在，已跳过复制", "info");
         return 0;
       }
 
-      // 默认模型也属于「方案」的一部分，否则复制过去会退化成目录里的第一个模型。
-      // defaultModelKey 形如 `<poolId>::<tool>/<model>`，先剥掉号池前缀再按
-      // `工具/模型` 解析，否则 splitScopedModelId 会把整串当成裸模型名。
-      const sourceDefaultKey = rawBindings.find((b) => b.agentId === fromAgentId)
-        ?.defaultModelKey;
-      let preferredDefaultModelId: string | null = null;
-      if (sourceDefaultKey) {
-        const rawModelKey = sourceDefaultKey.split("::")[1] ?? sourceDefaultKey;
-        const parsed = splitScopedModelId(rawModelKey);
-        const defaultModelId =
-          parsed.toolId === null || parsed.toolId === toolId ? parsed.modelId : null;
-        if (defaultModelId && copyable.includes(defaultModelId)) {
-          preferredDefaultModelId = defaultModelId;
-        }
-      }
-
-      setAgentToolModels(toAgentId, toolId, copyable, {
-        preferredDefaultModelId,
+      setAgentToolModels(toAgentId, toolId, plan.models, {
+        preferredDefaultModelId: plan.defaultModelId,
         silent,
+        skipWrite: opts?.skipWrite,
       });
 
       if (!silent) {
@@ -3247,19 +3275,59 @@ export function PoolPrototypeProvider({
         const toName =
           rawBindings.find((b) => b.agentId === toAgentId)?.name ?? toAgentId;
         notify(
-          `已把 ${fromName} 的「${toolLabel}」方案复制给 ${toName}（${copyable.length} 个模型）`,
+          `已把 ${fromName} 的「${toolLabel}」方案复制给 ${toName}（${plan.models.length} 个模型）`,
           "success"
         );
       }
-      return copyable.length;
+      return plan.models.length;
     },
     [
-      candidates,
       getAgentToolEnabledModelIds,
       notify,
       rawBindings,
+      resolveAgentToolModelPlan,
       setAgentToolModels,
     ]
+  );
+
+  /** 把某个订阅方案渲染成一条 batch 命令条目（无内容返回 null）。 */
+  const buildBatchEntry = useCallback(
+    (fromAgentId: TargetAgentId, toAgentId: TargetAgentId, toolId: string) => {
+      const plan = resolveAgentToolModelPlan(fromAgentId, toAgentId, toolId);
+      if (!plan) return null;
+      // 先只更新前端状态，写入统一由 batch 命令提交
+      setAgentToolModels(toAgentId, toolId, plan.models, {
+        preferredDefaultModelId: plan.defaultModelId,
+        silent: true,
+        skipWrite: true,
+      });
+      return {
+        toolId,
+        modelIds: plan.models,
+        defaultModelKey: plan.defaultModelId
+          ? makeDefaultModelKey(
+              `pool-agent-${toAgentId}`,
+              formatScopedModelId(toolId, plan.defaultModelId)
+            )
+          : undefined,
+      };
+    },
+    [resolveAgentToolModelPlan, setAgentToolModels]
+  );
+
+  /** 用一个批量命令提交某 Agent 的多组订阅方案（避免 N 条命令各重建一次 workspace）。 */
+  const commitModelPlanBatch = useCallback(
+    (
+      toAgentId: TargetAgentId,
+      entries: Array<{ toolId: string; modelIds: string[]; defaultModelKey?: string }>
+    ) => {
+      if (entries.length === 0) return;
+      void syncWorkspaceCommand("set_agent_tool_models_batch_cmd", {
+        agentId: toAgentId,
+        entries,
+      });
+    },
+    [syncWorkspaceCommand]
   );
 
   /** 把当前 Agent 的模型方案同步到其余全部 Agent（仅当前订阅工具）。 */
@@ -3269,9 +3337,10 @@ export function PoolPrototypeProvider({
       let synced = 0;
       for (const targetAgentId of TARGET_AGENT_ORDER) {
         if (targetAgentId === sourceAgentId) continue;
-        if (copyAgentToolModelPlan(sourceAgentId, targetAgentId, toolId, { silent: true }) > 0) {
-          synced += 1;
-        }
+        const entry = buildBatchEntry(sourceAgentId, targetAgentId, toolId);
+        if (!entry) continue;
+        commitModelPlanBatch(targetAgentId, [entry]);
+        synced += 1;
       }
       if (synced > 0) {
         notify(`已把「${toolLabel}」的模型方案同步到 ${synced} 个 Agent`, "success");
@@ -3280,7 +3349,7 @@ export function PoolPrototypeProvider({
       }
       return synced;
     },
-    [copyAgentToolModelPlan, notify]
+    [buildBatchEntry, commitModelPlanBatch, notify]
   );
 
   /**
@@ -3292,29 +3361,30 @@ export function PoolPrototypeProvider({
     (fromAgentId: TargetAgentId, toAgentId: TargetAgentId): number => {
       if (fromAgentId === toAgentId) return 0;
       const toolIds = getAgentConfiguredToolIds(fromAgentId);
-      let copiedTools = 0;
+      const entries: Array<{
+        toolId: string;
+        modelIds: string[];
+        defaultModelKey?: string;
+      }> = [];
       for (const toolId of toolIds) {
-        if (
-          copyAgentToolModelPlan(fromAgentId, toAgentId, toolId, { silent: true }) > 0
-        ) {
-          copiedTools += 1;
-        }
+        const entry = buildBatchEntry(fromAgentId, toAgentId, toolId);
+        if (entry) entries.push(entry);
       }
-      if (copiedTools > 0) {
-        const fromName =
-          rawBindings.find((b) => b.agentId === fromAgentId)?.name ?? fromAgentId;
-        const toName =
-          rawBindings.find((b) => b.agentId === toAgentId)?.name ?? toAgentId;
-        notify(
-          `已把 ${fromName} 的 ${copiedTools} 个订阅方案复制给 ${toName}`,
-          "success"
-        );
-      } else {
+      if (entries.length === 0) {
         notify("来源 Agent 还没有配置任何订阅方案", "info");
+        return 0;
       }
-      return copiedTools;
+      commitModelPlanBatch(toAgentId, entries);
+      const fromName =
+        rawBindings.find((b) => b.agentId === fromAgentId)?.name ?? fromAgentId;
+      const toName = rawBindings.find((b) => b.agentId === toAgentId)?.name ?? toAgentId;
+      notify(
+        `已把 ${fromName} 的 ${entries.length} 个订阅方案复制给 ${toName}`,
+        "success"
+      );
+      return entries.length;
     },
-    [copyAgentToolModelPlan, getAgentConfiguredToolIds, notify, rawBindings]
+    [buildBatchEntry, commitModelPlanBatch, getAgentConfiguredToolIds, notify, rawBindings]
   );
 
   /** 把当前 Agent 在**所有订阅工具**上的模型方案同步到其余全部 Agent。 */
@@ -3329,18 +3399,20 @@ export function PoolPrototypeProvider({
       let syncedGroups = 0;
       for (const targetAgentId of TARGET_AGENT_ORDER) {
         if (targetAgentId === sourceAgentId) continue;
-        let groups = 0;
+        const entries: Array<{
+          toolId: string;
+          modelIds: string[];
+          defaultModelKey?: string;
+        }> = [];
         for (const toolId of toolIds) {
-          if (
-            copyAgentToolModelPlan(sourceAgentId, targetAgentId, toolId, { silent: true }) > 0
-          ) {
-            groups += 1;
-          }
+          const entry = buildBatchEntry(sourceAgentId, targetAgentId, toolId);
+          if (entry) entries.push(entry);
         }
-        if (groups > 0) {
-          syncedAgents += 1;
-          syncedGroups += groups;
-        }
+        if (entries.length === 0) continue;
+        // 每个目标 Agent 只发一条命令
+        commitModelPlanBatch(targetAgentId, entries);
+        syncedAgents += 1;
+        syncedGroups += entries.length;
       }
       if (syncedAgents > 0) {
         notify(
@@ -3350,7 +3422,7 @@ export function PoolPrototypeProvider({
       }
       return syncedAgents;
     },
-    [copyAgentToolModelPlan, getAgentConfiguredToolIds, notify]
+    [buildBatchEntry, commitModelPlanBatch, getAgentConfiguredToolIds, notify]
   );
 
   const value = useMemo<PoolPrototypeContextValue>(

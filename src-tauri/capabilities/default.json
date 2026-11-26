@@ -84,6 +84,7 @@
     "allow-detect-agent-environment-cmd",
     "allow-run-pool-simulation-cmd",
     "allow-set-agent-tool-models-cmd",
+    "allow-set-agent-tool-models-batch-cmd",
     "allow-update-agent-tool-schedule-cmd",
     "allow-check-app-update",
     "allow-download-and-install-update",

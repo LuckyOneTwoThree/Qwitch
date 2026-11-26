@@ -1233,6 +1233,76 @@ pub async fn set_agent_tool_models_cmd(
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }
 
+/// 「全部订阅」批量写入的一组模型方案。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentToolModelPlanInput {
+    pub tool_id: String,
+    pub model_ids: Vec<String>,
+    /// 该组方案希望成为默认模型时，给出完整的 `<poolId>::<tool>/<model>`
+    #[serde(default)]
+    pub default_model_key: Option<String>,
+}
+
+/// 一次写入某个 Agent 在多个订阅工具上的模型方案。
+///
+/// 逐条调用 `set_agent_tool_models_cmd` 时每条都会重建一次 workspace（~36ms + 200KB 回传），
+/// 「全部订阅」在 6 Agent × 4 订阅下就是 24 次。这里合并成一次落库 + 一次接线 + 一次回传。
+#[tauri::command]
+pub async fn set_agent_tool_models_batch_cmd(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent_id: TargetAgentId,
+    entries: Vec<AgentToolModelPlanInput>,
+) -> Result<PoolWorkspaceState, String> {
+    if entries.is_empty() {
+        return build_workspace_state(&state.db, &state.master_key, &state.gateway);
+    }
+    // 上限仅用于防御异常调用（正常最多 7 个订阅）
+    if entries.len() > 16 {
+        return Err("批量模型方案条目过多（上限 16）".to_string());
+    }
+    let gw = state.gateway.runtime_state();
+    let (pool_id, binding) = state
+        .db
+        .ensure_agent_dedicated_pool(&state.master_key, agent_id)
+        .map_err(|e| e.to_string())?;
+    for entry in &entries {
+        state
+            .db
+            .set_pool_tool_models(
+                &state.master_key,
+                &pool_id,
+                &entry.tool_id,
+                &entry.model_ids,
+            )
+            .map_err(|e| format!("写入 {} 的模型方案失败: {e}", entry.tool_id))?;
+    }
+    let pools = state
+        .db
+        .list_pools(&state.master_key, &state.gateway.cooldown_snapshot())
+        .map_err(|e| e.to_string())?;
+    let effective_default = entries
+        .iter()
+        .find_map(|e| e.default_model_key.clone())
+        .or(binding.default_model_key);
+    let _ = apply_agent_wiring(
+        &state.db,
+        &state.master_key,
+        agent_id,
+        &[pool_id],
+        effective_default.as_deref(),
+        &binding.options,
+        &pools,
+        &gw.host,
+        gw.port,
+        gw.global_proxy_detected,
+        None,
+    )?;
+    emit_workspace_updated(&app);
+    build_workspace_state(&state.db, &state.master_key, &state.gateway)
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn update_agent_tool_schedule_cmd(

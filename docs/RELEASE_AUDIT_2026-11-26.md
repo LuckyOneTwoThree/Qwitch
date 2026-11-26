@@ -8,7 +8,7 @@
 | 项 | 结果 |
 | --- | --- |
 | `cargo fmt --check` / `cargo clippy --all-targets -D warnings` | 通过 |
-| `cargo test` | **293 passed** |
+| `cargo test` | **293 passed**（含新增批量命令的 ACL 校验） |
 | `npx tsc --noEmit` / `npm run lint` | 0 告警 |
 | `npm test` | **187 passed / 30 files** |
 | `npm run build` | 395.9 KB（gzip 105.5 KB） |
@@ -34,7 +34,7 @@
 
 ## 二、需要在本版修掉的高优先级问题
 
-### H-1 余额型额度的「按额度排序」失效
+### H-1 余额型额度的「按额度排序」失效（已修复）
 
 - **等级**：高（P1，功能退化）
 - **涉及**：`src-tauri/src/storage/pools.rs::format_quota_stats`
@@ -44,7 +44,7 @@
   或在 `format_quota_stats` 内按「剩余额度相对全池最大值」折算百分比（仅用于排序展示）
 - **验证**：新增单测覆盖两条分支；真机上对龙虾两个账号点排序看顺序
 
-### H-2 批量「全部订阅」写命令放大
+### H-2 批量「全部订阅」写命令放大（已修复）
 
 - **等级**：高（P2，性能）
 - **涉及**：`src/context/usePoolPrototypeStore.tsx`（`copyAgentAllToolModelPlans` /
@@ -56,7 +56,7 @@
   前端批量路径改走它；单条路径保持不变
 - **验证**：DevTools Performance 计时；后端命令计数断言（1 条而非 N 条）
 
-### H-3 豆包「关联本机」新增网络依赖
+### H-3 豆包「关联本机」新增网络依赖（已修复）
 
 - **等级**：高（P2，可用性）
 - **涉及**：`src-tauri/src/adapter/doubaowork.rs::import_from_local`
@@ -67,7 +67,7 @@
   请检查网络后重试」，并允许 `preview_local_account` 返回"身份待确认"而不是硬失败
 - **验证**：断网后点关联本机，确认提示语准确；恢复网络后成功
 
-### H-4 Windows 侧本轮改动未在本地编译验证
+### H-4 Windows 侧本轮改动未在本地编译验证（无法本地消除，依赖 CI）
 
 - **等级**：高（P2，风险项）
 - **涉及**：`src-tauri/src/adapter/doubaowork.rs`、`platform/mod.rs`（新增 `cfg(macos)` 分支）、
@@ -157,6 +157,29 @@ git tag -a v0.7.0 -m "Qwitch v0.7.0" && git push origin v0.7.0
 6. 运行状态：托盘各工具「运行中/未运行」与实际一致（打开/关闭客户端各看一次）。
 
 ---
+
+## 六点五、本轮修复记录（对应上文编号）
+
+| 编号 | 修复内容 | 改动位置 | 验证 |
+| --- | --- | --- | --- |
+| H-1 | 新增 `quota_sort_value`（有总量=剩余百分比、余额型=绝对剩余），`format_quota_stats` 旁统一计算；候选与成员透传；前端「按额度排序」改用该值 | `storage/pools.rs`、`domain/pools.rs`、`src/types/pool.ts`、`usePoolPrototypeStore.tsx` | `cargo test` 全绿；排序单测按新字段比较（余额型不再全部并列 100） |
+| H-2 | 新增 `set_agent_tool_models_batch_cmd`：一次落库 + 一次接线 + 一次回传，上限 16 条；前端「全部订阅」改走它，并为每条方案附带默认模型 key | `commands/pools.rs`、`lib.rs`、`build.rs`、`capabilities/default.json`、`usePoolPrototypeStore.tsx` | `command_acl` 测试通过；批量路径由 N 条降为 1 条命令（单条路径逻辑不变） |
+| H-3 | 关联本机区分 `NetworkError` 与凭据错误：网络不可用时提示「已读到 Cookie，校验需要联网」，不再误报登录态失效 | `adapter/doubaowork.rs` | 断网场景文案正确（代码分支覆盖） |
+| M-1 | 回滚时只清理「备份中确实存在」的 profile，避免误清备份后新建 profile 的 WAL/LevelDB | `adapter/doubaowork.rs::restore_session` | 由 `multi_profile` 相关测试与代码审查覆盖 |
+| M-4 | 写回 `Local State` 后恢复原文件权限（不再统一收敛成 0600） | `adapter/doubaowork.rs::set_active_profile` | 代码审查 + 真机切号（权限保持 0644） |
+| M-6 | 快照超限报错带实际体积与「清理客户端缓存」指引 | `adapter/doubaowork.rs` | 代码审查 |
+| M-7 | 回填 v0.6.0–v0.6.3 的 GitHub Release 说明（变更记录 + 原下载说明），并接入后续自动生成 | GitHub Releases、`CHANGELOG.md`、`release.yml` | `gh release view` 已确认四个版本均有「新增/修复」段落 |
+
+**明确不修（附理由）**：
+
+- **M-2（sidecar 按名字子串匹配）**：实测 `openclaw-gateway` 的工作目录在
+  `/Applications/LobsterAI.app/Contents/Resources/cfmind`，按 cwd 校验会直接漏杀；
+  改成「检查进程打开的文件是否在数据目录下」需要逐 pid 跑 `lsof`（受限环境可能不可用），
+  误判风险反而更高。当前名字足够产品专属，保留现状并在代码注释说明。
+- **M-3（其它客户端的「明确登出」判定）**：需要各家客户端各自的登出标记（Trae/Qoder
+  自定义存储），在拿到真实样本前实现等于猜；保持默认 `None`（绝不误清）。
+- **M-5（`ps` fail-open 的极端误判）**：代价仅为多等 ~3s，且换用 `libproc`
+  属于平台层重构，放到 0.7.1 评估。
 
 ## 七、已核查但未发现问题的范围
 

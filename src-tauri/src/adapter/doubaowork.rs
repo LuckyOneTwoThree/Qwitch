@@ -379,7 +379,14 @@ impl DoubaoWorkAdapter {
             code: UnifiedErrorCode::InternalError,
             message: format!("序列化 Local State 失败: {e}"),
         })?;
-        crate::adapter::write_private_file_atomic(&state_path, &bytes)
+        let original_perms = std::fs::metadata(&state_path).ok().map(|m| m.permissions());
+        crate::adapter::write_private_file_atomic(&state_path, &bytes)?;
+        // 原子写会把权限收敛成 0600；客户端原本可能是 0644，这里恢复原权限，
+        // 避免给客户端的文件留下非预期 ACL 变化
+        if let Some(perms) = original_perms {
+            let _ = std::fs::set_permissions(&state_path, perms);
+        }
+        Ok(())
     }
 
     /// 纯本地只读提取某个 profile 的 `Preferences` 里明文 `saman.last_user`。
@@ -559,7 +566,10 @@ impl DoubaoWorkAdapter {
         if zip_bytes.len() > MAX_SNAPSHOT_ZIP_BYTES {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InternalError,
-                message: "豆包工作会话快照压缩包超出 80 MiB 上限".into(),
+                message: format!(
+                    "豆包工作会话快照 {:.1} MiB 超出 80 MiB 上限（多账号会包含 sdk_storage 缓存）。请清理客户端缓存后重试",
+                    zip_bytes.len() as f64 / 1024.0 / 1024.0
+                ),
             });
         }
         Ok(zip_bytes)
@@ -1991,17 +2001,27 @@ impl ToolAdapter for DoubaoWorkAdapter {
         let (uid, display_name) = match last_user {
             Some(pair) => pair,
             None => match cookie.as_deref() {
-                Some(header) => {
-                    let probe = self.verify_cookie_with_base(header).await.map_err(|e| {
-                        AdapterError::Unified {
+                Some(header) => match self.verify_cookie_with_base(header).await {
+                    Ok(probe) => (probe.uid, probe.display_name),
+                    // 联网失败 ≠ 登录态失效：区分开，避免用户被误导去重新登录
+                    Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        ..
+                    }) => {
+                        return Err(AdapterError::Unified {
+                            code: UnifiedErrorCode::NetworkError,
+                            message: "已读到客户端 Cookie，但校验身份需要联网；当前网络不可用或接口超时，请稍后重试".into(),
+                        })
+                    }
+                    Err(e) => {
+                        return Err(AdapterError::Unified {
                             code: UnifiedErrorCode::InvalidCredential,
                             message: format!(
                                 "豆包工作客户端当前没有有效登录态（Preferences 无登录记录，Cookie 校验也失败）：{e}"
                             ),
-                        }
-                    })?;
-                    (probe.uid, probe.display_name)
-                }
+                        })
+                    }
+                },
                 None => {
                     return Err(AdapterError::Unified {
                         code: UnifiedErrorCode::InvalidCredential,
@@ -2540,9 +2560,26 @@ impl ToolAdapter for DoubaoWorkAdapter {
         backup: &SessionBackup,
     ) -> Result<(), AdapterError> {
         let profile_root = Self::resolve_profile_root(host)?;
-        let mut profiles = Self::list_profile_names(&profile_root);
+        // 只清理「备份里确实存在」的 profile：备份之后新建的 profile 不归本次切号管，
+        // 清它的 WAL/LevelDB 会让那个账号白白重新加载本地缓存。
+        let mut profiles: Vec<String> = backup
+            .files
+            .iter()
+            .filter_map(|(path, _)| {
+                path.strip_prefix(&profile_root)
+                    .ok()
+                    .and_then(|rel| rel.components().next())
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .filter(|name| Self::is_profile_dir_name(name))
+            })
+            .collect();
+        profiles.sort();
+        profiles.dedup();
         if profiles.is_empty() {
-            profiles.push(Self::active_profile_name(&profile_root));
+            profiles = Self::list_profile_names(&profile_root);
+            if profiles.is_empty() {
+                profiles.push(Self::active_profile_name(&profile_root));
+            }
         }
         for profile in &profiles {
             Self::clean_session_ephemeral_files(&profile_root, profile)?;

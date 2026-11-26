@@ -37,6 +37,8 @@ export interface PoolMember {
   priority: number;
   quotaPercent: number;
   quotaText: string;
+  /** 同工具内可比的排序值：有总量时=剩余百分比，余额型时为绝对剩余 */
+  quotaSortValue?: number;
   cooldownUntilMs?: number;
   isActiveOnClient?: boolean;
   accountStatus?: "active" | "expired" | "risk_paused" | "disabled";
@@ -175,6 +177,7 @@ export interface UpstreamAccountCandidate {
   defaultTier: MemberTier;
   quotaPercent: number;
   quotaText: string;
+  quotaSortValue?: number;
   isActiveOnClient?: boolean;
   accountStatus: "active" | "expired" | "risk_paused" | "disabled";
   codeArtsMode?: CodeArtsAuthMode;

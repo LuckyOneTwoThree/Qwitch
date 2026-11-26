@@ -81,6 +81,7 @@ fn main() {
         "detect_agent_environment_cmd",
         "run_pool_simulation_cmd",
         "set_agent_tool_models_cmd",
+        "set_agent_tool_models_batch_cmd",
         "update_agent_tool_schedule_cmd",
         "check_app_update",
         "download_and_install_update",

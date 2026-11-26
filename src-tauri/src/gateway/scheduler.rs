@@ -255,6 +255,7 @@ mod tests {
             priority,
             quota_percent,
             quota_text: "".into(),
+            quota_sort_value: quota_percent as f64,
             cooldown_until_ms: None,
             is_active_on_client: Some(false),
             account_status: Some("active".into()),

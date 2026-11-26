@@ -694,6 +694,7 @@ pub fn run() {
             commands::detect_agent_environment_cmd,
             commands::run_pool_simulation_cmd,
             commands::set_agent_tool_models_cmd,
+            commands::set_agent_tool_models_batch_cmd,
             commands::update_agent_tool_schedule_cmd,
             update::check_app_update,
             update::download_and_install_update,

@@ -206,7 +206,10 @@ pub fn cosy_headers(
         ("Accept".into(), "application/json".into()),
         ("Accept-Encoding".into(), "identity".into()),
         ("Content-Type".into(), "application/json".into()),
-        ("Authorization".into(), format!("Bearer COSY.{payload}.{sig}")),
+        (
+            "Authorization".into(),
+            format!("Bearer COSY.{payload}.{sig}"),
+        ),
         ("Cosy-Business-Product".into(), "app".into()),
         ("Cosy-Business-Type".into(), "agent".into()),
         ("Cosy-ClientIp".into(), machine_id.to_string()),
@@ -635,7 +638,10 @@ mod codec_vectors {
     use super::*;
     #[test]
     fn matches_node_reference() {
-        assert_eq!(encode_body(r#"{"hello":"世界","n":123}"#), "BOI*lMTYVkw$Bh,ILhmFMoBrmYKnDS%ruYBy");
+        assert_eq!(
+            encode_body(r#"{"hello":"世界","n":123}"#),
+            "BOI*lMTYVkw$Bh,ILhmFMoBrmYKnDS%ruYBy"
+        );
         assert_eq!(encode_body("abc"), "MSK#");
     }
 }

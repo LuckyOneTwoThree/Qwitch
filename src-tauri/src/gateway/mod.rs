@@ -553,10 +553,7 @@ fn now_beijing_hms() -> String {
 
 /// 失败或无候选成员时，从请求模型前缀或最后一次尝试推断归属订阅工具 ID，
 /// 避免所有失败记录在「路由观测」里都被错标成 `custom_api_key`。
-fn infer_trace_tool_id(
-    requested_model: &str,
-    attempts: &[RoutingAttempt],
-) -> String {
+fn infer_trace_tool_id(requested_model: &str, attempts: &[RoutingAttempt]) -> String {
     if let (Some(tid), _) = crate::domain::split_scoped_model_id(requested_model) {
         return tid.to_string();
     }
@@ -637,7 +634,6 @@ fn auth_expired_reason(tool_id: &str, body: &str) -> String {
     let snippet: String = body.chars().take(120).collect();
     snippet
 }
-
 
 fn is_valid_loopback_host(host: &str) -> bool {
     let bare = host.split(':').next().unwrap_or("");
@@ -1429,7 +1425,10 @@ fn validate_custom_base_url(
     }
 }
 
-pub(super) async fn read_bounded_response_text(resp: reqwest::Response, label: &str) -> Result<String, String> {
+pub(super) async fn read_bounded_response_text(
+    resp: reqwest::Response,
+    label: &str,
+) -> Result<String, String> {
     if resp
         .content_length()
         .is_some_and(|len| len > MAX_UPSTREAM_BODY)
@@ -1702,7 +1701,10 @@ async fn send_trae_stream(
         req = req.header("x-uid", &uid);
     }
 
-    let resp = req.send().await.map_err(|e| format!("Trae 上游请求失败: {}", e.without_url()))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Trae 上游请求失败: {}", e.without_url()))?;
     let status = resp.status();
     let raw = read_bounded_response_text(resp, "Trae").await?;
 
@@ -1723,7 +1725,11 @@ async fn send_trae_stream(
             "error": { "message": msg, "code": code, "type": "trae_error" }
         }))
         .unwrap_or_default();
-        return Ok(synthetic_response(http_status, "application/json", body_bytes));
+        return Ok(synthetic_response(
+            http_status,
+            "application/json",
+            body_bytes,
+        ));
     }
 
     // 正常：把 Trae 原生 SSE 转成 OpenAI chat.completion.chunk SSE 字节
@@ -1768,13 +1774,8 @@ async fn send_qoder_stream(
     let model_source = "system";
     let display_name = model_key;
 
-    let plaintext = qoder_cosy::build_qoder_body(
-        ir_req,
-        model_key,
-        model_source,
-        display_name,
-        200_000,
-    );
+    let plaintext =
+        qoder_cosy::build_qoder_body(ir_req, model_key, model_source, display_name, 200_000);
     let wire_body = qoder_cosy::encode_body(&plaintext.to_string());
 
     let url = format!("{api}{}", qoder_cosy::CHAT_PATH);
@@ -1822,7 +1823,11 @@ async fn send_qoder_stream(
             "error": { "message": msg, "code": code, "type": "qoder_error" }
         }))
         .unwrap_or_default();
-        return Ok(synthetic_response(http_status, "application/json", body_bytes));
+        return Ok(synthetic_response(
+            http_status,
+            "application/json",
+            body_bytes,
+        ));
     }
 
     let openai_sse = qoder_sse_to_openai(&raw, &ir_req.model);
@@ -1834,9 +1839,7 @@ async fn send_qoder_stream(
 }
 
 /// 从 Qoder 凭据里取 (machine_id, display_name, display_email)。
-fn extract_qoder_identity(
-    cred: &CredentialEnvelope,
-) -> (String, Option<String>, Option<String>) {
+fn extract_qoder_identity(cred: &CredentialEnvelope) -> (String, Option<String>, Option<String>) {
     let machine_id = match &cred.payload {
         CredentialPayload::Token { extra, .. } => extra
             .get("machine_id")
@@ -1854,14 +1857,22 @@ fn extract_qoder_identity(
             .unwrap_or_default(),
         _ => String::new(),
     };
-    (machine_id, cred.display_name.clone(), cred.display_email.clone())
+    (
+        machine_id,
+        cred.display_name.clone(),
+        cred.display_email.clone(),
+    )
 }
 
 /// 从 Qoder SSE 文本里提取首个错误。`status` 为 HTTP 状态码。
 fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)> {
     if !(200..300).contains(&status) {
         let msg = raw.trim();
-        let msg = if msg.is_empty() { format!("HTTP {status}") } else { msg.chars().take(512).collect() };
+        let msg = if msg.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            msg.chars().take(512).collect()
+        };
         return Some((Some(status.to_string()), msg));
     }
     for line in raw.lines() {
@@ -1878,7 +1889,11 @@ fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)>
         if let Some(sc) = env.get("statusCodeValue").and_then(Value::as_u64) {
             if sc != 200 {
                 let inner = env.get("body").and_then(Value::as_str).unwrap_or("");
-                let msg = if inner.trim().is_empty() { data.to_string() } else { inner.chars().take(512).collect() };
+                let msg = if inner.trim().is_empty() {
+                    data.to_string()
+                } else {
+                    inner.chars().take(512).collect()
+                };
                 return Some((Some(sc.to_string()), msg));
             }
         }
@@ -1886,7 +1901,10 @@ fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)>
         let inner = env.get("body").and_then(Value::as_str).unwrap_or("");
         if let Ok(chunk) = serde_json::from_str::<Value>(inner.trim()) {
             let has_choices = chunk.get("choices").map(|c| c.is_array()).unwrap_or(false);
-            if !has_choices && (chunk.get("error").is_some() || (chunk.get("code").is_some() && chunk.get("message").is_some())) {
+            if !has_choices
+                && (chunk.get("error").is_some()
+                    || (chunk.get("code").is_some() && chunk.get("message").is_some()))
+            {
                 let msg = chunk
                     .get("error")
                     .and_then(|e| e.get("message"))
@@ -1897,7 +1915,11 @@ fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)>
                 let code = chunk
                     .get("code")
                     .or_else(|| chunk.pointer("/error/code"))
-                    .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+                    .map(|c| {
+                        c.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| c.to_string())
+                    });
                 return Some((code, msg));
             }
         }
@@ -1907,17 +1929,21 @@ fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)>
     if trimmed.starts_with('{') {
         if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
             let has_choices = v.get("choices").is_some_and(Value::is_array);
-            if !has_choices && (v.get("error").is_some() || (v.get("code").is_some() && v.get("message").is_some())) {
+            if !has_choices
+                && (v.get("error").is_some()
+                    || (v.get("code").is_some() && v.get("message").is_some()))
+            {
                 let msg = v
                     .pointer("/error/message")
                     .and_then(Value::as_str)
                     .or_else(|| v.get("message").and_then(Value::as_str))
                     .unwrap_or("Qoder 返回错误")
                     .to_string();
-                let code = v
-                    .get("code")
-                    .or_else(|| v.pointer("/error/code"))
-                    .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+                let code = v.get("code").or_else(|| v.pointer("/error/code")).map(|c| {
+                    c.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| c.to_string())
+                });
                 return Some((code, msg));
             }
         }
@@ -1927,7 +1953,10 @@ fn qoder_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)>
 
 /// 把 Qoder SSE（外层信封包内层 OpenAI chunk）还原成标准 OpenAI SSE 文本。
 fn qoder_sse_to_openai(raw: &str, model: &str) -> String {
-    let id = format!("chatcmpl-qoder-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let id = format!(
+        "chatcmpl-qoder-{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    );
     let created = chrono::Utc::now().timestamp();
     let mut out = String::new();
     let mut wrote_role = false;
@@ -1960,7 +1989,10 @@ fn qoder_sse_to_openai(raw: &str, model: &str) -> String {
             .pointer("/choices/0/delta")
             .cloned()
             .unwrap_or(Value::Null);
-        if let Some(f) = chunk.pointer("/choices/0/finish_reason").filter(|f| f.is_string()) {
+        if let Some(f) = chunk
+            .pointer("/choices/0/finish_reason")
+            .filter(|f| f.is_string())
+        {
             finish_reason = Some(f.clone());
         }
 
@@ -2019,7 +2051,11 @@ fn qoder_sse_to_openai(raw: &str, model: &str) -> String {
 }
 
 /// 用 `http::Response<reqwest::Body>` 合成一个 `reqwest::Response`，供下游统一消费。
-fn synthetic_response(status: reqwest::StatusCode, content_type: &str, body: Vec<u8>) -> reqwest::Response {
+fn synthetic_response(
+    status: reqwest::StatusCode,
+    content_type: &str,
+    body: Vec<u8>,
+) -> reqwest::Response {
     let mut builder = http::Response::builder().status(status);
     if !content_type.is_empty() {
         builder = builder.header("content-type", content_type);
@@ -2038,7 +2074,11 @@ fn trae_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)> 
             let code = v
                 .get("code")
                 .or_else(|| v.pointer("/error/code"))
-                .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()))
+                .map(|c| {
+                    c.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| c.to_string())
+                })
                 .or_else(|| Some(status.to_string()));
             let msg = v
                 .pointer("/error/message")
@@ -2075,11 +2115,15 @@ fn trae_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)> 
             continue;
         };
         let is_error = event == "error"
-            || (v.get("code").is_some() && v.get("message").is_some() && v.get("content").is_none());
+            || (v.get("code").is_some()
+                && v.get("message").is_some()
+                && v.get("content").is_none());
         if is_error {
-            let code = v
-                .get("code")
-                .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+            let code = v.get("code").map(|c| {
+                c.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| c.to_string())
+            });
             let msg = v
                 .get("message")
                 .and_then(Value::as_str)
@@ -2097,10 +2141,11 @@ fn trae_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)> 
                     && v.get("message").is_some()
                     && v.get("content").is_none())
             {
-                let code = v
-                    .get("code")
-                    .or_else(|| v.pointer("/error/code"))
-                    .map(|c| c.as_str().map(str::to_string).unwrap_or_else(|| c.to_string()));
+                let code = v.get("code").or_else(|| v.pointer("/error/code")).map(|c| {
+                    c.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| c.to_string())
+                });
                 let msg = v
                     .pointer("/error/message")
                     .and_then(Value::as_str)
@@ -2119,28 +2164,32 @@ fn trae_first_error(status: u16, raw: &str) -> Option<(Option<String>, String)> 
 /// done/finish_reason→结束并发送 [DONE]。
 fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
     let normalized = raw.replace("\r\n", "\n");
-    let id = format!("chatcmpl-trae-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let id = format!(
+        "chatcmpl-trae-{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    );
     let created = chrono::Utc::now().timestamp();
     let mut out = String::new();
     let mut finish_reason = "stop".to_string();
     let mut usage_obj: Option<Value> = None;
     let mut wrote_any = false;
 
-    let push_chunk = |out: &mut String, delta: Value, finish: Option<&str>, usage: &Option<Value>| {
-        let mut payload = json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
-        });
-        if let Some(u) = usage {
-            payload["usage"] = u.clone();
-        }
-        out.push_str("data: ");
-        out.push_str(&payload.to_string());
-        out.push_str("\n\n");
-    };
+    let push_chunk =
+        |out: &mut String, delta: Value, finish: Option<&str>, usage: &Option<Value>| {
+            let mut payload = json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+            });
+            if let Some(u) = usage {
+                payload["usage"] = u.clone();
+            }
+            out.push_str("data: ");
+            out.push_str(&payload.to_string());
+            out.push_str("\n\n");
+        };
 
     for block in normalized.split("\n\n") {
         let mut event = String::new();
@@ -2175,7 +2224,9 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
             }
             if let Some(fr) = v.get("finish_reason").and_then(Value::as_str) {
                 finish_reason = match fr.to_lowercase().as_str() {
-                    "length" | "max_tokens" | "max_output_tokens" | "max_length" => "length".to_string(),
+                    "length" | "max_tokens" | "max_output_tokens" | "max_length" => {
+                        "length".to_string()
+                    }
                     "content_filter" | "sensitive" => "content_filter".to_string(),
                     _ => "stop".to_string(),
                 };
@@ -2184,10 +2235,15 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
         }
         // 统一取文本增量：response / content / delta.content / delta(字符串)
         let delta_obj = v.get("delta").cloned().unwrap_or(Value::Null);
-        let reasoning = [v.get("reasoning_content"), v.get("reasoning"), delta_obj.get("reasoning_content"), delta_obj.get("reasoning")]
-            .into_iter()
-            .flatten()
-            .find_map(|x| x.as_str().filter(|s| !s.is_empty()).map(str::to_string));
+        let reasoning = [
+            v.get("reasoning_content"),
+            v.get("reasoning"),
+            delta_obj.get("reasoning_content"),
+            delta_obj.get("reasoning"),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|x| x.as_str().filter(|s| !s.is_empty()).map(str::to_string));
         let text = v
             .get("response")
             .and_then(Value::as_str)
@@ -2197,18 +2253,34 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
             .unwrap_or("")
             .to_string();
         if !wrote_any {
-            push_chunk(&mut out, json!({ "role": "assistant", "content": "" }), None, &usage_obj);
+            push_chunk(
+                &mut out,
+                json!({ "role": "assistant", "content": "" }),
+                None,
+                &usage_obj,
+            );
             wrote_any = true;
         }
         if let Some(r) = reasoning {
-            push_chunk(&mut out, json!({ "reasoning_content": r }), None, &usage_obj);
+            push_chunk(
+                &mut out,
+                json!({ "reasoning_content": r }),
+                None,
+                &usage_obj,
+            );
         }
-        if !text.is_empty() && !text.starts_with("Building prompt:") && !text.starts_with("Completed building prompt") {
+        if !text.is_empty()
+            && !text.starts_with("Building prompt:")
+            && !text.starts_with("Completed building prompt")
+        {
             push_chunk(&mut out, json!({ "content": text }), None, &usage_obj);
         }
         if let Some(u) = v.get("usage") {
             let prompt = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let completion = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let completion = u
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             if prompt != 0 || completion != 0 {
                 usage_obj = Some(json!({
                     "prompt_tokens": prompt,
@@ -2219,14 +2291,21 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
         }
         if let Some(fr) = v.get("finish_reason").and_then(Value::as_str) {
             finish_reason = match fr.to_lowercase().as_str() {
-                "length" | "max_tokens" | "max_output_tokens" | "max_length" => "length".to_string(),
+                "length" | "max_tokens" | "max_output_tokens" | "max_length" => {
+                    "length".to_string()
+                }
                 "content_filter" | "sensitive" => "content_filter".to_string(),
                 _ => "stop".to_string(),
             };
         }
     }
     if !wrote_any {
-        push_chunk(&mut out, json!({ "role": "assistant", "content": "" }), None, &usage_obj);
+        push_chunk(
+            &mut out,
+            json!({ "role": "assistant", "content": "" }),
+            None,
+            &usage_obj,
+        );
     }
     // 结束帧
     let mut end = json!({
@@ -2248,7 +2327,10 @@ fn trae_sse_to_openai(raw: &str, model: &str, _wire_model: &str) -> String {
 
 fn tokens_of_trae(u: &Value) -> Option<Value> {
     let prompt = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let completion = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let completion = u
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     if prompt == 0 && completion == 0 {
         return None;
     }
@@ -4130,8 +4212,7 @@ async fn handle_http_connection(
                         {
                             cred = fresh;
                         }
-                        if let Ok(Some(refreshed)) = adapter.force_refresh_credential(&cred).await
-                        {
+                        if let Ok(Some(refreshed)) = adapter.force_refresh_credential(&cred).await {
                             did_auth_refresh = true;
                             let _ = db.bind_account_credential(
                                 &master_key,
@@ -4149,13 +4230,9 @@ async fn handle_http_connection(
                                 latency_ms: t_hop.elapsed().as_millis() as u64,
                                 detail: "401 单飞强制刷新凭据并回写加密库".into(),
                             });
-                            stream_res = send_upstream_stream(
-                                cand,
-                                &cred,
-                                &ir_req,
-                                &plan.effective_model,
-                            )
-                            .await;
+                            stream_res =
+                                send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model)
+                                    .await;
                         }
                     }
                 }
@@ -4246,8 +4323,7 @@ async fn handle_http_connection(
                             };
                             runtime.set_member_cooldown(
                                 &cand.account_id,
-                                chrono::Utc::now().timestamp_millis()
-                                    + (cool_sec as i64) * 1000,
+                                chrono::Utc::now().timestamp_millis() + (cool_sec as i64) * 1000,
                             );
                             attempts.push(RoutingAttempt {
                                 account_label: cand.label.clone(),
@@ -4443,10 +4519,8 @@ async fn handle_http_connection(
             }
             Ok((code, err_body)) if is_auth_expired_response(code, &err_body) => {
                 // 永久性鉴权失败（401 / 华为云 APIG.0301）：标记当前账号过期后继续 Failover 下一健康备号。
-                let _ = db.update_account_status(
-                    &cand.account_id,
-                    crate::domain::AccountStatus::Expired,
-                );
+                let _ = db
+                    .update_account_status(&cand.account_id, crate::domain::AccountStatus::Expired);
                 let reason = auth_expired_reason(&cand.tool_id, &err_body);
                 auth_expired_hits.push((cand.label.clone(), reason.clone()));
                 attempts.push(RoutingAttempt {
@@ -4495,7 +4569,12 @@ async fn handle_http_connection(
             .iter()
             .find(|a| a.outcome == RoutingAttemptOutcome::HttpError)
             .map(|a| format!("{}@{}: {}", a.tool_id, a.account_label, a.detail.clone()))
-            .or_else(|| attempts.iter().find(|a| a.outcome == RoutingAttemptOutcome::Cooldown429).map(|a| a.detail.clone()))
+            .or_else(|| {
+                attempts
+                    .iter()
+                    .find(|a| a.outcome == RoutingAttemptOutcome::Cooldown429)
+                    .map(|a| a.detail.clone())
+            })
             .unwrap_or_else(|| "无可用候选账号".to_string());
         let final_tool_id = infer_trace_tool_id(&requested_model, &attempts);
         let trace = RoutingTraceItem {
@@ -4522,9 +4601,8 @@ async fn handle_http_connection(
         if !auth_expired_hits.is_empty() {
             let first_label = &auth_expired_hits[0].0;
             let first_reason = &auth_expired_hits[0].1;
-            let summary = format!(
-                "凭据失效（{first_label}）：{first_reason}，请重新登录或导入该账号"
-            );
+            let summary =
+                format!("凭据失效（{first_label}）：{first_reason}，请重新登录或导入该账号");
             let payload = serde_json::json!({
                 "error": {
                     "message": summary,
@@ -4654,7 +4732,10 @@ mod tests {
         assert!(sse.contains("\"object\":\"chat.completion.chunk\""));
         assert!(sse.contains("你好"));
         assert!(sse.contains("世界"));
-        assert!(!sse.contains("全量答案"), "extra_info.content must be ignored: {sse}");
+        assert!(
+            !sse.contains("全量答案"),
+            "extra_info.content must be ignored: {sse}"
+        );
         assert!(sse.contains("\"finish_reason\":\"stop\""));
         assert!(sse.trim_end().ends_with("data: [DONE]"));
     }
@@ -4745,7 +4826,12 @@ mod tests {
         let received = mock.received_requests().await.unwrap();
         assert_eq!(received.len(), 1);
         assert_eq!(
-            received[0].headers.get("user-agent").unwrap().to_str().unwrap(),
+            received[0]
+                .headers
+                .get("user-agent")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "LobsterAI/2026.11.20"
         );
         assert!(received[0]
@@ -4797,7 +4883,10 @@ mod tests {
         assert!(body.contains("豆包"), "body: {body}");
         assert!(body.contains("你好"), "body: {body}");
         assert!(body.contains("思考"), "reasoning should stream: {body}");
-        assert!(!body.contains("应为噪声"), "extra_info must be ignored: {body}");
+        assert!(
+            !body.contains("应为噪声"),
+            "extra_info must be ignored: {body}"
+        );
         assert!(body.contains("\"finish_reason\":\"stop\""), "body: {body}");
         assert!(body.contains("\"total_tokens\":13"), "body: {body}");
         assert!(body.trim_end().ends_with("data: [DONE]"), "body: {body}");
@@ -4809,7 +4898,10 @@ mod tests {
         assert_eq!(req_json["function"], "chat_v3");
         assert_eq!(req_json["config_name"], "Doubao-Seed-2.1-Turbo");
         assert_eq!(req_json["stream"], true);
-        assert!(req_json["messages"][0]["content"].is_array(), "content must be array: {req_json}");
+        assert!(
+            req_json["messages"][0]["content"].is_array(),
+            "content must be array: {req_json}"
+        );
         assert!(received[0].headers.get("authorization").is_some());
         rt.stop_server();
         let _ = std::fs::remove_dir_all(root);
@@ -4838,13 +4930,8 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let (_db, rt, port, root, model_id) = spawn_gateway_with_custom_account(
-            "qoder_cn",
-            "dfmodel",
-            mock.uri(),
-            "qoder",
-        )
-        .await;
+        let (_db, rt, port, root, model_id) =
+            spawn_gateway_with_custom_account("qoder_cn", "dfmodel", mock.uri(), "qoder").await;
         let resp = reqwest::Client::new()
             .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
             .bearer_auth("qwitch-bind-opencode")

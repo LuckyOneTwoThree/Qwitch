@@ -510,14 +510,8 @@ pub fn parse_minimax_models(body: &Value) -> Vec<UpstreamModelOption> {
             return;
         }
         let display = m.get("name").and_then(|v| v.as_str());
-        let mut opt = normalize_upstream_model(
-            "minimax_code_cn",
-            raw_id,
-            display,
-            Some(0.0),
-            false,
-            "live",
-        );
+        let mut opt =
+            normalize_upstream_model("minimax_code_cn", raw_id, display, Some(0.0), false, "live");
         if let Some(ctx) = m
             .pointer("/limit/context")
             .and_then(|v| v.as_u64())
@@ -535,38 +529,39 @@ pub fn parse_minimax_models(body: &Value) -> Vec<UpstreamModelOption> {
         out.push(opt);
     };
 
-    let push_models = |models: &Value, order_val: Option<&Value>, out: &mut Vec<UpstreamModelOption>| {
-        if let Some(obj) = models.as_object() {
-            let mut ordered_keys: Vec<String> = Vec::new();
-            let mut seen = HashSet::new();
-            if let Some(order_arr) = order_val.and_then(|v| v.as_array()) {
-                for k in order_arr.iter().filter_map(|v| v.as_str()) {
-                    if obj.contains_key(k) && seen.insert(k.to_string()) {
-                        ordered_keys.push(k.to_string());
+    let push_models =
+        |models: &Value, order_val: Option<&Value>, out: &mut Vec<UpstreamModelOption>| {
+            if let Some(obj) = models.as_object() {
+                let mut ordered_keys: Vec<String> = Vec::new();
+                let mut seen = HashSet::new();
+                if let Some(order_arr) = order_val.and_then(|v| v.as_array()) {
+                    for k in order_arr.iter().filter_map(|v| v.as_str()) {
+                        if obj.contains_key(k) && seen.insert(k.to_string()) {
+                            ordered_keys.push(k.to_string());
+                        }
                     }
                 }
+                for k in obj.keys() {
+                    if seen.insert(k.clone()) {
+                        ordered_keys.push(k.clone());
+                    }
+                }
+                for k in ordered_keys {
+                    if let Some(m) = obj.get(&k) {
+                        push_entry(&k, m, out);
+                    }
+                }
+                return;
             }
-            for k in obj.keys() {
-                if seen.insert(k.clone()) {
-                    ordered_keys.push(k.clone());
+            if let Some(arr) = models.as_array() {
+                for m in arr {
+                    let Some(raw_id) = m.get("id").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    push_entry(raw_id, m, out);
                 }
             }
-            for k in ordered_keys {
-                if let Some(m) = obj.get(&k) {
-                    push_entry(&k, m, out);
-                }
-            }
-            return;
-        }
-        if let Some(arr) = models.as_array() {
-            for m in arr {
-                let Some(raw_id) = m.get("id").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                push_entry(raw_id, m, out);
-            }
-        }
-    };
+        };
 
     if let Some(providers) = root.get("providers").and_then(|v| v.as_array()) {
         // 若存在 providerId == "minimax" 的主条目则优先解析它，否则回退遍历全部 provider
@@ -1404,9 +1399,9 @@ async fn try_probe_live_models(
             if matches!(resp.status().as_u16(), 401 | 403)
                 && token_opt.as_deref().is_some_and(|s| !s.trim().is_empty())
             {
-                resp = send_minimax(None)
-                    .await
-                    .map_err(|e| format!("匿名回退请求 MiniMax 模型目录失败: {}", e.without_url()))?;
+                resp = send_minimax(None).await.map_err(|e| {
+                    format!("匿名回退请求 MiniMax 模型目录失败: {}", e.without_url())
+                })?;
             }
             if !resp.status().is_success() {
                 return Err(format!("MiniMax 模型目录返回 HTTP {}", resp.status()));

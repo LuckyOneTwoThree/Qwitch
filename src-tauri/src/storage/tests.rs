@@ -1638,9 +1638,15 @@ fn unbound_dedicated_pool_clears_stale_models_on_remount_and_cleanup() {
             extra: HashMap::new(),
         },
     };
-    let wb = db.upsert_account(&mk, None, &env("workbuddy", "u_wb")).expect("wb");
-    let qoder = db.upsert_account(&mk, None, &env("qoder_cn", "u_qoder")).expect("qoder");
-    let doubao = db.upsert_account(&mk, None, &env("doubaowork", "u_db")).expect("doubao");
+    let wb = db
+        .upsert_account(&mk, None, &env("workbuddy", "u_wb"))
+        .expect("wb");
+    let qoder = db
+        .upsert_account(&mk, None, &env("qoder_cn", "u_qoder"))
+        .expect("qoder");
+    let doubao = db
+        .upsert_account(&mk, None, &env("doubaowork", "u_db"))
+        .expect("doubao");
 
     let now = Utc::now().to_rfc3339();
     {
@@ -1673,16 +1679,25 @@ fn unbound_dedicated_pool_clears_stale_models_on_remount_and_cleanup() {
                     ('pool-agent-mimo','workbuddy/deepseek-v4-pro',1),
                     ('pool-agent-mimo','qoder_cn/qwen3.8-max',1)",
             [],
-        ).expect("policies");
+        )
+        .expect("policies");
     }
 
     // 启动清理：清除未绑定池 mimo 全部模型，保留已绑定池 dsh 的模型（含已接入网关的 doubaowork）
     db.cleanup_unbound_dedicated_pools().expect("cleanup");
     let cands = db.list_upstream_candidates(&mk).expect("cands");
-    let pools = db.list_pools_with_candidates(&cands, &HashMap::new()).expect("pools");
-    let dsh_pool = pools.iter().find(|p| p.id == "pool-agent-dsh").expect("dsh");
+    let pools = db
+        .list_pools_with_candidates(&cands, &HashMap::new())
+        .expect("pools");
+    let dsh_pool = pools
+        .iter()
+        .find(|p| p.id == "pool-agent-dsh")
+        .expect("dsh");
     assert_eq!(dsh_pool.model_policies.len(), 2);
-    let mimo_pool = pools.iter().find(|p| p.id == "pool-agent-mimo").expect("mimo");
+    let mimo_pool = pools
+        .iter()
+        .find(|p| p.id == "pool-agent-mimo")
+        .expect("mimo");
     assert!(mimo_pool.model_policies.is_empty());
 
     // 模拟未绑定池仍带脏数据（例如内存/外部写入），ensure_agent_dedicated_pool 从未绑定恢复时必须清空旧模型
@@ -1699,8 +1714,13 @@ fn unbound_dedicated_pool_clears_stale_models_on_remount_and_cleanup() {
     db.set_pool_tool_models(&mk, &pool_id, "workbuddy", &["deepseek-v4-pro".into()])
         .expect("set wb");
 
-    let pools_after = db.list_pools_with_candidates(&cands, &HashMap::new()).expect("pools_after");
-    let mimo_after = pools_after.iter().find(|p| p.id == "pool-agent-mimo").expect("mimo_after");
+    let pools_after = db
+        .list_pools_with_candidates(&cands, &HashMap::new())
+        .expect("pools_after");
+    let mimo_after = pools_after
+        .iter()
+        .find(|p| p.id == "pool-agent-mimo")
+        .expect("mimo_after");
     let enabled_ids: Vec<&str> = mimo_after
         .model_policies
         .iter()

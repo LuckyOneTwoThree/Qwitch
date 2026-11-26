@@ -323,10 +323,7 @@ impl TraeAdapter {
     /// 供网关 `send_trae_stream` 使用的对话身份：设备 id、uid、app 版本。
     /// 从账号快照 `trae_device.json` 取 device_id / app_version，从 Cloud-IDE-JWT
     /// 的 `data.id` 取 uid。任缺失则由调用方回退到默认值。
-    pub fn chat_request_identity(
-        cred: &CredentialEnvelope,
-        token: &str,
-    ) -> TraeChatIdentity {
+    pub fn chat_request_identity(cred: &CredentialEnvelope, token: &str) -> TraeChatIdentity {
         let mut id = TraeChatIdentity {
             device_id: String::new(),
             uid: String::new(),

@@ -52,9 +52,11 @@ pub(crate) fn resolve_doubao_model_spec(wire_model: &str) -> DoubaoModelSpec {
         }
         "person-kimi-k3-1-pro-highspeed-261111"
         | "kimi-k3.1-pro-fast"
-        | "kimi-k3.1-pro-highspeed" => {
-            ("person-kimi-k3-1-pro-highspeed-261111".to_string(), 10001, 5)
-        }
+        | "kimi-k3.1-pro-highspeed" => (
+            "person-kimi-k3-1-pro-highspeed-261111".to_string(),
+            10001,
+            5,
+        ),
         "person-kimi-k3-261111" | "kimi-k3" => ("person-kimi-k3-261111".to_string(), 10001, 5),
         "person-glm-5-3-261111" | "glm-5.3" => ("person-glm-5-3-261111".to_string(), 10001, 5),
         "person-glm-5-3-flash-261111" | "glm-5.3-flash" => {
@@ -250,8 +252,8 @@ async fn ensure_session_state(
                 }
             }
         }
+        state.ready_at_ms = now;
     }
-    state.ready_at_ms = now;
 
     let mut map = session_states()
         .lock()
@@ -287,7 +289,11 @@ pub(crate) fn build_doubao_prompt(ir_req: &IrRequest) -> String {
     }
 
     let mut instructions: Vec<Value> = Vec::new();
-    if let Some(sys) = ir_req.system_prompt.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(sys) = ir_req
+        .system_prompt
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         instructions.push(json!({ "role": "system", "content": sys }));
     }
 
@@ -362,7 +368,9 @@ pub(crate) fn build_doubao_prompt(ir_req: &IrRequest) -> String {
             .as_ref()
             .map(Value::to_string)
             .unwrap_or_else(|| "\"auto\"".to_string());
-        format!("\n现在输出下一条 assistant 回复。tool_choice={choice_str}；parallel_tool_calls=true。")
+        format!(
+            "\n现在输出下一条 assistant 回复。tool_choice={choice_str}；parallel_tool_calls=true。"
+        )
     } else {
         String::new()
     };
@@ -381,10 +389,7 @@ pub(crate) fn build_doubao_prompt(ir_req: &IrRequest) -> String {
             );
             root.insert("parallel_tool_calls".into(), json!(true));
         }
-        format!(
-            "{preamble}{}{suffix}",
-            Value::Object(root)
-        )
+        format!("{preamble}{}{suffix}", Value::Object(root))
     };
 
     let prompt = render_payload(&conversation, &instructions, &tools_json);
@@ -398,7 +403,11 @@ pub(crate) fn build_doubao_prompt(ir_req: &IrRequest) -> String {
             .iter()
             .map(|m| {
                 let mut o = m.as_object().cloned().unwrap_or_default();
-                if let Some(c) = o.get("content").and_then(Value::as_str).map(ToOwned::to_owned) {
+                if let Some(c) = o
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                {
                     o.insert("content".into(), json!(truncate_chars(&c, msg_lim)));
                 }
                 Value::Object(o)
@@ -834,10 +843,7 @@ pub(crate) fn parse_doubao_sse(raw: &str) -> DoubaoParsedStream {
                     if patch.get("patch_object").and_then(Value::as_u64) != Some(1) {
                         continue;
                     }
-                    let op = patch
-                        .get("patch_type")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(2);
+                    let op = patch.get("patch_type").and_then(Value::as_u64).unwrap_or(2);
                     if let Some(cbs) = patch
                         .pointer("/patch_value/content_block")
                         .and_then(Value::as_array)
@@ -896,11 +902,7 @@ fn extract_tool_json(text: &str) -> Option<Value> {
     None
 }
 
-fn build_openai_sse_response(
-    model: &str,
-    parsed: &DoubaoParsedStream,
-    has_tools: bool,
-) -> String {
+fn build_openai_sse_response(model: &str, parsed: &DoubaoParsedStream, has_tools: bool) -> String {
     let id = format!("chatcmpl-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let created = Utc::now().timestamp();
     let mut sse = format!(
@@ -1042,7 +1044,10 @@ fn build_openai_sse_response(
     sse
 }
 
-fn synthetic_error_response(status: reqwest::StatusCode, msg: &str) -> Result<reqwest::Response, String> {
+fn synthetic_error_response(
+    status: reqwest::StatusCode,
+    msg: &str,
+) -> Result<reqwest::Response, String> {
     let body_bytes = serde_json::to_vec(&json!({
         "error": { "message": msg, "type": "doubaowork_error" }
     }))
@@ -1163,14 +1168,16 @@ pub(crate) async fn send_doubao_stream(
                 .to_string();
             (c, m)
         } else {
-            (status.as_u16().to_string(), raw.trim().chars().take(300).collect())
+            (
+                status.as_u16().to_string(),
+                raw.trim().chars().take(300).collect(),
+            )
         };
         let mapped = classify_doubao_error_status(&code_str, &msg);
         if mapped == 403 {
             note_challenge(&member.account_id);
         }
-        let sc = reqwest::StatusCode::from_u16(mapped)
-            .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+        let sc = reqwest::StatusCode::from_u16(mapped).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
         return synthetic_error_response(sc, &msg);
     }
 
@@ -1183,8 +1190,8 @@ pub(crate) async fn send_doubao_stream(
         if err_status == 403 {
             note_challenge(&member.account_id);
         }
-        let sc = reqwest::StatusCode::from_u16(err_status)
-            .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+        let sc =
+            reqwest::StatusCode::from_u16(err_status).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
         return synthetic_error_response(sc, &err_msg);
     }
 

@@ -196,9 +196,9 @@ pub fn select_candidates_for_request(
 
     let diagnostic_reason = if candidates.is_empty() {
         Some(match policy.and_then(|p| p.fallback_model_id.as_deref()) {
-            Some(fb) => format!(
-                "主模型「{requested_model}」与显式降级模型「{fb}」当前均无可用账号"
-            ),
+            Some(fb) => {
+                format!("主模型「{requested_model}」与显式降级模型「{fb}」当前均无可用账号")
+            }
             None => {
                 if !skipped_attempts.is_empty()
                     && skipped_attempts
@@ -604,14 +604,8 @@ mod tests {
             ("lobsterai", "lobsterai/deepseek-v4.1-flash"),
             ("qoder_cn", "qoder_cn/deepseek-v4.1-flash"),
         ] {
-            let mut member = make_member(
-                "acc-1",
-                tool_id,
-                MemberTier::T1Primary,
-                1,
-                90,
-                &[model_id],
-            );
+            let mut member =
+                make_member("acc-1", tool_id, MemberTier::T1Primary, 1, 90, &[model_id]);
             member.is_active_on_client = Some(true);
             let pool = AccountPool {
                 id: "p-exempt".into(),

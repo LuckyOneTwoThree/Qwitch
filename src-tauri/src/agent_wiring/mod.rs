@@ -1068,10 +1068,8 @@ fn is_matching_toml_section_or_subtable(trimmed: &str, section_header: &str) -> 
     if trimmed == section_header {
         return true;
     }
-    if let (Some(base), Some(rest)) = (
-        section_header.strip_suffix(']'),
-        trimmed.strip_suffix(']'),
-    ) {
+    if let (Some(base), Some(rest)) = (section_header.strip_suffix(']'), trimmed.strip_suffix(']'))
+    {
         return rest
             .strip_prefix(base)
             .is_some_and(|suffix| suffix.starts_with('.'));
@@ -2306,8 +2304,7 @@ pub fn unbind_and_restore_agent(
                         restored.push_str(&block);
                     }
                 }
-                write_private_file_atomic(&p, restored.as_bytes())
-                    .map_err(|e| e.to_string())?;
+                write_private_file_atomic(&p, restored.as_bytes()).map_err(|e| e.to_string())?;
                 continue;
             }
         }

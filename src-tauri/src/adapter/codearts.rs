@@ -1171,7 +1171,8 @@ impl CodeArtsAdapter {
         // 本机客户端导入的账号绝不消费客户端一次性 refresh token，只做只读回吸本机客户端磁盘中已更新的 STS 凭据。
         if extra.get(EXTRA_CODEARTS_MODE).map(String::as_str) != Some("isolated_oauth") {
             let now_ms = Utc::now().timestamp_millis();
-            let expired_or_near = expires_at.is_none_or(|exp| exp - now_ms < CODEARTS_REFRESH_LEAD_MS);
+            let expired_or_near =
+                expires_at.is_none_or(|exp| exp - now_ms < CODEARTS_REFRESH_LEAD_MS);
             if !force && !expired_or_near {
                 return Ok(None);
             }

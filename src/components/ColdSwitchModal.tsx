@@ -7,7 +7,7 @@ import { Modal } from "./ui/Modal";
 
 const SWITCH_STEPS: Array<{ key: "closing" | "writing" | "launching"; label: string }> = [
   { key: "closing", label: "优雅关闭客户端" },
-  { key: "writing", label: "写入加密快照" },
+  { key: "writing", label: "写入加密会话" },
   { key: "launching", label: "重启桌面端" },
 ];
 
@@ -20,8 +20,8 @@ const PHASE_RANK: Record<string, number> = {
 
 const STEP_TEXT: Record<string, string> = {
   closing: "正在优雅关闭本机客户端并等待文件锁释放...",
-  writing: "正在写入目标账号加密会话快照...",
-  launching: "正在重新拉起桌面客户端并确认存活（大体积客户端冷启动最长约 45 秒）...",
+  writing: "正在写入目标账号的加密会话...",
+  launching: "正在重新拉起桌面客户端并确认存活（通常 1~3 秒，最长等待 12 秒）...",
   done: "切换完成，客户端已使用新账号启动！",
 };
 
@@ -73,14 +73,14 @@ export function ColdSwitchModal() {
         <>
           {switchDialog.isClientRunning !== false ? (
             <div className="mt-4 rounded-xl border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-relaxed text-zinc-700 dark:text-zinc-300">
-              检测到本地 {brand.name} 客户端正在运行。为防止会话文件损坏，Qwitch 将自动关闭当前客户端、写入选中账号的加密快照后重新启动。
+              检测到本地 {brand.name} 客户端正在运行。为防止会话文件损坏，Qwitch 将自动关闭当前客户端、写入选中账号的加密会话后重新启动。
               <strong className="mt-1 block font-medium text-amber-700 dark:text-amber-400">
                 切换前请先保存 IDE 或对话中未保存的工作内容。
               </strong>
             </div>
           ) : (
             <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-xs leading-relaxed text-zinc-700 dark:border-zinc-800 dark:bg-zinc-800/60 dark:text-zinc-300">
-              当前未检测到 {brand.name} 在运行。Qwitch 将直接写入选中账号的会话快照并重新拉起客户端。
+              当前未检测到 {brand.name} 在运行。Qwitch 将直接写入选中账号的会话并重新拉起客户端。
             </div>
           )}
 

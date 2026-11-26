@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { MoreHorizontal, type LucideIcon } from "lucide-react";
+import { MoreHorizontal, ChevronDown, type LucideIcon } from "lucide-react";
 
 export interface OverflowMenuItem {
   label: string;
@@ -13,9 +13,14 @@ export interface OverflowMenuItem {
 export function OverflowMenu({
   items,
   label,
+  display = "icon",
+  disabled = false,
 }: {
   items: OverflowMenuItem[];
   label: string;
+  /** icon = 只有「更多」图标按钮；text = 带文字的下拉按钮（用于更显眼的动作入口） */
+  display?: "icon" | "text";
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ top: number; left: number; placement: "top" | "bottom" }>({
@@ -162,10 +167,22 @@ export function OverflowMenu({
         aria-expanded={open}
         aria-label={label}
         title={label}
+        disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        className="btn btn-icon btn-secondary"
+        className={
+          display === "text"
+            ? "btn btn-xs btn-secondary gap-1 disabled:opacity-45"
+            : "btn btn-icon btn-secondary"
+        }
       >
-        <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+        {display === "text" ? (
+          <>
+            {label}
+            <ChevronDown className="h-3 w-3" aria-hidden="true" />
+          </>
+        ) : (
+          <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+        )}
       </button>
       {menuEl && (typeof document !== "undefined" ? createPortal(menuEl, document.body) : menuEl)}
     </div>

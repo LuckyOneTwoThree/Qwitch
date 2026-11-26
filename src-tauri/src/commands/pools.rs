@@ -162,29 +162,6 @@ pub fn apply_account_preset_models_cmd(
     build_workspace_state(&state.db, &state.master_key, &state.gateway)
 }
 
-/// 人工维护某账号的模型目录。
-///
-/// 用于没有可靠实时探测接口的工具（码道 CodeArts / 有道龙虾 / 豆包工作）：
-/// 与其展示静态猜测表，不如让用户按账号填入真实模型 ID。传空数组即清空。
-#[tauri::command]
-pub fn set_account_manual_models_cmd(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    account_id: String,
-    models: Vec<String>,
-) -> Result<PoolWorkspaceState, String> {
-    let summary = state
-        .db
-        .get_account_summary(&account_id)
-        .map_err(|e| e.to_string())?;
-    state
-        .db
-        .save_manual_account_models(&account_id, &summary.tool_id, &models)
-        .map_err(|e| e.to_string())?;
-    emit_workspace_updated(&app);
-    build_workspace_state(&state.db, &state.master_key, &state.gateway)
-}
-
 /// 一轮模型探测的执行摘要。
 struct ProbeRun {
     /// 实际发起探测并拿到结果的账号

@@ -89,6 +89,10 @@ export const AccountCard = React.memo(function AccountCard({
   const clientManagedCredential =
     account.toolId === "codearts" && account.renewalMode !== "auto_refresh";
   const missingApiToken = account.hasApiToken === false;
+  // 豆包工作：签到发放校验绑定「设备 + 桌面端当前登录账号」。网页登录导入的
+  // 其他账号点领取只会拿到 710010702 系统错误，这里直接禁用并说明要先切号。
+  const claimNeedsDesktopSession =
+    account.toolId === "doubaowork" && !account.isActiveOnClient;
   const missingLocalSnapshot = canSwitch && account.hasLocalSnapshot === false;
   const isBatchRunning = Boolean(batchProgress?.running);
   const effectiveClaimStatus = getEffectiveClaimStatus(account);
@@ -98,6 +102,14 @@ export const AccountCard = React.memo(function AccountCard({
   const secondaryBuckets = buckets.slice(1);
   const isQoderClaimBucket =
     account.toolId === "qoder_cn" && primaryBucket?.key === "daily_credits";
+  // 百分比桶：适配器拿不到绝对额度时，只能以 total = 100 / unit = "%" 表达水位。
+  // 这类桶的 remaining 本身就是百分比，重复渲染「x / 100 %」纯属噪音。
+  const isPercentBucket = primaryBucket?.unit === "%";
+  // 余额型桶：服务端只给剩余、没有可信总量（LobsterAI 跨池积分）。
+  // 这时既不能算百分比，也不该画进度条，只报剩余数字。
+  const isBalanceOnlyBucket = Boolean(
+    primaryBucket && primaryBucket.hasTotal === false && !isPercentBucket
+  );
 
   // 额度快照新鲜度：只有今日同步过的快照才代表当前水位，
   // 昨日快照必须在界面上明确标注，否则用户会把陈旧额度当成实时额度。
@@ -483,7 +495,14 @@ export const AccountCard = React.memo(function AccountCard({
                       <>
                         <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
                           <div className="flex min-w-0 items-center gap-1.5">
-                            <span className="truncate text-zinc-600 dark:text-zinc-400">
+                            <span
+                              className="truncate text-zinc-600 dark:text-zinc-400"
+                              title={
+                                isPercentBucket
+                                  ? "服务端本次只返回了百分比水位，没有给出绝对额度；点「查额」可重新获取"
+                                  : undefined
+                              }
+                            >
                               {primaryBucket.label}
                             </span>
                             {isQoderClaimBucket && (
@@ -499,6 +518,21 @@ export const AccountCard = React.memo(function AccountCard({
                               <>
                                 {formatQuotaNumber(primaryBucket.remaining)} {primaryBucket.unit}
                               </>
+                            ) : isPercentBucket ? (
+                              // 百分比桶的 total 恒为 100，再把「剩余 / 总量」原样打出来
+                              // 只会得到「100 / 100 %」这种没有信息量的读数，直接给百分比。
+                              <>
+                                剩余 {pct}%
+                                <span className="ml-1 font-normal text-zinc-500 dark:text-zinc-400">
+                                  · 已用 {Math.max(0, 100 - pct)}%
+                                </span>
+                              </>
+                            ) : isBalanceOnlyBucket ? (
+                              // 只有剩余值：不拼「/ 总量」，也不给百分比，避免假读数
+                              <>
+                                {formatQuotaNumber(primaryBucket.remaining)}{" "}
+                                {primaryBucket.unit}
+                              </>
                             ) : (
                               <>
                                 {formatQuotaNumber(primaryBucket.remaining)} /{" "}
@@ -510,19 +544,21 @@ export const AccountCard = React.memo(function AccountCard({
                             )}
                           </span>
                         </div>
-                        <div
-                          role="progressbar"
-                          aria-label={`${account.label} ${primaryBucket.label}`}
-                          aria-valuenow={pct}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          className="meter"
-                        >
+                        {!isBalanceOnlyBucket && (
                           <div
-                            className={`h-full rounded-full transition-all duration-300 ${barColor}`}
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
+                            role="progressbar"
+                            aria-label={`${account.label} ${primaryBucket.label}`}
+                            aria-valuenow={pct}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            className="meter"
+                          >
+                            <div
+                              className={`h-full rounded-full transition-all duration-300 ${barColor}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        )}
                       </>
                     );
                   })()}
@@ -703,16 +739,18 @@ export const AccountCard = React.memo(function AccountCard({
                     effectiveClaimStatus === "unknown") && (
                     <button
                       type="button"
-                      disabled={isBatchRunning}
+                      disabled={isBatchRunning || claimNeedsDesktopSession}
                       title={
-                        isBatchRunning
-                          ? "批量任务进行中"
-                          : effectiveClaimStatus === "unknown"
-                            ? "先核实今日签到状态，未领取则自动领取"
-                            : "领取今日签到福利"
+                        claimNeedsDesktopSession
+                          ? "豆包工作签到绑定桌面端登录账号：先「切至桌面端」再领取"
+                          : isBatchRunning
+                            ? "批量任务进行中"
+                            : effectiveClaimStatus === "unknown"
+                              ? "先核实今日签到状态，未领取则自动领取"
+                              : "领取今日签到福利"
                       }
                       onClick={() => void claimDailyBatch([account.id])}
-                      className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap"
+                      className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap disabled:opacity-45"
                     >
                       <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                       领取
@@ -752,6 +790,21 @@ export const AccountCard = React.memo(function AccountCard({
                   danger: true,
                   onSelect: () => setConfirmDeleteOpen(true),
                 },
+                // 豆包/码道即使能用 Cookie 或 safeStorage 直接切号，整份本机会话
+                // 仍然更稳（客户端可能还有 leveldb 级登录态）。这里保留补全入口，
+                // 不因为「可以直切」就把采集快照的能力藏起来。
+                ...(canSwitch &&
+                !account.isActiveOnClient &&
+                (account.toolId === "doubaowork" || account.toolId === "codearts")
+                  ? [
+                      {
+                        label: "补全本机会话快照",
+                        icon: Link2,
+                        disabled: associating,
+                        onSelect: () => void handleAssociateLocal(),
+                      },
+                    ]
+                  : []),
               ]}
             />
           </div>

@@ -48,11 +48,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
 
 use crate::adapter::common::{
     hash_fallback_uid, json_uid_to_string, map_http_status, shared_http_client,
 };
+use crate::adapter::safe_storage;
 use crate::adapter::{
     AdapterCapabilities, AdapterError, AdapterManifest, ClaimResult, SessionBackup, ToolAdapter,
 };
@@ -68,12 +68,6 @@ const DEFAULT_REGION: &str = "cn-north-4";
 const USER_AGENT_VALUE: &str = "CodeArts/0.2.3";
 const SIGN_ALGORITHM: &str = "SDK-HMAC-SHA256";
 
-/// Chromium safeStorage 在 macOS 上的固定参数（与 Electron 实现一致）。
-const SAFE_STORAGE_SALT: &[u8] = b"saltysalt";
-const SAFE_STORAGE_ITERATIONS: u32 = 1003;
-const SAFE_STORAGE_KEY_LEN: usize = 16;
-const SAFE_STORAGE_IV: [u8; 16] = [b' '; 16];
-
 // extra 字段键名（凭据信封内传递华为云临时凭据）
 const EXTRA_ACCESS_KEY: &str = "access_key";
 const EXTRA_SECRET_KEY: &str = "secret_key";
@@ -83,6 +77,8 @@ const EXTRA_DOMAIN_ID: &str = "domain_id";
 const EXTRA_CODEARTS_MODE: &str = "codearts_mode";
 const EXTRA_CODE_VERIFIER: &str = "code_verifier";
 const EXTRA_DPOP_PKCS8_B64: &str = "dpop_pkcs8_b64";
+/// 本机导入时保存的完整客户端 session 快照（base64 JSON），切号时原样写回
+const EXTRA_SESSION_SNAPSHOT: &str = "session_snapshot_b64";
 
 const CODEARTS_PORTAL_URL: &str = "https://codearts.huaweicloud.com/portal";
 const CODEARTS_OAUTH_CLIENT_ID: &str = "codearts-agent";
@@ -241,7 +237,8 @@ impl CodeArtsAdapter {
                     supports_quota_query: true,
                     // CodeArts 无每日签到机制，见模块文档
                     supports_daily_claim: false,
-                    supports_client_switch: false,
+                    // 切号 = safeStorage 重加密写回，仅 macOS 可复现（Windows 走 DPAPI）
+                    supports_client_switch: cfg!(target_os = "macos"),
                     supports_multi_instance: false,
                 },
             },
@@ -284,75 +281,12 @@ impl CodeArtsAdapter {
     /// 服务名形如 `<AppName> Safe Storage`，账号名与 app 名一致。
     /// 该命令可能触发系统授权弹窗，因此只在真正需要解密时调用一次。
     fn macos_safe_storage_password(app_name: &str) -> Result<String, AdapterError> {
-        let service = format!("{app_name} Safe Storage");
-        let output = Command::new("security")
-            .args([
-                "find-generic-password",
-                "-s",
-                &service,
-                "-a",
-                app_name,
-                "-w",
-            ])
-            .output()
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InternalError,
-                message: format!("调用 security 读取钥匙串失败: {e}"),
-            })?;
-        if !output.status.success() {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: format!(
-                    "未能从钥匙串读取「{service}」，请在系统「钥匙串访问」中允许 Qwitch 访问该条目"
-                ),
-            });
-        }
-        let pw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if pw.is_empty() {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: format!("钥匙串条目「{service}」为空"),
-            });
-        }
-        Ok(pw)
+        safe_storage::macos_safe_storage_password(app_name)
     }
 
     /// 解密 Chromium `v10` safeStorage 信封（AES-128-CBC）。
-    ///
-    /// 密钥派生与 Electron 的 `OSCrypt` 实现一致：
-    /// `PBKDF2-HMAC-SHA1(password, "saltysalt", 1003, 16)`，IV 为 16 个空格。
     fn decrypt_safe_storage(payload: &[u8], password: &str) -> Result<Vec<u8>, AdapterError> {
-        use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-
-        let body = if payload.len() > 3 && &payload[..3] == b"v10" {
-            &payload[3..]
-        } else {
-            payload
-        };
-        if body.is_empty() {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: "CodeArts 凭据文件为空".into(),
-            });
-        }
-
-        let mut key = [0u8; SAFE_STORAGE_KEY_LEN];
-        pbkdf2_hmac_sha1(
-            password.as_bytes(),
-            SAFE_STORAGE_SALT,
-            SAFE_STORAGE_ITERATIONS,
-            &mut key,
-        );
-
-        type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
-        let mut buf = body.to_vec();
-        let plain = Aes128CbcDec::new(&key.into(), &SAFE_STORAGE_IV.into())
-            .decrypt_padded_mut::<Pkcs7>(&mut buf)
-            .map_err(|_| AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: "CodeArts 凭据解密失败（钥匙串密码不匹配）".into(),
-            })?;
-        Ok(plain.to_vec())
+        safe_storage::decrypt_safe_storage(payload, password, "CodeArts")
     }
 
     /// 从 secretStorage 读取并解析 `{session, loginContext}`。
@@ -419,6 +353,15 @@ impl CodeArtsAdapter {
         extra.insert(EXTRA_REGION.to_string(), DEFAULT_REGION.to_string());
         if let Some(d) = domain_id {
             extra.insert(EXTRA_DOMAIN_ID.to_string(), d);
+        }
+        // 存一份完整 `{session, loginContext}` 快照：切号要写回 secretStorage，
+        // 而 AK/SK/STS 三个字段并不足以还原客户端认可的会话文件。
+        // 只从本机导入时才拿得到原文；独立 OAuth 授权的账号没有这份快照。
+        if let Ok(raw) = serde_json::to_vec(session) {
+            extra.insert(
+                EXTRA_SESSION_SNAPSHOT.to_string(),
+                BASE64.encode(raw.as_slice()),
+            );
         }
 
         Ok(CredentialEnvelope {
@@ -721,6 +664,7 @@ impl CodeArtsAdapter {
                 remaining,
                 unit: "积分".to_string(),
                 reset_at: None,
+                has_total: true,
             });
         }
         buckets
@@ -1300,35 +1244,6 @@ fn percent_encode(input: &str) -> String {
     out
 }
 
-/// PBKDF2-HMAC-SHA1（Chromium safeStorage 的密钥派生）。
-fn pbkdf2_hmac_sha1(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
-    use hmac::{Hmac, Mac};
-    use sha1::Sha1;
-
-    let mut block_index: u32 = 1;
-    let mut filled = 0usize;
-    while filled < out.len() {
-        let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(password).expect("HMAC 接受任意长度密钥");
-        mac.update(salt);
-        mac.update(&block_index.to_be_bytes());
-        let mut u = mac.finalize().into_bytes();
-        let mut acc = u;
-        for _ in 1..iterations {
-            let mut mac =
-                <Hmac<Sha1> as Mac>::new_from_slice(password).expect("HMAC 接受任意长度密钥");
-            mac.update(&u);
-            u = mac.finalize().into_bytes();
-            for (a, b) in acc.iter_mut().zip(u.iter()) {
-                *a ^= b;
-            }
-        }
-        let take = (out.len() - filled).min(acc.len());
-        out[filled..filled + take].copy_from_slice(&acc[..take]);
-        filled += take;
-        block_index += 1;
-    }
-}
-
 fn non_empty(obj: &Value, key: &str) -> Option<String> {
     obj.get(key)
         .and_then(|v| v.as_str())
@@ -1516,15 +1431,68 @@ impl ToolAdapter for CodeArtsAdapter {
         host: &dyn PlatformHost,
         cred: &CredentialEnvelope,
     ) -> Result<(), AdapterError> {
-        // 切号 = 把目标账号的 session 重新加密写回 secretStorage。
-        // 但 safeStorage 加密需要 Electron 运行时（Keychain 主密码可读，
-        // 加密本身可复现），这里采用「备份原文件 → 用新 session 覆盖」策略：
-        // 由于无法在本进程内生成合法 safeStorage 密文，切号需借助客户端。
-        let _ = (host, cred);
-        Err(AdapterError::Unified {
-            code: UnifiedErrorCode::UnsupportedCapability,
-            message: "码道 CodeArts 暂不支持本地切号（凭据由客户端 safeStorage 加密托管）".into(),
-        })
+        // 切号 = 把目标账号的 `{session, loginContext}` 用 safeStorage 重新加密写回
+        // secretStorage。字符串层面的加解密与客户端等价（同为 AES-128-CBC +
+        // Keychain 派生的同一把密钥），因此不再需要借助客户端登录流程。
+        //
+        // 前提：必须持有**该账号在本机登录时**留下的完整会话快照 —— 独立 OAuth
+        // 授权只有 AK/SK/STS，拼不出客户端认可的 loginContext。
+        let CredentialPayload::Token { extra, .. } = &cred.payload else {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::UnsupportedCapability,
+                message: "码道 CodeArts 暂不支持该凭据形态的本地切号".into(),
+            });
+        };
+        let Some(snapshot_b64) = extra.get(EXTRA_SESSION_SNAPSHOT) else {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::UnsupportedCapability,
+                message: "该账号没有本机会话快照（独立 OAuth 授权导入），无法写回客户端。\
+                          请先在码道客户端登录该账号，再用「本机导入」补一次快照"
+                    .into(),
+            });
+        };
+        Self::ensure_not_expired(cred)?;
+
+        let raw = BASE64
+            .decode(snapshot_b64.trim())
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!("码道会话快照不是合法 base64: {e}"),
+            })?;
+        let mut snapshot: Value =
+            serde_json::from_slice(&raw).map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: format!("码道会话快照结构解析失败: {e}"),
+            })?;
+
+        // 用当前凭据里的临时凭据覆盖快照内的同名字段：快照是导入当时的，
+        // STS 会轮换；不覆盖的话写回去的会话可能已经过期。
+        if let Some(session) = snapshot.get_mut("session").and_then(|v| v.as_object_mut()) {
+            for (key, extra_key) in [
+                ("accessKey", EXTRA_ACCESS_KEY),
+                ("secretKey", EXTRA_SECRET_KEY),
+                ("securityToken", EXTRA_SECURITY_TOKEN),
+            ] {
+                if let Some(value) = extra.get(extra_key) {
+                    session.insert(key.to_string(), Value::String(value.clone()));
+                }
+            }
+        }
+
+        let patched = serde_json::to_vec(&snapshot).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("码道会话快照序列化失败: {e}"),
+        })?;
+
+        let password = Self::macos_safe_storage_password("codearts")?;
+        let envelope = safe_storage::encrypt_safe_storage(&patched, &password, "CodeArts")?;
+        let encoded = BASE64.encode(&envelope);
+
+        let dir = Self::resolve_secret_dir(host)?;
+        let file = dir.join(Self::secret_file_name(&format!(
+            "authSession:{DEFAULT_REGION}"
+        )));
+        crate::adapter::write_private_file_atomic(&file, encoded.as_bytes())
     }
 
     async fn backup_session(&self, host: &dyn PlatformHost) -> Result<SessionBackup, AdapterError> {
@@ -1622,9 +1590,10 @@ mod tests {
             !m.capabilities.supports_daily_claim,
             "CodeArts 无每日签到机制，capability 必须为 false"
         );
-        assert!(
-            !m.capabilities.supports_client_switch,
-            "CodeArts 不支持桌面端切号，supports_client_switch 必须为 false"
+        assert_eq!(
+            m.capabilities.supports_client_switch,
+            cfg!(target_os = "macos"),
+            "码道切号依赖 safeStorage 重加密，仅 macOS 可复现"
         );
     }
 
@@ -1684,14 +1653,6 @@ mod tests {
         assert_eq!(percent_encode("a b"), "a%20b");
         assert_eq!(percent_encode("a/b"), "a%2Fb");
         assert_eq!(percent_encode("中"), "%E4%B8%AD");
-    }
-
-    #[test]
-    fn pbkdf2_matches_known_vector() {
-        // PBKDF2-HMAC-SHA1("password", "salt", 1, 20) 的公开测试向量
-        let mut out = [0u8; 20];
-        pbkdf2_hmac_sha1(b"password", b"salt", 1, &mut out);
-        assert_eq!(hex::encode(out), "0c60c80f961f0e71f3a9b524af6012062fe037a6");
     }
 
     #[tokio::test]

@@ -169,16 +169,13 @@ fn format_quota_stats(summary: &crate::domain::AccountSummary) -> (u8, String) {
     }
     if let Some(q) = &summary.latest_quota {
         if let Some(b) = q.buckets.first() {
-            let pct = if b.total > 0.0 {
-                ((b.remaining / b.total) * 100.0).round().clamp(0.0, 100.0) as u8
-            } else {
-                0
-            };
-            let text = if b.total > 0.0 {
-                format!("{:.0} / {:.0} {}", b.remaining, b.total, b.unit)
-            } else {
-                format!("{:.0} {}", b.remaining, b.unit)
-            };
+            // 余额型桶（LobsterAI 跨池积分）没有可信总量：只报剩余，
+            // 不拿「剩余 / 总量」冒充水位（否则号池里会出现「361/361 积分 · 100%」）
+            if !b.has_total || b.total <= 0.0 {
+                return (100, format!("剩余 {:.0} {}", b.remaining, b.unit));
+            }
+            let pct = ((b.remaining / b.total) * 100.0).round().clamp(0.0, 100.0) as u8;
+            let text = format!("{:.0} / {:.0} {}", b.remaining, b.total, b.unit);
             return (pct, text);
         }
     }
@@ -294,47 +291,6 @@ impl QwitchDatabase {
         Ok(())
     }
 
-    /// 写入「人工维护」的模型目录。
-    ///
-    /// 码道 / 有道龙虾 / 豆包工作目前没有可靠的实时模型目录接口，静态兜底表只能算猜测。
-    /// 与其继续展示猜测值，不如允许用户按账号填入真实模型 ID：
-    /// - 落库为 `source == "manual"`，不受 12 小时 TTL 约束；
-    /// - 一旦该账号实时探测成功，`live` 结果会覆盖它（实时优先）。
-    pub fn save_manual_account_models(
-        &self,
-        account_id: &str,
-        tool_id: &str,
-        model_ids: &[String],
-    ) -> Result<usize, StorageError> {
-        let mut seen = HashSet::new();
-        let models: Vec<UpstreamModelOption> = model_ids
-            .iter()
-            .map(|raw| raw.trim())
-            .filter(|raw| !raw.is_empty())
-            .map(|raw| {
-                crate::domain::normalize_upstream_model(tool_id, raw, None, None, false, "manual")
-            })
-            .filter(|m| seen.insert(m.id.clone()))
-            .collect();
-        if models.is_empty() {
-            self.clear_account_models(account_id)?;
-            return Ok(0);
-        }
-        let now = Utc::now().to_rfc3339();
-        let json = serde_json::to_string(&models)?;
-        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        conn.execute(
-            "INSERT INTO account_discovered_models (account_id, tool_id, models_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(account_id) DO UPDATE SET
-                tool_id = excluded.tool_id,
-                models_json = excluded.models_json,
-                updated_at = excluded.updated_at",
-            params![account_id, tool_id, json, now],
-        )?;
-        Ok(models.len())
-    }
-
     /// 套用工具级「内置推荐目录」（source = preset）。
     pub fn save_preset_account_models(
         &self,
@@ -344,7 +300,7 @@ impl QwitchDatabase {
         let models = crate::domain::recommended_model_options_for_tool(tool_id);
         if models.is_empty() {
             return Err(StorageError::Validation(format!(
-                "工具 {tool_id} 暂无内置推荐目录，请手工维护"
+                "工具 {tool_id} 暂无内置推荐目录"
             )));
         }
         let now = Utc::now().to_rfc3339();
@@ -2497,79 +2453,6 @@ mod tests {
     }
 
     #[test]
-    fn manual_models_persist_without_ttl_and_live_overrides_them() {
-        let (db, key, dir) = temp_db("manualmodels");
-        let acc = seed_account(&db, &key, "codearts", "ca_manual", "码道");
-
-        // 手工目录：去空行、去首尾空格、按账号落库
-        let count = db
-            .save_manual_account_models(
-                &acc,
-                "codearts",
-                &[
-                    "deepseek-v4.1-flash".into(),
-                    "  glm-5.3-flash  ".into(),
-                    "".into(),
-                ],
-            )
-            .expect("save manual models");
-        assert_eq!(count, 2);
-        let map = db.load_cached_models_map().expect("load map");
-        let list = map.get(&acc).expect("manual models must be visible");
-        assert_eq!(
-            list.iter()
-                .map(|m| m.vendor_wire_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["deepseek-v4.1-flash", "glm-5.3-flash"]
-        );
-        assert!(list.iter().all(|m| m.source == "manual"));
-
-        // 人工目录不随 TTL 过期（用户显式维护的内容不该被时间清掉）
-        {
-            let conn = db.conn.lock().expect("lock");
-            conn.execute(
-                "UPDATE account_discovered_models SET updated_at = '2000-01-01T00:00:00+00:00' WHERE account_id = ?1",
-                rusqlite::params![acc],
-            )
-            .expect("age manual cache");
-        }
-        assert!(
-            db.load_cached_models_map()
-                .expect("load map")
-                .contains_key(&acc),
-            "manual catalog must not expire by TTL"
-        );
-
-        // 实时探测成功后覆盖人工目录（实时优先）
-        let live = vec![crate::domain::normalize_upstream_model(
-            "codearts",
-            "glm-5.3-flash",
-            None,
-            None,
-            false,
-            "live",
-        )];
-        db.save_cached_account_models(&acc, "codearts", &live)
-            .expect("save live");
-        let map = db.load_cached_models_map().expect("load map");
-        assert!(map
-            .get(&acc)
-            .expect("live map present")
-            .iter()
-            .all(|m| m.source == "live"));
-
-        // 空列表 = 清空，回到工具级兜底
-        db.save_manual_account_models(&acc, "codearts", &[])
-            .expect("clear manual");
-        assert!(!db
-            .load_cached_models_map()
-            .expect("load map")
-            .contains_key(&acc));
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
     fn preset_models_apply_per_tool_and_do_not_expire() {
         let (db, key, dir) = temp_db("presetmodels");
         let acc = seed_account(&db, &key, "codearts", "ca_preset", "码道");
@@ -2601,6 +2484,24 @@ mod tests {
                 .contains_key(&acc),
             "preset catalog must not expire by TTL"
         );
+
+        // 实时探测成功后覆盖预设（实时优先）
+        let live = vec![crate::domain::normalize_upstream_model(
+            "codearts",
+            "glm-5.3-flash",
+            None,
+            None,
+            false,
+            "live",
+        )];
+        db.save_cached_account_models(&acc, "codearts", &live)
+            .expect("save live");
+        let map = db.load_cached_models_map().expect("load map");
+        assert!(map
+            .get(&acc)
+            .expect("live map present")
+            .iter()
+            .all(|m| m.source == "live"));
 
         // 没有内置预设的工具必须报错，而不是写入空目录
         let wb = seed_account(&db, &key, "workbuddy", "wb_preset", "WB");

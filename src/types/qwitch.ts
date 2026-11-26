@@ -52,6 +52,12 @@ export interface QuotaBucket {
   remaining: number;
   unit: string;
   resetAt?: string;
+  /**
+   * 服务端是否给出了可信「总量」。缺省视为 true。
+   * LobsterAI 的跨池积分、豆包的纯百分比桶只有剩余/水位，没有可观测总量，
+   * 这类桶不画百分比进度条，避免出现「361 / 661 · 55%」这种假读数。
+   */
+  hasTotal?: boolean;
 }
 
 export interface QuotaSnapshot {

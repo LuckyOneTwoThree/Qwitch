@@ -121,7 +121,6 @@ export interface PoolPrototypeContextValue {
   clearMemberCooldown: (poolId: string, memberId: string) => void;
   authorizeCodeArtsIsolated: (accountId: string) => void;
   /** 人工维护某账号的模型目录（无实时探测能力的工具使用；传空数组即清空） */
-  setAccountManualModels: (accountId: string, modelIds: string[]) => void;
   /** 一键套用该工具的内置推荐目录（source = preset，明确区别于实时探测） */
   applyAccountPresetModels: (accountId: string) => void;
   updateAgentMountedPools: (
@@ -147,7 +146,12 @@ export interface PoolPrototypeContextValue {
   getAgentToolEnabledModelIds: (agentId: TargetAgentId, toolId: string) => string[];
   getAgentToolAccounts: (agentId: TargetAgentId, toolId: string) => PoolMember[];
   getAgentPrimaryPool: (agentId: TargetAgentId) => AccountPool | null;
-  setAgentToolModels: (agentId: TargetAgentId, toolId: string, modelIds: string[]) => void;
+  setAgentToolModels: (
+    agentId: TargetAgentId,
+    toolId: string,
+    modelIds: string[],
+    opts?: { preferredDefaultModelId?: string | null; silent?: boolean }
+  ) => void;
   selectAllAgentToolModels: (
     agentId: TargetAgentId,
     toolId: string,
@@ -193,6 +197,24 @@ export interface PoolPrototypeContextValue {
     }
   ) => void;
   syncToolScheduleToAllAgents: (sourceAgentId: TargetAgentId, toolId: string) => void;
+  /** 从另一 Agent 复制同一工具的模型方案（勾选集合 + 默认模型），返回实际复制的模型数 */
+  copyAgentToolModelPlan: (
+    fromAgentId: TargetAgentId,
+    toAgentId: TargetAgentId,
+    toolId: string,
+    opts?: { silent?: boolean }
+  ) => number;
+  /** 把当前 Agent 的模型方案同步到其余全部 Agent（仅当前订阅），返回被同步的 Agent 数 */
+  syncAgentToolModelPlanToAllAgents: (sourceAgentId: TargetAgentId, toolId: string) => number;
+  /** 某个 Agent 已经配置过模型的订阅工具列表 */
+  getAgentConfiguredToolIds: (agentId: TargetAgentId) => string[];
+  /** 把一个 Agent 全部订阅的模型方案复制给另一个 Agent，返回复制的订阅数 */
+  copyAgentAllToolModelPlans: (
+    fromAgentId: TargetAgentId,
+    toAgentId: TargetAgentId
+  ) => number;
+  /** 把当前 Agent 全部订阅的模型方案同步到其余全部 Agent，返回被同步的 Agent 数 */
+  syncAllToolModelPlansToAllAgents: (sourceAgentId: TargetAgentId) => number;
 }
 
 interface PoolWorkspaceState {
@@ -323,7 +345,6 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   injectMemberCooldown: () => {},
   clearMemberCooldown: () => {},
   authorizeCodeArtsIsolated: () => {},
-  setAccountManualModels: () => {},
   applyAccountPresetModels: () => {},
   updateAgentMountedPools: () => {},
   setAgentDefaultModel: () => {},
@@ -360,6 +381,11 @@ const DEFAULT_FALLBACK_VALUE: PoolPrototypeContextValue = {
   sortAgentToolAccountsByQuota: () => {},
   updateAgentToolRoutingOptions: () => {},
   syncToolScheduleToAllAgents: () => {},
+  copyAgentToolModelPlan: () => 0,
+  syncAgentToolModelPlanToAllAgents: () => 0,
+  getAgentConfiguredToolIds: () => [],
+  copyAgentAllToolModelPlans: () => 0,
+  syncAllToolModelPlansToAllAgents: () => 0,
 };
 
 const PoolPrototypeContext = createContext<PoolPrototypeContextValue | null>(null);
@@ -373,6 +399,8 @@ type PendingModelWrite = {
   modelIds: string[];
   defaultModelKey: string | null;
   message: string;
+  /** 批量操作（全部订阅）时不逐条弹 Toast，由调用方汇总成一条 */
+  silent?: boolean;
 };
 
 function slugifyPoolName(name: string): string {
@@ -888,7 +916,7 @@ export function PoolPrototypeProvider({
     const pending = Array.from(pendingModelWritesRef.current.values());
     pendingModelWritesRef.current.clear();
     for (const write of pending) {
-      notify(write.message, "success");
+      if (!write.silent) notify(write.message, "success");
       void syncWorkspaceCommand("set_agent_tool_models_cmd", {
         agentId: write.agentId,
         toolId: write.toolId,
@@ -1729,47 +1757,6 @@ export function PoolPrototypeProvider({
       void syncWorkspaceCommand("authorize_codearts_isolated_cmd", { accountId });
     },
     [notify, syncWorkspaceCommand]
-  );
-
-  /**
-   * 人工维护某账号的模型目录（仅用于没有实时探测能力的工具）。
-   *
-   * 乐观更新候选账号的 modelOptions，随后以后端返回的 workspace 为准。
-   */
-  const setAccountManualModels = useCallback(
-    (accountId: string, modelIds: string[]) => {
-      const trimmed = modelIds.map((m) => m.trim()).filter(Boolean);
-      const toolId = candidates.find((c) => c.accountId === accountId)?.toolId ?? "";
-      setCandidates((prev) =>
-        prev.map((c) =>
-          c.accountId === accountId
-            ? {
-                ...c,
-                modelOptions: trimmed.map((id) => ({
-                  id,
-                  displayName: id,
-                  vendorWireId: id,
-                  family: "Other",
-                  source: "manual",
-                  isFree: false,
-                })),
-                defaultModels: trimmed,
-              }
-            : c
-        )
-      );
-      notify(
-        trimmed.length === 0
-          ? "已清空该账号的人工模型目录"
-          : `已保存 ${trimmed.length} 个手工模型（${toolId || "账号"}）`,
-        "success"
-      );
-      void syncWorkspaceCommand("set_account_manual_models_cmd", {
-        accountId,
-        models: trimmed,
-      });
-    },
-    [candidates, notify, syncWorkspaceCommand]
   );
 
   const applyAccountPresetModels = useCallback(
@@ -2680,7 +2667,12 @@ export function PoolPrototypeProvider({
   );
 
   const setAgentToolModels = useCallback(
-    (agentId: TargetAgentId, toolId: string, modelIds: string[]) => {
+    (
+      agentId: TargetAgentId,
+      toolId: string,
+      modelIds: string[],
+      opts?: { preferredDefaultModelId?: string | null; silent?: boolean }
+    ) => {
       const uniqueBare = Array.from(
         new Set(modelIds.map((m) => splitScopedModelId(m).modelId).filter(Boolean))
       );
@@ -2725,15 +2717,25 @@ export function PoolPrototypeProvider({
         };
       });
 
+      // 复制方案时希望「默认模型也一起搬过去」：这里直接接受调用方的偏好，
+      // 避免再补一次 setAgentDefaultToolModel（那会多下发一次只含单个模型的写命令）
+      const preferred = opts?.preferredDefaultModelId ?? null;
+      const preferredKey =
+        preferred && uniqueBare.includes(preferred)
+          ? makeDefaultModelKey(dedicatedId, formatScopedModelId(toolId, preferred))
+          : null;
+
       let computedDefaultKey: string | null = null;
       const updatedBindings: AgentBinding[] = nextBindings.map((b) => {
         if (b.agentId !== agentId) return b;
-        const validDefault = resolveValidDefaultModelKey(
-          agentId,
-          [dedicatedId],
-          b.defaultModelKey,
-          updatedPools
-        );
+        const validDefault =
+          preferredKey ??
+          resolveValidDefaultModelKey(
+            agentId,
+            [dedicatedId],
+            b.defaultModelKey,
+            updatedPools
+          );
         computedDefaultKey = validDefault;
         const needsRestart =
           agentId === "claude_desktop" ||
@@ -2781,6 +2783,7 @@ export function PoolPrototypeProvider({
           scopedList.length === 0
             ? `已清空 ${toolLabel} 的开放模型`
             : `已更新 ${toolLabel} 对该 Agent 开放 ${scopedList.length} 个模型`,
+        silent: opts?.silent,
       });
     },
     [candidates, queueModelWrite]
@@ -3163,6 +3166,193 @@ export function PoolPrototypeProvider({
     [commitAgentToolAccountSchedule, getAgentPrimaryPool, getAgentToolAccounts, notify]
   );
 
+  /** 某个 Agent 当前在哪些订阅工具上配过模型（方案覆盖的工具集合）。 */
+  const getAgentConfiguredToolIds = useCallback(
+    (agentId: TargetAgentId): string[] => {
+      const toolIds = new Set<string>();
+      for (const c of candidates) toolIds.add(c.toolId);
+      for (const p of pools) {
+        for (const m of p.members) toolIds.add(m.toolId);
+      }
+      return Array.from(toolIds).filter(
+        (toolId) => getAgentToolEnabledModelIds(agentId, toolId).length > 0
+      );
+    },
+    [candidates, getAgentToolEnabledModelIds, pools]
+  );
+
+  /**
+   * 从一个 Agent 复制同一工具的模型方案到另一个 Agent。
+   *
+   * 模型勾选本身是「每个 Agent 自己的专属号池」上的字段，新挂载一个 Agent 时
+   * 它必然是空的，用户只能把同一批模型重新勾一遍。这里把「勾选集合 + 默认模型」
+   * 作为一个整体方案复制过去，复制后仍然走原有的 debounce 写命令落盘。
+   */
+  const copyAgentToolModelPlan = useCallback(
+    (
+      fromAgentId: TargetAgentId,
+      toAgentId: TargetAgentId,
+      toolId: string,
+      opts?: { silent?: boolean }
+    ): number => {
+      if (fromAgentId === toAgentId) return 0;
+      const silent = opts?.silent ?? false;
+      const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
+      const sourceModels = getAgentToolEnabledModelIds(fromAgentId, toolId);
+      if (sourceModels.length === 0) {
+        if (!silent) {
+          const fromName =
+            rawBindings.find((b) => b.agentId === fromAgentId)?.name ?? fromAgentId;
+          notify(`${fromName} 没有为「${toolLabel}」勾选模型，无需复制`, "info");
+        }
+        return 0;
+      }
+
+      // 只复制目标目录里确实存在的模型，避免把已下架的 ID 写进新 Agent 的配置
+      const catalog = new Set(
+        getCatalogModelsForTool(toolId, candidates).map((m) => m.id)
+      );
+      const copyable = catalog.size
+        ? sourceModels.filter((id) => catalog.has(id))
+        : sourceModels;
+      if (copyable.length === 0) {
+        if (!silent) notify("来源方案的模型在当前目录中已不存在，已跳过复制", "info");
+        return 0;
+      }
+
+      // 默认模型也属于「方案」的一部分，否则复制过去会退化成目录里的第一个模型。
+      // defaultModelKey 形如 `<poolId>::<tool>/<model>`，先剥掉号池前缀再按
+      // `工具/模型` 解析，否则 splitScopedModelId 会把整串当成裸模型名。
+      const sourceDefaultKey = rawBindings.find((b) => b.agentId === fromAgentId)
+        ?.defaultModelKey;
+      let preferredDefaultModelId: string | null = null;
+      if (sourceDefaultKey) {
+        const rawModelKey = sourceDefaultKey.split("::")[1] ?? sourceDefaultKey;
+        const parsed = splitScopedModelId(rawModelKey);
+        const defaultModelId =
+          parsed.toolId === null || parsed.toolId === toolId ? parsed.modelId : null;
+        if (defaultModelId && copyable.includes(defaultModelId)) {
+          preferredDefaultModelId = defaultModelId;
+        }
+      }
+
+      setAgentToolModels(toAgentId, toolId, copyable, {
+        preferredDefaultModelId,
+        silent,
+      });
+
+      if (!silent) {
+        const fromName =
+          rawBindings.find((b) => b.agentId === fromAgentId)?.name ?? fromAgentId;
+        const toName =
+          rawBindings.find((b) => b.agentId === toAgentId)?.name ?? toAgentId;
+        notify(
+          `已把 ${fromName} 的「${toolLabel}」方案复制给 ${toName}（${copyable.length} 个模型）`,
+          "success"
+        );
+      }
+      return copyable.length;
+    },
+    [
+      candidates,
+      getAgentToolEnabledModelIds,
+      notify,
+      rawBindings,
+      setAgentToolModels,
+    ]
+  );
+
+  /** 把当前 Agent 的模型方案同步到其余全部 Agent（仅当前订阅工具）。 */
+  const syncAgentToolModelPlanToAllAgents = useCallback(
+    (sourceAgentId: TargetAgentId, toolId: string): number => {
+      const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
+      let synced = 0;
+      for (const targetAgentId of TARGET_AGENT_ORDER) {
+        if (targetAgentId === sourceAgentId) continue;
+        if (copyAgentToolModelPlan(sourceAgentId, targetAgentId, toolId, { silent: true }) > 0) {
+          synced += 1;
+        }
+      }
+      if (synced > 0) {
+        notify(`已把「${toolLabel}」的模型方案同步到 ${synced} 个 Agent`, "success");
+      } else {
+        notify(`没有可同步的「${toolLabel}」模型方案`, "info");
+      }
+      return synced;
+    },
+    [copyAgentToolModelPlan, notify]
+  );
+
+  /**
+   * 把一个 Agent 在**所有订阅工具**上的模型方案复制给另一个 Agent。
+   *
+   * 逐个订阅手动点「复制方案」在 4~5 个工具下非常啰嗦，这里一次遍历完成。
+   */
+  const copyAgentAllToolModelPlans = useCallback(
+    (fromAgentId: TargetAgentId, toAgentId: TargetAgentId): number => {
+      if (fromAgentId === toAgentId) return 0;
+      const toolIds = getAgentConfiguredToolIds(fromAgentId);
+      let copiedTools = 0;
+      for (const toolId of toolIds) {
+        if (
+          copyAgentToolModelPlan(fromAgentId, toAgentId, toolId, { silent: true }) > 0
+        ) {
+          copiedTools += 1;
+        }
+      }
+      if (copiedTools > 0) {
+        const fromName =
+          rawBindings.find((b) => b.agentId === fromAgentId)?.name ?? fromAgentId;
+        const toName =
+          rawBindings.find((b) => b.agentId === toAgentId)?.name ?? toAgentId;
+        notify(
+          `已把 ${fromName} 的 ${copiedTools} 个订阅方案复制给 ${toName}`,
+          "success"
+        );
+      } else {
+        notify("来源 Agent 还没有配置任何订阅方案", "info");
+      }
+      return copiedTools;
+    },
+    [copyAgentToolModelPlan, getAgentConfiguredToolIds, notify, rawBindings]
+  );
+
+  /** 把当前 Agent 在**所有订阅工具**上的模型方案同步到其余全部 Agent。 */
+  const syncAllToolModelPlansToAllAgents = useCallback(
+    (sourceAgentId: TargetAgentId): number => {
+      const toolIds = getAgentConfiguredToolIds(sourceAgentId);
+      if (toolIds.length === 0) {
+        notify("当前 Agent 还没有配置任何订阅方案", "info");
+        return 0;
+      }
+      let syncedAgents = 0;
+      let syncedGroups = 0;
+      for (const targetAgentId of TARGET_AGENT_ORDER) {
+        if (targetAgentId === sourceAgentId) continue;
+        let groups = 0;
+        for (const toolId of toolIds) {
+          if (
+            copyAgentToolModelPlan(sourceAgentId, targetAgentId, toolId, { silent: true }) > 0
+          ) {
+            groups += 1;
+          }
+        }
+        if (groups > 0) {
+          syncedAgents += 1;
+          syncedGroups += groups;
+        }
+      }
+      if (syncedAgents > 0) {
+        notify(
+          `已把 ${toolIds.length} 个订阅的模型方案同步到 ${syncedAgents} 个 Agent（共 ${syncedGroups} 组）`,
+          "success"
+        );
+      }
+      return syncedAgents;
+    },
+    [copyAgentToolModelPlan, getAgentConfiguredToolIds, notify]
+  );
+
   const value = useMemo<PoolPrototypeContextValue>(
     () => ({
       isTauriRuntime,
@@ -3200,7 +3390,6 @@ export function PoolPrototypeProvider({
       injectMemberCooldown,
       clearMemberCooldown,
       authorizeCodeArtsIsolated,
-      setAccountManualModels,
       applyAccountPresetModels,
       updateAgentMountedPools,
       setAgentDefaultModel,
@@ -3234,6 +3423,11 @@ export function PoolPrototypeProvider({
       sortAgentToolAccountsByQuota,
       updateAgentToolRoutingOptions,
       syncToolScheduleToAllAgents,
+      copyAgentToolModelPlan,
+      syncAgentToolModelPlanToAllAgents,
+      getAgentConfiguredToolIds,
+      copyAgentAllToolModelPlans,
+      syncAllToolModelPlansToAllAgents,
     }),
     [
       isTauriRuntime,
@@ -3270,7 +3464,6 @@ export function PoolPrototypeProvider({
       injectMemberCooldown,
       clearMemberCooldown,
       authorizeCodeArtsIsolated,
-      setAccountManualModels,
       applyAccountPresetModels,
       updateAgentMountedPools,
       setAgentDefaultModel,
@@ -3304,6 +3497,11 @@ export function PoolPrototypeProvider({
       sortAgentToolAccountsByQuota,
       updateAgentToolRoutingOptions,
       syncToolScheduleToAllAgents,
+      copyAgentToolModelPlan,
+      syncAgentToolModelPlanToAllAgents,
+      getAgentConfiguredToolIds,
+      copyAgentAllToolModelPlans,
+      syncAllToolModelPlansToAllAgents,
     ]
   );
 

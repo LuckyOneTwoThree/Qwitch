@@ -38,7 +38,6 @@ describe("Agent 页高频操作的往返开销", () => {
         };
       }
       if (cmd === "set_agent_tool_models_cmd") return EMPTY_WORKSPACE;
-      if (cmd === "set_account_manual_models_cmd") return EMPTY_WORKSPACE;
       if (cmd === "apply_account_preset_models_cmd") return EMPTY_WORKSPACE;
       throw new Error(`unexpected command: ${cmd}`);
     });
@@ -112,33 +111,6 @@ describe("Agent 页高频操作的往返开销", () => {
     const commands = invokeMock.mock.calls.map(([cmd]) => cmd);
     expect(commands).toContain("detect_agent_running_cmd");
     expect(commands).not.toContain("get_pool_workspace_state");
-  });
-
-  it("手工维护模型目录按账号落库，去空行并去首尾空格", async () => {
-    const { result } = renderHook(() => usePoolPrototype(), {
-      wrapper: createWrapper(),
-    });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
-    invokeMock.mockClear();
-
-    await act(async () => {
-      result.current.setAccountManualModels("acc-codearts-1", [
-        "deepseek-v4.1-flash",
-        "  glm-5.3-flash  ",
-        "",
-      ]);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
-
-    const call = invokeMock.mock.calls.find(
-      ([cmd]) => cmd === "set_account_manual_models_cmd"
-    );
-    expect(call?.[1]).toMatchObject({
-      accountId: "acc-codearts-1",
-      models: ["deepseek-v4.1-flash", "glm-5.3-flash"],
-    });
   });
 
   it("一键套用推荐目录会调用后端命令，而不是只在前端改状态", async () => {

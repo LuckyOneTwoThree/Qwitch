@@ -1112,7 +1112,7 @@ pub fn default_model_options_for_tool(tool_id: &str) -> Vec<UpstreamModelOption>
         // 云端 inferhub 路径未公开），历史上这里写死了 4 个猜测模型，实测与该账号
         // 真实可用模型（deepseek-v4.1-flash / glm-5.3-flash / kimi-k3.1-pro / kimi-k3）
         // 几乎零交集，等于凭空展示不存在的模型。这里不再编造，改为空目录：
-        // 用户可在「Agent 接入 → 模型选择」里手工维护该账号的真实模型。
+        // 真实目录由客户端内核日志探测（source=client）或用户一键套用内置预设。
         "codearts" => vec![],
         "doubaowork" => vec![
             catalog_opt(tool_id, "Doubao-Seed-2.1-Pro", None, false),
@@ -1153,7 +1153,7 @@ pub fn default_models_for_tool(tool_id: &str) -> Vec<String> {
 /// 与 `default_model_options_for_tool`（静态兜底）的区别：
 /// - 兜底是系统**自动**展示的猜测，来源标记 `catalog`，UI 标「未探测」；
 /// - 推荐目录必须由用户显式点一次「套用」，来源标记 `preset`，UI 标「内置预设」，
-///   语义是「我认可这组模型可用」，可随时改成手工维护。
+///   语义是「我认可这组模型可用」。
 pub fn recommended_model_options_for_tool(tool_id: &str) -> Vec<UpstreamModelOption> {
     // 目录来自 resources/model_presets.json：加模型、改输出上限都不必重新编译
     crate::domain::model_meta::preset_entries(tool_id)

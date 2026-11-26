@@ -723,6 +723,7 @@ impl QoderAdapter {
                     remaining: claimed_credits,
                     unit: "Credits".into(),
                     reset_at: None,
+                    has_total: true,
                 }],
                 ClaimStatus::Available => vec![QuotaBucket {
                     key: "daily_credits".into(),
@@ -732,6 +733,7 @@ impl QoderAdapter {
                     remaining: claimable_credits,
                     unit: "Credits".into(),
                     reset_at: None,
+                    has_total: true,
                 }],
                 ClaimStatus::Unsupported | ClaimStatus::Unknown => Vec::new(),
             }

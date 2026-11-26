@@ -128,6 +128,90 @@
 * 活动为定向开放，账号未被投放签到任务时 `v3/detail` 无 `daily_signin` 任务，
   适配器据此返回 `Unsupported`，不发起写请求。
 
+### 额度解析：绝对额度优先，百分比只作附注
+
+`quota/summary` 的 `window_limit_section` 在套餐开通瞬间只回 `used_percent`（且常数 0），
+此时 `total` 只能按 100 折算 —— 这正是历史上「豆包明明有额度却显示剩余 100%」的来源。
+现行规则：
+
+* 只有窗口段回百分比时，仍然用顶层 `quota_blance_usage` 的绝对额度补桶（旧实现只在
+  「完全没有桶」时才补，于是活活把绝对额度挡掉）；
+* 绝对值桶排在主读数位，百分比桶带 `hasTotal = false`，前端只展示百分比、不画进度条；
+* 解析出「全是百分比」时，`inspect_quota` 会等 1.2s 重取一次（套餐数据异步下发，
+  正常响应零额外开销）。
+
+### 签到绑定「设备 + 桌面端当前登录账号」
+
+`landing/get` 只反映卡片投放，是账号维度的；`landing/checkin` 的发放校验则要求
+该账号是**本机桌面端当前登录的账号**（实测：网页登录导入的第二个账号 landing 显示
+「今日签到领 200 额度」，写接口恒定返回 `710010702 系统错误`；同一个 Cookie 换成
+桌面端在登账号即返回 `checked_in: true`）。
+
+因此：
+
+* `claim_daily` 会先比对 `detect_local_active_uid`，不一致直接返回可执行提示
+  「先把该账号切至桌面端再领取」，不再打写接口；
+* 前端对「非本机在登」的豆包账号禁用「领取」按钮并给出同样的提示。
+
+### 切号：只接受整份 profile 快照（不做 Cookie 直写）
+
+曾经尝试「只把 passport Cookie 加密写进 `Default/Cookies`」来绕过「先在客户端登录一次」，
+**结论是不成立**（2026-11-26 实测）：
+
+* 写入本身是可复现的：Keychain `DoubaoWork Safe Storage` → PBKDF2 → AES-128-CBC，
+  明文为 `SHA256(host_key)`(32B) + cookie 值，前缀 `v10`。写入后用 openssl 独立解密，
+  与源值 SHA-256 完全一致；直接用这份 Cookie 调 `quota/summary` 也能成功。
+* 但客户端**不会**因此进入登录态：拉起客户端后 `Preferences.saman.last_user` 始终为空，
+  随后客户端把自己的登录态写成「已登出」（`user_id` / `sec_user_id` 空串、`credit=0`）。
+  再次用这批 Cookie 打 passport 校验，返回 `AuthExpired`。
+* 原因：我们用的是 `DELETE` + `INSERT`，把客户端原有的**分区 Cookie**（`top_frame_site_key`
+  非空 / `has_cross_site_ancestor=1`，CHIPS）替换成了非分区副本；客户端按分区读取，
+  自然读不到登录会话。Cookie 值对「直连 HTTP」有效，对「客户端自身」无效——这两件事
+  此前被混为一谈，属于误判。
+
+因此 `apply_session` 只接受 `LocalSnapshot`：切号 = 写回整份快照（含 Preferences、
+Cookies、分区属性、sdk_storage）。要新增账号，必须在该账号的本机客户端登录过一次。
+
+### 多账号：客户端内多账号 = 多 Chromium profile
+
+豆包工作客户端**自带多账号**：每加一个账号就多一个 Chromium profile 目录
+（`Default`、`Profile 2`、…），当前账号由 `Local State` 的
+`profile.last_used` 指定。早期实现把路径写死成 `Default/...`，于是用户在客户端
+切到第二个账号后，Qwitch 仍然读第一个账号的 `Preferences`，
+「关联本机」就会报「本机当前登录的是另一个账号」——**这是 bug，不是用户操作错误**。
+
+现在的规则：
+
+* `active_profile_name(root)`：读 `Local State.profile.last_used`
+  （再退 `last_active_profiles[0]`、再退 `Default`、最后退任意存在的 profile）；
+  带 `Preferences` 校验，避免指到空目录。
+* 所有路径统一以「profile 目录」为基准：`<profile>/Preferences`、
+  `<profile>/Cookies`、`<profile>/Network/Cookies`、`<profile>/Local Storage/leveldb`、
+  `<profile>/saman_shell_persistent_storage_v1`；`sdk_storage/**` 与 `aha/users/**`
+  是设备级共享，仍在根目录。
+* 导入时把 profile 名写进快照（`profile_dir.txt`）；切号写回后调
+  `set_active_profile()` 把 `Local State.profile.last_used` 指向它——
+  否则客户端重启后还是打开原来那个账号。
+* `backup_session` 覆盖**所有** profile + `Local State`，回滚才能回到切号前的账号；
+  老快照没有 `profile_dir.txt`，按 `Default` 处理（向后兼容）。
+
+### 关联本机：身份来源与登出判定
+
+`import_from_local` 的身份来源按优先级：
+
+1. 当前 profile 的 `Preferences` 里 `saman.last_user`（客户端自报；`user_id` 为空串视为**没有**记录）；
+2. 否则读客户端 Cookies 库（safeStorage 解密，自动剥 32B 域名哈希）拼成 Cookie 头，
+   打一次 `passport/account/info/v2` 拿真实 uid；
+3. 两者都拿不到 → 返回可执行提示「客户端 Preferences 没有登录记录，Cookies 库里也没有
+   可用会话；请先在客户端登录一次再关联本机」。
+
+成功时会把这份在线 Cookie 一并写进快照（`decrypted_token.txt`），关联完立刻能查额/签到。
+
+另：客户端登出后 `last_user` 会被清空，而 `detect_local_active_uid` 返回 `None` 同时代表
+「没登录」和「本机没数据」，导致「本机使用中」标记永远清不掉（卡片既没有「关联本机」
+也没有「切至桌面端」）。新增 `ToolAdapter::detect_local_logged_out`（默认 `None`，
+豆包实现为「Preferences 无 last_user 即明确登出」），校准任务据此清空该工具的在登标记。
+
 ### 本地网关推理通道
 
 * 已通过 `src-tauri/src/gateway/doubao.rs` 接入原生 HTTP/SSE 网关上游：自动完成会话初始化，支持流式 SSE 与非流式响应转换，并在响应结束后异步清理临时会话。
@@ -181,9 +265,15 @@
 
 * **已知约束**：
   * `claim_status` 恒为 `Unsupported`，UI 不显示可领按钮，调度器跳过领取。
-  * **不支持本地切号**：`apply_session` 返回 `UnsupportedCapability`。
-    原因是回写凭据需要生成合法的 `safeStorage` 密文（依赖 Electron 运行时），
-    本进程无法产出；仅提供 `backup_session` 备份原文件。
+  * **本地切号（仅 macOS）**：`supports_client_switch = cfg!(target_os = "macos")`。
+    `apply_session` 用同一套 safeStorage 参数**加密**（此前只实现了解密）把
+    `{session, loginContext}` 重新写回 `secretStorage/<sha256(key)>.enc`，
+    写前用凭据里最新的 AK/SK/STS 覆盖快照内的同名字段。
+    前提是「本机导入」时留下的完整会话快照（存于凭据 `extra.session_snapshot_b64`，
+    内含 `loginContext` 的 pkcePair / dpopKeyPair 与 refreshToken，随凭据一起用
+    AES-256-GCM 加密落库，不额外落明文）；
+    独立 OAuth 授权的账号没有 loginContext，`apply_session` 返回
+    `UnsupportedCapability` 并提示先做一次本机导入。Windows 无法复现，返回不支持。
   * **凭据过期：Qwitch 只检测，不代刷。**
     AK/SK 为华为云 STS 临时凭据，`tokenRefreshInterval` 为 1 小时，
     且 **refresh token 是一次性轮换的**（消费后必须立刻持有新 token，

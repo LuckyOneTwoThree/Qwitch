@@ -338,8 +338,113 @@ describe("usePoolPrototypeStore v2", () => {
     expect(finalAccs[1].enabled).toBe(false);
   });
 
-  it("只读码道账号会成为号池成员（签名上游可直接调度）", () => {
+  it("可以把一个 Agent 的模型方案复制或同步到其他 Agent", () => {
     const { result } = renderHook(() => usePoolPrototype(), {
+      wrapper: createWrapper(),
+    });
+
+    act(() => {
+      result.current.setAgentToolModels("dsh", "workbuddy", [
+        "deepseek-v4-pro",
+        "kimi-k3.1-pro",
+      ]);
+    });
+    const source = result.current.getAgentToolEnabledModelIds("dsh", "workbuddy");
+    expect(source).toHaveLength(2);
+    // 模拟「刚挂载、还没配过」的 Agent
+    act(() => {
+      result.current.clearAgentToolModels("opencode", "workbuddy");
+    });
+    expect(result.current.getAgentToolEnabledModelIds("opencode", "workbuddy")).toEqual([]);
+
+    // 新挂载的 Agent 直接复用 dsh 的方案：勾选集合 + 默认模型一起过去
+    act(() => {
+      result.current.setAgentDefaultToolModel("dsh", "workbuddy", "kimi-k3.1-pro");
+    });
+    const sourceDefault = result.current.agentBindings.find((b) => b.agentId === "dsh")
+      ?.defaultModelKey;
+    expect(sourceDefault).toContain("workbuddy/kimi-k3.1-pro");
+    let copied = 0;
+    act(() => {
+      copied = result.current.copyAgentToolModelPlan("dsh", "opencode", "workbuddy");
+    });
+    expect(copied).toBe(2);
+    expect(
+      [...result.current.getAgentToolEnabledModelIds("opencode", "workbuddy")].sort()
+    ).toEqual([...source].sort());
+    expect(
+      result.current.agentBindings.find((b) => b.agentId === "opencode")?.defaultModelKey
+    ).toContain("workbuddy/kimi-k3.1-pro");
+
+    // 来源没有为该工具勾选任何模型时不产生复制；同一个 Agent 自复制也无意义
+    act(() => {
+      result.current.clearAgentToolModels("opencode", "trae_cn");
+    });
+    expect(result.current.copyAgentToolModelPlan("opencode", "codex_desktop", "trae_cn")).toBe(0);
+    expect(result.current.copyAgentToolModelPlan("dsh", "dsh", "workbuddy")).toBe(0);
+
+    // 一键同步到全部：除来源外所有 Agent 都拿到同一份方案
+    let synced = 0;
+    act(() => {
+      synced = result.current.syncAgentToolModelPlanToAllAgents("dsh", "workbuddy");
+    });
+    expect(synced).toBeGreaterThan(0);
+    for (const binding of result.current.agentBindings) {
+      if (binding.agentId === "dsh") continue;
+      expect(
+        result.current.getAgentToolEnabledModelIds(binding.agentId, "workbuddy").length
+      ).toBe(2);
+    }
+  });
+
+  it("可以一次性复制/同步某个 Agent 的全部订阅方案", () => {
+    const { result } = renderHook(() => usePoolPrototype(), {
+      wrapper: createWrapper(),
+    });
+
+    // 给 dsh 再补两个订阅，模拟「已经调好的一整套方案」
+    act(() => {
+      result.current.setAgentToolModels("dsh", "workbuddy", [
+        "deepseek-v4-pro",
+        "kimi-k3.1-pro",
+      ]);
+      result.current.setAgentToolModels("dsh", "trae_cn", ["doubao-seed-code"]);
+    });
+    const sourceTools = result.current.getAgentConfiguredToolIds("dsh");
+    expect(sourceTools).toEqual(expect.arrayContaining(["workbuddy", "trae_cn"]));
+    expect(sourceTools.length).toBeGreaterThan(1);
+
+    // 一次性把所有订阅复制给 opencode（不用逐个工具点）
+    let copiedTools = 0;
+    act(() => {
+      copiedTools = result.current.copyAgentAllToolModelPlans("dsh", "opencode");
+    });
+    expect(copiedTools).toBeGreaterThanOrEqual(2);
+    expect(
+      result.current.getAgentToolEnabledModelIds("opencode", "workbuddy").length
+    ).toBe(2);
+    expect(
+      result.current.getAgentToolEnabledModelIds("opencode", "trae_cn").length
+    ).toBe(1);
+
+    // 一次性把所有订阅同步到其余全部 Agent
+    let syncedAgents = 0;
+    act(() => {
+      syncedAgents = result.current.syncAllToolModelPlansToAllAgents("dsh");
+    });
+    expect(syncedAgents).toBe(result.current.agentBindings.length - 1);
+    for (const binding of result.current.agentBindings) {
+      if (binding.agentId === "dsh") continue;
+      expect(
+        result.current.getAgentToolEnabledModelIds(binding.agentId, "workbuddy").length
+      ).toBe(2);
+      expect(
+        result.current.getAgentToolEnabledModelIds(binding.agentId, "trae_cn").length
+      ).toBe(1);
+    }
+  });
+
+  it("只读码道账号会成为号池成员（签名上游可直接调度）", () => {    const { result } = renderHook(() => usePoolPrototype(), {
       wrapper: createWrapper(),
     });
 

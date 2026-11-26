@@ -247,7 +247,7 @@ export const UPSTREAM_MODEL_OPTIONS: Record<string, CatalogModelEntry[]> = {
     makeCatalogModel("kimi-k3.1-pro", "Kimi-K3.1-Pro", "Kimi-K3.1-Pro", "Kimi"),
   ],
   // 码道没有可靠的模型目录接口：这里不再编造（历史上的 deepseek-v4-pro /
-  // glm-5.3 / glm-5.2 / openPangu 与真实账号可用模型不符）。改由用户手工维护。
+  // glm-5.3 / glm-5.2 / openPangu 与真实账号可用模型不符）。改由客户端日志探测 + 内置预设。
   codearts: [],
   custom_api_key: [
     makeCatalogModel("deepseek-v4-pro", "DeepSeek-V4-Pro", "deepseek-v4-pro", "DeepSeek"),

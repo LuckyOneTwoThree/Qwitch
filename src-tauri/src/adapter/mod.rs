@@ -6,6 +6,7 @@ pub mod lobsterai;
 pub mod minimax;
 pub mod qoder;
 pub mod qoder_cosy;
+pub mod safe_storage;
 pub mod trae;
 pub mod workbuddy;
 
@@ -236,6 +237,20 @@ pub trait ToolAdapter: Send + Sync {
 
     /// 纯本地只读探测当前客户端登录账号的真实 UID（严禁联网或拉起外部解密子进程）。
     fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
+        let _ = host;
+        None
+    }
+
+    /// 纯本地判定「客户端当前是否**明确没登录**」。
+    ///
+    /// `detect_local_active_uid` 返回 `None` 同时覆盖「没登录」和「本机没装/没数据」，
+    /// 两者混在一起会让「本机使用中」标记永远清不掉——实测豆包客户端退出登录后
+    /// Preferences 里 `saman.last_user` 被清空，卡片仍显示「本机使用中」，
+    /// 用户既看不到「关联本机」也看不到「切至桌面端」。
+    ///
+    /// 返回 `Some(true)` 表示可以确定客户端未登录（调用方可安全清空该工具的在登标记）；
+    /// `None` 表示无法判断，保持原有「绝不误清」策略。
+    fn detect_local_logged_out(&self, host: &dyn PlatformHost) -> Option<bool> {
         let _ = host;
         None
     }

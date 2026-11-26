@@ -989,6 +989,7 @@ impl WorkBuddyAdapter {
                             remaining: cycle_remain,
                             unit: "积分".into(),
                             reset_at: None,
+                            has_total: true,
                         });
                     }
                 }
@@ -1009,6 +1010,7 @@ impl WorkBuddyAdapter {
                 remaining: checkin_total_credits,
                 unit: "积分".into(),
                 reset_at: None,
+                has_total: true,
             });
         }
 

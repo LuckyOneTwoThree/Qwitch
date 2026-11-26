@@ -519,6 +519,7 @@ fn quota_snapshot_join_retention_and_rename_account() {
             plan_name: Some(format!("Plan-{i}")),
             claim_status: ClaimStatus::Available,
             buckets: vec![QuotaBucket {
+                has_total: true,
                 key: "k".into(),
                 label: "额度".into(),
                 used: i as f64,

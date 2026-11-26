@@ -45,7 +45,6 @@ fn main() {
         "export_action_logs",
         "get_pool_workspace_state",
         "detect_agent_running_cmd",
-        "set_account_manual_models_cmd",
         "apply_account_preset_models_cmd",
         "refresh_upstream_models_cmd",
         "ensure_upstream_models_cmd",

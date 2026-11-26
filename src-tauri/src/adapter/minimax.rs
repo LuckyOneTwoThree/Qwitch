@@ -805,6 +805,7 @@ impl MiniMaxAdapter {
                 remaining,
                 unit: "积分".into(),
                 reset_at: next_expiry.and_then(ms_to_rfc3339),
+                has_total: true,
             }]
         } else {
             Vec::new()

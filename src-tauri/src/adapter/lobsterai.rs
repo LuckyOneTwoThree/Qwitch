@@ -515,6 +515,18 @@ impl LobsterAiAdapter {
         Ok(Self::check_api_envelope(&raw, "查询 LobsterAI 额度")?.clone())
     }
 
+    /// 拉取 `profile-summary`：跨池总积分 `totalCreditsRemaining` + `creditItems` 明细。
+    async fn fetch_profile_summary(&self, token: &str) -> Result<Value, AdapterError> {
+        let raw = self
+            .authed_get(
+                "/api/user/profile-summary",
+                token,
+                "查询 LobsterAI 积分明细",
+            )
+            .await?;
+        Ok(Self::check_api_envelope(&raw, "查询 LobsterAI 积分明细")?.clone())
+    }
+
     async fn fetch_daily_checkin_slot(
         &self,
         token: &str,
@@ -624,7 +636,11 @@ impl LobsterAiAdapter {
         }
     }
 
-    fn build_quota_snapshot(raw_quota: &Value, claim_status: ClaimStatus) -> QuotaSnapshot {
+    fn build_quota_snapshot(
+        raw_quota: &Value,
+        profile_summary: Option<&Value>,
+        claim_status: ClaimStatus,
+    ) -> QuotaSnapshot {
         let mut total = 0.0;
         let mut used = 0.0;
         let mut explicit_remaining: Option<f64> = None;
@@ -652,6 +668,9 @@ impl LobsterAiAdapter {
         {
             total = free_total;
             used = amount_field(raw_quota.get("freeCreditsUsed"));
+            // `freeCreditsRemaining` 是服务端算好的权威剩余值，比 `total - used` 更准
+            // （两者会因服务端四舍五入出现 ~1e-5 级偏差，且退订/重置时可能不同步）。
+            explicit_remaining = opt_amount_field(raw_quota.get("freeCreditsRemaining"));
             plan_name = raw_quota
                 .get("planName")
                 .and_then(non_empty_str)
@@ -696,20 +715,108 @@ impl LobsterAiAdapter {
         .iter()
         .find_map(|key| parse_timestamp_rfc3339(raw_quota.get(*key)));
 
+        // 以 `profile-summary.creditItems` 为准拆桶：`/api/user/quota` 只描述**免费
+        // 额度池**（300 起、按天扣），而用户真正能花的积分还包括签到/邀请/活动发放，
+        // 集中体现在 `totalCreditsRemaining` 里。旧实现只报免费池，于是「积分不准」。
+        let mut buckets = Self::credit_item_buckets(profile_summary);
+
+        if let Some(total_remaining) =
+            profile_summary.and_then(|s| opt_amount_field(s.get("totalCreditsRemaining")))
+        {
+            // 跨池「剩余」是服务端算好的可信值；但「已发放总量」根本无法观测：
+            // 过期条目会从 `creditItems` 里消失，免费池 used 也只代表免费池消耗。
+            // 旧实现用 `total_remaining + 免费池 used` 反推总量，得到的是
+            // 「361 / 661 积分 · 55%」这种一对客户端就发现对不上的读数。
+            // 因此这里只报剩余，并标记 `has_total = false`，前端不再画百分比。
+            buckets.insert(
+                0,
+                QuotaBucket {
+                    key: "credits".to_string(),
+                    label: "可用积分".to_string(),
+                    used: 0.0,
+                    total: total_remaining,
+                    remaining: total_remaining,
+                    unit: "积分".to_string(),
+                    reset_at: reset_at.clone(),
+                    has_total: false,
+                },
+            );
+        } else {
+            buckets.insert(
+                0,
+                QuotaBucket {
+                    key: "credits".to_string(),
+                    label: "可用积分".to_string(),
+                    used,
+                    total,
+                    remaining,
+                    unit: "积分".to_string(),
+                    reset_at,
+                    has_total: total > 0.0,
+                },
+            );
+        }
+
         QuotaSnapshot {
             plan_name: Some(plan_name),
             claim_status,
-            buckets: vec![QuotaBucket {
-                key: "credits".to_string(),
-                label: "可用积分".to_string(),
-                used,
-                total,
-                remaining,
-                unit: "积分".to_string(),
-                reset_at,
-            }],
+            buckets,
             fetched_at: Utc::now().to_rfc3339(),
         }
+    }
+
+    /// 把 `profile-summary.creditItems` 拆成明细桶（免费池/签到奖励/邀请奖励）。
+    fn credit_item_buckets(profile_summary: Option<&Value>) -> Vec<QuotaBucket> {
+        let Some(items) = profile_summary
+            .and_then(|s| s.get("creditItems"))
+            .and_then(|v| v.as_array())
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<QuotaBucket> = Vec::new();
+        for item in items {
+            let Some(credits) = opt_amount_field(item.get("creditsRemaining")) else {
+                continue;
+            };
+            if credits <= 0.0 {
+                continue;
+            }
+            let kind = item
+                .get("type")
+                .and_then(non_empty_str)
+                .unwrap_or_else(|| "credits".to_string());
+            let label = item
+                .get("label")
+                .and_then(non_empty_str)
+                .unwrap_or_else(|| kind.clone());
+            let reset_at = parse_timestamp_rfc3339(item.get("expiresAt"));
+            // 同名同期同类目合并，避免「每日登录奖励」刷出七八条重复明细
+            let key = format!("{kind}::{}", reset_at.clone().unwrap_or_default());
+            if let Some(existing) = out.iter_mut().find(|b| b.key == key) {
+                existing.total += credits;
+                existing.remaining += credits;
+                continue;
+            }
+            out.push(QuotaBucket {
+                key,
+                label,
+                used: 0.0,
+                total: credits,
+                remaining: credits,
+                unit: "积分".to_string(),
+                reset_at,
+                // 明细条目只有剩余值，没有「已用」，进度条会恒为 100%
+                has_total: false,
+            });
+        }
+        // 过期时间近的排前面，让用户先看到快过期的积分
+        out.sort_by(|a, b| match (&a.reset_at, &b.reset_at) {
+            (Some(x), Some(y)) => x.cmp(y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        out
     }
 
     async fn post_checkin_action(
@@ -749,7 +856,10 @@ impl LobsterAiAdapter {
             None => "每日签到已完成".to_string(),
         };
         match (claimed_days, total_days) {
-            (Some(d), Some(t)) if t > 0 => format!("{base}（第 {d}/{t} 天）"),
+            // 服务端把「每日签到」活动配成 36500 天（等价永久），直接展示会出现
+            // 「第 1/36500 天」这种一眼就是错的读数。超过一年就不再报总天数。
+            (Some(d), Some(t)) if t > 0 && t <= 366 => format!("{base}（第 {d}/{t} 天）"),
+            (Some(d), _) if d > 0 => format!("{base}（已连续 {d} 天）"),
             _ => base,
         }
     }
@@ -848,6 +958,32 @@ fn parse_timestamp_rfc3339(v: Option<&Value>) -> Option<String> {
         }
         if let Ok(n) = s.parse::<i64>() {
             return epoch_num_to_rfc3339(n);
+        }
+        // 服务端会给出**无时区偏移**的本地时间（`2026-12-05T23:51:14`）和**纯日期**
+        // （`freeCreditsExpiresAt: "2026-12-05"`）。旧实现只认严格 RFC3339，
+        // 这两种全都解析失败 → `resetAt` 恒为 null → UI 上「过期时间」全空。
+        // 该服务端是国内服务，无偏移一律按 Asia/Shanghai (+08:00) 解释。
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+            if let Some(dt) = chrono::TimeZone::from_local_datetime(
+                &chrono::FixedOffset::east_opt(8 * 3600)?,
+                &naive,
+            )
+            .single()
+            {
+                return Some(dt.with_timezone(&Utc).to_rfc3339());
+            }
+        }
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+            // 纯日期按当日 23:59:59 算，符合「xx 日到期」的语义（当日仍可用）
+            let naive = date.and_hms_opt(23, 59, 59)?;
+            if let Some(dt) = chrono::TimeZone::from_local_datetime(
+                &chrono::FixedOffset::east_opt(8 * 3600)?,
+                &naive,
+            )
+            .single()
+            {
+                return Some(dt.with_timezone(&Utc).to_rfc3339());
+            }
         }
         return None;
     }
@@ -1096,6 +1232,22 @@ impl ToolAdapter for LobsterAiAdapter {
         let tokens = Self::extract_tokens(cred)?;
         let raw_quota = self.fetch_quota_data(&tokens.access_token).await?;
 
+        // `profile-summary` 才给出**跨池总量**与分项明细（免费/签到/邀请），
+        // `/api/user/quota` 只描述免费池。认证类错误向上熔断，其余降级为无明细。
+        let profile_summary = match self.fetch_profile_summary(&tokens.access_token).await {
+            Ok(summary) => Some(summary),
+            Err(
+                e @ AdapterError::Unified {
+                    code:
+                        UnifiedErrorCode::AuthExpired
+                        | UnifiedErrorCode::RiskTriggered
+                        | UnifiedErrorCode::RateLimited,
+                    ..
+                },
+            ) => return Err(e),
+            Err(_) => None,
+        };
+
         // 活动槽位探测属于附加状态：认证/风控/限流错误向上熔断，普通网络波动退化为 Unknown
         let claim_status = match self.probe_daily_checkin_status(&tokens.access_token).await {
             Ok(status) => status,
@@ -1111,7 +1263,11 @@ impl ToolAdapter for LobsterAiAdapter {
             Err(_) => ClaimStatus::Unknown,
         };
 
-        Ok(Self::build_quota_snapshot(&raw_quota, claim_status))
+        Ok(Self::build_quota_snapshot(
+            &raw_quota,
+            profile_summary.as_ref(),
+            claim_status,
+        ))
     }
 
     async fn claim_daily(
@@ -1818,6 +1974,7 @@ mod tests {
         // Case 3: Generic creditsLimit / Team limit
         let team_snapshot = LobsterAiAdapter::build_quota_snapshot(
             &serde_json::json!({ "limit": 10000, "used": 250 }),
+            None,
             ClaimStatus::Claimed,
         );
         assert_eq!(team_snapshot.plan_name.as_deref(), Some("团队版"));
@@ -1830,10 +1987,127 @@ mod tests {
                 "creditsRemaining": 400,
                 "subscriptionStatus": "active"
             }),
+            None,
             ClaimStatus::Available,
         );
         assert_eq!(generic_snapshot.plan_name.as_deref(), Some("订阅版"));
         assert_eq!(generic_snapshot.buckets[0].remaining, 400.0);
+    }
+
+    /// 真实线上响应：`/api/user/quota` 只描述免费池（300），而用户实有 1004.21 积分
+    /// （含每日签到与邀请奖励）。旧实现只报免费池 → 界面显示「剩余 104」，比实际少 900。
+    #[test]
+    fn build_quota_snapshot_aggregates_profile_summary_credit_items() {
+        let raw_quota = serde_json::json!({
+            "freeCreditsTotal": 300,
+            "dailyCreditsUsed": 194.43022,
+            "freeCreditsRemaining": 104.21328,
+            "freeCreditsUsed": 195.78672,
+            "freeCreditsExpiresAt": "2026-12-05",
+            "hasPaidCredits": true,
+            "planName": "免费",
+            "subscriptionStatus": "free",
+            "freeCreditsExpired": false
+        });
+        let profile_summary = serde_json::json!({
+            "totalCreditsRemaining": 1004.21328,
+            "availableResetCount": 0,
+            "creditItems": [
+                { "type": "free", "label": "新用户赠送", "creditsRemaining": 104.21328,
+                  "expiresAt": "2026-12-05T23:51:14" },
+                { "type": "campaign", "label": "每日登录奖励", "creditsRemaining": 100.0,
+                  "expiresAt": "2026-12-21T23:51:14" },
+                { "type": "campaign", "label": "每日登录奖励", "creditsRemaining": 100.0,
+                  "expiresAt": "2026-12-21T23:51:14" },
+                { "type": "invitation", "label": "邀请奖励", "creditsRemaining": 300.0,
+                  "expiresAt": "2026-12-26T13:28:55" }
+            ],
+            "creditsResetCampaign": { "enabled": true, "active": false, "identity": "free" }
+        });
+
+        let snap = LobsterAiAdapter::build_quota_snapshot(
+            &raw_quota,
+            Some(&profile_summary),
+            ClaimStatus::Claimed,
+        );
+
+        // 主桶必须是跨池总量，而不是免费池剩余
+        assert_eq!(snap.buckets[0].key, "credits");
+        assert!((snap.buckets[0].remaining - 1004.21328).abs() < 1e-6);
+        // 跨池「已发放总量」不可观测：总数字段不再拼免费池已用，只复述剩余，
+        // 并用 has_total=false 告诉前端不要画百分比进度条。
+        assert!((snap.buckets[0].total - 1004.21328).abs() < 1e-6);
+        assert_eq!(snap.buckets[0].used, 0.0);
+        assert!(!snap.buckets[0].has_total);
+        // resetAt 必须解析出来（免费池到期日是纯日期，旧的严格 RFC3339 解析会全丢）
+        assert_eq!(
+            snap.buckets[0].reset_at.as_deref(),
+            Some("2026-12-05T15:59:59+00:00")
+        );
+
+        // 明细：同类型同到期日的签到奖励合并，过期早的排前面
+        let detail_keys: Vec<&str> = snap.buckets[1..].iter().map(|b| b.key.as_str()).collect();
+        assert_eq!(detail_keys.len(), 3, "got {detail_keys:?}");
+        assert!((snap.buckets[1].remaining - 104.21328).abs() < 1e-6);
+        assert!((snap.buckets[2].remaining - 200.0).abs() < 1e-6);
+        assert!((snap.buckets[3].remaining - 300.0).abs() < 1e-6);
+        assert_eq!(snap.buckets[3].label, "邀请奖励");
+        assert!(snap.buckets[1..].iter().all(|b| !b.has_total));
+        // 明细应严格按过期时间升序
+        let resets: Vec<&str> = snap.buckets[1..]
+            .iter()
+            .filter_map(|b| b.reset_at.as_deref())
+            .collect();
+        let mut sorted = resets.clone();
+        sorted.sort_unstable();
+        assert_eq!(resets, sorted);
+    }
+
+    /// `profile-summary` 拉不到时必须退回免费池单桶，不能把积分显示成 0。
+    #[test]
+    fn build_quota_snapshot_falls_back_without_profile_summary() {
+        let raw_quota = serde_json::json!({
+            "freeCreditsTotal": 300,
+            "freeCreditsUsed": 120,
+            "freeCreditsRemaining": 180,
+            "planName": "免费"
+        });
+        let snap = LobsterAiAdapter::build_quota_snapshot(&raw_quota, None, ClaimStatus::Available);
+        assert_eq!(snap.buckets.len(), 1);
+        assert_eq!(snap.buckets[0].total, 300.0);
+        // 权威剩余值优先，不做 total - used 的二次运算
+        assert_eq!(snap.buckets[0].remaining, 180.0);
+    }
+
+    #[test]
+    fn parse_timestamp_accepts_date_only_and_offset_less_local_time() {
+        // 严格 RFC3339
+        assert_eq!(
+            super::parse_timestamp_rfc3339(Some(&serde_json::json!("2026-12-05T00:00:00Z")))
+                .as_deref(),
+            Some("2026-12-05T00:00:00+00:00")
+        );
+        // 无偏移本地时间：按 Asia/Shanghai 解释
+        assert_eq!(
+            super::parse_timestamp_rfc3339(Some(&serde_json::json!("2026-12-05T23:51:14")))
+                .as_deref(),
+            Some("2026-12-05T15:51:14+00:00")
+        );
+        // 纯日期：当日 23:59:59(+08:00)
+        assert_eq!(
+            super::parse_timestamp_rfc3339(Some(&serde_json::json!("2026-12-05"))).as_deref(),
+            Some("2026-12-05T15:59:59+00:00")
+        );
+        // epoch 秒/毫秒
+        assert!(super::parse_timestamp_rfc3339(Some(&serde_json::json!(1797994310))).is_some());
+        assert!(
+            super::parse_timestamp_rfc3339(Some(&serde_json::json!(1797994310958i64))).is_some()
+        );
+        // 明显非法值不猜
+        assert_eq!(
+            super::parse_timestamp_rfc3339(Some(&serde_json::json!("not-a-date"))),
+            None
+        );
     }
 
     #[tokio::test]

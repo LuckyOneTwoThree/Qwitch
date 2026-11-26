@@ -180,7 +180,7 @@ pub async fn switch_desktop_account(
         );
         if let Err(e) = state
             .host
-            .terminate_client_gracefully(&summary.tool_id, 5000)
+            .terminate_client_gracefully(&summary.tool_id, 3000)
             .await
         {
             let msg = e.to_string();
@@ -266,16 +266,20 @@ pub async fn switch_desktop_account(
         return Err(msg);
     }
 
-    // 启动存活轮询：700ms 间隔、总超时 45s、连续两次探测存活才确认，
-    // 给慢启动客户端（大量扩展/大工作区/冷启动）更充裕的时间，避免误判回滚
+    // 启动存活轮询：300ms 间隔、总超时 12s、连续两次探测存活才确认。
+    //
+    // 45s 是历史遗留的保守值：实测 Electron 客户端冷启动通常 1~3s，
+    // 45s 只会让「启动失败」变成一次 45 秒的假死等待（期间 UI 一直停在
+    // 「重启桌面端」），用户感知就是「切号卡死」。12s 足够覆盖慢启动，
+    // 且探测本身已修成不依赖 `ps`，误判概率很低。
     let mut alive = false;
-    for _ in 0..64 {
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         if check_client_running_async(&state.host, &summary.tool_id)
             .await
             .unwrap_or(false)
         {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             if check_client_running_async(&state.host, &summary.tool_id)
                 .await
                 .unwrap_or(false)
@@ -311,7 +315,7 @@ pub async fn switch_desktop_account(
             Err(e) => format!("，重新拉起客户端失败（{e}）"),
         };
         let msg = format!(
-            "客户端启动后 45 秒内未确认存活，{note}{relaunch_note}；若仍无法启动请手动检查或重启系统"
+            "客户端启动后 12 秒内未确认存活，{note}{relaunch_note}；若仍无法启动请手动检查或重启系统"
         );
         log_switch_failure(
             &state.db,

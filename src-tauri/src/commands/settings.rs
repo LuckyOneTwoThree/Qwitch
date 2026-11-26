@@ -431,18 +431,25 @@ pub async fn reconcile_active_accounts(
         .map(|(k, v)| (k.clone(), Arc::clone(v)))
         .collect();
 
-    let detected: Vec<(String, String)> = tokio::task::spawn_blocking(move || {
-        candidates
-            .into_iter()
-            .filter_map(|(tool_id, adapter)| {
-                adapter
-                    .detect_local_active_uid(host.as_ref())
-                    .map(|uid| (tool_id, uid))
-            })
-            .collect()
-    })
-    .await
-    .map_err(|e| format!("探测本机活跃账号失败: {e}"))?;
+    let (detected, logged_out): (Vec<(String, String)>, Vec<String>) =
+        tokio::task::spawn_blocking(move || {
+            let mut detected = Vec::new();
+            let mut logged_out = Vec::new();
+            for (tool_id, adapter) in candidates {
+                match adapter.detect_local_active_uid(host.as_ref()) {
+                    Some(uid) => detected.push((tool_id, uid)),
+                    // 客户端明确登出：必须在下一轮把「本机使用中」清掉，
+                    // 否则卡片会停在既不能关联本机、也不能切号的死胡同
+                    None if adapter.detect_local_logged_out(host.as_ref()) == Some(true) => {
+                        logged_out.push(tool_id)
+                    }
+                    None => {}
+                }
+            }
+            (detected, logged_out)
+        })
+        .await
+        .map_err(|e| format!("探测本机活跃账号失败: {e}"))?;
 
     for (tool_id, uid) in detected {
         let trimmed = uid.trim();
@@ -485,6 +492,23 @@ pub async fn reconcile_active_accounts(
                 }
             }
             Err(_) => {}
+        }
+    }
+
+    // 客户端明确登出的工具：清掉遗留的「本机使用中」，让「关联本机 / 切至桌面端」重新出现
+    for tool_id in logged_out {
+        if let Ok(cleared) = state.db.clear_active_on_client(&tool_id) {
+            if cleared > 0 {
+                let _ = state.db.append_action_log(
+                    None,
+                    &tool_id,
+                    "reconcile",
+                    "success",
+                    None,
+                    &format!("{tool_id} 客户端已登出，已清除 {cleared} 个账号的「本机使用中」标记"),
+                );
+                let _ = app.emit("qwitch://account-updated", &tool_id);
+            }
         }
     }
     Ok(())

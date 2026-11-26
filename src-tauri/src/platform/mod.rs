@@ -95,6 +95,81 @@ async fn cleanup_bundle_leftovers(app_names: &[String], extra_ms: u64) {
     }
 }
 
+/// 在给定预算内轮询「主进程是否已退出」，退出即返回 true。
+async fn wait_until_stopped(
+    primary_names: &[String],
+    proc_names: &[String],
+    budget_ms: u64,
+) -> Result<bool, HostError> {
+    let p_clone = primary_names.to_vec();
+    let proc_clone = proc_names.to_vec();
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    loop {
+        let p = p_clone.clone();
+        let pr = proc_clone.clone();
+        let running = tokio::task::spawn_blocking(move || {
+            NativePlatformHost::is_client_running_names(&p, &pr)
+        })
+        .await
+        .map_err(|e| HostError::OperationFailed(e.to_string()))??;
+        if !running {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// 终止客户端自带的常驻子进程（网关/本地服务）。
+///
+/// 这些进程不在 `.app` bundle 内，`cleanup_bundle_leftovers` 抓不到。客户端被
+/// 外部终止后它们会变成孤儿并继续占用客户端数据目录，下一次启动的新实例会
+/// 拒绝迁移（有道龙虾 `openclaw-gateway` → 「Another gateway already owns this
+/// state directory」→ 客户端弹「AI 引擎网关启动失败」）。
+#[cfg(target_os = "macos")]
+async fn stop_mac_sidecar_processes(names: &[&str], budget_ms: u64) {
+    for name in names {
+        let needle = escape_pgrep_regex(name);
+        let is_alive = || {
+            let needle = needle.clone();
+            async move {
+                tokio::process::Command::new("pgrep")
+                    .args(["-f", &needle])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
+        };
+        if !is_alive().await {
+            continue;
+        }
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-TERM", "-f", &needle])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        let deadline = Instant::now() + Duration::from_millis(budget_ms.max(500));
+        while is_alive().await {
+            if Instant::now() >= deadline {
+                let _ = tokio::process::Command::new("pkill")
+                    .args(["-KILL", "-f", &needle])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum HostError {
     #[error("I/O error: {0}")]
@@ -109,6 +184,14 @@ pub enum HostError {
 pub struct ClientSpec {
     pub mac_app_names: &'static [&'static str],
     pub mac_process_names: &'static [&'static str],
+    /// 客户端自带的**常驻子进程**（网关/本地服务）。
+    ///
+    /// 这些进程不在 `.app` bundle 内，`cleanup_bundle_leftovers` 抓不到；
+    /// 客户端被外部终止后会变成孤儿并继续占用它自己的数据目录，
+    /// 下次启动的新实例会因此拒绝迁移（有道龙虾的 `openclaw-gateway` 就是这样：
+    /// 日志 `Another gateway (pid …) already owns this state directory`，
+    /// 客户端弹「AI 引擎网关启动失败」）。
+    pub mac_sidecar_process_names: &'static [&'static str],
     pub win_exe_names: &'static [&'static str],
     pub win_folder_names: &'static [&'static str],
 }
@@ -255,54 +338,63 @@ pub fn client_spec(tool_id: &str) -> Option<ClientSpec> {
             mac_process_names: &["Trae"],
             win_exe_names: &["Trae.exe"],
             win_folder_names: &["Trae"],
+            mac_sidecar_process_names: &[],
         }),
         "trae_cn" => Some(ClientSpec {
             mac_app_names: &["Trae CN.app"],
             mac_process_names: &["Trae CN"],
             win_exe_names: &["Trae CN.exe"],
             win_folder_names: &["Trae CN"],
+            mac_sidecar_process_names: &[],
         }),
         "workbuddy" => Some(ClientSpec {
             mac_app_names: &["WorkBuddy.app"],
             mac_process_names: &["WorkBuddy"],
             win_exe_names: &["WorkBuddy.exe"],
             win_folder_names: &["WorkBuddy"],
+            mac_sidecar_process_names: &[],
         }),
         "qoder" => Some(ClientSpec {
             mac_app_names: &["Qoder.app"],
             mac_process_names: &["Qoder"],
             win_exe_names: &["Qoder.exe"],
             win_folder_names: &["Qoder"],
+            mac_sidecar_process_names: &[],
         }),
         "qoder_cn" => Some(ClientSpec {
             mac_app_names: &["Qoder CN.app", "Qoder.app"],
             mac_process_names: &["Qoder CN", "Qoder"],
             win_exe_names: &["Qoder CN.exe", "Qoder.exe"],
             win_folder_names: &["Qoder CN", "Qoder"],
+            mac_sidecar_process_names: &[],
         }),
         "minimax_code_cn" => Some(ClientSpec {
             mac_app_names: &["MiniMax Code.app"],
             mac_process_names: &["MiniMax Code"],
             win_exe_names: &["MiniMax Code.exe"],
             win_folder_names: &["MiniMax Code", "MiniMax"],
+            mac_sidecar_process_names: &[],
         }),
         "lobsterai" => Some(ClientSpec {
             mac_app_names: &["LobsterAI.app"],
             mac_process_names: &["LobsterAI"],
             win_exe_names: &["LobsterAI.exe"],
             win_folder_names: &["LobsterAI"],
+            mac_sidecar_process_names: &["openclaw-gateway"],
         }),
         "doubaowork" => Some(ClientSpec {
             mac_app_names: &["DoubaoWork.app"],
             mac_process_names: &["DoubaoWork", "DoubaoWork Browser"],
             win_exe_names: &["DoubaoWork.exe"],
             win_folder_names: &["DoubaoWork"],
+            mac_sidecar_process_names: &[],
         }),
         "codearts" => Some(ClientSpec {
             mac_app_names: &["CodeArts.app"],
             mac_process_names: &["CodeArts"],
             win_exe_names: &["CodeArts.exe"],
             win_folder_names: &["CodeArts"],
+            mac_sidecar_process_names: &[],
         }),
         _ => None,
     }
@@ -606,13 +698,18 @@ impl NativePlatformHost {
     #[cfg(target_os = "macos")]
     fn has_non_helper_pids(pids_stdout: &str, proc_name: &str) -> bool {
         for pid in pids_stdout.split_whitespace() {
-            let Ok(ps_out) = Command::new("ps")
+            let ps_out = match Command::new("ps")
                 .args(["-p", pid, "-o", "command="])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .output()
-            else {
-                continue;
+            {
+                Ok(out) => out,
+                // `ps` 本身不可用（受限环境/沙箱）时无法做辅助进程甄别。
+                // 此时**不能**把「能 pgrep 到」误判成「未运行」——否则切号会
+                // 跳过优雅关闭、并在启动后 45s 判死回滚。pgrep 已经确认进程
+                // 存在，这里按运行中处理。
+                Err(_) => return true,
             };
             let command = String::from_utf8_lossy(&ps_out.stdout);
             let command = command.trim();
@@ -720,15 +817,17 @@ impl NativePlatformHost {
             return false;
         }
 
-        let Ok(output) = Command::new("ps")
+        let output = match Command::new("ps")
             .args(["-axo", "pid=,command="])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
-        else {
-            // ps 不可用时退回保守判定（宁可报「未运行」也不误报运行中，
-            // 避免用户被引导去终止一个并未运行的主进程）
-            return false;
+        {
+            Ok(out) => out,
+            // 受限环境（沙箱 / 无 ps 权限）下无法做辅助进程甄别。pgrep 已经
+            // 确认 `<App>.app/Contents/MacOS/` 下有活进程，这里按运行中处理：
+            // 误报「未运行」会让切号跳过优雅关闭、并在重启后空等超时回滚。
+            Err(_) => return true,
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1330,6 +1429,11 @@ impl PlatformHost for NativePlatformHost {
         timeout_ms: u64,
     ) -> Result<(), HostError> {
         let tid = tool_id.to_string();
+        #[cfg(target_os = "macos")]
+        let sidecar_names: Vec<&'static str> = client_spec(tool_id)
+            .map(|s| s.mac_sidecar_process_names)
+            .unwrap_or(&[])
+            .to_vec();
         let (primary_names, proc_names) = tokio::task::spawn_blocking(move || {
             NativePlatformHost.resolve_target_process_names(&tid)
         })
@@ -1356,10 +1460,19 @@ impl PlatformHost for NativePlatformHost {
             // 主进程已不在，但可能仍残留 Renderer/GPU/utility 等辅助进程，
             // 它们会占用单实例锁/用户数据，导致随后的重启“秒退”，这里一并清理。
             #[cfg(target_os = "macos")]
-            cleanup_bundle_leftovers(&primary_names, 1200).await;
+            {
+                cleanup_bundle_leftovers(&primary_names, 1200).await;
+                // 主进程已不在，但它留下的网关子进程可能还占着数据目录
+                stop_mac_sidecar_processes(&sidecar_names, 3000).await;
+            }
             return Ok(());
         }
 
+        // 是否有任何一次「优雅退出」请求真的发出去了。
+        // osascript 在无 Automation 权限（或被沙箱拦截）时会立刻报 -10004，
+        // 这时不该再傻等 3 秒优雅期，直接进入 TERM 阶段。
+        #[allow(unused_mut)]
+        let mut quit_requested = false;
         #[cfg(target_os = "macos")]
         {
             for app_name in &primary_names {
@@ -1376,12 +1489,17 @@ impl PlatformHost for NativePlatformHost {
                     .trim_end_matches(".app")
                     .replace('\\', "\\\\")
                     .replace('"', "\\\"");
-                let _ = tokio::process::Command::new("osascript")
+                if let Ok(status) = tokio::process::Command::new("osascript")
                     .args(["-e", &format!("tell application \"{clean}\" to quit")])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status()
-                    .await;
+                    .await
+                {
+                    if status.success() {
+                        quit_requested = true;
+                    }
+                }
             }
         }
 
@@ -1390,25 +1508,36 @@ impl PlatformHost for NativePlatformHost {
             for exe in &primary_names {
                 let mut cmd = tokio::process::Command::new("taskkill");
                 hide_console_tokio(&mut cmd);
-                let _ = cmd
+                if let Ok(status) = cmd
                     .args(["/IM", exe])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status()
-                    .await;
+                    .await
+                {
+                    if status.success() {
+                        quit_requested = true;
+                    }
+                }
             }
         }
 
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1000));
-        while Instant::now() < deadline {
-            if !check_running(&primary_names, &proc_names).await? {
-                // 额外等待 300ms 确保文件锁完全释放
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                #[cfg(target_os = "macos")]
-                cleanup_bundle_leftovers(&primary_names, 2500).await;
-                return Ok(());
+        if quit_requested {
+            // 优雅退出请求已送达：给它一段收尾时间（关闭窗口/落盘/销毁 WebView）
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1000));
+            while Instant::now() < deadline {
+                if !check_running(&primary_names, &proc_names).await? {
+                    // 额外等待 300ms 确保文件锁完全释放
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    #[cfg(target_os = "macos")]
+                    {
+                        cleanup_bundle_leftovers(&primary_names, 2500).await;
+                        stop_mac_sidecar_processes(&sidecar_names, 3000).await;
+                    }
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
         }
 
         // 超时后尝试温和信号或强杀兜底
@@ -1456,16 +1585,68 @@ impl PlatformHost for NativePlatformHost {
             }
         }
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if check_running(&primary_names, &proc_names).await? {
-            return Err(HostError::OperationFailed(format!(
-                "无法关闭正在运行的 {tool_id} 客户端，请手动退出后重试"
-            )));
+        // TERM 之后不能只等固定 500ms：Electron 客户端收到 SIGTERM 还要走
+        // 「关闭窗口 → 清理 → 退出」的收尾流程，实测豆包要 ~1.5s。
+        // 旧实现 500ms 后就判定「仍在运行」直接报错，于是豆包/龙虾这类客户端
+        // 每次切号都失败，UI 上表现为「切号卡死」。
+        if wait_until_stopped(&primary_names, &proc_names, 2500).await? {
+            #[cfg(target_os = "macos")]
+            {
+                cleanup_bundle_leftovers(&primary_names, 2500).await;
+                stop_mac_sidecar_processes(&sidecar_names, 3000).await;
+            }
+            return Ok(());
         }
-        #[cfg(target_os = "macos")]
-        cleanup_bundle_leftovers(&primary_names, 2500).await;
 
-        Ok(())
+        // 最后兜底：强杀（SIGKILL 不可被忽略）
+        #[cfg(target_os = "macos")]
+        {
+            for app_name in &primary_names {
+                let needle = format!("/{}/Contents/", escape_pgrep_regex(app_name));
+                let _ = tokio::process::Command::new("pkill")
+                    .args(["-KILL", "-f", &needle])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+            }
+            for proc_name in &proc_names {
+                let _ = tokio::process::Command::new("pkill")
+                    .args([
+                        "-KILL",
+                        "-f",
+                        &format!("/Contents/MacOS/{}", escape_pgrep_regex(proc_name)),
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            for exe in &primary_names {
+                let mut cmd = tokio::process::Command::new("taskkill");
+                hide_console_tokio(&mut cmd);
+                let _ = cmd
+                    .args(["/F", "/T", "/IM", exe])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+            }
+        }
+        if wait_until_stopped(&primary_names, &proc_names, 2000).await? {
+            #[cfg(target_os = "macos")]
+            {
+                cleanup_bundle_leftovers(&primary_names, 2500).await;
+                stop_mac_sidecar_processes(&sidecar_names, 3000).await;
+            }
+            return Ok(());
+        }
+        Err(HostError::OperationFailed(format!(
+            "无法关闭正在运行的 {tool_id} 客户端，请手动退出后重试"
+        )))
     }
 
     fn launch_client(&self, executable: &Path, args: &[String]) -> Result<(), HostError> {
@@ -1740,6 +1921,14 @@ fn find_latest_prefixed_dir(parent: &Path, prefix: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    /// 空进程名列表必须立刻判定「已停止」，不能进轮询空转。
+    #[tokio::test]
+    async fn wait_until_stopped_returns_immediately_without_processes() {
+        let started = std::time::Instant::now();
+        assert!(wait_until_stopped(&[], &[], 2_000).await.unwrap());
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
 
     #[test]
     fn macos_launch_agent_plist_bundle_aware_and_escaped() {

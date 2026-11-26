@@ -57,6 +57,18 @@ pub struct QuotaBucket {
     pub remaining: f64,
     pub unit: String,
     pub reset_at: Option<String>,
+    /// 服务端是否给出了可信的「总量」。
+    ///
+    /// LobsterAI 的积分是跨池余额（免费池 + 签到 + 邀请），服务端只报剩余值，
+    /// 已发放总量不可观测。旧实现用「免费池已用」反推总量，会得出「361 / 661
+    /// 积分 · 55%」这种用户一对客户端就发现对不上的读数。这类桶把 `has_total`
+    /// 置为 false，前端只展示剩余，不再画百分比进度条。
+    #[serde(default = "default_has_total")]
+    pub has_total: bool,
+}
+
+fn default_has_total() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,11 +263,13 @@ pub struct CredentialEnvelope {
 impl CredentialEnvelope {
     pub fn capability_flags(&self) -> (bool, bool) {
         match &self.payload {
-            CredentialPayload::Token { .. } => {
-                let can_switch = matches!(
-                    self.tool_id.as_str(),
-                    "trae" | "trae_cn" | "workbuddy" | "lobsterai"
-                );
+            CredentialPayload::Token { extra, .. } => {
+                let can_switch = match self.tool_id.as_str() {
+                    "trae" | "trae_cn" | "workbuddy" | "lobsterai" => true,
+                    // 码道：只有本机导入留下的完整 session 快照才能重加密写回
+                    "codearts" => extra.contains_key("session_snapshot_b64"),
+                    _ => false,
+                };
                 (can_switch, true)
             }
             CredentialPayload::LocalSnapshot { files } => {

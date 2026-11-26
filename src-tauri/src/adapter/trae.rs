@@ -1122,6 +1122,7 @@ impl TraeAdapter {
                 remaining,
                 unit: "Credits".into(),
                 reset_at,
+                has_total: true,
             }],
             fetched_at: Utc::now().to_rfc3339(),
         })

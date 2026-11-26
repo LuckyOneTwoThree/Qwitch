@@ -3,6 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{TimeZone, Utc};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, REFERER, USER_AGENT};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -61,22 +62,31 @@ const DOUBAO_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
 
 const SNAPSHOT_ZIP_KEY: &str = "doubaowork_profile.zip";
 const SNAPSHOT_TOKEN_FILE: &str = "decrypted_token.txt";
+/// 快照属于哪个 Chromium profile（`Default` / `Profile 2`）：切号时要把它写回
+/// `Local State.profile.last_used`，否则客户端启动后仍停在另一个账号。
+const SNAPSHOT_PROFILE_FILE: &str = "profile_dir.txt";
+const DEFAULT_PROFILE_NAME: &str = "Default";
 
 const MAX_SNAPSHOT_ZIP_BYTES: usize = 80 * 1024 * 1024;
 const MAX_SNAPSHOT_ENTRIES: usize = 500;
 const MAX_SNAPSHOT_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DIR_DEPTH: usize = 12;
 
-const FIXED_SIDECARS: &[&str] = &[
-    "Default/Cookies-journal",
-    "Default/Cookies-wal",
-    "Default/Cookies-shm",
-    "Default/Network/Cookies-journal",
-    "Default/Network/Cookies-wal",
-    "Default/Network/Cookies-shm",
-    "sdk_storage/common.db-wal",
-    "sdk_storage/common.db-shm",
-];
+/// 固定附属文件（WAL/journal）。`profile` 为 Chromium profile 目录名。
+fn fixed_sidecars(profile: &str) -> Vec<String> {
+    [
+        format!("{profile}/Cookies-journal"),
+        format!("{profile}/Cookies-wal"),
+        format!("{profile}/Cookies-shm"),
+        format!("{profile}/Network/Cookies-journal"),
+        format!("{profile}/Network/Cookies-wal"),
+        format!("{profile}/Network/Cookies-shm"),
+        "sdk_storage/common.db-wal".to_string(),
+        "sdk_storage/common.db-shm".to_string(),
+    ]
+    .into_iter()
+    .collect()
+}
 
 /// 豆包工作（DoubaoWork）内置适配器（双轨模式：本机快照切号 + WebView/Cookie 查额签到）。
 pub struct DoubaoWorkAdapter {
@@ -272,9 +282,94 @@ impl DoubaoWorkAdapter {
         Ok(dir)
     }
 
-    /// 纯本地只读提取 `Default/Preferences` 中明文 `saman.last_user` 的 `(user_id, display_name)`。
-    fn read_last_user(profile_root: &Path) -> Option<(String, Option<String>)> {
-        let pref_path = profile_root.join("Default").join("Preferences");
+    fn is_profile_dir_name(name: &str) -> bool {
+        name == DEFAULT_PROFILE_NAME
+            || name
+                .strip_prefix("Profile ")
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    }
+
+    /// 客户端「多账号」= Chromium 多 profile（`Default` / `Profile 2` …）。
+    ///
+    /// 当前账号由 `Local State` 的 `profile.last_used` 指定；只看 `Default` 会把
+    /// 第二个账号误判成第一个（实测：用户已切到 `Profile 2`，我们仍报 `Default` 的账号）。
+    fn active_profile_name(profile_root: &Path) -> String {
+        let mut candidates: Vec<String> = Vec::new();
+        if let Ok(bytes) = std::fs::read(profile_root.join("Local State")) {
+            if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                if let Some(last) = val.pointer("/profile/last_used").and_then(|v| v.as_str()) {
+                    candidates.push(last.to_string());
+                }
+                if let Some(list) = val
+                    .pointer("/profile/last_active_profiles")
+                    .and_then(|v| v.as_array())
+                {
+                    for item in list {
+                        if let Some(name) = item.as_str() {
+                            candidates.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        candidates.push(DEFAULT_PROFILE_NAME.to_string());
+        for name in &candidates {
+            if Self::is_profile_dir_name(name)
+                && profile_root.join(name).join("Preferences").is_file()
+            {
+                return name.clone();
+            }
+        }
+        // 兜底：任何一个真实存在的 profile（Default 缺失时也能工作）
+        if let Some(first) = Self::list_profile_names(profile_root).into_iter().next() {
+            return first;
+        }
+        DEFAULT_PROFILE_NAME.to_string()
+    }
+
+    /// 枚举用户数据根下真实存在的 profile 目录名（含 Default）。
+    fn list_profile_names(profile_root: &Path) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(profile_root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if Self::is_profile_dir_name(&name)
+                    && profile_root.join(&name).join("Preferences").is_file()
+                {
+                    out.push(name);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// 把 `Local State.profile.last_used` 指向指定 profile。
+    ///
+    /// 只改这一个字段：`Local State` 里还有设备标识等机器级状态，整份替换风险更大。
+    fn set_active_profile(profile_root: &Path, profile: &str) -> Result<(), AdapterError> {
+        let state_path = profile_root.join("Local State");
+        let mut val: Value = std::fs::read(&state_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !val.is_object() {
+            val = serde_json::json!({});
+        }
+        if val.get("profile").map(|v| v.is_object()) != Some(true) {
+            val["profile"] = serde_json::json!({});
+        }
+        val["profile"]["last_used"] = Value::String(profile.to_string());
+        let bytes = serde_json::to_vec(&val).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("序列化 Local State 失败: {e}"),
+        })?;
+        crate::adapter::write_private_file_atomic(&state_path, &bytes)
+    }
+
+    /// 纯本地只读提取某个 profile 的 `Preferences` 里明文 `saman.last_user`。
+    fn read_last_user(profile_dir: &Path) -> Option<(String, Option<String>)> {
+        let pref_path = profile_dir.join("Preferences");
         let bytes = std::fs::read(pref_path).ok()?;
         let val: Value = serde_json::from_slice(&bytes).ok()?;
         let last_user = val.pointer("/saman/last_user")?;
@@ -283,6 +378,10 @@ impl DoubaoWorkAdapter {
             .and_then(json_uid_to_string)
             .or_else(|| last_user.get("user_id").and_then(json_uid_to_string))
             .or_else(|| last_user.get("sec_user_id").and_then(json_uid_to_string))?;
+        // 客户端登出后会把 `user_id` / `sec_user_id` 写成空串，不能当成「有登录记录」
+        if uid.trim().is_empty() {
+            return None;
+        }
         let name = last_user
             .get("name")
             .or_else(|| last_user.get("user_name"))
@@ -303,34 +402,34 @@ impl DoubaoWorkAdapter {
     }
 
     /// 枚举需要纳入切号快照的核心认证文件（排除 140MB 沙箱与 37MB 插件目录）。
-    fn collect_session_relative_paths(profile_root: &Path) -> Vec<String> {
+    fn collect_session_relative_paths(profile_root: &Path, profile: &str) -> Vec<String> {
         let mut rels = Vec::new();
         let fixed = [
-            "Default/Preferences",
-            "Default/Cookies",
-            "Default/Cookies-journal",
-            "Default/Cookies-wal",
-            "Default/Cookies-shm",
-            "Default/Network/Cookies",
-            "Default/Network/Cookies-journal",
-            "Default/Network/Cookies-wal",
-            "Default/Network/Cookies-shm",
-            "sdk_storage/common.db",
-            "sdk_storage/common.db-wal",
-            "sdk_storage/common.db-shm",
+            format!("{profile}/Preferences"),
+            format!("{profile}/Cookies"),
+            format!("{profile}/Cookies-journal"),
+            format!("{profile}/Cookies-wal"),
+            format!("{profile}/Cookies-shm"),
+            format!("{profile}/Network/Cookies"),
+            format!("{profile}/Network/Cookies-journal"),
+            format!("{profile}/Network/Cookies-wal"),
+            format!("{profile}/Network/Cookies-shm"),
+            "sdk_storage/common.db".to_string(),
+            "sdk_storage/common.db-wal".to_string(),
+            "sdk_storage/common.db-shm".to_string(),
         ];
         for rel in fixed {
-            if Self::is_real_file(&profile_root.join(rel)) {
-                rels.push(rel.to_string());
+            if Self::is_real_file(&profile_root.join(&rel)) {
+                rels.push(rel);
             }
         }
 
         // LevelDB 会话与持久化状态（跳过 LOCK 与符号链接）
         for dir_rel in [
-            "Default/Local Storage/leveldb",
-            "Default/saman_shell_persistent_storage_v1",
+            format!("{profile}/Local Storage/leveldb"),
+            format!("{profile}/saman_shell_persistent_storage_v1"),
         ] {
-            let dir_path = profile_root.join(dir_rel);
+            let dir_path = profile_root.join(&dir_rel);
             if !Self::is_real_dir(&dir_path) {
                 continue;
             }
@@ -478,13 +577,18 @@ impl DoubaoWorkAdapter {
     }
 
     /// 清理所有瞬态 LevelDB 段与 SQLite WAL/SHM 附属日志，供切号与回滚共用。
-    fn clean_session_ephemeral_files(profile_root: &Path) -> Result<(), AdapterError> {
-        Self::clear_dir_files_except_lock(&profile_root.join("Default/Local Storage/leveldb"))?;
+    fn clean_session_ephemeral_files(
+        profile_root: &Path,
+        profile: &str,
+    ) -> Result<(), AdapterError> {
         Self::clear_dir_files_except_lock(
-            &profile_root.join("Default/saman_shell_persistent_storage_v1"),
+            &profile_root.join(format!("{profile}/Local Storage/leveldb")),
         )?;
-        for sidecar in FIXED_SIDECARS {
-            Self::remove_file_if_present(&profile_root.join(sidecar), "清理旧会话附属文件失败")?;
+        Self::clear_dir_files_except_lock(
+            &profile_root.join(format!("{profile}/saman_shell_persistent_storage_v1")),
+        )?;
+        for sidecar in fixed_sidecars(profile) {
+            Self::remove_file_if_present(&profile_root.join(&sidecar), "清理旧会话附属文件失败")?;
         }
         let sdk_dir = profile_root.join("sdk_storage");
         if Self::is_real_dir(&sdk_dir) {
@@ -729,6 +833,117 @@ impl DoubaoWorkAdapter {
                 .and_then(sanitize_device_param),
             web_id: None,
         }
+    }
+
+    /// 从客户端 Cookies 库读出豆包域的在线 Cookie 头（macOS safeStorage 解密）。
+    ///
+    /// `Default/Preferences` 的 `saman.last_user` 只代表「客户端自己记着的登录态」：
+    /// 客户端被登出、异常退出、或会话由其它途径写入时它会变成空串，但 Cookies 库里
+    /// 仍然可能有可用的 passport 会话。「关联本机」必须在两者之间兜底，否则用户明明
+    /// 刚登录过，也会被判成「桌面端尚未登录」。
+    fn read_client_cookie_header(profile_dir: &Path) -> Result<String, AdapterError> {
+        if !cfg!(target_os = "macos") {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::UnsupportedCapability,
+                message: "当前平台无法解密客户端 Cookie（Windows 走 DPAPI），请在客户端登录后重试"
+                    .into(),
+            });
+        }
+        let db_path = cookie_db_path(profile_dir).ok_or_else(|| AdapterError::Unified {
+            code: UnifiedErrorCode::ClientNotFound,
+            message: "未找到豆包工作客户端的 Cookies 库".into(),
+        })?;
+        let password = crate::adapter::safe_storage::macos_safe_storage_password("DoubaoWork")?;
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("读取豆包工作 Cookies 库失败: {e}"),
+        })?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT host_key, name, value, encrypted_value FROM cookies
+                 WHERE host_key LIKE '%doubao%' ORDER BY length(host_key) ASC",
+            )
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("查询豆包工作 Cookies 失败: {e}"),
+            })?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::InternalError,
+                message: format!("读取豆包工作 Cookies 行失败: {e}"),
+            })?;
+
+        let mut cookies: HashMap<String, String> = HashMap::new();
+        for row in rows.flatten() {
+            let (host_key, name, plain, encrypted) = row;
+            let value = if encrypted.is_empty() {
+                plain
+            } else {
+                match Self::decrypt_client_cookie(&host_key, &encrypted, &password) {
+                    Some(v) => v,
+                    None => continue,
+                }
+            };
+            if value.is_empty() || name.is_empty() {
+                continue;
+            }
+            if name.chars().any(|c| c.is_control()) || value.chars().any(|c| c.is_control()) {
+                continue;
+            }
+            cookies.insert(name, value);
+        }
+
+        // 只有真正带着登录会话的 Cookie 才有意义，否则别把它当成「已登录」
+        let has_session = ["sessionid", "sessionid_ss", "sid_tt"]
+            .iter()
+            .any(|k| cookies.get(*k).is_some_and(|v| !v.is_empty()));
+        if !has_session {
+            return Err(AdapterError::Unified {
+                code: UnifiedErrorCode::InvalidCredential,
+                message: "客户端 Cookie 中没有可用的登录会话（缺 sessionid / sid_tt）".into(),
+            });
+        }
+
+        let header = cookies
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        normalize_cookie_header(&header)
+    }
+
+    /// 解密单条 Chromium Cookie：`v10/v11` 信封 + 32 字节 `SHA256(host_key)` 前缀。
+    fn decrypt_client_cookie(host_key: &str, encrypted: &[u8], password: &str) -> Option<String> {
+        let body = if encrypted.starts_with(b"v10") || encrypted.starts_with(b"v11") {
+            &encrypted[3..]
+        } else if encrypted.starts_with(b"v20") {
+            // App-Bound 加密：密钥绑定客户端可执行文件，本进程无法解
+            return None;
+        } else {
+            encrypted
+        };
+        let plain =
+            crate::adapter::safe_storage::decrypt_safe_storage(body, password, "豆包工作").ok()?;
+        let digest = Sha256::digest(host_key.as_bytes());
+        let value = if plain.len() > digest.len() && plain[..digest.len()] == digest[..] {
+            &plain[digest.len()..]
+        } else {
+            &plain[..]
+        };
+        String::from_utf8(value.to_vec()).ok()
     }
 
     /// 构造与官方 `DoubaoWork.app` 2.37.19 (`local_web`) 对齐的公共查询串，
@@ -1064,6 +1279,20 @@ impl DoubaoWorkAdapter {
         append_section_buckets(data.get("window_limit_section"), "window", &mut buckets);
         let has_personal_paid = buckets.len() > win_len_before;
 
+        // 兜底：窗口段只回了百分比（服务端未给出绝对额度，常见于套餐/订阅数据
+        // 尚未就绪的瞬间）时，用顶层 `quota_blance_usage` 的绝对值补桶。
+        // 旧实现只在「完全没有桶」时才走这里，于是「有一个 100% 桶」会把真实
+        // 绝对额度彻底挡掉。
+        if !buckets.iter().any(|b| b.unit != "%") {
+            append_balance_usage_buckets(data, &mut buckets);
+        }
+
+        // 桶序决定 UI 主读数（`AccountCard` 取 `buckets[0]`）。插入顺序是
+        // incentive → package → window，会让「活动赠送额度」压在主套餐额度头上。
+        // 排序规则：绝对额度桶优先于百分比桶，同组内 window（订阅/月度额度）
+        // 优先于 package，最后才是 incentive 活动奖励。
+        buckets.sort_by_key(bucket_display_rank);
+
         let member_type = data
             .pointer("/member_info/member_type")
             .and_then(int_field)
@@ -1073,15 +1302,27 @@ impl DoubaoWorkAdapter {
             .and_then(int_field)
             .unwrap_or(0);
 
+        // 套餐名判定：`member_info.member_type` / `member_info.status` 在现行的
+        // 订阅制账号上**根本不返回**（实测只有 hasActiveSubscription 等布尔位），
+        // 所以旧逻辑会把「免费体验」误标成「专业版」。以服务端展示名为主，
+        // 布尔位只在展示名缺失时兜底。
         let plan_name = if has_enterprise || matches!(member_type, 1 | 2) {
-            "企业版"
-        } else if has_personal_paid || sub_status == 3 {
-            "专业版"
+            "企业版".to_string()
+        } else if let Some(display) = subscription_display_name(data) {
+            display
         } else {
-            "免费版"
+            let active = data
+                .pointer("/member_info/hasActiveSubscription")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if has_personal_paid || sub_status == 3 || active {
+                "专业版".to_string()
+            } else {
+                "免费版".to_string()
+            }
         };
 
-        (plan_name.to_string(), buckets)
+        (plan_name, buckets)
     }
 
     fn claim_status_from_landing(data: &Value) -> ClaimStatus {
@@ -1185,23 +1426,34 @@ pub(crate) fn is_allowed_snapshot_rel_path(rel: &str) -> bool {
             _ => return false,
         }
     }
-    matches!(
-        norm.as_str(),
-        "Default/Preferences"
-            | "Default/Cookies"
-            | "Default/Cookies-journal"
-            | "Default/Cookies-wal"
-            | "Default/Cookies-shm"
-            | "Default/Network/Cookies"
-            | "Default/Network/Cookies-journal"
-            | "Default/Network/Cookies-wal"
-            | "Default/Network/Cookies-shm"
-            | "sdk_storage/common.db"
-            | "sdk_storage/common.db-wal"
-            | "sdk_storage/common.db-shm"
-    ) || (norm.starts_with("Default/Local Storage/leveldb/") && !norm.ends_with("/LOCK"))
-        || (norm.starts_with("Default/saman_shell_persistent_storage_v1/")
-            && !norm.ends_with("/LOCK"))
+    // 多账号客户端：Default / Profile N 都是合法 profile 目录
+    let is_profile_segment = |seg: &str| {
+        seg == "Default"
+            || seg
+                .strip_prefix("Profile ")
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    if let Some((profile, rest)) = norm.split_once('/') {
+        if is_profile_segment(profile) {
+            return matches!(
+                rest,
+                "Preferences"
+                    | "Cookies"
+                    | "Cookies-journal"
+                    | "Cookies-wal"
+                    | "Cookies-shm"
+                    | "Network/Cookies"
+                    | "Network/Cookies-journal"
+                    | "Network/Cookies-wal"
+                    | "Network/Cookies-shm"
+            ) || ((rest.starts_with("Local Storage/leveldb/")
+                || rest.starts_with("saman_shell_persistent_storage_v1/"))
+                && !rest.ends_with("/LOCK"));
+        }
+    }
+    norm == "sdk_storage/common.db"
+        || norm == "sdk_storage/common.db-wal"
+        || norm == "sdk_storage/common.db-shm"
         || (norm.starts_with("aha/users/") && !norm.contains("/cache/"))
         || (norm.starts_with("sdk_storage/")
             && (norm.ends_with("/cookie_store.db")
@@ -1363,6 +1615,79 @@ fn extract_cookie_from_text(raw: &str) -> String {
     raw.to_string()
 }
 
+/// 读取服务端给出的套餐展示名（`current_subscription.display.short_name`）。
+///
+/// 实测响应：`{ product_name: "个人订阅", short_name: "免费体验" }`。
+/// 缺 `short_name` 时退回 `product_name`，两者都空则返回 `None` 交由调用方兜底。
+fn subscription_display_name(data: &Value) -> Option<String> {
+    let display = data.pointer("/current_subscription/display")?;
+    display
+        .get("short_name")
+        .and_then(non_empty_str)
+        .or_else(|| display.get("product_name").and_then(non_empty_str))
+}
+
+/// 用顶层 `quota_blance_usage` 的绝对额度拆桶。
+///
+/// 该字段形如：
+/// ```json
+/// [{ "category": 1, "title": "套餐", "total_amount": "2,142",
+///    "used_amount": "19", "used_percent": 0 }, …]
+/// ```
+/// 是服务端唯一同时给出 `total` 与 `used` 绝对值的扁平列表；当
+/// `window_limit_section` / `incentive_quota_section` 都缺失时（体验套餐常见），
+/// 它仍然能还原真实水位，比「百分比兜底」准确得多。
+fn append_balance_usage_buckets(data: &Value, out: &mut Vec<QuotaBucket>) {
+    let Some(items) = data.get("quota_blance_usage").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for (idx, item) in items.iter().enumerate() {
+        let Some(total) = opt_amount_field(item.get("total_amount")).filter(|t| *t > 0.0) else {
+            continue;
+        };
+        let used = opt_amount_field(item.get("used_amount")).unwrap_or(0.0);
+        let remaining = (total - used).max(0.0);
+        let title = item
+            .get("title")
+            .and_then(non_empty_str)
+            .unwrap_or_else(|| "额度".to_string());
+        out.push(QuotaBucket {
+            key: format!("balance_usage_{idx}"),
+            label: title,
+            used,
+            total,
+            remaining,
+            unit: "额度".to_string(),
+            reset_at: item
+                .get("end_time")
+                .and_then(int_field)
+                .and_then(epoch_num_to_rfc3339),
+            has_total: true,
+        });
+    }
+}
+
+/// 桶在 UI 里的展示顺位（越小越靠前，会被 `AccountCard` 取作主读数）。
+///
+/// 订阅/月度额度是用户真正关心的主额度；活动奖励只是附加，必须排在后面，
+/// 否则「活动赠送额度 200」会盖住「每月额度 2,142」。
+fn bucket_display_rank(b: &QuotaBucket) -> (u8, u8) {
+    // 百分比桶永远排最后：它信息量最低，不该占据主读数位置。
+    let absolute = u8::from(b.unit == "%");
+    let family = if b.key.starts_with("balance_usage_") {
+        4
+    } else if b.key.starts_with("window_") {
+        0
+    } else if b.key.starts_with("package_") {
+        1
+    } else if b.key.starts_with("incentive_") {
+        2
+    } else {
+        3
+    };
+    (absolute, family)
+}
+
 fn append_section_buckets(section: Option<&Value>, kind_hint: &str, out: &mut Vec<QuotaBucket>) {
     let Some(groups) = section
         .and_then(|s| s.get("window_limit_groups"))
@@ -1426,6 +1751,9 @@ fn append_section_buckets(section: Option<&Value>, kind_hint: &str, out: &mut Ve
                 item.get("end_time").and_then(int_field)
             };
             let reset_at = raw_end.and_then(epoch_num_to_rfc3339);
+            // 只有百分比桶说明服务端没返回绝对额度，此时 total 恒为 100，
+            // 前端不应再把它当成「总量」画进度条
+            let has_total = unit != "%";
 
             out.push(QuotaBucket {
                 key: format!("{kind_hint}_{window_type}_{g_idx}_{l_idx}"),
@@ -1435,6 +1763,7 @@ fn append_section_buckets(section: Option<&Value>, kind_hint: &str, out: &mut Ve
                 remaining,
                 unit,
                 reset_at,
+                has_total,
             });
         }
     }
@@ -1510,12 +1839,33 @@ fn merge_set_cookies(existing: &str, set_cookies: &[String]) -> Option<String> {
     (merged != before).then_some(merged)
 }
 
-fn opt_amount_field(v: Option<&Value>) -> Option<f64> {
+/// 解析服务端金额字段。
+///
+/// 豆包的额度接口会把千分位写成**字符串**（如 `"2,142"`、`"1,234.50"`），
+/// 直接 `str::parse::<f64>()` 会失败，调用方随即掉进「按 used_percent 折算」的
+/// 兜底分支 —— 而兜底分支的 `total` 恒为 100，于是 UI 永远显示「剩余 100%」，
+/// 真实额度被彻底丢掉。这里先剥掉千分位逗号（以及全角逗号、空白）再解析。
+pub(crate) fn opt_amount_field(v: Option<&Value>) -> Option<f64> {
     let v = v?;
-    let val = v
-        .as_f64()
-        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))?;
+    let val = match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => parse_decimal_str(s),
+        _ => None,
+    }?;
     val.is_finite().then_some(val)
+}
+
+/// 解析可能带千分位分隔符的十进制字符串。
+fn parse_decimal_str(raw: &str) -> Option<f64> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, ',' | '，' | '_' | ' ' | '\u{00a0}'))
+        .collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    cleaned.parse::<f64>().ok()
 }
 
 fn non_empty_str(v: &Value) -> Option<String> {
@@ -1562,15 +1912,38 @@ fn finalize_claimed_quota(
     quota
 }
 
+/// 定位某个 profile 下实际生效的 Cookies 库（新版 Chromium 会挪到 `<profile>/Network/`）。
+fn cookie_db_path(profile_dir: &Path) -> Option<PathBuf> {
+    for rel in ["Network/Cookies", "Cookies"] {
+        let p = profile_dir.join(rel);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[async_trait]
 impl ToolAdapter for DoubaoWorkAdapter {
     fn manifest(&self) -> &AdapterManifest {
         &self.manifest
     }
 
+    /// 豆包客户端登出时会把 `saman.last_user` 清成空串，这是客户端自己的判断，
+    /// 可以据此安全清空「本机使用中」标记（否则卡片会一直假性显示在登）。
+    fn detect_local_logged_out(&self, host: &dyn PlatformHost) -> Option<bool> {
+        let profile_root = Self::resolve_profile_root(host).ok()?;
+        if !profile_root.join("Default").join("Preferences").is_file() {
+            return None;
+        }
+        Some(Self::read_last_user(&profile_root).is_none())
+    }
+
     fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
         let profile_root = Self::resolve_profile_root(host).ok()?;
-        let (uid, _) = Self::read_last_user(&profile_root)?;
+        // 多账号客户端：当前账号在 `Local State.profile.last_used` 指定的 profile 里
+        let profile_dir = profile_root.join(Self::active_profile_name(&profile_root));
+        let (uid, _) = Self::read_last_user(&profile_dir)?;
         if CredentialEnvelope::is_fallback_uid(&uid) {
             None
         } else {
@@ -1583,25 +1956,57 @@ impl ToolAdapter for DoubaoWorkAdapter {
         host: &dyn PlatformHost,
     ) -> Result<CredentialEnvelope, AdapterError> {
         let profile_root = Self::resolve_profile_root(host)?;
-        if !profile_root.join("Default").join("Preferences").is_file() {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::ClientNotFound,
-                message: "未检测到豆包工作桌面端配置目录，请先安装并登录一次客户端".into(),
-            });
-        }
+        // 多账号客户端：只认 `Local State` 指向的那个 profile
+        let profile = Self::active_profile_name(&profile_root);
+        let profile_dir = profile_root.join(&profile);
+        let last_user = Self::read_last_user(&profile_dir);
+        let cookie = Self::read_client_cookie_header(&profile_dir).ok();
 
-        let Some((uid, display_name)) = Self::read_last_user(&profile_root) else {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: "豆包工作桌面端尚未登录，请先在客户端登录后再导入".into(),
-            });
+        // 身份来源优先级：`saman.last_user`（客户端自报）→ Cookies 里的 passport 会话。
+        // 客户端登出会清空 last_user，但 Cookie 可能仍然可用（网页登录 / 刚被写入），
+        // 此时直接用 Cookie 打一次 passport 拿真实 uid，比甩一句「尚未登录」有用。
+        let (uid, display_name) = match last_user {
+            Some(pair) => pair,
+            None => match cookie.as_deref() {
+                Some(header) => {
+                    let probe = self.verify_cookie_with_base(header).await.map_err(|e| {
+                        AdapterError::Unified {
+                            code: UnifiedErrorCode::InvalidCredential,
+                            message: format!(
+                                "豆包工作客户端当前没有有效登录态（Preferences 无登录记录，Cookie 校验也失败）：{e}"
+                            ),
+                        }
+                    })?;
+                    (probe.uid, probe.display_name)
+                }
+                None => {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::InvalidCredential,
+                        message: "豆包工作桌面端尚未登录：客户端 Preferences 没有登录记录，\
+                                  Cookies 库里也没有可用会话；请先在客户端登录一次再关联本机"
+                            .into(),
+                    });
+                }
+            },
         };
 
-        let rels = Self::collect_session_relative_paths(&profile_root);
+        let rels = Self::collect_session_relative_paths(&profile_root, &profile);
         let zip_bytes = Self::build_profile_zip(&profile_root, &rels)?;
 
         let mut files = HashMap::new();
         files.insert(SNAPSHOT_ZIP_KEY.to_string(), BASE64.encode(&zip_bytes));
+        files.insert(
+            SNAPSHOT_PROFILE_FILE.to_string(),
+            BASE64.encode(profile.as_bytes()),
+        );
+        // 顺手把在线 Cookie 也固化进快照：关联本机后立刻能查额/签到，
+        // 不必再单独走一次「在线授权」把 Cookie 补上。
+        if let Some(header) = cookie {
+            files.insert(
+                SNAPSHOT_TOKEN_FILE.to_string(),
+                BASE64.encode(header.as_bytes()),
+            );
+        }
 
         Ok(CredentialEnvelope {
             tool_id: "doubaowork".to_string(),
@@ -1625,7 +2030,21 @@ impl ToolAdapter for DoubaoWorkAdapter {
     ) -> Result<QuotaSnapshot, AdapterError> {
         let cookie = Self::extract_cookie(cred)?;
         let summary_data = self.fetch_quota_summary(&cookie, cred).await?;
-        let (plan_name, buckets) = Self::parse_quota_summary(&summary_data);
+        let (mut plan_name, mut buckets) = Self::parse_quota_summary(&summary_data);
+
+        // 降级响应自愈：账号刚导入、试用套餐刚下发时，服务端会先只回百分比
+        // （`used_percent` 恒定 0），落库后就变成「剩余 100%」且再也不变。
+        // 这里只在这种异常形态下多等一拍重取一次（正常响应零额外开销）。
+        if !buckets.is_empty() && buckets.iter().all(|b| b.unit == "%") {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            if let Ok(retry) = self.fetch_quota_summary(&cookie, cred).await {
+                let (retry_plan, retry_buckets) = Self::parse_quota_summary(&retry);
+                if retry_buckets.iter().any(|b| b.unit != "%") {
+                    plan_name = retry_plan;
+                    buckets = retry_buckets;
+                }
+            }
+        }
 
         // 每日签到状态探测：以 campaign v3 detail 的 `daily_checkin` 为权威源，
         // `landing/get` 只作为补充（它只反映卡片投放，不反映已签事实）。
@@ -1688,6 +2107,23 @@ impl ToolAdapter for DoubaoWorkAdapter {
         precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
         let cookie = Self::extract_cookie(cred)?;
+
+        // 签到写接口会核对「设备 + 桌面端当前登录账号」：网页登录导入的其他账号
+        // 即使 landing 投放了签到卡片，写接口也只会稳定返回 710010702 系统错误。
+        // 提前拦截并给出可执行建议，避免批量签到反复撞墙、把工具误熔断。
+        if let Some(host) = self.host.as_deref() {
+            if let Some(active_uid) = self.detect_local_active_uid(host) {
+                if active_uid != cred.uid {
+                    return Ok(ClaimResult {
+                        claimed: false,
+                        reward_summary:
+                            "豆包工作签到绑定桌面端登录账号：请先把该账号「切至桌面端」再领取"
+                                .into(),
+                        updated_quota: None,
+                    });
+                }
+            }
+        }
 
         if let Some(q) = precheck {
             match q.claim_status {
@@ -2013,42 +2449,64 @@ impl ToolAdapter for DoubaoWorkAdapter {
             extracted_files.push((rel_str, buf));
         }
 
-        if !extracted_files
-            .iter()
-            .any(|(rel, _)| rel == "Default/Preferences")
-        {
+        // 快照属于哪个 profile：老快照没有这个文件，按 Default 处理
+        let profile = files
+            .get(SNAPSHOT_PROFILE_FILE)
+            .and_then(|b64| BASE64.decode(b64).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|name| name.trim().to_string())
+            .filter(|name| Self::is_profile_dir_name(name))
+            .unwrap_or_else(|| DEFAULT_PROFILE_NAME.to_string());
+
+        let prefs_rel = format!("{profile}/Preferences");
+        if !extracted_files.iter().any(|(rel, _)| rel == &prefs_rel) {
             return Err(AdapterError::Unified {
                 code: UnifiedErrorCode::InvalidCredential,
-                message: "豆包工作会话快照缺少核心 Preferences 文件，已取消写入".into(),
+                message: format!(
+                    "豆包工作会话快照缺少核心 Preferences 文件（{prefs_rel}），已取消写入"
+                ),
             });
         }
 
         let profile_root = Self::resolve_profile_root(host)?;
-        // 清理旧账号遗留 LevelDB 段与 SQLite WAL 附属日志，避免跨号混用崩溃
-        Self::clean_session_ephemeral_files(&profile_root)?;
+        // 清理目标 profile 遗留的 LevelDB 段与 SQLite WAL 附属日志，避免跨号混用崩溃
+        Self::clean_session_ephemeral_files(&profile_root, &profile)?;
 
         for (rel, bytes) in extracted_files {
             write_private_file_atomic(&profile_root.join(&rel), &bytes)?;
         }
+
+        // 关键一步：把客户端的「当前 profile」指向这份快照，
+        // 否则重启后它仍然打开原来那个账号。
+        Self::set_active_profile(&profile_root, &profile)?;
         Ok(())
     }
 
     async fn backup_session(&self, host: &dyn PlatformHost) -> Result<SessionBackup, AdapterError> {
         let profile_root = Self::resolve_profile_root(host)?;
-        let mut rels = Self::collect_session_relative_paths(&profile_root);
-        for base in [
-            "Default/Preferences",
-            "Default/Cookies",
-            "Default/Network/Cookies",
-            "sdk_storage/common.db",
-        ]
-        .into_iter()
-        .chain(FIXED_SIDECARS.iter().copied())
-        {
-            if !rels.iter().any(|r| r == base) {
-                rels.push(base.to_string());
+        // 回滚必须能复原「切号前那个账号」：多 profile 客户端里它可能在别的目录，
+        // 因此这里备份所有 profile 的会话文件 + Local State（记录 last_used）。
+        let mut rels: Vec<String> = vec!["Local State".to_string()];
+        let mut profiles = Self::list_profile_names(&profile_root);
+        if profiles.is_empty() {
+            profiles.push(Self::active_profile_name(&profile_root));
+        }
+        for profile in &profiles {
+            rels.extend(Self::collect_session_relative_paths(&profile_root, profile));
+            for base in [
+                format!("{profile}/Preferences"),
+                format!("{profile}/Cookies"),
+                format!("{profile}/Network/Cookies"),
+                "sdk_storage/common.db".to_string(),
+            ]
+            .into_iter()
+            .chain(fixed_sidecars(profile))
+            {
+                rels.push(base);
             }
         }
+        rels.sort();
+        rels.dedup();
         let paths: Vec<PathBuf> = rels.into_iter().map(|r| profile_root.join(r)).collect();
         crate::adapter::backup_files(&paths)
     }
@@ -2059,7 +2517,13 @@ impl ToolAdapter for DoubaoWorkAdapter {
         backup: &SessionBackup,
     ) -> Result<(), AdapterError> {
         let profile_root = Self::resolve_profile_root(host)?;
-        Self::clean_session_ephemeral_files(&profile_root)?;
+        let mut profiles = Self::list_profile_names(&profile_root);
+        if profiles.is_empty() {
+            profiles.push(Self::active_profile_name(&profile_root));
+        }
+        for profile in &profiles {
+            Self::clean_session_ephemeral_files(&profile_root, profile)?;
+        }
         crate::adapter::restore_files(backup)
     }
 }
@@ -2236,6 +2700,144 @@ mod tests {
         assert!(normalize_cookie_header("sessionid=abc\r\nEvil: 1").is_err());
     }
 
+    /// 多账号：客户端用 Chromium 多 profile 存两个账号，当前账号由
+    /// `Local State.profile.last_used` 指定。只看 `Default` 会把第二个账号
+    /// 误判成第一个（实测就是这样「关联时报登录的是另一个账号」）。
+    #[tokio::test]
+    async fn multi_profile_client_reports_and_snapshots_active_account() {
+        let root = std::env::temp_dir().join(format!("qwitch_doubao_multi_{}", Uuid::new_v4()));
+        let write_prefs = |dir: &Path, uid: &str, name: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join("Preferences"),
+                serde_json::json!({
+                    "saman": { "last_user": { "user_id": uid, "name": name } }
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        // DummyHost 的 client_config_dir = root/<tool_id>
+        let base = root.join("doubaowork");
+        write_prefs(&base.join("Default"), "111111111111", "账号A");
+        write_prefs(&base.join("Profile 2"), "222222222222", "账号B");
+        // 客户端切到第二个账号
+        std::fs::write(
+            base.join("Local State"),
+            serde_json::json!({
+                "profile": {
+                    "last_used": "Profile 2",
+                    "info_cache": { "Default": {}, "Profile 2": {} }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let host: Arc<dyn PlatformHost> = Arc::new(DummyHost { root: root.clone() });
+        let adapter = DoubaoWorkAdapter::with_host(Arc::clone(&host));
+
+        assert_eq!(
+            adapter.detect_local_active_uid(host.as_ref()).as_deref(),
+            Some("222222222222"),
+            "必须跟随 Local State.profile.last_used，而不是固定 Default"
+        );
+
+        // 导入要带上 profile 归属，切号时才能写回正确的目录 + 更新 last_used
+        let env = adapter
+            .import_from_local(host.as_ref())
+            .await
+            .expect("import");
+        assert_eq!(env.uid, "222222222222");
+        let files = match &env.payload {
+            CredentialPayload::LocalSnapshot { files } => files.clone(),
+            other => panic!("unexpected payload {other:?}"),
+        };
+        let profile_b64 = files
+            .get(SNAPSHOT_PROFILE_FILE)
+            .expect("missing profile marker");
+        let profile = String::from_utf8(BASE64.decode(profile_b64).unwrap()).unwrap();
+        assert_eq!(profile, "Profile 2");
+
+        // 切号写回后 last_used 必须指向快照所属 profile
+        std::fs::write(
+            base.join("Local State"),
+            serde_json::json!({ "profile": { "last_used": "Default" } }).to_string(),
+        )
+        .unwrap();
+        adapter
+            .apply_session(host.as_ref(), &env)
+            .await
+            .expect("apply");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(base.join("Local State")).unwrap()).unwrap();
+        assert_eq!(
+            state.pointer("/profile/last_used").and_then(|v| v.as_str()),
+            Some("Profile 2")
+        );
+        // 其它机器级字段必须原样保留
+        assert_eq!(
+            adapter.detect_local_active_uid(host.as_ref()).as_deref(),
+            Some("222222222222")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 客户端登出后会把 `user_id` / `sec_user_id` 写成空串，不能当成「有登录记录」。
+    #[test]
+    fn read_last_user_treats_empty_uid_as_logged_out() {
+        let root = std::env::temp_dir().join(format!("qwitch_doubao_empty_{}", Uuid::new_v4()));
+        // DummyHost 的 client_config_dir = root/<tool_id>，profile 要放在这一层
+        let profile = root.join("doubaowork");
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        std::fs::write(
+            profile.join("Default/Preferences"),
+            serde_json::json!({
+                "saman": { "last_user": { "user_id": "", "sec_user_id": "", "name": "" } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(DoubaoWorkAdapter::read_last_user(&profile).is_none());
+
+        // 明确登出：校准任务据此清掉「本机使用中」
+        let host: Arc<dyn PlatformHost> = Arc::new(DummyHost { root: root.clone() });
+        let adapter = DoubaoWorkAdapter::with_host(Arc::clone(&host));
+        assert_eq!(adapter.detect_local_logged_out(host.as_ref()), Some(true));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 没有 Preferences（未安装/未启动）→ 无法判断，保持「绝不误清」
+        let empty = std::env::temp_dir().join(format!("qwitch_doubao_nopref_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let host2: Arc<dyn PlatformHost> = Arc::new(DummyHost {
+            root: empty.clone(),
+        });
+        let adapter2 = DoubaoWorkAdapter::with_host(Arc::clone(&host2));
+        assert_eq!(adapter2.detect_local_logged_out(host2.as_ref()), None);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// 客户端 Cookie 是 `v10` 信封 + 32 字节 `SHA256(host_key)` 前缀，读取时必须剥掉。
+    #[test]
+    fn decrypt_client_cookie_strips_host_digest_and_rejects_app_bound() {
+        let host = ".doubao.com";
+        let value = "sessionid-value";
+        let mut plain = Vec::new();
+        plain.extend_from_slice(Sha256::digest(host.as_bytes()).as_slice());
+        plain.extend_from_slice(value.as_bytes());
+        let encrypted =
+            crate::adapter::safe_storage::encrypt_safe_storage(&plain, "pw", "test").unwrap();
+        assert_eq!(
+            DoubaoWorkAdapter::decrypt_client_cookie(host, &encrypted, "pw").as_deref(),
+            Some(value)
+        );
+        // App-Bound（v20）无法在本进程解密，必须显式跳过而不是当作明文
+        assert!(DoubaoWorkAdapter::decrypt_client_cookie(host, b"v20abcdef", "pw").is_none());
+        // 口令不匹配：返回 None，不 panic
+        assert!(DoubaoWorkAdapter::decrypt_client_cookie(host, &encrypted, "wrong").is_none());
+    }
+
     #[test]
     fn read_last_user_prefers_user_id_str_and_zero_total_falls_back_to_percent() {
         let root = std::env::temp_dir().join(format!("qwitch_doubao_uidstr_{}", Uuid::new_v4()));
@@ -2255,7 +2857,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let (uid, name) = DoubaoWorkAdapter::read_last_user(&root).unwrap();
+        let (uid, name) = DoubaoWorkAdapter::read_last_user(&root.join("Default")).unwrap();
         assert_eq!(uid, "9007199254740993123");
         assert_eq!(name.as_deref(), Some("测试用户"));
         let _ = std::fs::remove_dir_all(&root);
@@ -2277,6 +2879,155 @@ mod tests {
         assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0].unit, "%");
         assert_eq!(buckets[0].remaining, 65.0);
+    }
+
+    /// 线上真实响应：`total_amount` / `used_amount` 是带千分位的**字符串**。
+    /// 旧实现 `str::parse::<f64>()` 失败后掉进「百分比兜底」，把 2,323 额度报成 100%。
+    #[test]
+    fn parse_quota_summary_reads_thousand_separated_amount_strings() {
+        let data = serde_json::json!({
+            "quota_remaining_amount": "2,323",
+            "quota_blance_usage": [
+                { "category": 1, "title": "套餐", "total_amount": "2,142", "used_amount": "19" },
+                { "category": 3, "title": "赠送", "total_amount": "200", "used_amount": "0" }
+            ],
+            "current_subscription": {
+                "display": { "product_name": "个人订阅", "short_name": "免费体验" },
+                "sku_key": "doubao_personal_exp_work",
+                "status": 3,
+                "is_gift": true
+            },
+            "member_info": { "hasActiveSubscription": false },
+            "window_limit_section": {
+                "window_limit_groups": [{
+                    "feature_group_name": "monthly_quota",
+                    "window_limits": [{
+                        "window_type": 4,
+                        "total_amount": "2,142",
+                        "used_amount": "19",
+                        "used_percent": 0,
+                        "less_than_one_percent": true,
+                        "end_time": 1797869570235i64
+                    }]
+                }]
+            },
+            "incentive_quota_section": {
+                "window_limit_groups": [{
+                    "feature_group_name": "活动赠送额度",
+                    "window_limits": [{
+                        "window_type": 3,
+                        "total_amount": "200",
+                        "used_amount": "0",
+                        "end_time": 1798263517817i64
+                    }]
+                }]
+            }
+        });
+
+        let (plan_name, buckets) = DoubaoWorkAdapter::parse_quota_summary(&data);
+        // 服务端展示名优先，不能被 status=3 误判成「专业版」
+        assert_eq!(plan_name, "免费体验");
+        assert_eq!(buckets.len(), 2);
+
+        // 主桶必须是绝对额度，不能是 % 兜底
+        assert_eq!(buckets[0].unit, "额度");
+        assert_eq!(buckets[0].total, 2142.0);
+        assert_eq!(buckets[0].used, 19.0);
+        assert_eq!(buckets[0].remaining, 2123.0);
+        assert!(buckets[0].reset_at.is_some());
+
+        assert_eq!(buckets[1].total, 200.0);
+        assert_eq!(buckets[1].remaining, 200.0);
+    }
+
+    /// 只有赠送额度、两个 window section 全空时，用 `quota_blance_usage` 兜底拆桶，
+    /// 而不是吐出一个 total=100 的假百分比桶。
+    #[test]
+    fn parse_quota_summary_falls_back_to_balance_usage_when_sections_absent() {
+        let data = serde_json::json!({
+            "quota_remaining_amount": "400",
+            "quota_blance_usage": [
+                { "category": 3, "title": "赠送", "total_amount": "400", "used_amount": "0" }
+            ],
+            "current_subscription": { "display": { "short_name": "免费体验" } },
+            "member_info": {},
+            "window_limit_section": {},
+            "incentive_quota_section": {}
+        });
+
+        let (plan_name, buckets) = DoubaoWorkAdapter::parse_quota_summary(&data);
+        assert_eq!(plan_name, "免费体验");
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].key, "balance_usage_0");
+        assert_eq!(buckets[0].label, "赠送");
+        assert_eq!(buckets[0].unit, "额度");
+        assert_eq!(buckets[0].total, 400.0);
+        assert_eq!(buckets[0].remaining, 400.0);
+    }
+
+    /// 窗口段只回百分比时，顶层 `quota_blance_usage` 的绝对额度必须能补进来，
+    /// 否则 UI 会把「剩余 100%」当成真实水位（实测套餐开通瞬间就是这种响应）。
+    #[test]
+    fn parse_quota_summary_merges_balance_usage_when_window_is_percent_only() {
+        let data = serde_json::json!({
+            "quota_blance_usage": [
+                { "category": 1, "title": "套餐", "total_amount": "2,142", "used_amount": "19" }
+            ],
+            "window_limit_section": {
+                "usage_exhausted": false,
+                "window_limit_groups": [{
+                    "feature_group_name": "",
+                    "window_limits": [{
+                        "window_type": 4,
+                        "used_percent": 0,
+                        "less_than_one_percent": true,
+                        "end_time": 1797869570235i64
+                    }]
+                }]
+            },
+            "incentive_quota_section": {},
+            "current_subscription": { "display": { "short_name": "免费体验" } },
+            "member_info": {}
+        });
+
+        let (_, buckets) = DoubaoWorkAdapter::parse_quota_summary(&data);
+        let absolute = buckets
+            .iter()
+            .find(|b| b.unit == "额度")
+            .expect("必须补出绝对额度桶");
+        assert_eq!(absolute.total, 2142.0);
+        assert_eq!(absolute.remaining, 2123.0);
+        assert!(absolute.has_total);
+        // 绝对额度桶要占主读数位；百分比桶降级为附注且不参与进度条
+        assert_eq!(buckets[0].unit, "额度");
+        let percent = buckets
+            .iter()
+            .find(|b| b.unit == "%")
+            .expect("百分比桶保留");
+        assert!(!percent.has_total);
+    }
+
+    #[test]
+    fn opt_amount_field_handles_thousand_separators_and_junk() {
+        assert_eq!(
+            super::opt_amount_field(Some(&serde_json::json!("2,142"))),
+            Some(2142.0)
+        );
+        assert_eq!(
+            super::opt_amount_field(Some(&serde_json::json!("1,234.50"))),
+            Some(1234.5)
+        );
+        assert_eq!(
+            super::opt_amount_field(Some(&serde_json::json!("2，142"))),
+            Some(2142.0)
+        );
+        assert_eq!(
+            super::opt_amount_field(Some(&serde_json::json!(300))),
+            Some(300.0)
+        );
+        assert_eq!(super::opt_amount_field(Some(&serde_json::json!(""))), None);
+        assert_eq!(super::opt_amount_field(Some(&serde_json::json!("—"))), None);
+        assert_eq!(super::opt_amount_field(None), None);
     }
 
     #[tokio::test]

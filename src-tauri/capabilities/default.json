@@ -48,7 +48,6 @@
     "allow-export-action-logs",
     "allow-get-pool-workspace-state",
     "allow-detect-agent-running-cmd",
-    "allow-set-account-manual-models-cmd",
     "allow-apply-account-preset-models-cmd",
     "allow-refresh-upstream-models-cmd",
     "allow-ensure-upstream-models-cmd",

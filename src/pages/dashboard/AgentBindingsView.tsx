@@ -13,7 +13,6 @@ import {
   FileCode2,
   Flame,
   Layers,
-  PencilLine,
   RefreshCw,
   RotateCcw,
   Search,
@@ -43,9 +42,9 @@ import type { AgentBinding, PoolStrategy, TargetAgentId } from "../../types/pool
 import { AgentBrandIcon } from "../../components/AgentBrandIcon";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
+import { OverflowMenu } from "../../components/ui/OverflowMenu";
 import { GatewayPortModal } from "../../components/gateway/GatewayPortModal";
 import { ConfigDiffModal, type DiffActionKind } from "../../components/pool/ConfigDiffModal";
-import { ManualModelModal } from "../../components/pool/ManualModelModal";
 import {
   gatewayUnsupportedReason,
   isToolGatewayRoutable,
@@ -177,7 +176,6 @@ export function AgentBindingsView({
     injectMemberCooldown,
     clearMemberCooldown,
     authorizeCodeArtsIsolated,
-    setAccountManualModels,
     applyAccountPresetModels,
     getAgentToolModelOptions,
     getAgentToolEnabledModelIds,
@@ -196,6 +194,11 @@ export function AgentBindingsView({
     sortAgentToolAccountsByQuota,
     updateAgentToolRoutingOptions,
     syncToolScheduleToAllAgents,
+    copyAgentToolModelPlan,
+    syncAgentToolModelPlanToAllAgents,
+    getAgentConfiguredToolIds,
+    copyAgentAllToolModelPlans,
+    syncAllToolModelPlansToAllAgents,
   } = usePoolPrototype();
 
   const isTauriRuntime =
@@ -224,7 +227,6 @@ export function AgentBindingsView({
     agentId?: TargetAgentId;
   } | null>(null);
   const [portModalOpen, setPortModalOpen] = useState(false);
-  const [manualModelModalOpen, setManualModelModalOpen] = useState(false);
 
   useEffect(() => {
     if (highlightAgentId) {
@@ -313,6 +315,47 @@ export function AgentBindingsView({
     () => new Set(enabledBareModelIds),
     [enabledBareModelIds]
   );
+
+  // 可作为「方案来源」的其他 Agent：同一工具下已经勾过模型，才有复制价值
+  const modelPlanCopySources = useMemo(() => {
+    if (!activeBinding) return [];
+    return agentBindings
+      .filter((b) => b.agentId !== activeBinding.agentId)
+      .map((b) => ({
+        agentId: b.agentId,
+        name: b.name,
+        modelCount: getAgentToolEnabledModelIds(b.agentId, activeToolId).length,
+        toolCount: getAgentConfiguredToolIds(b.agentId).length,
+      }))
+      .filter((s) => s.modelCount > 0)
+      .sort((a, b) => b.modelCount - a.modelCount);
+  }, [
+    activeBinding,
+    activeToolId,
+    agentBindings,
+    getAgentConfiguredToolIds,
+    getAgentToolEnabledModelIds,
+  ]);
+
+  // 当前 Agent 已经配过模型的订阅工具（决定「全部订阅」批量同步的范围）
+  const configuredToolIds = useMemo(
+    () => (activeBinding ? getAgentConfiguredToolIds(activeBinding.agentId) : []),
+    [activeBinding, getAgentConfiguredToolIds]
+  );
+
+  // 全局范围（跨订阅）的「方案来源」：不依赖当前选中的是哪个订阅
+  const modelPlanGlobalSources = useMemo(() => {
+    if (!activeBinding) return [];
+    return agentBindings
+      .filter((b) => b.agentId !== activeBinding.agentId)
+      .map((b) => ({
+        agentId: b.agentId,
+        name: b.name,
+        toolCount: getAgentConfiguredToolIds(b.agentId).length,
+      }))
+      .filter((s) => s.toolCount > 0)
+      .sort((a, b) => b.toolCount - a.toolCount);
+  }, [activeBinding, agentBindings, getAgentConfiguredToolIds]);
 
   const filteredToolModels = useMemo(() => {
     const q = modelSearch.trim().toLowerCase();
@@ -469,7 +512,6 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
       };
     }
     if (sources.has("preset")) return { label: "内置预设", tone: "info" as const };
-    if (sources.has("manual")) return { label: "手工维护", tone: "info" as const };
     if (sources.has("cache")) return { label: "本机缓存目录", tone: "info" as const };
     return { label: "未探测（静态兜底）", tone: "warn" as const };
   })();
@@ -498,9 +540,39 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
             <Layers className="h-3.5 w-3.5 text-brand-600 dark:text-brand-400" aria-hidden="true" />
             <span>订阅工具（按工具独立计费与限流）</span>
           </div>
-          <span className="text-[11px] text-zinc-400">
-            切换不同工具配置开放模型与主备顺位
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="hidden text-[11px] text-zinc-400 @lg:inline">
+              切换不同工具配置开放模型与主备顺位
+            </span>
+            {subTab === "models" && (() => {
+              const globalItems = [
+                ...(configuredToolIds.length > 1
+                  ? [
+                      {
+                        label: `同步全部 ${configuredToolIds.length} 个订阅到其余 Agent`,
+                        icon: CopyCheck,
+                        onSelect: () =>
+                          syncAllToolModelPlansToAllAgents(activeBinding.agentId),
+                      },
+                    ]
+                  : []),
+                ...modelPlanGlobalSources.map((source) => ({
+                  label: `从 ${source.name} 复制全部 ${source.toolCount} 个订阅`,
+                  icon: Copy,
+                  onSelect: () =>
+                    copyAgentAllToolModelPlans(source.agentId, activeBinding.agentId),
+                })),
+              ];
+              if (globalItems.length === 0) return null;
+              return (
+                <OverflowMenu
+                  display="text"
+                  label="全部订阅方案"
+                  items={globalItems}
+                />
+              );
+            })()}
+          </div>
         </div>
 
         <div
@@ -1039,7 +1111,7 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
                           }`}
                           title={
                             modelSourceBadge.tone === "warn"
-                              ? "该工具没有可用的探测接口，当前列表来自静态兜底表，可能与真实可用模型不一致；请点「手工维护」填写"
+                              ? "该工具没有可用的探测接口，当前列表来自静态兜底表，可能与真实可用模型不一致；可点「刷新真实模型」或「套用推荐目录」"
                               : undefined
                           }
                         >
@@ -1057,6 +1129,34 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
                     </div>
 
                     <div className="flex shrink-0 items-center gap-1.5">
+                      {modelPlanCopySources.length > 0 && (
+                        <OverflowMenu
+                          display="text"
+                          label="复制本订阅"
+                          items={modelPlanCopySources.map((source) => ({
+                            label: `${source.name}（${source.modelCount} 个模型）`,
+                            icon: Copy,
+                            onSelect: () =>
+                              copyAgentToolModelPlan(
+                                source.agentId,
+                                activeBinding.agentId,
+                                activeToolId
+                              ),
+                          }))}
+                        />
+                      )}
+                      <button
+                        type="button"
+                        disabled={scopeNotSelectable || enabledBareModelIds.length === 0}
+                        onClick={() =>
+                          syncAgentToolModelPlanToAllAgents(activeBinding.agentId, activeToolId)
+                        }
+                        className="btn btn-xs btn-secondary gap-1 disabled:opacity-45"
+                        title="把当前订阅的模型与默认模型写入其余所有 Agent；跨订阅请用上方「全部订阅方案」"
+                      >
+                        <CopyCheck className="h-3 w-3 text-brand-500" aria-hidden="true" />
+                        同步本订阅
+                      </button>
                       {presetAvailable &&
                         modelSourceBadge.tone === "warn" &&
                         toolAccountsForScope[0] && (
@@ -1072,15 +1172,6 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
                             套用推荐目录
                           </button>
                         )}
-                      <button
-                        type="button"
-                        onClick={() => setManualModelModalOpen(true)}
-                        className="btn btn-xs btn-secondary gap-1"
-                        title="该工具没有可靠的自动探测时，按账号手工填写真实模型 ID"
-                      >
-                        <PencilLine className="h-3 w-3" aria-hidden="true" />
-                        手工维护
-                      </button>
                       <button
                         type="button"
                         disabled={isRefreshingModels}
@@ -1241,7 +1332,7 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
                             {activeToolName} 暂无模型目录：该工具没有可用的自动探测接口
                           </span>
                           <span className="text-[11px] text-zinc-400">
-                            请按客户端里真实可选的模型手工填写，避免展示猜测值
+                            可先点「刷新真实模型」读取上游目录；仍为空时用「套用推荐目录」按真实账号核对后的内置清单
                           </span>
                           <div className="flex flex-wrap items-center justify-center gap-1.5">
                             {presetAvailable && toolAccountsForScope[0] && (
@@ -1256,14 +1347,6 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
                                 套用推荐目录
                               </button>
                             )}
-                            <button
-                              type="button"
-                              onClick={() => setManualModelModalOpen(true)}
-                              className="btn btn-xs btn-secondary gap-1"
-                            >
-                              <PencilLine className="h-3 w-3" aria-hidden="true" />
-                              手工维护模型目录
-                            </button>
                           </div>
                         </div>
                       ) : (
@@ -1973,15 +2056,6 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
 
       <GatewayPortModal open={portModalOpen} onClose={() => setPortModalOpen(false)} />
 
-      <ManualModelModal
-        open={manualModelModalOpen}
-        onClose={() => setManualModelModalOpen(false)}
-        toolName={activeToolName}
-        candidates={candidates.filter((c) => c.toolId === activeToolId)}
-        onSave={(accountId, modelIds) => setAccountManualModels(accountId, modelIds)}
-        onApplyPreset={(accountId) => applyAccountPresetModels(accountId)}
-        presetAvailable={presetAvailable}
-      />
     </div>
   );
 }

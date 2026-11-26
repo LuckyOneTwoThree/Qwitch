@@ -15,7 +15,7 @@ use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use md5::{Digest as Md5Digest, Md5};
 use rsa::pkcs8::DecodePublicKey;
-use rsa::{Pkcs1v15Encrypt, RsaPublicKey};
+use rsa::PublicKey;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -113,13 +113,13 @@ pub fn decode_body(wire: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-static CACHED_RSA_PUBKEY: std::sync::OnceLock<Result<RsaPublicKey, String>> =
+static CACHED_RSA_PUBKEY: std::sync::OnceLock<Result<PublicKey, String>> =
     std::sync::OnceLock::new();
 
-fn qoder_rsa_pubkey() -> Result<&'static RsaPublicKey, String> {
+fn qoder_rsa_pubkey() -> Result<&'static PublicKey, String> {
     CACHED_RSA_PUBKEY
         .get_or_init(|| {
-            RsaPublicKey::from_public_key_pem(QODER_RSA_PUBLIC_KEY)
+            PublicKey::from_public_key_pem(QODER_RSA_PUBLIC_KEY)
                 .map_err(|e| format!("解析 Qoder RSA 公钥失败: {e}"))
         })
         .as_ref()
@@ -150,9 +150,8 @@ fn user_blob(uid: &str, name: &str, email: &str, access: &str) -> Result<(String
     let info = BASE64.encode(ciphertext);
 
     let pubkey = qoder_rsa_pubkey()?;
-    let mut rng = rand::thread_rng();
     let wrapped = pubkey
-        .encrypt(&mut rng, Pkcs1v15Encrypt, &key)
+        .pkcs1v15_encrypt(&key)
         .map_err(|e| format!("RSA 包裹 AES 密钥失败: {e}"))?;
     Ok((info, BASE64.encode(wrapped)))
 }

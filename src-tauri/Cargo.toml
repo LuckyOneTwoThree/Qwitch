@@ -43,7 +43,7 @@ base64 = "0.22"
 rfd = "0.15"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 md-5 = "0.11.0"
-rsa = "0.9"
+rsa = { version = "0.10", features = ["pkcs1v15"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

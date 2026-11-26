@@ -570,6 +570,15 @@ fn is_auth_expired_response(code: u16, body: &str) -> bool {
         || lower.contains("incorrect iam authentication")
 }
 
+/// 判定一次上游响应是否为「限流 / 并发会话数上限」——可短暂冷却并尝试 Failover 下一账号。
+fn is_concurrency_limit_response(code: u16, body: &str) -> bool {
+    if code == 429 {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("tm.00001041") || body.contains("并发会话数已达上限")
+}
+
 /// 从上游错误体里提炼一段人类可读的凭据失效原因（尽量含 error_code/error_msg）。
 fn auth_expired_reason(tool_id: &str, body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
@@ -4166,11 +4175,17 @@ async fn handle_http_connection(
                     Ok(resp) => {
                         let code = resp.status().as_u16();
                         let body_txt = resp.text().await.unwrap_or_default();
-                        if code == 429 {
+                        if is_concurrency_limit_response(code, &body_txt) {
+                            let is_session_cap = code != 429;
+                            let cool_sec = if is_session_cap {
+                                pool.cooldown_seconds.min(15)
+                            } else {
+                                pool.cooldown_seconds
+                            };
                             runtime.set_member_cooldown(
                                 &cand.account_id,
                                 chrono::Utc::now().timestamp_millis()
-                                    + (pool.cooldown_seconds as i64) * 1000,
+                                    + (cool_sec as i64) * 1000,
                             );
                             attempts.push(RoutingAttempt {
                                 account_label: cand.label.clone(),
@@ -4179,10 +4194,13 @@ async fn handle_http_connection(
                                 tier: Some(cand.tier),
                                 outcome: RoutingAttemptOutcome::Cooldown429,
                                 latency_ms: t_hop.elapsed().as_millis() as u64,
-                                detail: format!(
-                                    "HTTP 429 限流，置入 {}s 冷却并切换下一账号",
-                                    pool.cooldown_seconds
-                                ),
+                                detail: if is_session_cap {
+                                    format!("并发会话数已达上限(3个)，请关闭码道桌面端或其它并发会话后重试（冷却 {cool_sec}s）")
+                                } else {
+                                    format!(
+                                        "HTTP 429 限流，置入 {cool_sec}s 冷却并切换下一账号"
+                                    )
+                                },
                             });
                             break;
                         } else if is_auth_expired_response(code, &body_txt) {
@@ -4334,10 +4352,16 @@ async fn handle_http_connection(
                 final_ir_resp = Some((ir_resp, cand.clone()));
                 break;
             }
-            Ok((429, _)) => {
+            Ok((code, err_body)) if is_concurrency_limit_response(code, &err_body) => {
+                let is_session_cap = code != 429;
+                let cool_sec = if is_session_cap {
+                    pool.cooldown_seconds.min(15)
+                } else {
+                    pool.cooldown_seconds
+                };
                 runtime.set_member_cooldown(
                     &cand.account_id,
-                    chrono::Utc::now().timestamp_millis() + (pool.cooldown_seconds as i64) * 1000,
+                    chrono::Utc::now().timestamp_millis() + (cool_sec as i64) * 1000,
                 );
                 attempts.push(RoutingAttempt {
                     account_label: cand.label.clone(),
@@ -4346,10 +4370,13 @@ async fn handle_http_connection(
                     tier: Some(cand.tier),
                     outcome: RoutingAttemptOutcome::Cooldown429,
                     latency_ms: t_hop.elapsed().as_millis() as u64,
-                    detail: format!(
-                        "HTTP 429 限流，置入 {}s 冷却并切换下一账号",
-                        pool.cooldown_seconds
-                    ),
+                    detail: if is_session_cap {
+                        format!("并发会话数已达上限(3个)，请关闭码道桌面端或其它并发会话后重试（冷却 {cool_sec}s）")
+                    } else {
+                        format!(
+                            "HTTP 429 限流，置入 {cool_sec}s 冷却并切换下一账号"
+                        )
+                    },
                 });
             }
             Ok((code, err_body)) if is_auth_expired_response(code, &err_body) => {
@@ -4432,8 +4459,15 @@ async fn handle_http_connection(
         if !auth_expired_hits.is_empty() {
             let first_label = &auth_expired_hits[0].0;
             let first_reason = &auth_expired_hits[0].1;
+            let summary = format!(
+                "凭据失效（{first_label}）：{first_reason}，请重新登录或导入该账号"
+            );
             let payload = serde_json::json!({
-                "error": "凭据失效：上游账号凭据已过期或不存在，且无可用备号接管，需重新登录/导入",
+                "error": {
+                    "message": summary,
+                    "type": "auth_expired",
+                },
+                "message": summary,
                 "error_type": "auth_expired",
                 "account": first_label,
                 "reason": first_reason,
@@ -4450,11 +4484,16 @@ async fn handle_http_connection(
             .await;
         }
         // 抽一条最具体的失败明细，让客户端直接看到真实原因。
+        let summary = format!("全部候选账号均失败：{first_detail}");
         let payload = serde_json::json!({
-            "error": "全部候选账号均失败",
+            "error": {
+                "message": summary,
+                "type": "all_candidates_failed",
+            },
+            "message": summary,
             "error_type": "all_candidates_failed",
             "detail": first_detail,
-            "hint": "常见原因：该工具的上游不是标准 OpenAI/Anthropic 端点（如 Trae 走 /api/agent/v3/llm_utils_chat、Qoder 走 COSY 私有协议），或端点/模型映射错误。",
+            "hint": "常见原因：上游账号限流/并发会话数已满、凭据过期，或模型映射不匹配。",
         })
         .to_string();
         return write_http_response(
@@ -5943,6 +5982,14 @@ mod tests {
         assert!(is_auth_expired_response(
             400,
             r#"{"error_msg":"Bad request: the security token has expired","error_code":"APIG.0602","request_id":"abc"}"#,
+        ));
+    }
+
+    #[test]
+    fn is_concurrency_limit_response_recognizes_codearts_tm_00001041() {
+        assert!(is_concurrency_limit_response(
+            400,
+            r#"{"error_code":"TM.00001041","error_msg":"并发会话数已达上限(3个)，请关闭部分会话后重试。"}"#,
         ));
     }
 }

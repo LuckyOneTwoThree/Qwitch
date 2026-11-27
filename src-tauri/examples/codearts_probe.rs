@@ -1,7 +1,8 @@
-//! CodeArts 适配器真机调试：从本机 secretStorage 导入凭据并查询额度。
+//! CodeArts 适配器真机调试：从本机 secretStorage 导入凭据，查询额度并真实领取每日签到。
 //!
 //! ```bash
-//! cargo run --example codearts_probe -- --read-only
+//! cargo run --example codearts_probe
+//! # STS 误标过期排查时可加 CODEARTS_PROBE_IGNORE_EXPIRY=1 让服务端判定
 //! ```
 
 use std::sync::Arc;
@@ -85,7 +86,7 @@ async fn main() {
         Err(e) => eprintln!("  查询失败: {e}"),
     }
 
-    println!("\n=== claim_daily（应无网络请求）===");
+    println!("\n=== claim_daily（/v1/ops/delivery→claim→confirm 真领）===");
     match adapter.claim_daily(&cred, None).await {
         Ok(r) => println!("  claimed={} summary={}", r.claimed, r.reward_summary),
         Err(e) => eprintln!("  失败: {e}"),

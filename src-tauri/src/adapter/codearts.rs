@@ -5,8 +5,9 @@
 //! 早期版本本模块记载「全文检索 `每日`/`签到`/`打卡`/`daily` 均 0 命中」，
 //! 该结论**已过时/错误**。当前 CodeArts 客户端（`活动福利` 面板）真实存在：
 //!
-//! * 每日签到领 {n} 积分（`type=daily_claim`，按钮「每日领取」）——**这就是每日签到**；
-//! * 学生认证领积分（`type=student_certify`，每月 5000，有效期至 2026-12-31）；
+//! * 每日签到领 {n} 积分（真机 `type=USER_LOGIN` / `triggerEvent=user.login`，
+//!   早期 asar 误读为 `daily_claim`；按钮「每日领取」）——**这就是每日签到**；
+//! * 学生认证领积分（`type=STUDENT_CERTIFIED`，每月 5000，有效期至 2026-12-31）；
 //! * 邀请好友得积分（`type=invite`）。
 //!
 //! ### 真实数据面（`BenefitService`，全部走华为云 SDK-HMAC-SHA256 签名，签名算法与本适配器
@@ -258,7 +259,7 @@ impl CodeArtsAdapter {
                         AuthMethod::TokenPaste,
                     ],
                     supports_quota_query: true,
-                    // CodeArts「活动福利」确有每日签到（type=daily_claim），走 /v1/ops/* 纯服务端接口
+                    // CodeArts「活动福利」确有每日签到（真机 type=USER_LOGIN），走 /v1/ops/* 纯服务端接口
                     supports_daily_claim: true,
                     // 切号 = safeStorage 重加密写回，仅 macOS 可复现（Windows 走 DPAPI）
                     supports_client_switch: cfg!(target_os = "macos"),
@@ -675,9 +676,16 @@ impl CodeArtsAdapter {
         let status = resp.status();
         if !status.is_success() {
             if status.as_u16() == 401 {
+                let body = if std::env::var("CODEARTS_PROBE_DUMP_401").as_deref() == Ok("1") {
+                    resp.text().await.unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 return Err(AdapterError::Unified {
                     code: UnifiedErrorCode::AuthExpired,
-                    message: format!("{context}: 华为云签名校验失败 (HTTP 401)，凭据可能已过期"),
+                    message: format!(
+                        "{context}: 华为云签名校验失败 (HTTP 401)，凭据可能已过期 {body}"
+                    ),
                 });
             }
             return Err(map_http_status(status, context));
@@ -710,6 +718,12 @@ impl CodeArtsAdapter {
         let delivery = self
             .signed_get(&url, creds, &headers, "查询码道活动福利")
             .await?;
+        if std::env::var("CODEARTS_PROBE_DUMP_DELIVERY").as_deref() == Ok("1") {
+            eprintln!(
+                "[dump] delivery raw = {}",
+                serde_json::to_string_pretty(&delivery).unwrap_or_default()
+            );
+        }
         let items = delivery
             .get("data")
             .and_then(|d| d.get("items"))
@@ -807,6 +821,11 @@ impl CodeArtsAdapter {
     /// 把对方的 token 作废，结果是用户被迫重新登录——代价远大于「点一下打开客户端」。
     /// 官方客户端在剩余 1 小时时就会自行刷新，因此这里只做检测与引导。
     fn ensure_not_expired(cred: &CredentialEnvelope) -> Result<(), AdapterError> {
+        // 真机调试旁路：设置 CODEARTS_PROBE_IGNORE_EXPIRY=1 时跳过本地过期拦截，
+        // 直接让服务端判定 STS 是否仍有效（用于验证领取链路/排查误标过期）。
+        if std::env::var("CODEARTS_PROBE_IGNORE_EXPIRY").as_deref() == Ok("1") {
+            return Ok(());
+        }
         let CredentialPayload::Token { expires_at, .. } = &cred.payload else {
             // 非 Token 形态不在此处拦截，交给后续流程处理
             return Ok(());
@@ -1388,6 +1407,23 @@ fn activity_type(item: &Value) -> String {
         .to_ascii_lowercase()
 }
 
+/// 是否为「每日签到」活动。
+///
+/// 真机 delivery 实测：每日签到活动的 `type == "USER_LOGIN"`（触发事件
+/// `extra.triggerEvent == "user.login"`），如「每日签到领100积分」。历史/其它
+/// 区域也可能用 `daily_claim`。这里两者都认，并以 triggerEvent 兜底。
+fn is_daily_checkin(item: &Value) -> bool {
+    let ty = activity_type(item);
+    if ty == "user_login" || ty == "daily_claim" || ty == "daily_signin" {
+        return true;
+    }
+    item.get("extra")
+        .and_then(|e| e.get("triggerEvent"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("user.login"))
+        .unwrap_or(false)
+}
+
 /// 活动是否已领：`claimed==true` 或 `status ∈ {CLAIMED,CONFIRMED,CONSUMED}`。
 fn activity_claimed(item: &Value) -> bool {
     if matches!(item.get("claimed").and_then(|v| v.as_bool()), Some(true)) {
@@ -1404,10 +1440,23 @@ fn activity_claimed(item: &Value) -> bool {
 
 /// 取活动的 campaignId（客户端用 `campaignId` 或 `campaign_id`）。
 fn activity_campaign_id(item: &Value) -> String {
-    non_empty(item, "campaignId")
-        .or_else(|| non_empty(item, "campaign_id"))
-        .or_else(|| non_empty(item, "id"))
-        .unwrap_or_default()
+    // campaignId 真机为数字（如 34），也兼容字符串形态。
+    for key in ["campaignId", "campaign_id", "id"] {
+        if let Some(v) = item.get(key) {
+            if let Some(s) = v.as_str() {
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+            if let Some(n) = v.as_i64() {
+                return n.to_string();
+            }
+            if let Some(n) = v.as_u64() {
+                return n.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 /// 从领取响应里提取 `userBenefitId`（客户端取 `data.id ?? data.userBenefitId`）。
@@ -1567,14 +1616,11 @@ impl ToolAdapter for CodeArtsAdapter {
             "免费"
         };
         // 从活动列表推断每日签到状态，供调度器决定是否领取：
-        //   有未领的 daily_claim → Available；有但已领 → Claimed；无该活动 → Unsupported。
+        //   有未领的每日签到 → Available；有但已领 → Claimed；无该活动 → Unsupported。
         // 活动接口失败不应拖垮额度查询：降级为 Unknown（调度器会跳过，防误发请求）。
         let claim_status = match self.fetch_delivery_items(&creds).await {
             Ok(items) => {
-                let daily: Vec<&Value> = items
-                    .iter()
-                    .filter(|it| activity_type(it) == "daily_claim")
-                    .collect();
+                let daily: Vec<&Value> = items.iter().filter(|it| is_daily_checkin(it)).collect();
                 if daily.is_empty() {
                     ClaimStatus::Unsupported
                 } else if daily.iter().any(|it| {
@@ -1601,7 +1647,8 @@ impl ToolAdapter for CodeArtsAdapter {
         cred: &CredentialEnvelope,
         _precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
-        // 码道「活动福利」体系确有每日签到（type=daily_claim），走纯服务端接口：
+        // 码道「活动福利」体系确有每日签到（真机 type=USER_LOGIN / triggerEvent=user.login），
+        // 走纯服务端接口：
         //   GET  {policyCenterDomain}/v1/ops/delivery?channel=DESKTOP      // 拉活动列表
         //   POST {policyCenterDomain}/v1/ops/claim   {campaignId,idempotentKey,channel}  // 领取
         //   POST {policyCenterDomain}/v1/ops/confirm {userBenefitId}       // 领取后确认
@@ -1616,15 +1663,14 @@ impl ToolAdapter for CodeArtsAdapter {
 
         // 2) 找未领取的每日签到活动
         let daily = items.iter().find(|it| {
-            let ty = activity_type(it);
-            ty == "daily_claim"
+            is_daily_checkin(it)
                 && !activity_claimed(it)
                 && !matches!(it.get("claimable").and_then(|v| v.as_bool()), Some(false))
         });
 
         let Some(activity) = daily else {
             // 没有可领的每日签到：可能今日已领，或该账号无此活动
-            let any_daily = items.iter().any(|it| activity_type(it) == "daily_claim");
+            let any_daily = items.iter().any(is_daily_checkin);
             let msg = if any_daily {
                 "码道每日签到：今日已领取"
             } else {
@@ -2090,6 +2136,59 @@ mod tests {
         assert!(claim_req.headers.get("authorization").is_some());
         assert_eq!(claim_req.headers.get("x-security-token").unwrap(), "STS");
         assert_eq!(claim_req.headers.get("agent-type").unwrap(), "PromptCenter");
+    }
+
+    #[tokio::test]
+    async fn claim_daily_claims_user_login_campaign_with_numeric_id() {
+        // 真机 delivery 实测结构：每日签到 type=USER_LOGIN、campaignId 为数字、
+        // status=ELIGIBLE、claimable=true、extra.triggerEvent=user.login。
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v1/ops/delivery"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "channel": "DESKTOP", "items": [
+                    { "campaignId": 39, "type": "STUDENT_CERTIFIED",
+                      "status": null, "claimable": false, "benefitAmount": 5000,
+                      "extra": { "triggerEvent": "student.certified" } },
+                    { "campaignId": 34, "type": "USER_LOGIN",
+                      "status": "ELIGIBLE", "claimable": true, "benefitAmount": 100,
+                      "pendingCount": 1, "title": "每日签到领100积分",
+                      "extra": { "triggerEvent": "user.login" } }
+                ]}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/ops/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "userBenefitId": "ub_34" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/ops/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": {} })))
+            .mount(&server)
+            .await;
+
+        let res = adapter
+            .claim_daily(&cred_with("AK", "SK", "STS"), None)
+            .await
+            .expect("claim ok");
+        assert!(res.claimed);
+        assert!(res.reward_summary.contains("100"), "{}", res.reward_summary);
+
+        // claim 请求体应带数字 campaignId 的字符串化 "34"
+        let reqs = server.received_requests().await.unwrap();
+        let claim_req = reqs
+            .iter()
+            .find(|r| r.url.path() == "/v1/ops/claim")
+            .expect("claim called");
+        let body: Value = serde_json::from_slice(claim_req.body.as_ref()).unwrap();
+        assert_eq!(body.get("campaignId").and_then(|v| v.as_str()), Some("34"));
+        assert_eq!(body.get("channel").and_then(|v| v.as_str()), Some("DESKTOP"));
     }
 
     #[tokio::test]

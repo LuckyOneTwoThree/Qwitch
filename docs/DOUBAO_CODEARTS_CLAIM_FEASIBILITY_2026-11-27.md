@@ -5,6 +5,19 @@
 > - **豆包**：服务端签到写接口把「设备 + 桌面端当前登录账号」绑死。所谓「一键」在工程上必然等于「逐个冷切号 → 立即领取 → 下一个」，本质是 `switch_desktop_account` 的串行批处理封装，**不是**无副作用的纯网络批量。技术上完全可做，成本在于每个账号都必须持有完整本机快照、且切换要杀掉/重启客户端。
 > - **码道（已更正）**：CodeArts **确实有每日签到**！用户截图「活动福利」面板里的「每日签到领100积分 / 每日领取」就是每日签到。**早期本仓库文档「app.asar 全文 0 命中」的结论是错的**——重新逆向 `app.asar` 证实存在完整福利体系：`GET /v1/ops/delivery`（拉活动）→ `POST /v1/ops/claim`（领取）→ `POST /v1/ops/confirm`（确认），活动类型含 `daily_claim`（每日签到）/`student_certify`（学生认证）/`invite`（邀请）。**关键利好**：这些接口的签名算法与本适配器 `sign_headers_with_body` 完全一致、域名就是现有的 `snap-access`（`policyCenterDomain`），实现成本极低。「一键领取」可以做真签到；「频繁关联本机」根因是 STS 短时轮换 + 只读回吸 + 切号需完整 `session_snapshot_b64`，可大幅降低但做不到字面『永不关联』。
 
+> ## ✅ 真机实测更正（2026-11-27 12:28，真实 STS 抓包）
+>
+> 用真实账号（`GT-HeQiLucky` / `c02b6539…a38f7`）跑通 `claim_daily` 全链路后，实测 delivery 响应**推翻了部分字段假设**，已按真机修正代码：
+>
+> 1. **每日签到的 `type` 不是 `daily_claim`，而是 `USER_LOGIN`**（`extra.triggerEvent = "user.login"`，标题「每日签到领100积分」，`pageUrl /v1/ops/pages/34`）。早期从 asar 推断的 `daily_claim` 是**误读**，代码已改为 `is_daily_checkin()` 同时识别 `USER_LOGIN`/`daily_claim`/`daily_signin` 并以 `extra.triggerEvent=user.login` 兜底。
+> 2. **状态字段是 `status`，取值 `ELIGIBLE`（可领）/`CLAIMED`/`CONFIRMED`/`CONSUMED`**；`claimable:true` + `pendingCount:1` + `pendingTotalAmount:100` 表示今日待领。已领判定 `status ∈ {CLAIMED,CONFIRMED,CONSUMED}`。
+> 3. **`campaignId` 是数字**（每日签到=34、学生认证=2/39），非字符串；代码 `activity_campaign_id()` 已兼容数字→字符串化后放入领取请求体。
+> 4. **学生认证 `type=STUDENT_CERTIFIED`**（`claimable:false`，需先去官网 `account.huaweicloud.com/.../studentAuth` 认证，非本适配器可自动领）。
+> 5. **真实领取已验证成功**：`claim_daily` → `claimed=true，领取 100 积分`；赠送积分 4085.43→4185.43（+100），总积分 4585.43→4685.43。**第二次幂等**：`claim_status=Claimed`、`claim_daily` 返回「今日已领取」，不重复发放。
+> 6. **签名/头全部被服务端接受**：`Agent-Type: PromptCenter`、`X-Language: zh-cn`、`X-Security-Token`、`x-snap-traceid`、SDK-HMAC-SHA256(body 哈希) 均通过。
+>
+> 另：客户端日志再次印证域名 `snap-access.cn-north-4.myhuaweicloud.com` 与真实报错 `campaignId : 参数无效`（PROMPTCENTER.00000001），与实现一致。
+
 ---
 
 ## 一、现状核对（代码级事实）

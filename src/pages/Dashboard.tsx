@@ -37,6 +37,7 @@ import { ImportAccountModal } from "../components/ImportAccountModal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
 import { UpdateBanner } from "../components/UpdateBanner";
+import { WindowsWindowControls } from "../components/WindowsWindowControls";
 import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
 import {
@@ -559,6 +560,11 @@ export function Dashboard({
     if (typeof navigator === "undefined") return true;
     return !/windows|linux/i.test(navigator.userAgent);
   }, []);
+  const isWindows = useMemo(() => {
+    if (typeof navigator === "undefined") return false;
+    return /windows/i.test(navigator.userAgent);
+  }, []);
+  const usesCustomTitleBar = reservesTrafficLightSpace || isWindows;
 
   const autoStartDescription = useMemo(() => {
     const ua = typeof navigator !== "undefined" ? navigator.userAgent.toLowerCase() : "";
@@ -756,7 +762,11 @@ export function Dashboard({
         )}
         <div className="flex min-h-0 flex-1 flex-col justify-between">
         <div className="overflow-y-auto">
-          <div className="mb-4 flex items-center gap-2.5 px-1.5">
+          <div
+            onMouseDown={isWindows ? onTitleBarMouseDown : undefined}
+            onDoubleClick={isWindows ? onTitleBarDoubleClick : undefined}
+            className={`mb-4 flex items-center gap-2.5 px-1.5 ${isWindows ? "pt-2.5" : ""}`}
+          >
             <QwitchLogo size="md" />
             <div className="min-w-0">
               <div className="text-sm font-semibold tracking-tight">Qwitch</div>
@@ -1003,8 +1013,8 @@ export function Dashboard({
 
       <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header
-          onMouseDown={reservesTrafficLightSpace ? onTitleBarMouseDown : undefined}
-          onDoubleClick={reservesTrafficLightSpace ? onTitleBarDoubleClick : undefined}
+          onMouseDown={usesCustomTitleBar ? onTitleBarMouseDown : undefined}
+          onDoubleClick={usesCustomTitleBar ? onTitleBarDoubleClick : undefined}
           className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70"
         >
           <div className="flex min-w-[160px] flex-1 items-center gap-2.5">
@@ -1206,6 +1216,8 @@ export function Dashboard({
                 <Moon className="h-3.5 w-3.5" aria-hidden="true" />
               )}
             </button>
+
+            {isWindows && <WindowsWindowControls />}
           </div>
         </header>
 

@@ -148,6 +148,12 @@ pub fn run() {
                 }
             }
 
+            #[cfg(target_os = "windows")]
+            if let Some(main_win) = app.get_webview_window("main") {
+                // Windows 启用无原生标题栏的一体化顶栏（前端内嵌最小化/最大化/关闭按钮与顶栏拖拽）
+                let _ = main_win.set_decorations(false);
+            }
+
             let launched_by_autostart = std::env::args().any(|a| a == "--autostart");
             if !startup_settings.start_minimized && !launched_by_autostart {
                 commands::present_main_window(app.handle());

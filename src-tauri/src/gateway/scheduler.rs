@@ -48,7 +48,7 @@ fn sort_members_in_tier(
                         .get(&b.tool_id)
                         .copied()
                         .unwrap_or(b.priority);
-                    pa.cmp(&pb)
+                    pa.cmp(&pb).then_with(|| a.tool_id.cmp(&b.tool_id))
                 }
             });
             tier_members
@@ -98,10 +98,10 @@ fn collect_for_model(
             continue;
         }
         // 码道有专用签名上游，只读凭据同样可被调度（不再跳过）
-        let runtime_cool = cooldowns
-            .get(&m.account_id)
-            .copied()
-            .or(m.cooldown_until_ms);
+        let runtime_cool = [cooldowns.get(&m.account_id).copied(), m.cooldown_until_ms]
+            .into_iter()
+            .flatten()
+            .max();
         if runtime_cool.is_some_and(|until| until > now_ms) {
             continue;
         }
@@ -148,6 +148,20 @@ pub fn select_candidates_for_request(
     now_ms: i64,
 ) -> SchedulePlan {
     let mut skipped_attempts = Vec::new();
+    let policy = pool
+        .model_policies
+        .iter()
+        .find(|p| p.model_id == requested_model);
+    if policy.is_some_and(|p| !p.enabled) {
+        return SchedulePlan {
+            effective_model: requested_model.to_string(),
+            used_explicit_fallback: false,
+            cache_affinity_hit: false,
+            candidates: Vec::new(),
+            skipped_attempts,
+            diagnostic_reason: Some(format!("模型 {requested_model} 已在号池中被禁用")),
+        };
+    }
     let mut effective_model = requested_model.to_string();
     let mut candidates = collect_for_model(
         pool,
@@ -156,10 +170,6 @@ pub fn select_candidates_for_request(
         now_ms,
         &mut skipped_attempts,
     );
-    let policy = pool
-        .model_policies
-        .iter()
-        .find(|p| p.model_id == requested_model);
     let mut used_explicit_fallback = false;
 
     if candidates.is_empty() {
@@ -643,5 +653,47 @@ mod tests {
                 plan.diagnostic_reason
             );
         }
+    }
+
+    #[test]
+    fn quota_first_with_duplicate_cross_tool_priorities_is_total_order() {
+        let pool = AccountPool {
+            id: "pool-qf".into(),
+            slug: "qf".into(),
+            name: "QF".into(),
+            description: String::new(),
+            scene_tag: "Coding".into(),
+            enabled: true,
+            strategy: PoolStrategy::QuotaFirst,
+            affinity_mode: AffinityMode::Off,
+            skip_active_client_account: false,
+            cooldown_seconds: 60,
+            auto_refresh_on_401: true,
+            fallback_api_key_enabled: false,
+            model_policies: Vec::new(),
+            members: vec![
+                make_member("t1", "trae_cn", MemberTier::T1Primary, 0, 20, &["m1"]),
+                make_member("q1", "qoder_cn", MemberTier::T1Primary, 0, 50, &["m1"]),
+                make_member("t2", "trae_cn", MemberTier::T1Primary, 1, 90, &["m1"]),
+            ],
+            today_requests: 0,
+            today_failovers: 0,
+            cache_hit_rate: 0,
+            created_at: String::new(),
+        };
+        let plan = select_candidates_for_request(
+            &pool,
+            "m1",
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            1_000,
+        );
+        let ids: Vec<&str> = plan
+            .candidates
+            .iter()
+            .map(|c| c.account_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["q1", "t2", "t1"]);
     }
 }

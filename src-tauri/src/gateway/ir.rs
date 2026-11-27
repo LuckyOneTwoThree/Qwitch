@@ -328,7 +328,7 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
         .unwrap_or(false);
     let max_tokens = body.get("max_output_tokens").and_then(|v| v.as_u64());
     let temperature = body.get("temperature").and_then(|v| v.as_f64());
-    let system_prompt = body
+    let mut system_prompt = body
         .get("instructions")
         .and_then(|v| v.as_str())
         .map(String::from)
@@ -372,14 +372,21 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
                             .and_then(|v| v.as_str())
                             .unwrap_or("{}")
                             .to_string();
-                        messages.push(IrMessage {
-                            role: IrRole::Assistant,
-                            parts: vec![IrPart::ToolCall {
-                                id: call_id,
-                                name,
-                                args_json,
-                            }],
-                        });
+                        let part = IrPart::ToolCall {
+                            id: call_id,
+                            name,
+                            args_json,
+                        };
+                        if let Some(last) =
+                            messages.last_mut().filter(|m| m.role == IrRole::Assistant)
+                        {
+                            last.parts.push(part);
+                        } else {
+                            messages.push(IrMessage {
+                                role: IrRole::Assistant,
+                                parts: vec![part],
+                            });
+                        }
                     }
                     "function_call_output" => {
                         let call_id = normalize_tool_call_id(
@@ -398,17 +405,38 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
                         });
                     }
                     _ => {
-                        let role = match item.get("role").and_then(|v| v.as_str()).unwrap_or("user")
-                        {
-                            "assistant" => IrRole::Assistant,
-                            _ => IrRole::User,
-                        };
+                        let role_str = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                         let text = extract_text_from_value(item.get("content"));
                         if !text.is_empty() {
-                            messages.push(IrMessage {
-                                role,
-                                parts: vec![IrPart::Text(text)],
-                            });
+                            match role_str {
+                                "system" | "developer" => {
+                                    system_prompt = Some(match system_prompt {
+                                        Some(existing) if !existing.is_empty() => {
+                                            format!("{existing}\n\n{text}")
+                                        }
+                                        _ => text,
+                                    });
+                                }
+                                "assistant" => {
+                                    let part = IrPart::Text(text);
+                                    if let Some(last) =
+                                        messages.last_mut().filter(|m| m.role == IrRole::Assistant)
+                                    {
+                                        last.parts.push(part);
+                                    } else {
+                                        messages.push(IrMessage {
+                                            role: IrRole::Assistant,
+                                            parts: vec![part],
+                                        });
+                                    }
+                                }
+                                _ => {
+                                    messages.push(IrMessage {
+                                        role: IrRole::User,
+                                        parts: vec![IrPart::Text(text)],
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -521,6 +549,10 @@ fn tool_choice_to_openai(choice: &Value) -> Option<Value> {
             .get("name")
             .and_then(|v| v.as_str())
             .map(|n| json!({ "type": "function", "function": { "name": n } })),
+        Some("function") if choice.get("function").is_none() => choice
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| json!({ "type": "function", "function": { "name": n } })),
         // 已是 OpenAI 形态（"auto"/"none"/{type:"function",...}）或未知 -> 原样透传
         _ => Some(choice.clone()),
     }
@@ -540,6 +572,11 @@ fn tool_choice_to_anthropic(choice: &Value) -> Option<Value> {
         .and_then(|v| v.as_str())
     {
         return Some(json!({ "type": "tool", "name": name }));
+    }
+    if choice.get("type").and_then(|v| v.as_str()) == Some("function") {
+        if let Some(name) = choice.get("name").and_then(|v| v.as_str()) {
+            return Some(json!({ "type": "tool", "name": name }));
+        }
     }
     // 已是 Anthropic 形态
     choice.get("type").map(|_| choice.clone())
@@ -657,7 +694,7 @@ pub fn to_upstream_openai_chat_body(ir: &IrRequest, upstream_model: &str, stream
 }
 
 pub fn to_upstream_anthropic_body(ir: &IrRequest, upstream_model: &str, stream: bool) -> Value {
-    let mut msgs = Vec::new();
+    let mut msgs: Vec<Value> = Vec::new();
     for msg in &ir.messages {
         let role = match msg.role {
             IrRole::Assistant => "assistant",
@@ -719,7 +756,18 @@ pub fn to_upstream_anthropic_body(ir: &IrRequest, upstream_model: &str, stream: 
             }
         }
         if !blocks.is_empty() {
-            msgs.push(json!({ "role": role, "content": blocks }));
+            let merged = msgs.last_mut().and_then(|last| {
+                if last.get("role").and_then(Value::as_str) == Some(role) {
+                    last.get_mut("content").and_then(Value::as_array_mut)
+                } else {
+                    None
+                }
+            });
+            if let Some(arr) = merged {
+                arr.extend(blocks);
+            } else {
+                msgs.push(json!({ "role": role, "content": blocks }));
+            }
         }
     }
 
@@ -1540,5 +1588,42 @@ mod tests {
         assert!(chat_sse.contains("\"index\":0"));
         assert!(chat_sse.contains("\"finish_reason\":\"tool_calls\""));
         assert!(chat_sse.contains("\"usage\""));
+    }
+
+    #[test]
+    fn parallel_tool_results_merge_and_responses_items_normalize() {
+        let req = json!({
+            "model": "claude-sonnet-4-6",
+            "tools": [{ "type": "function", "name": "read_file", "parameters": { "type": "object" } }],
+            "tool_choice": { "type": "function", "name": "read_file" },
+            "input": [
+                { "role": "developer", "content": "Be concise." },
+                { "role": "user", "content": "Read both" },
+                { "role": "assistant", "content": "Reading..." },
+                { "type": "function_call", "call_id": "c1", "name": "read_file", "arguments": "{\"p\":\"a\"}" },
+                { "type": "function_call", "call_id": "c2", "name": "read_file", "arguments": "{\"p\":\"b\"}" },
+                { "type": "function_call_output", "call_id": "c1", "output": "ok1" },
+                { "type": "function_call_output", "call_id": "c2", "output": "ok2" }
+            ]
+        });
+        let ir = parse_openai_responses_request(&req).expect("parse responses");
+        assert_eq!(ir.system_prompt.as_deref(), Some("Be concise."));
+        assert_eq!(ir.messages.len(), 4); // user, assistant (text + 2 calls), tool c1, tool c2
+        assert_eq!(ir.messages[1].role, IrRole::Assistant);
+        assert_eq!(ir.messages[1].parts.len(), 3);
+
+        let anth = to_upstream_anthropic_body(&ir, "claude-sonnet-4-6", false);
+        assert_eq!(anth["tool_choice"]["type"], "tool");
+        assert_eq!(anth["tool_choice"]["name"], "read_file");
+        let msgs = anth["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3); // user -> assistant -> single merged user with 2 tool_results
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"].as_array().unwrap().len(), 2);
+
+        let openai = to_upstream_openai_chat_body(&ir, "gpt-5", false);
+        assert_eq!(openai["tool_choice"]["type"], "function");
+        assert_eq!(openai["tool_choice"]["function"]["name"], "read_file");
     }
 }

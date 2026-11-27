@@ -636,8 +636,44 @@ fn auth_expired_reason(tool_id: &str, body: &str) -> String {
 }
 
 fn is_valid_loopback_host(host: &str) -> bool {
-    let bare = host.split(':').next().unwrap_or("");
-    matches!(bare, "127.0.0.1" | "localhost" | "[::1]" | "::1")
+    let trimmed = host.trim();
+    let bare = if let Some(rest) = trimmed.strip_prefix('[') {
+        match rest.find(']') {
+            Some(end) => &rest[..end],
+            None => return false,
+        }
+    } else {
+        trimmed.split(':').next().unwrap_or("")
+    };
+    bare == "127.0.0.1" || bare == "::1" || bare.eq_ignore_ascii_case("localhost")
+}
+
+fn is_session_cap_body(body_txt: &str) -> bool {
+    let lower = body_txt.to_ascii_lowercase();
+    lower.contains("tm.00001041") || body_txt.contains("并发会话数已达上限")
+}
+
+fn record_session_affinity(
+    runtime: &GatewayRuntime,
+    pool: &AccountPool,
+    effective_model: &str,
+    session_key: Option<&str>,
+    winner_account_id: &str,
+) {
+    if pool.affinity_mode != crate::domain::AffinityMode::Off {
+        let aff_key = format!(
+            "{}::{}::{}",
+            pool.id,
+            effective_model,
+            session_key.unwrap_or("default")
+        );
+        let mut g = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.session_affinity.len() >= 4096 {
+            g.session_affinity.clear();
+        }
+        g.session_affinity
+            .insert(aff_key, winner_account_id.to_string());
+    }
 }
 
 async fn write_http_response(
@@ -694,7 +730,13 @@ fn resolve_target_pool_and_model(
     // 2. 尝试解包 `<pool_slug>/<model_or_scoped_id>`
     if let Some((slug, model)) = trimmed_raw.split_once('/') {
         if let Some(p) = pools.iter().find(|p| p.slug == slug && p.enabled) {
-            return Some((p.clone(), model.to_string()));
+            let disabled = p
+                .model_policies
+                .iter()
+                .any(|pol| !pol.enabled && pol.model_id == model);
+            if !disabled {
+                return Some((p.clone(), model.to_string()));
+            }
         }
     }
     // 3. Claude Desktop 伪装 ID `mythos-qwitch-*` 反向映射回池与模型
@@ -4173,6 +4215,8 @@ async fn handle_http_connection(
         let stream_kind = if ir_req.stream && cand.tool_id != "workbuddy" {
             if ir_req.incoming_protocol == upstream_proto {
                 Some(StreamKind::Passthrough)
+            } else if !ir_req.tools.is_empty() {
+                None
             } else if ir_req.incoming_protocol == WireProtocolKind::OpenaiChat
                 && upstream_proto == WireProtocolKind::AnthropicMessages
             {
@@ -4199,47 +4243,21 @@ async fn handle_http_connection(
             let mut did_auth_refresh = false;
             let mut stream_res =
                 send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model).await;
-            if let Ok(ref resp) = stream_res {
-                if resp.status().as_u16() == 401
-                    && pool.auto_refresh_on_401
-                    && cand.tool_id != "custom_api_key"
-                {
-                    if let Some(adapter) = adapters.get(&cand.tool_id) {
-                        let lock = runtime.refresh_lock_for(&cand.account_id);
-                        let _guard = lock.lock().await;
-                        if let Ok((_, fresh)) =
-                            db.get_account_credential(&master_key, &cand.account_id)
-                        {
-                            cred = fresh;
-                        }
-                        if let Ok(Some(refreshed)) = adapter.force_refresh_credential(&cred).await {
-                            did_auth_refresh = true;
-                            let _ = db.bind_account_credential(
-                                &master_key,
-                                &cand.account_id,
-                                None,
-                                &refreshed,
-                            );
-                            cred = refreshed;
-                            attempts.push(RoutingAttempt {
-                                account_label: cand.label.clone(),
-                                tool_id: cand.tool_id.clone(),
-                                model: plan.effective_model.clone(),
-                                tier: Some(cand.tier),
-                                outcome: RoutingAttemptOutcome::Refreshed401,
-                                latency_ms: t_hop.elapsed().as_millis() as u64,
-                                detail: "401 单飞强制刷新凭据并回写加密库".into(),
-                            });
-                            stream_res =
-                                send_upstream_stream(cand, &cred, &ir_req, &plan.effective_model)
-                                    .await;
-                        }
-                    }
-                }
-            }
             loop {
                 match stream_res {
                     Ok(resp) if resp.status().is_success() => {
+                        record_session_affinity(
+                            &runtime,
+                            &pool,
+                            &plan.effective_model,
+                            session_key.as_deref(),
+                            &cand.account_id,
+                        );
+                        let actual_affinity_hit = plan.cache_affinity_hit
+                            && plan
+                                .candidates
+                                .first()
+                                .is_some_and(|c| c.account_id == cand.account_id);
                         let detail = match kind {
                             StreamKind::Passthrough => "网关实时流式透传成功（首字节后锁定上游）",
                             StreamKind::OpenAiClientAnthropicUpstream => {
@@ -4281,7 +4299,7 @@ async fn handle_http_connection(
                             } else {
                                 RoutingTraceStatus::Success
                             },
-                            cache_affinity_hit: plan.cache_affinity_hit,
+                            cache_affinity_hit: actual_affinity_hit,
                             ttft_ms: t_hop.elapsed().as_millis() as u64,
                             total_tokens: 0,
                             attempts,
@@ -4292,7 +4310,7 @@ async fn handle_http_connection(
                             db.increment_pool_stats(
                                 &pool.id,
                                 trace.status == RoutingTraceStatus::FailoverSuccess,
-                                plan.cache_affinity_hit,
+                                actual_affinity_hit,
                             ),
                         );
                         return match kind {
@@ -4315,7 +4333,7 @@ async fn handle_http_connection(
                         let code = resp.status().as_u16();
                         let body_txt = resp.text().await.unwrap_or_default();
                         if is_concurrency_limit_response(code, &body_txt) {
-                            let is_session_cap = code != 429;
+                            let is_session_cap = is_session_cap_body(&body_txt);
                             let cool_sec = if is_session_cap {
                                 pool.cooldown_seconds.min(15)
                             } else {
@@ -4348,18 +4366,45 @@ async fn handle_http_connection(
                                 && pool.auto_refresh_on_401
                                 && cand.tool_id != "custom_api_key"
                             {
+                                did_auth_refresh = true;
                                 if let Some(adapter) = adapters.get(&cand.tool_id) {
                                     let lock = runtime.refresh_lock_for(&cand.account_id);
-                                    let _guard = lock.lock().await;
+                                    let guard = lock.lock().await;
+                                    let prev_json = serde_json::to_value(&cred).ok();
+                                    let mut already_refreshed = false;
                                     if let Ok((_, fresh)) =
                                         db.get_account_credential(&master_key, &cand.account_id)
                                     {
-                                        cred = fresh;
+                                        if serde_json::to_value(&fresh).ok() != prev_json {
+                                            cred = fresh;
+                                            already_refreshed = true;
+                                        }
                                     }
-                                    if let Ok(Some(refreshed)) =
-                                        adapter.force_refresh_credential(&cred).await
-                                    {
-                                        did_auth_refresh = true;
+                                    if already_refreshed {
+                                        drop(guard);
+                                        attempts.push(RoutingAttempt {
+                                            account_label: cand.label.clone(),
+                                            tool_id: cand.tool_id.clone(),
+                                            model: plan.effective_model.clone(),
+                                            tier: Some(cand.tier),
+                                            outcome: RoutingAttemptOutcome::Refreshed401,
+                                            latency_ms: t_hop.elapsed().as_millis() as u64,
+                                            detail: format!(
+                                                "HTTP {code} 复用并发单飞已刷新的最新凭据重试"
+                                            ),
+                                        });
+                                        stream_res = send_upstream_stream(
+                                            cand,
+                                            &cred,
+                                            &ir_req,
+                                            &plan.effective_model,
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                    let refreshed_res =
+                                        adapter.force_refresh_credential(&cred).await;
+                                    if let Ok(Some(refreshed)) = refreshed_res {
                                         let _ = db.bind_account_credential(
                                             &master_key,
                                             &cand.account_id,
@@ -4367,6 +4412,7 @@ async fn handle_http_connection(
                                             &refreshed,
                                         );
                                         cred = refreshed;
+                                        drop(guard);
                                         attempts.push(RoutingAttempt {
                                             account_label: cand.label.clone(),
                                             tool_id: cand.tool_id.clone(),
@@ -4446,12 +4492,32 @@ async fn handle_http_connection(
             {
                 if let Some(adapter) = adapters.get(&cand.tool_id) {
                     let lock = runtime.refresh_lock_for(&cand.account_id);
-                    let _guard = lock.lock().await;
+                    let guard = lock.lock().await;
+                    let prev_json = serde_json::to_value(&cred).ok();
+                    let mut already_refreshed = false;
                     if let Ok((_, fresh)) = db.get_account_credential(&master_key, &cand.account_id)
                     {
-                        cred = fresh;
+                        if serde_json::to_value(&fresh).ok() != prev_json {
+                            cred = fresh;
+                            already_refreshed = true;
+                        }
                     }
-                    if let Ok(Some(refreshed)) = adapter.force_refresh_credential(&cred).await {
+                    if already_refreshed {
+                        drop(guard);
+                        attempts.push(RoutingAttempt {
+                            account_label: cand.label.clone(),
+                            tool_id: cand.tool_id.clone(),
+                            model: plan.effective_model.clone(),
+                            tier: Some(cand.tier),
+                            outcome: RoutingAttemptOutcome::Refreshed401,
+                            latency_ms: t_hop.elapsed().as_millis() as u64,
+                            detail: "401 复用并发单飞已刷新的最新凭据重试".into(),
+                        });
+                        res =
+                            call_upstream_member(cand, &cred, &ir_req, &plan.effective_model).await;
+                    } else if let Ok(Some(refreshed)) =
+                        adapter.force_refresh_credential(&cred).await
+                    {
                         let _ = db.bind_account_credential(
                             &master_key,
                             &cand.account_id,
@@ -4459,6 +4525,7 @@ async fn handle_http_connection(
                             &refreshed,
                         );
                         cred = refreshed;
+                        drop(guard);
                         attempts.push(RoutingAttempt {
                             account_label: cand.label.clone(),
                             tool_id: cand.tool_id.clone(),
@@ -4491,7 +4558,7 @@ async fn handle_http_connection(
                 break;
             }
             Ok((code, err_body)) if is_concurrency_limit_response(code, &err_body) => {
-                let is_session_cap = code != 429;
+                let is_session_cap = is_session_cap_body(&err_body);
                 let cool_sec = if is_session_cap {
                     pool.cooldown_seconds.min(15)
                 } else {
@@ -4647,6 +4714,18 @@ async fn handle_http_connection(
         .await;
     };
 
+    record_session_affinity(
+        &runtime,
+        &pool,
+        &plan.effective_model,
+        session_key.as_deref(),
+        &winner.account_id,
+    );
+    let actual_affinity_hit = plan.cache_affinity_hit
+        && plan
+            .candidates
+            .first()
+            .is_some_and(|c| c.account_id == winner.account_id);
     let trace = RoutingTraceItem {
         id: format!("tr-{}", &Uuid::new_v4().simple().to_string()[..8]),
         timestamp: now_beijing_hms(),
@@ -4664,7 +4743,7 @@ async fn handle_http_connection(
         } else {
             RoutingTraceStatus::Success
         },
-        cache_affinity_hit: plan.cache_affinity_hit,
+        cache_affinity_hit: actual_affinity_hit,
         ttft_ms: t_start.elapsed().as_millis() as u64,
         total_tokens: ir_resp.usage.input_tokens + ir_resp.usage.output_tokens,
         attempts,
@@ -4675,7 +4754,7 @@ async fn handle_http_connection(
         db.increment_pool_stats(
             &pool.id,
             trace.status == RoutingTraceStatus::FailoverSuccess,
-            plan.cache_affinity_hit,
+            actual_affinity_hit,
         ),
     );
 

@@ -938,6 +938,7 @@ fn build_openai_sse_response(model: &str, parsed: &DoubaoParsedStream, has_tools
     }
 
     let mut finish_reason = "stop";
+    let mut emitted_any_content = false;
     if has_tools {
         if let Some(tool_payload) = extract_tool_json(&parsed.content) {
             let text_content = tool_payload
@@ -945,28 +946,11 @@ fn build_openai_sse_response(model: &str, parsed: &DoubaoParsedStream, has_tools
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim();
-            if !text_content.is_empty() {
-                sse.push_str(&format!(
-                    "data: {}\n\n",
-                    json!({
-                        "id": id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": { "content": text_content },
-                            "finish_reason": Value::Null
-                        }]
-                    })
-                ));
-            }
             if let Some(calls) = tool_payload.get("tool_calls").and_then(Value::as_array) {
                 if !calls.is_empty() {
                     let formatted: Vec<Value> = calls
                         .iter()
-                        .enumerate()
-                        .filter_map(|(idx, c)| {
+                        .filter_map(|c| {
                             let name = c.get("name").and_then(Value::as_str)?.trim();
                             if name.is_empty() {
                                 return None;
@@ -976,7 +960,11 @@ fn build_openai_sse_response(model: &str, parsed: &DoubaoParsedStream, has_tools
                                 Some(v) => v.to_string(),
                                 None => "{}".to_string(),
                             };
-                            Some(json!({
+                            Some((name.to_string(), args))
+                        })
+                        .enumerate()
+                        .map(|(idx, (name, args))| {
+                            json!({
                                 "index": idx,
                                 "id": format!("call_{}", &Uuid::new_v4().simple().to_string()[..12]),
                                 "type": "function",
@@ -984,10 +972,27 @@ fn build_openai_sse_response(model: &str, parsed: &DoubaoParsedStream, has_tools
                                     "name": name,
                                     "arguments": args,
                                 }
-                            }))
+                            })
                         })
                         .collect();
                     if !formatted.is_empty() {
+                        if !text_content.is_empty() {
+                            emitted_any_content = true;
+                            sse.push_str(&format!(
+                                "data: {}\n\n",
+                                json!({
+                                    "id": id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": { "content": text_content },
+                                        "finish_reason": Value::Null
+                                    }]
+                                })
+                            ));
+                        }
                         finish_reason = "tool_calls";
                         sse.push_str(&format!(
                             "data: {}\n\n",
@@ -1006,10 +1011,27 @@ fn build_openai_sse_response(model: &str, parsed: &DoubaoParsedStream, has_tools
                     }
                 }
             }
+            if finish_reason != "tool_calls" && !text_content.is_empty() {
+                emitted_any_content = true;
+                sse.push_str(&format!(
+                    "data: {}\n\n",
+                    json!({
+                        "id": id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "content": text_content },
+                            "finish_reason": Value::Null
+                        }]
+                    })
+                ));
+            }
         }
     }
 
-    if finish_reason != "tool_calls" && !parsed.content.is_empty() {
+    if finish_reason != "tool_calls" && !emitted_any_content && !parsed.content.is_empty() {
         sse.push_str(&format!(
             "data: {}\n\n",
             json!({
@@ -1120,6 +1142,16 @@ pub(crate) async fn send_doubao_stream(
 
     let lock = lock_for_account(&member.account_id);
     let _guard = lock.lock().await;
+    let left_ms_after_lock = challenge_remaining_ms(&member.account_id);
+    if left_ms_after_lock > 0 {
+        let mins = (left_ms_after_lock + 59_999) / 60_000;
+        return synthetic_error_response(
+            reqwest::StatusCode::FORBIDDEN,
+            &format!(
+                "豆包工作风控冷却中（约 {mins} 分钟后恢复）：请先在浏览器打开 https://www.doubao.com/chat/ 完成一次人机验证"
+            ),
+        );
+    }
 
     let state = ensure_session_state(client, &member.account_id, &cookie_header).await?;
     let spec = resolve_doubao_model_spec(wire_model);

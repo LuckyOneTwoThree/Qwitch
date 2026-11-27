@@ -104,7 +104,7 @@ export const TOOL_BRAND_META: Record<string, ToolBrandMeta> = {
     id: "codearts",
     name: "码道 CodeArts",
     shortTagline: "华为云 AI IDE",
-    tagline: "华为云 CodeArts 桌面 AI IDE（仅额度监控，无每日签到）",
+    tagline: "华为云 CodeArts 桌面 AI IDE（支持每日签到领积分）",
     icon: "/icons/codearts.svg",
     accentDot: "bg-red-500",
     badgeClass:

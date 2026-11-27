@@ -1,11 +1,34 @@
 //! 华为云 CodeArts（`codearts`）内置适配器 —— 额度监控型。
 //!
-//! 与其余内置适配器的关键差异：**CodeArts 没有「每日签到」机制**。
-//! 对 `app.asar` 主进程代码全文检索 `每日` / `签到` / `打卡` / `daily` 均为 0 命中，
-//! 仅存在一次性的权益领取（`BenefitService.claimBenefit`）。因此本适配器：
+//! ## 更正：CodeArts **确实有「每日签到」**（2026-11-27 重新逆向 `app.asar` 证实）
+//!
+//! 早期版本本模块记载「全文检索 `每日`/`签到`/`打卡`/`daily` 均 0 命中」，
+//! 该结论**已过时/错误**。当前 CodeArts 客户端（`活动福利` 面板）真实存在：
+//!
+//! * 每日签到领 {n} 积分（`type=daily_claim`，按钮「每日领取」）——**这就是每日签到**；
+//! * 学生认证领积分（`type=student_certify`，每月 5000，有效期至 2026-12-31）；
+//! * 邀请好友得积分（`type=invite`）。
+//!
+//! ### 真实数据面（`BenefitService`，全部走华为云 SDK-HMAC-SHA256 签名，签名算法与本适配器
+//! `sign_headers_with_body` 完全一致，故实现无新增密码学成本）：
+//!
+//! ```text
+//! GET  {policyCenterDomain}/v1/ops/delivery?channel=DESKTOP      // 拉活动列表 → items[]
+//! POST {policyCenterDomain}/v1/ops/claim    {campaignId, idempotentKey, channel:"DESKTOP"}  // 领取
+//! POST {policyCenterDomain}/v1/ops/confirm  {userBenefitId}      // 领取后确认（两步）
+//! ```
+//!
+//! 头部固定：`X-Security-Token`(=STS)、`Agent-Type: PromptCenter`、`Content-Type: application/json`、
+//! `X-Language: zh-cn`（delivery 另加 `x-snap-traceid`）。
+//!
+//! `items[]` 关键字段：`campaignId`、`type`(DAILY_CLAIM/STUDENT_CERTIFY/INVITE_USER/…)、
+//! `status`(CLAIMED/CONFIRMED/CONSUMED=已领)、`claimable`、`benefitAmount`、`displayConfig`。
+//!
+//! 旧 `BenefitService.claimBenefit`（`/api/v1/benefit/claim`）是另一套旧接口，仅做查询/一次性领取；
+//! 当前福利主路径是 `/v1/ops/*`。因此本适配器现状：
 //!
 //! * `supports_quota_query = true`
-//! * `supports_daily_claim = false`
+//! * `supports_daily_claim = false`（**待改造为 true**，见 docs/DOUBAO_CODEARTS_CLAIM_FEASIBILITY_2026-11-27.md）
 //!
 //! ## 凭据形态
 //!
@@ -178,7 +201,7 @@ impl HuaweiCreds {
     }
 }
 
-/// 华为云 CodeArts 适配器（额度监控型，无每日签到）。
+/// 华为云 CodeArts 适配器（额度监控 + 每日签到型）。
 pub struct CodeArtsAdapter {
     manifest: AdapterManifest,
     http: reqwest::Client,
@@ -235,8 +258,8 @@ impl CodeArtsAdapter {
                         AuthMethod::TokenPaste,
                     ],
                     supports_quota_query: true,
-                    // CodeArts 无每日签到机制，见模块文档
-                    supports_daily_claim: false,
+                    // CodeArts「活动福利」确有每日签到（type=daily_claim），走 /v1/ops/* 纯服务端接口
+                    supports_daily_claim: true,
                     // 切号 = safeStorage 重加密写回，仅 macOS 可复现（Windows 走 DPAPI）
                     supports_client_switch: cfg!(target_os = "macos"),
                     supports_multi_instance: false,
@@ -406,6 +429,14 @@ impl CodeArtsAdapter {
             .into_iter()
             .next()
             .unwrap_or_else(|| DEFAULT_SNAP_ENGINE.to_string())
+    }
+
+    /// 福利/活动接口（`/v1/ops/*`）的 host。
+    ///
+    /// 客户端 `policyCenterDomain` 与 `snapEngineUrl` 指向同一数据面
+    /// （`snap-access.cn-north-4...`），故直接复用适配器已配置的 `snap_engine`。
+    fn policy_center_base(&self) -> String {
+        self.snap_engine.trim_end_matches('/').to_string()
     }
 
     /// 为一次具体请求生成完整的签名头（含 `X-Security-Token`、`Content-Type`）。
@@ -603,6 +634,90 @@ impl CodeArtsAdapter {
                 code: UnifiedErrorCode::NetworkError,
                 message: format!("解析{context}响应失败: {}", e.without_url()),
             })
+    }
+
+    /// 发起一次带签名（含 body 哈希）的 POST JSON 请求。
+    ///
+    /// 福利领取链路（`/v1/ops/claim`、`/v1/ops/confirm`）都是 POST + JSON body，
+    /// 必须把 body 哈希算进 canonical request，故复用 `sign_headers_with_body`。
+    async fn signed_post_json(
+        &self,
+        url: &str,
+        creds: &HuaweiCreds,
+        extra_headers: &[(&str, &str)],
+        body: &Value,
+        context: &str,
+    ) -> Result<Value, AdapterError> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("{context}: URL 非法 ({e})"),
+        })?;
+        let body_bytes = serde_json::to_vec(body).map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InternalError,
+            message: format!("{context}: 序列化请求体失败 ({e})"),
+        })?;
+        let headers = Self::sign_headers_with_body("POST", &parsed, creds, extra_headers, &body_bytes);
+
+        let mut req = self
+            .http
+            .post(parsed)
+            .header(ACCEPT, "application/json")
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .body(body_bytes);
+        for (k, v) in &headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        let resp = req.send().await.map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::NetworkError,
+            message: format!("{context}失败: {}", e.without_url()),
+        })?;
+        let status = resp.status();
+        if !status.is_success() {
+            if status.as_u16() == 401 {
+                return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::AuthExpired,
+                    message: format!("{context}: 华为云签名校验失败 (HTTP 401)，凭据可能已过期"),
+                });
+            }
+            return Err(map_http_status(status, context));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| AdapterError::Unified {
+                code: UnifiedErrorCode::NetworkError,
+                message: format!("解析{context}响应失败: {}", e.without_url()),
+            })
+    }
+
+    /// 福利/活动接口的公共签名头（`Agent-Type: PromptCenter` + `X-Language: zh-cn`）。
+    fn benefit_extra_headers(creds: &HuaweiCreds) -> Vec<(&str, &str)> {
+        vec![
+            ("Content-Type", "application/json"),
+            ("X-Security-Token", creds.security_token.as_str()),
+            ("Agent-Type", "PromptCenter"),
+            ("X-Language", "zh-cn"),
+        ]
+    }
+
+    /// 拉取活动福利列表（`GET /v1/ops/delivery?channel=DESKTOP`），返回 `data.items`。
+    async fn fetch_delivery_items(&self, creds: &HuaweiCreds) -> Result<Vec<Value>, AdapterError> {
+        let base = self.policy_center_base();
+        let url = format!("{base}/v1/ops/delivery?channel=DESKTOP");
+        let trace_id = uuid_like();
+        let mut headers = Self::benefit_extra_headers(creds);
+        headers.push(("x-snap-traceid", trace_id.as_str()));
+        let delivery = self
+            .signed_get(&url, creds, &headers, "查询码道活动福利")
+            .await?;
+        let items = delivery
+            .get("data")
+            .and_then(|d| d.get("items"))
+            .and_then(|v| v.as_array())
+            .or_else(|| delivery.get("items").and_then(|v| v.as_array()))
+            .cloned()
+            .unwrap_or_default();
+        Ok(items)
     }
 
     async fn fetch_package_overview(&self, creds: &HuaweiCreds) -> Result<Value, AdapterError> {
@@ -1261,6 +1376,69 @@ fn num_field(obj: &Value, key: &str) -> Option<f64> {
     n.is_finite().then_some(n)
 }
 
+// ---------------------------------------------------------------------------
+// 活动福利（/v1/ops/*）字段解析辅助
+// ---------------------------------------------------------------------------
+
+/// 归一化活动类型：兼容 `DAILY_CLAIM`（大写）与 `daily_claim`（小写）。
+fn activity_type(item: &Value) -> String {
+    item.get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// 活动是否已领：`claimed==true` 或 `status ∈ {CLAIMED,CONFIRMED,CONSUMED}`。
+fn activity_claimed(item: &Value) -> bool {
+    if matches!(item.get("claimed").and_then(|v| v.as_bool()), Some(true)) {
+        return true;
+    }
+    match item.get("status").and_then(|v| v.as_str()) {
+        Some(s) => matches!(
+            s.to_ascii_uppercase().as_str(),
+            "CLAIMED" | "CONFIRMED" | "CONSUMED"
+        ),
+        None => false,
+    }
+}
+
+/// 取活动的 campaignId（客户端用 `campaignId` 或 `campaign_id`）。
+fn activity_campaign_id(item: &Value) -> String {
+    non_empty(item, "campaignId")
+        .or_else(|| non_empty(item, "campaign_id"))
+        .or_else(|| non_empty(item, "id"))
+        .unwrap_or_default()
+}
+
+/// 从领取响应里提取 `userBenefitId`（客户端取 `data.id ?? data.userBenefitId`）。
+fn extract_user_benefit_id(resp: &Value) -> Option<String> {
+    let data = resp.get("data").unwrap_or(resp);
+    non_empty(data, "userBenefitId")
+        .or_else(|| non_empty(data, "user_benefit_id"))
+        .or_else(|| non_empty(data, "id"))
+}
+
+/// 毫秒时间戳（用于幂等键）。
+fn now_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+/// 生成一个 UUID v4 形式字符串（用于 `x-snap-traceid`），避免引入新依赖。
+fn uuid_like() -> String {
+    let mut b = [0u8; 16];
+    SystemRandom::new()
+        .fill(&mut b)
+        .expect("系统随机源不可用");
+    // 版本位/变体位，凑成合法 v4 形态
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14],
+        b[15]
+    )
+}
+
 #[async_trait]
 impl ToolAdapter for CodeArtsAdapter {
     fn manifest(&self) -> &AdapterManifest {
@@ -1388,10 +1566,31 @@ impl ToolAdapter for CodeArtsAdapter {
         } else {
             "免费"
         };
+        // 从活动列表推断每日签到状态，供调度器决定是否领取：
+        //   有未领的 daily_claim → Available；有但已领 → Claimed；无该活动 → Unsupported。
+        // 活动接口失败不应拖垮额度查询：降级为 Unknown（调度器会跳过，防误发请求）。
+        let claim_status = match self.fetch_delivery_items(&creds).await {
+            Ok(items) => {
+                let daily: Vec<&Value> = items
+                    .iter()
+                    .filter(|it| activity_type(it) == "daily_claim")
+                    .collect();
+                if daily.is_empty() {
+                    ClaimStatus::Unsupported
+                } else if daily.iter().any(|it| {
+                    !activity_claimed(it)
+                        && !matches!(it.get("claimable").and_then(|v| v.as_bool()), Some(false))
+                }) {
+                    ClaimStatus::Available
+                } else {
+                    ClaimStatus::Claimed
+                }
+            }
+            Err(_) => ClaimStatus::Unknown,
+        };
         Ok(QuotaSnapshot {
             plan_name: Some(plan_name.to_string()),
-            // 无签到机制，状态恒为不支持；调度器据此跳过领取
-            claim_status: ClaimStatus::Unsupported,
+            claim_status,
             buckets,
             fetched_at: Utc::now().to_rfc3339(),
         })
@@ -1399,15 +1598,112 @@ impl ToolAdapter for CodeArtsAdapter {
 
     async fn claim_daily(
         &self,
-        _cred: &CredentialEnvelope,
+        cred: &CredentialEnvelope,
         _precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
-        // CodeArts 没有每日签到机制，不做任何网络请求。
-        // 注意：这里**不**做过期检查——调度器对无签到能力的工具本就不该调它，
-        // 若在此报 AuthExpired 会让账号状态被误标为过期，干扰额度监控。
+        // 码道「活动福利」体系确有每日签到（type=daily_claim），走纯服务端接口：
+        //   GET  {policyCenterDomain}/v1/ops/delivery?channel=DESKTOP      // 拉活动列表
+        //   POST {policyCenterDomain}/v1/ops/claim   {campaignId,idempotentKey,channel}  // 领取
+        //   POST {policyCenterDomain}/v1/ops/confirm {userBenefitId}       // 领取后确认
+        // 与豆包不同：不需要桌面端在登、不需要切号，只需 STS 签名即可。
+        // 过期即拦截，避免发出注定 401 的请求（与 inspect_quota 一致）。
+        Self::ensure_not_expired(cred)?;
+        let creds = HuaweiCreds::from_envelope(cred)?;
+        let base = self.policy_center_base();
+
+        // 1) 拉活动列表
+        let items = self.fetch_delivery_items(&creds).await?;
+
+        // 2) 找未领取的每日签到活动
+        let daily = items.iter().find(|it| {
+            let ty = activity_type(it);
+            ty == "daily_claim"
+                && !activity_claimed(it)
+                && !matches!(it.get("claimable").and_then(|v| v.as_bool()), Some(false))
+        });
+
+        let Some(activity) = daily else {
+            // 没有可领的每日签到：可能今日已领，或该账号无此活动
+            let any_daily = items.iter().any(|it| activity_type(it) == "daily_claim");
+            let msg = if any_daily {
+                "码道每日签到：今日已领取"
+            } else {
+                "码道当前无可领取的每日签到活动"
+            };
+            return Ok(ClaimResult {
+                claimed: false,
+                reward_summary: msg.into(),
+                updated_quota: None,
+            });
+        };
+
+        let campaign_id = activity_campaign_id(activity);
+        if campaign_id.is_empty() {
+            return Ok(ClaimResult {
+                claimed: false,
+                reward_summary: "码道每日签到活动缺少 campaignId，已跳过".into(),
+                updated_quota: None,
+            });
+        }
+        let reward = activity
+            .get("benefitAmount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        // 3) 领取（带幂等键，安全重试不重复发放）
+        let idem = format!("claim_{}_{}", campaign_id, now_ms());
+        let claim_body = serde_json::json!({
+            "campaignId": campaign_id,
+            "idempotentKey": idem,
+            "channel": "DESKTOP",
+        });
+        let claim_headers = Self::benefit_extra_headers(&creds);
+        let claim = self
+            .signed_post_json(
+                &format!("{base}/v1/ops/claim"),
+                &creds,
+                &claim_headers,
+                &claim_body,
+                "领取码道每日签到",
+            )
+            .await?;
+
+        // 4) 领取成功后确认（部分活动返回 userBenefitId 需二次确认）
+        let user_benefit_id = extract_user_benefit_id(&claim);
+        let mut confirm_note = String::new();
+        if let Some(ubid) = user_benefit_id.as_deref().filter(|s| !s.is_empty()) {
+            let confirm_body = serde_json::json!({ "userBenefitId": ubid });
+            let confirm_headers = Self::benefit_extra_headers(&creds);
+            match self
+                .signed_post_json(
+                    &format!("{base}/v1/ops/confirm"),
+                    &creds,
+                    &confirm_headers,
+                    &confirm_body,
+                    "确认码道每日签到",
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::AuthExpired,
+                    ..
+                }) => return Err(AdapterError::Unified {
+                    code: UnifiedErrorCode::AuthExpired,
+                    message: "码道每日签到领取成功但确认时凭据过期，请稍后重试".into(),
+                }),
+                Err(e) => confirm_note = format!("（确认阶段异常，可稍后重试：{e}）"),
+            }
+        }
+
+        let summary = if reward > 0 {
+            format!("码道每日签到成功，领取 {reward} 积分{confirm_note}")
+        } else {
+            format!("码道每日签到成功{confirm_note}")
+        };
         Ok(ClaimResult {
-            claimed: false,
-            reward_summary: "码道 CodeArts 无每日签到机制，仅监控额度".into(),
+            claimed: true,
+            reward_summary: summary,
             updated_quota: None,
         })
     }
@@ -1581,14 +1877,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_declares_no_daily_claim() {
+    fn manifest_declares_daily_claim() {
         let a = CodeArtsAdapter::new();
         let m = a.manifest();
         assert_eq!(m.id, "codearts");
         assert!(m.capabilities.supports_quota_query);
         assert!(
-            !m.capabilities.supports_daily_claim,
-            "CodeArts 无每日签到机制，capability 必须为 false"
+            m.capabilities.supports_daily_claim,
+            "CodeArts「活动福利」确有每日签到（/v1/ops/*），capability 必须为 true"
         );
         assert_eq!(
             m.capabilities.supports_client_switch,
@@ -1656,9 +1952,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_quota_returns_unsupported_claim_status() {
+    async fn inspect_quota_derives_claim_status_from_delivery() {
         let server = MockServer::start().await;
         let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        // 活动列表：每日签到今日已领
+        Mock::given(method("GET"))
+            .and(path("/v1/ops/delivery"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "items": [
+                    { "campaignId": "cmp_daily", "type": "daily_claim", "status": "CLAIMED" }
+                ]}
+            })))
+            .mount(&server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/snap-manager/v1/package/overview"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1685,13 +1991,17 @@ mod tests {
             .inspect_quota(&cred_with("AK", "SK", "STS"))
             .await
             .expect("inspect");
-        assert_eq!(q.claim_status, ClaimStatus::Unsupported);
+        assert_eq!(q.claim_status, ClaimStatus::Claimed);
         assert_eq!(q.buckets.len(), 3);
         assert_eq!(q.plan_name.as_deref(), Some("基础套餐"));
 
-        // 必须带上签名头
+        // 必须带上签名头（额度请求）
         let reqs = server.received_requests().await.unwrap();
-        let auth = reqs[0]
+        let overview_req = reqs
+            .iter()
+            .find(|r| r.url.path() == "/snap-manager/v1/package/overview")
+            .expect("应有额度请求");
+        let auth = overview_req
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -1699,8 +2009,8 @@ mod tests {
         assert!(auth.starts_with("SDK-HMAC-SHA256 Access=AK"), "auth={auth}");
         assert!(auth.contains("SignedHeaders="));
         assert!(auth.contains("Signature="));
-        assert_eq!(reqs[0].headers.get("x-security-token").unwrap(), "STS");
-        assert!(reqs[0].headers.contains_key("x-sdk-date"));
+        assert_eq!(overview_req.headers.get("x-security-token").unwrap(), "STS");
+        assert!(overview_req.headers.contains_key("x-sdk-date"));
     }
 
     #[tokio::test]
@@ -1730,17 +2040,105 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_daily_is_noop_without_network() {
+    async fn claim_daily_claims_unclaimed_daily_and_confirms() {
         let server = MockServer::start().await;
         let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
-        // 不挂任何 mock：若有请求就会 404 报错
+        // 1) 活动列表：一条未领的每日签到
+        Mock::given(method("GET"))
+            .and(path("/v1/ops/delivery"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "items": [
+                    { "campaignId": "cmp_daily_1", "type": "DAILY_CLAIM",
+                      "status": "ENTRY", "claimable": true, "benefitAmount": 100 }
+                ]}
+            })))
+            .mount(&server)
+            .await;
+        // 2) 领取：返回 userBenefitId
+        Mock::given(method("POST"))
+            .and(path("/v1/ops/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "userBenefitId": "ub_123" }
+            })))
+            .mount(&server)
+            .await;
+        // 3) 确认
+        Mock::given(method("POST"))
+            .and(path("/v1/ops/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": {} })))
+            .mount(&server)
+            .await;
+
         let res = adapter
             .claim_daily(&cred_with("AK", "SK", "STS"), None)
             .await
-            .expect("noop");
+            .expect("claim ok");
+        assert!(res.claimed);
+        assert!(res.reward_summary.contains("100"), "{}", res.reward_summary);
+
+        // 三个接口都被访问
+        let reqs = server.received_requests().await.unwrap();
+        let paths: Vec<String> = reqs.iter().map(|r| r.url.path().to_string()).collect();
+        assert!(paths.iter().any(|p| p == "/v1/ops/delivery"));
+        assert!(paths.iter().any(|p| p == "/v1/ops/claim"));
+        assert!(paths.iter().any(|p| p == "/v1/ops/confirm"));
+        // 签名头存在
+        let claim_req = reqs
+            .iter()
+            .find(|r| r.url.path() == "/v1/ops/claim")
+            .unwrap();
+        assert!(claim_req.headers.get("authorization").is_some());
+        assert_eq!(claim_req.headers.get("x-security-token").unwrap(), "STS");
+        assert_eq!(claim_req.headers.get("agent-type").unwrap(), "PromptCenter");
+    }
+
+    #[tokio::test]
+    async fn claim_daily_reports_already_claimed_without_claim_call() {
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v1/ops/delivery"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "items": [
+                    { "campaignId": "cmp_daily_1", "type": "DAILY_CLAIM", "status": "CLAIMED" }
+                ]}
+            })))
+            .mount(&server)
+            .await;
+
+        let res = adapter
+            .claim_daily(&cred_with("AK", "SK", "STS"), None)
+            .await
+            .expect("ok");
         assert!(!res.claimed);
-        assert!(res.reward_summary.contains("无每日签到"));
-        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(res.reward_summary.contains("已领取"), "{}", res.reward_summary);
+
+        let reqs = server.received_requests().await.unwrap();
+        assert!(
+            !reqs.iter().any(|r| r.url.path() == "/v1/ops/claim"),
+            "已领时不应发起 claim 请求"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_daily_skips_when_no_daily_activity() {
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v1/ops/delivery"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": { "items": [
+                    { "campaignId": "cmp_stu", "type": "student_certify", "status": "ENTRY" }
+                ]}
+            })))
+            .mount(&server)
+            .await;
+
+        let res = adapter
+            .claim_daily(&cred_with("AK", "SK", "STS"), None)
+            .await
+            .expect("ok");
+        assert!(!res.claimed);
     }
 
     #[tokio::test]
@@ -2132,14 +2530,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_daily_ignores_expiry_to_avoid_mislabeling_account() {
-        // claim 是 no-op，即使凭据过期也不应报 AuthExpired，
-        // 否则会把账号状态误标为过期、打断额度监控。
+    async fn claim_daily_short_circuits_on_expired_credential() {
+        // claim 现在会真实联网；凭据过期时应直接拦截报 AuthExpired，
+        // 避免发出注定 401 的请求（与 inspect_quota 行为一致）。
         let server = MockServer::start().await;
         let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
         let expired = cred_with_expiry(Some(chrono::Utc::now().timestamp_millis() - 60_000));
-        let res = adapter.claim_daily(&expired, None).await.expect("noop");
-        assert!(!res.claimed);
+        let err = adapter.claim_daily(&expired, None).await.unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 

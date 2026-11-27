@@ -105,10 +105,10 @@ export const MOCK_ADAPTERS: AdapterManifest[] = [
     version: "0.1.0",
     isBuiltin: true,
     capabilities: {
-      // 额度监控型：无每日签到机制
+      // 额度监控 + 每日签到（/v1/ops/* 纯服务端接口）
       authMethods: ["local_import", "token_paste"],
       supportsQuotaQuery: true,
-      supportsDailyClaim: false,
+      supportsDailyClaim: true,
       supportsClientSwitch: false,
       supportsMultiInstance: false,
     },
@@ -417,8 +417,8 @@ export const INITIAL_ACCOUNTS: AccountSummary[] = [
     hasApiToken: true,
     latestQuota: {
       planName: "基础套餐",
-      // 无签到机制，恒为 unsupported
-      claimStatus: "unsupported",
+      // 每日签到可用（mock 展示为待领取）
+      claimStatus: "available",
       fetchedAt: cstTimestamp(0, 9, 50),
       buckets: [
         {

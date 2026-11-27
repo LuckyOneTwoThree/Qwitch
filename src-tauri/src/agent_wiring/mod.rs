@@ -2119,7 +2119,6 @@ pub fn apply_agent_wiring(
         return Err(format!("写入 Agent 配置失败，已回滚原有配置：{e}"));
     }
 
-    let mut clean_opts = clean_opts;
     let (next_status, running_snapshot) = if is_restartable_desktop_agent(agent_id) {
         if base_dir_override.is_none() {
             let snapshot = process_snapshot();

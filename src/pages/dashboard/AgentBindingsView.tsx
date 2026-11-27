@@ -626,12 +626,12 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
                   setModelSearch("");
                   setModelQuickFilter("all");
                 }}
-                className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
+                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
                   isActive
-                    ? "border-brand-500 bg-brand-500/10 font-semibold text-brand-900 shadow-2xs dark:border-brand-400 dark:text-brand-100"
+                    ? "bg-brand-500/12 font-semibold text-brand-900 ring-1 ring-brand-500/35 shadow-2xs dark:bg-brand-400/15 dark:text-brand-100 dark:ring-brand-400/35"
                     : selectedToolCount > 0
-                      ? "border-emerald-500/35 bg-emerald-500/[0.04] text-zinc-800 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-900"
-                      : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400"
+                      ? "bg-emerald-500/[0.06] text-zinc-800 ring-1 ring-emerald-500/20 hover:bg-emerald-500/[0.1] dark:text-zinc-200"
+                      : "bg-zinc-100/75 text-zinc-600 hover:bg-zinc-100 dark:bg-white/[0.04] dark:text-zinc-400 dark:hover:bg-white/[0.08]"
                 }`}
               >
                 <ToolBrandIcon toolId={toolId} size="xs" decorative />

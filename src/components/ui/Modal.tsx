@@ -128,7 +128,7 @@ export function Modal({
 
   const content = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/40 p-4 backdrop-blur-sm dark:bg-black/65"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/35 p-4 backdrop-blur-md dark:bg-black/65"
       onMouseDown={(e) => {
         backdropMouseDownRef.current = e.target === e.currentTarget;
       }}
@@ -150,7 +150,7 @@ export function Modal({
         aria-labelledby={labelledBy}
         aria-describedby={describedBy}
         tabIndex={-1}
-        className={`w-full ${maxWidthClass} max-h-[calc(100vh-2rem)] animate-pop rounded-2xl border border-zinc-200 bg-white shadow-float outline-none dark:border-zinc-800 dark:bg-zinc-900 ${
+        className={`w-full ${maxWidthClass} max-h-[calc(100vh-2rem)] animate-pop rounded-2xl bg-white shadow-float ring-1 ring-black/[0.06] outline-none dark:bg-[#141519] dark:ring-white/[0.08] ${
           flush ? "flex flex-col overflow-hidden p-0" : "overflow-y-auto p-5"
         }`}
       >

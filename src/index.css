@@ -34,11 +34,17 @@
   --text-label-sm: 0.75rem;
 
   /* ---- 阴影：把「描边盒子」升级为「有厚度的表面」---- */
-  --shadow-card: 0 1px 2px 0 rgb(16 24 40 / 0.04), 0 1px 3px 0 rgb(16 24 40 / 0.05);
-  --shadow-card-hover: 0 6px 16px -4px rgb(16 24 40 / 0.1), 0 2px 6px -2px rgb(16 24 40 / 0.06);
-  --shadow-float: 0 18px 44px -10px rgb(16 24 40 / 0.22), 0 6px 16px -6px rgb(16 24 40 / 0.12);
+  --shadow-card:
+    0 1px 2px 0 rgb(15 23 42 / 0.04),
+    0 4px 12px -2px rgb(15 23 42 / 0.04);
+  --shadow-card-hover:
+    0 8px 20px -6px rgb(15 23 42 / 0.1),
+    0 2px 6px -2px rgb(15 23 42 / 0.05);
+  --shadow-float:
+    0 20px 48px -12px rgb(15 23 42 / 0.24),
+    0 6px 18px -6px rgb(15 23 42 / 0.12);
   --shadow-brand: 0 6px 16px -6px rgb(4 120 87 / 0.45);
-  --shadow-brand-soft: 0 2px 10px -2px rgb(4 120 87 / 0.28);
+  --shadow-brand-soft: 0 2px 10px -2px rgb(4 120 87 / 0.24);
 
   /* ---- 字体：补齐中文回退，数字统一等宽对齐 ---- */
   --font-sans:
@@ -218,21 +224,28 @@
   /* 统一表单输入框/选择框基元 */
   .field-input {
     border-radius: var(--radius-control);
-    border: 1px solid var(--color-zinc-200);
+    border: 1px solid rgb(15 23 42 / 0.09);
     background-color: #fff;
     padding: 0.375rem 0.625rem;
     font-size: 0.75rem;
     color: var(--color-zinc-900);
+    box-shadow: 0 1px 1px rgb(15 23 42 / 0.025);
     transition: border-color 0.16s var(--ease-soft), box-shadow 0.16s var(--ease-soft);
   }
   .field-input:focus {
     border-color: var(--color-brand-500);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-brand-500) 14%, transparent);
     outline: none;
   }
   .dark .field-input {
-    border-color: var(--color-zinc-700);
-    background-color: var(--color-zinc-900);
+    border-color: rgb(255 255 255 / 0.09);
+    background-color: rgb(255 255 255 / 0.04);
     color: var(--color-zinc-100);
+    box-shadow: none;
+  }
+  .dark .field-input:focus {
+    border-color: var(--color-brand-400);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-brand-400) 18%, transparent);
   }
 
   /* 主按钮：品牌色实心 + 内高光，避免「纯黑按钮」的通用感 */
@@ -241,13 +254,13 @@
     color: #fff;
     box-shadow:
       var(--shadow-brand-soft),
-      inset 0 1px 0 rgb(255 255 255 / 0.16);
+      inset 0 1px 0 rgb(255 255 255 / 0.18);
   }
   .btn-primary:hover:not(:disabled) {
     background-color: var(--color-brand-800);
     box-shadow:
       var(--shadow-brand),
-      inset 0 1px 0 rgb(255 255 255 / 0.16);
+      inset 0 1px 0 rgb(255 255 255 / 0.18);
   }
   .dark .btn-primary {
     background-color: var(--color-brand-400);
@@ -263,26 +276,27 @@
       inset 0 1px 0 rgb(255 255 255 / 0.3);
   }
 
-  /* 次按钮：描边 + 浅底 */
+  /* 次按钮：轻描边 + 微抬升阴影，弱化生硬框线 */
   .btn-secondary {
     background-color: #fff;
-    border: 1px solid var(--color-zinc-200);
+    border: 1px solid rgb(15 23 42 / 0.08);
     color: var(--color-zinc-700);
+    box-shadow: 0 1px 1px rgb(15 23 42 / 0.035);
   }
   .btn-secondary:hover:not(:disabled) {
     background-color: var(--color-zinc-50);
-    border-color: var(--color-zinc-300);
+    border-color: rgb(15 23 42 / 0.14);
     color: var(--color-zinc-900);
   }
   .dark .btn-secondary {
-    background-color: var(--color-zinc-900);
-    border-color: var(--color-zinc-700);
+    background-color: rgb(255 255 255 / 0.05);
+    border-color: rgb(255 255 255 / 0.08);
     color: var(--color-zinc-200);
-    box-shadow: none;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
   }
   .dark .btn-secondary:hover:not(:disabled) {
-    background-color: var(--color-zinc-800);
-    border-color: var(--color-zinc-600);
+    background-color: rgb(255 255 255 / 0.09);
+    border-color: rgb(255 255 255 / 0.14);
     color: var(--color-zinc-50);
   }
 
@@ -292,31 +306,31 @@
     color: var(--color-zinc-500);
   }
   .btn-ghost:hover:not(:disabled) {
-    background-color: var(--color-zinc-100);
+    background-color: rgb(15 23 42 / 0.05);
     color: var(--color-zinc-900);
   }
   .dark .btn-ghost {
     color: var(--color-zinc-400);
   }
   .dark .btn-ghost:hover:not(:disabled) {
-    background-color: var(--color-zinc-800);
+    background-color: rgb(255 255 255 / 0.07);
     color: var(--color-zinc-100);
   }
 
   /* 危险按钮 */
   .btn-danger {
     background-color: color-mix(in oklab, var(--color-rose-500) 10%, transparent);
-    border: 1px solid color-mix(in oklab, var(--color-rose-500) 30%, transparent);
+    border: 1px solid color-mix(in oklab, var(--color-rose-500) 18%, transparent);
     color: var(--color-rose-700);
   }
   .btn-danger:hover:not(:disabled) {
     background-color: color-mix(in oklab, var(--color-rose-500) 16%, transparent);
-    border-color: color-mix(in oklab, var(--color-rose-500) 45%, transparent);
+    border-color: color-mix(in oklab, var(--color-rose-500) 28%, transparent);
     color: var(--color-rose-800);
   }
   .dark .btn-danger {
     background-color: color-mix(in oklab, var(--color-rose-500) 14%, transparent);
-    border-color: color-mix(in oklab, var(--color-rose-400) 30%, transparent);
+    border-color: color-mix(in oklab, var(--color-rose-400) 20%, transparent);
     color: var(--color-rose-300);
   }
   .dark .btn-danger:hover:not(:disabled) {
@@ -324,20 +338,19 @@
     color: var(--color-rose-200);
   }
 
-  /* 浅色品牌底按钮：卡片级主操作（切号/领取），把实心品牌色让给页面级唯一主 CTA */
+  /* 浅色品牌底按钮：无硬描边色调填充，卡片级主操作 */
   .btn-brand-soft {
     background-color: color-mix(in oklab, var(--color-brand-500) 12%, transparent);
-    border: 1px solid color-mix(in oklab, var(--color-brand-500) 32%, transparent);
+    border: 1px solid transparent;
     color: var(--color-brand-800);
   }
   .btn-brand-soft:hover:not(:disabled) {
     background-color: color-mix(in oklab, var(--color-brand-500) 20%, transparent);
-    border-color: color-mix(in oklab, var(--color-brand-500) 45%, transparent);
     color: var(--color-brand-900);
   }
   .dark .btn-brand-soft {
     background-color: color-mix(in oklab, var(--color-brand-400) 14%, transparent);
-    border-color: color-mix(in oklab, var(--color-brand-400) 30%, transparent);
+    border-color: transparent;
     color: var(--color-brand-200);
   }
   .dark .btn-brand-soft:hover:not(:disabled) {
@@ -347,16 +360,15 @@
 
   .btn-sky-soft {
     background-color: color-mix(in oklab, var(--color-sky-500) 12%, transparent);
-    border: 1px solid color-mix(in oklab, var(--color-sky-500) 30%, transparent);
+    border: 1px solid transparent;
     color: var(--color-sky-800);
   }
   .btn-sky-soft:hover:not(:disabled) {
     background-color: color-mix(in oklab, var(--color-sky-500) 20%, transparent);
-    border-color: color-mix(in oklab, var(--color-sky-500) 45%, transparent);
   }
   .dark .btn-sky-soft {
     background-color: color-mix(in oklab, var(--color-sky-400) 14%, transparent);
-    border-color: color-mix(in oklab, var(--color-sky-400) 30%, transparent);
+    border-color: transparent;
     color: var(--color-sky-200);
   }
   .dark .btn-sky-soft:hover:not(:disabled) {
@@ -367,12 +379,17 @@
   /* ---------------- 卡片表面 ---------------- */
   .surface-card {
     border-radius: var(--radius-card);
-    border: 1px solid var(--color-zinc-200);
+    border: 1px solid rgb(15 23 42 / 0.06);
     background-color: #fff;
+    box-shadow: var(--shadow-card);
   }
   .dark .surface-card {
-    border-color: var(--color-zinc-800);
-    background-color: color-mix(in oklab, var(--color-zinc-900) 92%, white);
+    border-color: rgb(255 255 255 / 0.06);
+    background-color: #181a20;
+    box-shadow:
+      0 1px 2px 0 rgb(0 0 0 / 0.35),
+      0 4px 14px -2px rgb(0 0 0 / 0.28),
+      inset 0 1px 0 rgb(255 255 255 / 0.04);
   }
 
   /* 可交互卡片：hover 时抬升，替代「只有描边」的扁平感 */
@@ -383,11 +400,15 @@
       border-color 0.2s var(--ease-soft);
   }
   .surface-interactive:hover {
+    border-color: rgb(15 23 42 / 0.1);
     box-shadow: var(--shadow-card-hover);
     transform: translateY(-1px);
   }
   .dark .surface-interactive:hover {
-    box-shadow: 0 8px 22px -8px rgb(0 0 0 / 0.55);
+    border-color: rgb(255 255 255 / 0.11);
+    box-shadow:
+      0 10px 26px -8px rgb(0 0 0 / 0.6),
+      inset 0 1px 0 rgb(255 255 255 / 0.06);
   }
 
   /* ---------------- 品牌进度条 ---------------- */
@@ -396,10 +417,10 @@
     width: 100%;
     overflow: hidden;
     border-radius: 9999px;
-    background-color: var(--color-zinc-100);
+    background-color: rgb(15 23 42 / 0.06);
   }
   .dark .meter {
-    background-color: var(--color-zinc-800);
+    background-color: rgb(255 255 255 / 0.08);
   }
   .meter-fill {
     height: 100%;
@@ -432,25 +453,25 @@
       color 0.16s var(--ease-soft);
   }
   .nav-item:hover {
-    background-color: var(--color-zinc-100);
+    background-color: rgb(15 23 42 / 0.04);
     color: var(--color-zinc-900);
   }
   .dark .nav-item {
     color: var(--color-zinc-400);
   }
   .dark .nav-item:hover {
-    background-color: var(--color-zinc-800);
+    background-color: rgb(255 255 255 / 0.05);
     color: var(--color-zinc-100);
   }
 
   /* 选中态：品牌浅底 + 左侧色条，比「纯黑药丸」更轻、更有指向性 */
   .nav-item-active {
-    background-color: var(--color-brand-50);
+    background-color: color-mix(in oklab, var(--color-brand-500) 10%, transparent);
     color: var(--color-brand-800);
     font-weight: 600;
   }
   .nav-item-active:hover {
-    background-color: var(--color-brand-50);
+    background-color: color-mix(in oklab, var(--color-brand-500) 14%, transparent);
     color: var(--color-brand-800);
   }
   .nav-item-active::before {
@@ -537,20 +558,21 @@
   }
 
   .badge-neutral {
-    background-color: var(--color-zinc-100);
+    background-color: rgb(15 23 42 / 0.055);
     color: var(--color-zinc-600);
   }
   .dark .badge-neutral {
-    background-color: var(--color-zinc-800);
+    background-color: rgb(255 255 255 / 0.08);
     color: var(--color-zinc-300);
   }
 
   .badge-brand {
     background-color: color-mix(in oklab, var(--color-brand-500) 12%, transparent);
-    border-color: color-mix(in oklab, var(--color-brand-500) 26%, transparent);
+    border-color: transparent;
     color: var(--color-brand-800);
   }
   .dark .badge-brand {
+    background-color: color-mix(in oklab, var(--color-brand-400) 15%, transparent);
     color: var(--color-brand-300);
   }
 
@@ -593,6 +615,188 @@
   }
   .scrollbar-none::-webkit-scrollbar {
     display: none;
+  }
+
+  /* ==========================================================================
+     台账（Ledger）—— 账号主视图
+     --------------------------------------------------------------------------
+     列收敛用容器查询而非 JS 测量：容器宽度决定「能看到几列」，
+     列本身永远是同一份 DOM，只是 display 开关，避免测量逻辑与状态不同步。
+     基准来自 tauri.conf.json：主窗默认 1080×740、最小 860×580。
+     ========================================================================== */
+  .ledger-grid {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) 132px 104px 76px 36px;
+    column-gap: 10px;
+    align-items: center;
+    padding-inline: 14px;
+  }
+  /* ≥768：补 套餐 + 同步 */
+  @container (min-width: 768px) {
+    .ledger-grid {
+      grid-template-columns: 16px minmax(0, 1fr) 72px 132px 108px 76px 64px 36px;
+    }
+  }
+  /* ≥1024：补 工具 */
+  @container (min-width: 1024px) {
+    .ledger-grid {
+      grid-template-columns: 16px minmax(0, 1fr) 104px 72px 126px 120px 76px 64px 36px;
+    }
+  }
+  /* ≥1152：操作列展开为常显按钮组 */
+  @container (min-width: 1152px) {
+    .ledger-grid {
+      grid-template-columns: 16px minmax(0, 1fr) 104px 72px 126px 120px 76px 64px 96px;
+    }
+  }
+
+  /* 默认全部隐藏，按断点逐个放行 */
+  .ledger-col-tool,
+  .ledger-col-tier,
+  .ledger-col-sync {
+    display: none;
+  }
+  @container (min-width: 768px) {
+    .ledger-col-tier,
+    .ledger-col-sync {
+      display: flex;
+    }
+  }
+  @container (min-width: 1024px) {
+    .ledger-col-tool {
+      display: flex;
+    }
+  }
+
+  .ledger-head {
+    height: 30px;
+    border-bottom: 1px solid rgb(15 23 42 / 0.07);
+    background-color: rgb(15 23 42 / 0.018);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    color: var(--color-zinc-500);
+    position: sticky;
+    top: 0;
+    z-index: 3;
+  }
+  .dark .ledger-head {
+    border-bottom-color: rgb(255 255 255 / 0.07);
+    background-color: rgb(255 255 255 / 0.025);
+    color: var(--color-zinc-400);
+  }
+
+  .ledger-row {
+    position: relative;
+    height: 48px;
+    border-bottom: 1px solid rgb(15 23 42 / 0.045);
+    background-color: #fff;
+    transition: background-color 0.12s var(--ease-soft);
+    outline: none;
+  }
+  .ledger-row:hover {
+    background-color: rgb(15 23 42 / 0.016);
+  }
+  .ledger-row[data-selected="true"] {
+    background-color: color-mix(in oklab, var(--color-brand-500) 5%, #fff);
+  }
+  .ledger-row[data-selected="true"]:hover {
+    background-color: color-mix(in oklab, var(--color-brand-500) 8%, #fff);
+  }
+  .ledger-row:focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: -2px;
+    z-index: 2;
+  }
+  .dark .ledger-row {
+    background-color: transparent;
+    border-bottom-color: rgb(255 255 255 / 0.05);
+  }
+  .dark .ledger-row:hover {
+    background-color: rgb(255 255 255 / 0.03);
+  }
+  .dark .ledger-row[data-selected="true"] {
+    background-color: color-mix(in oklab, var(--color-brand-400) 10%, transparent);
+  }
+
+  /* 操作列：窄窗只留「更多」，宽窗展开为按钮组 */
+  .ledger-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 2px;
+  }
+  .ledger-actions .ledger-act-secondary {
+    display: none;
+  }
+  @container (min-width: 1152px) {
+    .ledger-actions .ledger-act-secondary {
+      display: inline-flex;
+    }
+    .ledger-actions {
+      opacity: 0;
+      transition: opacity 0.12s var(--ease-soft);
+    }
+    .ledger-row:hover .ledger-actions,
+    .ledger-row:focus-within .ledger-actions {
+      opacity: 1;
+    }
+  }
+
+  /* 水位条 */
+  .ledger-meter {
+    position: relative;
+    height: 4px;
+    flex: 1;
+    overflow: hidden;
+    border-radius: 9999px;
+    background-color: rgb(15 23 42 / 0.07);
+  }
+  .dark .ledger-meter {
+    background-color: rgb(255 255 255 / 0.1);
+  }
+  .ledger-meter > i {
+    display: block;
+    height: 100%;
+    border-radius: 9999px;
+    background-image: linear-gradient(90deg, var(--color-brand-400), var(--color-brand-600));
+  }
+  .ledger-meter > i[data-tone="low"] {
+    background-image: none;
+    background-color: var(--color-amber-500);
+  }
+  .ledger-meter > i[data-tone="critical"] {
+    background-image: none;
+    background-color: var(--color-rose-500);
+  }
+
+  /* 行内勾选框 */
+  .ledger-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 14px;
+    width: 14px;
+    border-radius: 4px;
+    border: 1.5px solid var(--color-zinc-300);
+    background-color: #fff;
+    color: transparent;
+    transition: all 0.12s var(--ease-soft);
+  }
+  .ledger-check:hover {
+    border-color: var(--color-zinc-400);
+  }
+  .ledger-check[data-checked="true"] {
+    border-color: var(--color-brand-700);
+    background-color: var(--color-brand-700);
+    color: #fff;
+  }
+  .dark .ledger-check {
+    border-color: rgb(255 255 255 / 0.25);
+    background-color: transparent;
+  }
+  .dark .ledger-check[data-checked="true"] {
+    border-color: var(--color-brand-400);
+    background-color: var(--color-brand-400);
+    color: var(--color-zinc-950);
   }
 }
 

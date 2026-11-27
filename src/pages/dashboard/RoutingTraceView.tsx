@@ -240,7 +240,7 @@ export function RoutingTraceView({
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索号池、命中账号或模型..."
               aria-label="搜索路由决策记录"
-              className="w-full rounded-lg border border-zinc-200 bg-zinc-50/70 py-1.5 pr-7 pl-8 text-xs focus:border-brand-500 focus:bg-white dark:border-zinc-700 dark:bg-zinc-800/70"
+              className="field-input w-full py-1.5 pr-7 pl-8"
             />
             {search && (
               <button
@@ -258,7 +258,7 @@ export function RoutingTraceView({
             <div
               role="group"
               aria-label="按路由结果筛选"
-              className="inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-700 dark:bg-zinc-800/70"
+              className="inline-flex flex-wrap items-center gap-0.5 rounded-lg bg-zinc-100/80 p-0.5 dark:bg-white/[0.05]"
             >
               {(
                 [

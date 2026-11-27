@@ -259,9 +259,9 @@ export const AccountCard = React.memo(function AccountCard({
       <div
         className={`group surface-card surface-interactive flex h-full flex-col p-3.5 ${
           account.isActiveOnClient
-            ? "border-emerald-500/45 ring-1 ring-emerald-500/15 dark:border-emerald-400/35 dark:ring-emerald-400/15"
+            ? "border-emerald-500/35 ring-1 ring-emerald-500/20 shadow-[0_2px_12px_-2px_rgba(16,185,129,0.12)] dark:border-emerald-400/30 dark:ring-emerald-400/20"
             : isDisabled
-              ? "bg-zinc-50/70 opacity-85 dark:bg-zinc-900/50"
+              ? "bg-zinc-50/70 opacity-80 dark:bg-white/[0.02]"
               : ""
         }`}
       >
@@ -270,16 +270,6 @@ export const AccountCard = React.memo(function AccountCard({
             <div className="flex min-w-0 flex-1 items-start gap-2.5">
               <ToolBrandIcon toolId={account.toolId} size="md" className="mt-0.5" decorative />
               <div className="min-w-0 flex-1">
-                {account.latestQuota?.planName && (
-                  <div className="mb-0.5 flex flex-wrap items-center gap-1.5">
-                    <span
-                      className={`badge shrink-0 whitespace-nowrap ${toolMeta.badgeClass}`}
-                    >
-                      {account.latestQuota.planName}
-                    </span>
-                  </div>
-                )}
-
                 {editingLabel ? (
                   <div className="mt-1 flex items-center gap-1">
                     <input
@@ -303,7 +293,7 @@ export const AccountCard = React.memo(function AccountCard({
                       }
                       aria-label="编辑账号别名"
                       autoFocus
-                      className="min-w-0 flex-1 rounded-[var(--radius-control)] border border-zinc-300 bg-white px-2 py-0.5 text-xs font-medium text-zinc-900 disabled:opacity-60 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
+                      className="field-input min-w-0 flex-1 py-0.5 font-medium"
                     />
                     <button
                       type="button"
@@ -348,6 +338,7 @@ export const AccountCard = React.memo(function AccountCard({
                     <h3 className="truncate text-[15px] font-semibold text-zinc-900 dark:text-zinc-100">
                       {account.label}
                     </h3>
+
                     {hasCustomAlias && (
                       <span
                         title={`当前显示为本地别名，平台原用户名：${account.accountName}`}
@@ -371,7 +362,11 @@ export const AccountCard = React.memo(function AccountCard({
                   </div>
                 )}
 
-                <p className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                <div className="flex min-w-0 items-center gap-1.5">
+                <p
+                  title={[account.uidMasked, account.emailMasked].filter(Boolean).join(" · ")}
+                  className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400"
+                >
                   {hasCustomAlias ? `${account.accountName} · ` : ""}
                   {account.uidMasked}
                   {account.emailMasked ? ` · ${account.emailMasked}` : ""}
@@ -388,6 +383,15 @@ export const AccountCard = React.memo(function AccountCard({
                     </span>
                   )}
                 </p>
+                {account.latestQuota?.planName && (
+                  <span
+                    title={`套餐：${account.latestQuota.planName}`}
+                    className="shrink-0 rounded border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[10px] leading-none font-medium whitespace-nowrap text-zinc-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-zinc-300"
+                  >
+                    {account.latestQuota.planName}
+                  </span>
+                )}
+                </div>
               </div>
             </div>
 
@@ -567,7 +571,7 @@ export const AccountCard = React.memo(function AccountCard({
                 {secondaryBuckets.map((bucket) => (
                   <div
                     key={bucket.key}
-                    className="flex items-center justify-between gap-2 rounded-lg bg-zinc-50/80 px-3 py-1.5 text-xs dark:bg-zinc-800/50"
+                    className="flex items-center justify-between gap-2 rounded-lg bg-zinc-100/65 px-3 py-1.5 text-xs dark:bg-white/[0.04]"
                   >
                     <span className="truncate text-zinc-600 dark:text-zinc-400">
                       {bucket.label}
@@ -579,7 +583,7 @@ export const AccountCard = React.memo(function AccountCard({
                 ))}
               </>
             ) : (
-              <div className="rounded-lg border border-dashed border-zinc-200 px-3 py-3 text-center text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+              <div className="rounded-lg border border-dashed border-zinc-900/[0.09] bg-zinc-50/60 px-3 py-3 text-center text-xs text-zinc-500 dark:border-white/[0.09] dark:bg-white/[0.02] dark:text-zinc-400">
                 {account.latestQuota
                   ? account.latestQuota.claimStatus === "unsupported" &&
                     adapter?.capabilities.supportsDailyClaim
@@ -660,7 +664,7 @@ export const AccountCard = React.memo(function AccountCard({
           </div>
         </div>
 
-        <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-zinc-200/70 pt-2.5 dark:border-zinc-800/70">
+        <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-zinc-900/[0.05] pt-2.5 dark:border-white/[0.06]">
           <div className="flex flex-wrap items-center gap-1.5">
             {needsRecovery ? (
               <>
@@ -670,7 +674,7 @@ export const AccountCard = React.memo(function AccountCard({
                     disabled={launchingClient}
                     onClick={() => void handleLaunchClient()}
                     title="该工具凭据由客户端自行刷新，打开客户端后会自动更新登录态"
-                    className="btn btn-sm gap-1 whitespace-nowrap border border-amber-500/25 bg-amber-500/15 text-amber-800 transition hover:bg-amber-500/25 disabled:opacity-50 dark:text-amber-300"
+                    className="btn btn-sm gap-1 whitespace-nowrap bg-amber-500/12 text-amber-800 transition hover:bg-amber-500/20 disabled:opacity-50 dark:bg-amber-500/15 dark:text-amber-300 dark:hover:bg-amber-500/25"
                   >
                     <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                     {launchingClient ? "启动中..." : "打开客户端"}
@@ -680,7 +684,7 @@ export const AccountCard = React.memo(function AccountCard({
                   type="button"
                   disabled={oauthLaunching}
                   onClick={() => void handleDirectOAuth()}
-                  className="btn btn-sm gap-1 whitespace-nowrap border border-amber-500/25 bg-amber-500/15 text-amber-800 transition hover:bg-amber-500/25 disabled:opacity-50 dark:text-amber-300"
+                  className="btn btn-sm gap-1 whitespace-nowrap bg-amber-500/12 text-amber-800 transition hover:bg-amber-500/20 disabled:opacity-50 dark:bg-amber-500/15 dark:text-amber-300 dark:hover:bg-amber-500/25"
                 >
                   <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                   {oauthLaunching ? "授权中..." : "重新授权"}

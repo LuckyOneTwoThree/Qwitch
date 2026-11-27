@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Sparkles, ScrollText, Search, X, Archive, ArchiveRestore, Trash2, Download, Clock, CheckSquare, Square } from "lucide-react";
 import { useQwitch } from "../../context/QwitchContext";
 import { ToolBrandIcon } from "../../components/ToolBrandIcon";
+import { OverflowMenu } from "../../components/ui/OverflowMenu";
 import { getToolBrandMeta } from "../../domain/toolRegistry";
 import type { Dispatch, SetStateAction } from "react";
 import type { ActionLogItem } from "../../types/qwitch";
@@ -56,13 +57,13 @@ export function LogsToolbar({
   const isBusy = busyAction !== null;
 
   return (
-    <div className="shrink-0 border-b border-zinc-200/80 bg-zinc-50/95 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950/95">
-      <div className="surface-card divide-y divide-zinc-200/70 dark:divide-zinc-800">
+    <div className="shrink-0 border-b border-zinc-200/50 bg-[#f6f7f9]/90 px-5 py-3 backdrop-blur-md dark:border-white/[0.05] dark:bg-[#0c0d10]/90">
+      <div className="surface-card divide-y divide-zinc-900/[0.05] dark:divide-white/[0.05]">
         <div className="flex flex-wrap items-center justify-between gap-2.5 p-3">
           <div
             role="group"
             aria-label="日志作用域"
-            className="inline-flex rounded-xl border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/60"
+            className="inline-flex rounded-xl bg-zinc-100/80 p-0.5 dark:bg-white/[0.05]"
           >
             <button
               type="button"
@@ -107,6 +108,8 @@ export function LogsToolbar({
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
+            {/* 只把「主操作 + 高频非破坏性」留在一级；归档类与不可逆操作用力分散到溢出菜单，
+                避免 5 个同权重按钮并排时把「清空活跃」也点成肌肉记忆 */}
             {logScope === "active" ? (
               <>
                 <button
@@ -136,39 +139,6 @@ export function LogsToolbar({
                 <button
                   type="button"
                   disabled={isBusy || logStats.activeCount === 0}
-                  onClick={() =>
-                    void runBusy("archive7d", () =>
-                      archiveLogs(
-                        { scope: "active", olderThanDays: 7 },
-                        "已将 7 天前活跃日志移入归档"
-                      )
-                    )
-                  }
-                  className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
-                >
-                  <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  归档 7 天前
-                </button>
-
-                <button
-                  type="button"
-                  disabled={isBusy || logStats.activeCount === 0}
-                  onClick={() =>
-                    setConfirmLogAction({
-                      label: "归档当前全部活跃日志？",
-                      detail: `将把 ${logStats.activeCount} 条活跃日志全部转入「已归档」，可在归档区查看、导出或恢复。`,
-                      run: async () => (await archiveLogs({ scope: "active" })) !== null,
-                    })
-                  }
-                  className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
-                >
-                  <Archive className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  全部归档
-                </button>
-
-                <button
-                  type="button"
-                  disabled={isBusy || logStats.activeCount === 0}
                   onClick={() => void runBusy("exportActive", () => exportLogs("active", false))}
                   className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
                 >
@@ -176,22 +146,49 @@ export function LogsToolbar({
                   导出
                 </button>
 
-                <button
-                  type="button"
-                  disabled={isBusy || logStats.activeCount === 0}
-                  onClick={() =>
-                    setConfirmLogAction({
-                      label: "确认清空全部活跃日志？",
-                      detail: `将永久删除 ${logStats.activeCount} 条活跃日志，不可恢复；若需留存请先点击「全部归档」或「导出」。`,
+                <OverflowMenu
+                  label="更多日志操作"
+                  display="text"
+                  disabled={isBusy}
+                  items={[
+                    {
+                      label: "归档 7 天前",
+                      icon: Clock,
+                      disabled: logStats.activeCount === 0,
+                      onSelect: () =>
+                        void runBusy("archive7d", () =>
+                          archiveLogs(
+                            { scope: "active", olderThanDays: 7 },
+                            "已将 7 天前活跃日志移入归档"
+                          )
+                        ),
+                    },
+                    {
+                      label: "全部归档",
+                      icon: Archive,
+                      disabled: logStats.activeCount === 0,
+                      onSelect: () =>
+                        setConfirmLogAction({
+                          label: "归档当前全部活跃日志？",
+                          detail: `将把 ${logStats.activeCount} 条活跃日志全部转入「已归档」，可在归档区查看、导出或恢复。`,
+                          run: async () => (await archiveLogs({ scope: "active" })) !== null,
+                        }),
+                    },
+                    {
+                      label: "清空活跃日志",
+                      icon: Trash2,
                       danger: true,
-                      run: async () => (await deleteLogs({ scope: "active" })) !== null,
-                    })
-                  }
-                  className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
-                >
-                  <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  清空活跃
-                </button>
+                      disabled: logStats.activeCount === 0,
+                      onSelect: () =>
+                        setConfirmLogAction({
+                          label: "确认清空全部活跃日志？",
+                          detail: `将永久删除 ${logStats.activeCount} 条活跃日志，不可恢复；若需留存请先点击「全部归档」或「导出」。`,
+                          danger: true,
+                          run: async () => (await deleteLogs({ scope: "active" })) !== null,
+                        }),
+                    },
+                  ]}
+                />
               </>
             ) : (
               <>
@@ -207,39 +204,38 @@ export function LogsToolbar({
                   导出归档 JSON
                 </button>
 
-                <button
-                  type="button"
-                  disabled={isBusy || logStats.archivedCount === 0}
-                  onClick={() =>
-                    void runBusy("unarchiveAll", () =>
-                      unarchiveLogs(
-                        { scope: "archived" },
-                        (count) => `已恢复 ${count} 条归档日志`
-                      )
-                    )
-                  }
-                  className="btn btn-sm btn-secondary shrink-0 gap-1 whitespace-nowrap"
-                >
-                  <ArchiveRestore className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  全部恢复
-                </button>
-
-                <button
-                  type="button"
-                  disabled={isBusy || logStats.archivedCount === 0}
-                  onClick={() =>
-                    setConfirmLogAction({
-                      label: "确认彻底清空已归档日志？",
-                      detail: `将永久删除 ${logStats.archivedCount} 条已归档历史记录，建议先点击「导出归档 JSON」保存备份。`,
+                <OverflowMenu
+                  label="更多归档操作"
+                  display="text"
+                  disabled={isBusy}
+                  items={[
+                    {
+                      label: "全部恢复",
+                      icon: ArchiveRestore,
+                      disabled: logStats.archivedCount === 0,
+                      onSelect: () =>
+                        void runBusy("unarchiveAll", () =>
+                          unarchiveLogs(
+                            { scope: "archived" },
+                            (count) => `已恢复 ${count} 条归档日志`
+                          )
+                        ),
+                    },
+                    {
+                      label: "彻底清空归档",
+                      icon: Trash2,
                       danger: true,
-                      run: async () => (await deleteLogs({ scope: "archived" })) !== null,
-                    })
-                  }
-                  className="btn btn-sm btn-danger shrink-0 gap-1 whitespace-nowrap"
-                >
-                  <Trash2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  彻底清空归档
-                </button>
+                      disabled: logStats.archivedCount === 0,
+                      onSelect: () =>
+                        setConfirmLogAction({
+                          label: "确认彻底清空已归档日志？",
+                          detail: `将永久删除 ${logStats.archivedCount} 条已归档历史记录，建议先点击「导出归档 JSON」保存备份。`,
+                          danger: true,
+                          run: async () => (await deleteLogs({ scope: "archived" })) !== null,
+                        }),
+                    },
+                  ]}
+                />
               </>
             )}
           </div>

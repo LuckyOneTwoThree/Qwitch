@@ -60,6 +60,8 @@ import { computeVisibleToolCount, Dashboard } from "./Dashboard";
 
 beforeEach(() => {
   ctxValue.current = { ...baseCtx };
+  // 视图偏好会落盘，用例之间必须隔离，否则前一个用例切到「分组」会污染后一个
+  localStorage.clear();
   // jsdom 未实现 Element.scrollTo
   Element.prototype.scrollTo = vi.fn() as unknown as typeof Element.prototype.scrollTo;
   vi.stubGlobal("__APP_VERSION__", "0.0.0-test");
@@ -151,6 +153,8 @@ describe("Dashboard navigation", () => {
     };
 
     render(<Dashboard />);
+    // 默认视图是台账，本用例断言的是分组视图里的「补位卡」，先显式切换
+    fireEvent.click(screen.getByRole("button", { name: "分组" }));
     const toolNav = within(screen.getByRole("navigation", { name: "账号视图导航" }));
     fireEvent.click(toolNav.getByRole("button", { name: /豆包工作/ }));
 
@@ -190,6 +194,7 @@ describe("Dashboard navigation", () => {
   it("renders quick-launch client buttons in grouped and single-tool views", async () => {
     launchToolClient.mockClear();
     render(<Dashboard />);
+    fireEvent.click(screen.getByRole("button", { name: "分组" }));
 
     const groupedLaunch = screen.getByRole("button", { name: /快捷启动 Trae CN 客户端/ });
     fireEvent.click(groupedLaunch);
@@ -254,29 +259,24 @@ describe("Dashboard 导航可达性", () => {
 describe("Dashboard 指标口径自洽", () => {
   /** 取文本中的第一个数字（KPI 卡主指标） */
   const firstNumber = (s: string) => s.match(/\d+/)?.[0];
-  /** 取文本中的最后一个数字（筛选芯片计数） */
-  const lastNumber = (s: string) => [...s.matchAll(/\d+/g)].pop()?.[0];
-
-  /** 定位筛选芯片：其第一个 span 文本即芯片标签 */
-  const chipByLabel = (label: string) =>
-    screen
-      .getAllByRole("button")
-      .find((b) => b.querySelector("span")?.textContent?.trim() === label)!;
-
-  it("四张 KPI 卡的主指标与其对应筛选芯片的计数完全一致", () => {
+  it("指标条数字即点击后台账里真实可见的账号数量", () => {
     render(<Dashboard />);
 
-    const pairs: Array<[string, string]> = [
-      ["显示全部账号", "全部"],
-      ["仅显示本机客户端正在使用的账号", "使用中"],
-      ["仅显示今日待领取额度的账号", "待领"],
-      ["仅显示凭据过期、风险暂停或待授权的账号", "待完善"],
+    const titles = [
+      "显示全部账号",
+      "仅显示本机客户端正在使用的账号",
+      "仅显示今日待领取额度的账号",
+      "仅显示凭据过期、风险暂停或待授权的账号",
     ];
 
-    for (const [title, chipLabel] of pairs) {
+    for (const title of titles) {
       const card = screen.getByTitle(title);
-      const chip = chipByLabel(chipLabel);
-      expect(firstNumber(card.textContent ?? "")).toBe(lastNumber(chip.textContent ?? ""));
+      const shown = firstNumber(card.textContent ?? "");
+      fireEvent.click(card);
+      const rows = screen
+        .getAllByRole("row")
+        .filter((r) => r.getAttribute("aria-rowindex") !== null);
+      expect(rows.length).toBe(Number(shown));
     }
   });
 
@@ -298,11 +298,11 @@ describe("Dashboard 指标口径自洽", () => {
     expect(card.textContent).toMatch(/^待完善\d+正常/);
   });
 
-  it("KPI 卡采用可换行布局：窄容器下标签换行而非被截断成不可读片段", () => {
+  it("KPI 卡采用紧凑单行布局：左右分栏且标签与值区不互相折行挤压", () => {
     render(<Dashboard />);
     const card = screen.getByTitle("仅显示今日待领取额度的账号");
-    // 值区（数字 + 徽章）为 shrink-0，标签区会被压扁；
-    // 卡片必须允许换行，否则窄容器下「今日待领」会变成「≯」这类碎片
-    expect(card.className).toContain("flex-wrap");
+    expect(card.className).toContain("flex");
+    expect(card.className).toContain("items-center");
+    expect(card.className).toContain("justify-between");
   });
 });

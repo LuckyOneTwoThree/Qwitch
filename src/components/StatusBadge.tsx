@@ -24,7 +24,7 @@ export function AccountStatusBadge({
               ? "缺少在线授权凭据（授权后开启查额与签到）"
               : "未关联本机客户端会话（关联后可一键冷切换）"
         }
-        className="badge border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300"
+        className="badge bg-amber-500/12 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
       >
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
         {missingApiToken ? "待授权" : "待关联"}
@@ -33,10 +33,10 @@ export function AccountStatusBadge({
   }
 
   const styles: Record<AccountStatus, string> = {
-    active: "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300",
-    expired: "border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300",
-    risk_paused: "border-rose-500/25 bg-rose-500/12 text-rose-800 dark:text-rose-300",
-    disabled: "border-zinc-500/25 bg-zinc-500/12 text-zinc-700 dark:text-zinc-300",
+    active: "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+    expired: "bg-amber-500/12 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300",
+    risk_paused: "bg-rose-500/12 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300",
+    disabled: "bg-zinc-900/[0.06] text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300",
   };
 
   const labels: Record<AccountStatus, string> = {
@@ -70,7 +70,7 @@ export function ClaimStatusBadge({ status }: { status: ClaimStatus }) {
 
   if (status === "unknown") {
     return (
-      <span className="badge badge-neutral border-zinc-300 dark:border-zinc-700">
+      <span className="badge badge-neutral">
         状态待核实
       </span>
     );
@@ -78,11 +78,11 @@ export function ClaimStatusBadge({ status }: { status: ClaimStatus }) {
 
   if (status === "available") {
     return (
-      <span className="badge border-sky-500/25 bg-sky-500/12 text-sky-800 dark:text-sky-300">
+      <span className="badge bg-sky-500/12 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">
         今日待领
       </span>
     );
   }
 
-  return <span className="badge badge-neutral border-zinc-300 dark:border-zinc-700">今日已领</span>;
+  return <span className="badge badge-neutral">今日已领</span>;
 }

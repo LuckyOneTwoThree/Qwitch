@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity,
+  ArrowUpDown,
   CheckCircle2,
-  ChevronDown,
   CircleAlert,
   Download,
   Globe,
@@ -27,10 +27,22 @@ import {
   ShieldCheck,
   Sparkles,
   Sun,
+  Table2,
+  UserRound,
   X,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
 import { AccountCard } from "../components/AccountCard";
+import { AccountLedger } from "../components/ledger/AccountLedger";
+import { AccountDrawer } from "../components/ledger/AccountDrawer";
+import { CommandPalette, type CommandItem } from "../components/CommandPalette";
+import {
+  formatQuotaNumber,
+  sortLedgerAccounts,
+  toQuotaView,
+  LEDGER_SORT_LABEL,
+  type LedgerSortKey,
+} from "../components/ledger/ledgerModel";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
 import { ColdSwitchModal } from "../components/ColdSwitchModal";
 import { ImportAccountModal } from "../components/ImportAccountModal";
@@ -56,6 +68,7 @@ import type {
   ToolId,
 } from "../types/qwitch";
 import { invoke } from "@tauri-apps/api/core";
+import { formatRelativeSyncTime } from "../domain/time";
 import { formatLogDayLabel } from "./dashboard/types";
 import type {
   AllViewMode,
@@ -71,6 +84,27 @@ import { RoutingTraceView } from "./dashboard/RoutingTraceView";
 import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import type { TargetAgentId, TrayNavigateTarget } from "../types/pool";
+
+const VIEW_PREF_KEY = "qwitch.accounts.view";
+
+/** 读取持久化的账号视图偏好；未知值一律回落到台账。 */
+export function readStoredAccountView(): AllViewMode {
+  try {
+    const raw = localStorage.getItem(VIEW_PREF_KEY);
+    if (raw === "ledger" || raw === "grouped" || raw === "flat") return raw;
+  } catch {
+    /* 隐私模式或存储被禁用时静默回落 */
+  }
+  return "ledger";
+}
+
+export function writeStoredAccountView(view: AllViewMode): void {
+  try {
+    localStorage.setItem(VIEW_PREF_KEY, view);
+  } catch {
+    /* 同上 */
+  }
+}
 
 export function computeVisibleToolCount(
   containerWidth: number,
@@ -284,7 +318,12 @@ export function Dashboard({
   }, [nav, isTauriRuntime, reloadExternalPlugins]);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<AccountFilter>("all");
-  const [viewMode, setViewMode] = useState<AllViewMode>("grouped");
+  const [viewMode, setViewMode] = useState<AllViewMode>(() => readStoredAccountView());
+  const [ledgerSort, setLedgerSort] = useState<LedgerSortKey>("risk");
+  const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(() => new Set());
+  const [detailAccountId, setDetailAccountId] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const detailReturnFocusRef = useRef<HTMLElement | null>(null);
   const [logActionFilter, setLogActionFilter] = useState<LogActionFilter>("all");
   const [logResultFilter, setLogResultFilter] = useState<LogResultFilter>("all");
   const [logSearch, setLogSearch] = useState("");
@@ -304,61 +343,14 @@ export function Dashboard({
     return [...populated, ...empty];
   }, [visibleTools, accountCountByTool]);
 
-  const toolNavContainerRef = useRef<HTMLDivElement | null>(null);
-  const toolNavMeasureRef = useRef<HTMLDivElement | null>(null);
-  const [visibleToolCount, setVisibleToolCount] = useState<number>(orderedVisibleTools.length);
-  const [toolNavExpanded, setToolNavExpanded] = useState(false);
-
-  const recomputeVisibleTools = useCallback(() => {
-    const container = toolNavContainerRef.current;
-    const measure = toolNavMeasureRef.current;
-    if (!container || !measure) {
-      setVisibleToolCount(orderedVisibleTools.length);
-      return;
-    }
-    const containerWidth = container.clientWidth;
-    if (containerWidth <= 0) {
-      setVisibleToolCount(orderedVisibleTools.length);
-      return;
-    }
-    const allEl = measure.querySelector<HTMLElement>("[data-measure-all]");
-    const toolEls = Array.from(measure.querySelectorAll<HTMLElement>("[data-measure-tool]"));
-    const allTabWidth = allEl?.offsetWidth ?? 96;
-    const toolWidths = toolEls.map((el) => el.offsetWidth);
-    const nextCount = computeVisibleToolCount(containerWidth, allTabWidth, toolWidths, 96, 6);
-    setVisibleToolCount((prev) => (prev === nextCount ? prev : nextCount));
-  }, [orderedVisibleTools.length]);
-
-  useEffect(() => {
-    recomputeVisibleTools();
-    const container = toolNavContainerRef.current;
-    let observer: ResizeObserver | undefined;
-    if (typeof ResizeObserver !== "undefined" && container) {
-      observer = new ResizeObserver(() => recomputeVisibleTools());
-      observer.observe(container);
-    }
-    if (typeof window !== "undefined") {
-      window.addEventListener("resize", recomputeVisibleTools);
-    }
-    return () => {
-      observer?.disconnect();
-      if (typeof window !== "undefined") {
-        window.removeEventListener("resize", recomputeVisibleTools);
-      }
-    };
-  }, [recomputeVisibleTools, orderedVisibleTools, isInitializing, nav]);
-
-  const inlineTools = useMemo(
-    () => orderedVisibleTools.slice(0, visibleToolCount),
-    [orderedVisibleTools, visibleToolCount]
-  );
-  const overflowTools = useMemo(
-    () => orderedVisibleTools.slice(visibleToolCount),
-    [orderedVisibleTools, visibleToolCount]
-  );
-  const activeOverflowTool = useMemo(
-    () => overflowTools.find((t) => t.id === nav) ?? null,
-    [overflowTools, nav]
+  // 侧栏只列「已有账号」的工具：0 账号的工具不占导航位（走「导入账号」入口），
+  // 但空库时仍完整展示，避免新用户看到一个没有内容的侧栏。
+  const sidebarTools = useMemo(
+    () =>
+      orderedVisibleTools.filter(
+        (t) => (accountCountByTool.get(t.id) ?? 0) > 0 || accounts.length === 0
+      ),
+    [orderedVisibleTools, accountCountByTool, accounts.length]
   );
 
   const activeToolFilter: ToolId | undefined =
@@ -479,6 +471,36 @@ export function Dashboard({
     setSearchQuery("");
   }, [nav]);
 
+  // 视图偏好落盘：下次启动保持用户上次选择的排布
+  useEffect(() => {
+    writeStoredAccountView(viewMode);
+  }, [viewMode]);
+
+  // 抽屉只持有 id；账号消失（删除/切作用域）时自动收起
+  useEffect(() => {
+    if (!detailAccountId) return;
+    if (!accounts.some((a) => a.id === detailAccountId)) setDetailAccountId(null);
+  }, [accounts, detailAccountId]);
+
+  useEffect(() => {
+    setDetailAccountId(null);
+  }, [nav]);
+
+  const detailAccount = useMemo(
+    () => (detailAccountId ? accounts.find((a) => a.id === detailAccountId) ?? null : null),
+    [accounts, detailAccountId]
+  );
+
+  // 选中集合按 id 保存，但账号被删除后必须剪掉，否则批量条会统计到幽灵账号
+  useEffect(() => {
+    setSelectedAccountIds((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(accounts.map((a) => a.id));
+      const next = new Set([...prev].filter((id) => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [accounts]);
+
   useEffect(() => {
     setSelectedLogIds([]);
     setConfirmLogAction(null);
@@ -513,7 +535,8 @@ export function Dashboard({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-      if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return;
+      // 只拦模态层：账号详情抽屉是非模态检视面板，开着时仍应能用 ⌘K
+      if (document.querySelector('[role="alertdialog"], [role="dialog"][aria-modal="true"]')) return;
       const target = e.target as HTMLElement | null;
       const isEditing =
         Boolean(target) &&
@@ -525,10 +548,7 @@ export function Dashboard({
       const key = e.key.toLowerCase();
       if (key === "k") {
         e.preventDefault();
-        if (nav === "pools" || nav === "agents" || nav === "routing" || nav === "logs" || nav === "settings") {
-          setNav("all");
-        }
-        requestAnimationFrame(() => searchInputRef.current?.focus());
+        setPaletteOpen(true);
         return;
       }
       if (isEditing) return;
@@ -609,12 +629,17 @@ export function Dashboard({
     }
   };
 
-  const openImportModal = (defaultMethod?: AuthMethod, toolId?: ToolId) => {
-    setBindTargetAccount(null);
-    setImportDefaultMethod(defaultMethod);
-    setImportPresetTool(toolId ?? activeToolFilter);
-    setImportOpen(true);
-  };
+  // 用 useCallback 固定引用：它会进入 ⌘K 面板的依赖数组，
+  // 普通函数每次渲染都是新引用，会让整个面板列表无谓重建。
+  const openImportModal = useCallback(
+    (defaultMethod?: AuthMethod, toolId?: ToolId) => {
+      setBindTargetAccount(null);
+      setImportDefaultMethod(defaultMethod);
+      setImportPresetTool(toolId ?? activeToolFilter);
+      setImportOpen(true);
+    },
+    [activeToolFilter]
+  );
 
   const openBindModal = useCallback(
     (account: AccountSummary, preferredMethod?: AuthMethod) => {
@@ -633,6 +658,89 @@ export function Dashboard({
     ? (adapters.find((a) => a.id === activeToolFilter)?.capabilities.supportsDailyClaim ?? false)
     : true;
   const isBatchBusy = Boolean(batchProgress?.running);
+
+  // ⌘K 面板：账号优先（输入即定位），动作与导航兜底
+  const paletteItems = useMemo<CommandItem[]>(() => {
+    // 与台账同序：最该处理的账号排在最前，⌘K 打开即可回车
+    const accountItems: CommandItem[] = sortLedgerAccounts(scopeAccounts, "risk").map((acc) => {
+      const q = toQuotaView(acc);
+      const meta =
+        q.pct !== null
+          ? `${q.pct}%`
+          : q.kind === "balance"
+            ? `${formatQuotaNumber(q.remaining ?? 0)} ${q.unit}`
+            : "未查额";
+      return {
+        id: `acc:${acc.id}`,
+        group: "账号",
+        label: acc.label,
+        meta,
+        keywords: `${acc.uidMasked} ${acc.emailMasked ?? ""} ${getToolBrandMeta(acc.toolId, adapters).name}`,
+        icon: UserRound,
+        toolId: acc.toolId,
+        run: () => {
+          detailReturnFocusRef.current = null;
+          setDetailAccountId(acc.id);
+        },
+      };
+    });
+
+    const actionItems: CommandItem[] = [
+      {
+        id: "act:claim",
+        group: "操作",
+        label: scopedStats.claimableCount > 0
+          ? `一键领取今日待领（${scopedStats.claimableCount}）`
+          : "一键领取今日待领",
+        icon: Sparkles,
+        keywords: "claim 签到 领取 daily",
+        run: () => void claimDailyBatch(undefined, activeToolFilter),
+      },
+      {
+        id: "act:refresh",
+        group: "操作",
+        label: "刷新全部额度",
+        icon: RefreshCw,
+        keywords: "refresh 查额 quota",
+        run: () => void refreshAllQuotas(activeToolFilter),
+      },
+      {
+        id: "act:import",
+        group: "操作",
+        label: "导入账号",
+        icon: Plus,
+        keywords: "import add 新增",
+        run: () => openImportModal(),
+      },
+      {
+        id: "act:gateway",
+        group: "操作",
+        label: gateway.running ? "停止本地网关" : "启动本地网关",
+        icon: Power,
+        keywords: "gateway 网关 proxy",
+        run: () => void toggleGateway(),
+      },
+    ];
+
+    const navItems: CommandItem[] = [
+      { id: "nav:agents", group: "导航", label: "Agent 接入与调度", icon: Link2, keywords: "agent pool 号池", run: () => setNav("agents") },
+      { id: "nav:routing", group: "导航", label: "路由观测", icon: Radio, keywords: "routing trace 路由", run: () => setNav("routing") },
+      { id: "nav:logs", group: "导航", label: "操作日志", icon: ScrollText, keywords: "logs 日志 审计", run: () => setNav("logs") },
+      { id: "nav:settings", group: "导航", label: "设置与环境", icon: Settings, keywords: "settings 设置 偏好", run: () => setNav("settings") },
+    ];
+
+    return [...accountItems, ...actionItems, ...navItems];
+  }, [
+    scopeAccounts,
+    adapters,
+    scopedStats.claimableCount,
+    activeToolFilter,
+    gateway.running,
+    claimDailyBatch,
+    refreshAllQuotas,
+    toggleGateway,
+    openImportModal,
+  ]);
 
   const boundAgentCount = useMemo(
     () => agentBindings.filter((b) => b.mountedPoolIds.length > 0).length,
@@ -654,6 +762,20 @@ export function Dashboard({
     return "账号与额度总览";
   }, [nav, activeToolMeta]);
 
+  // 副标题不再复述指标条里已经有的数字，改为「指标条没有的信息」：
+  // 数据新鲜度与工具覆盖面。
+  const latestSyncLabel = useMemo(() => {
+    let newest = 0;
+    for (const acc of scopeAccounts) {
+      const iso = acc.latestQuota?.fetchedAt;
+      if (!iso) continue;
+      const t = Date.parse(iso);
+      if (Number.isFinite(t) && t > newest) newest = t;
+    }
+    if (!newest) return "尚未同步";
+    return formatRelativeSyncTime(new Date(newest).toISOString());
+  }, [scopeAccounts]);
+
   const headerSubtitle = useMemo(() => {
     if (nav === "pools" || nav === "agents") {
       return `已接入 ${boundAgentCount}/${agentBindings.length} 个目标 Agent · 在每个 Agent 下直接挑选订阅工具模型并编排同工具主备顺位${
@@ -674,11 +796,13 @@ export function Dashboard({
       return `已加载 ${adapters.length} 个工具适配器 · ${scopedStats.runningClientsCount} 个桌面客户端运行中`;
     }
     if (activeToolMeta) {
-      return `${activeToolMeta.tagline} · 当前纳管 ${scopedStats.total} 个账号 · ${scopedStats.claimBadgeText}`;
+      return `${activeToolMeta.tagline} · 最近同步 ${latestSyncLabel}`;
     }
-    return `共 ${scopedStats.total} 个纳管账号 · 今日已签 ${scopedStats.claimedCount} 个 · ${scopedStats.claimBadgeText}`;
+    return `本地加密库 · ${sidebarTools.length} 个工具 · 最近同步 ${latestSyncLabel}`;
   }, [
     nav,
+    latestSyncLabel,
+    sidebarTools.length,
     boundAgentCount,
     agentBindings.length,
     driftedAgentCount,
@@ -754,14 +878,16 @@ export function Dashboard({
     logScope === "archived" ? logStats.archivedCount : logStats.activeCount;
 
   return (
-    <div className="relative flex h-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div className="relative flex h-full overflow-hidden bg-[#f6f7f9] text-zinc-900 dark:bg-[#0c0d10] dark:text-zinc-100">
 
-      <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200 bg-white px-2.5 pb-3 pt-0 dark:border-zinc-800 dark:bg-zinc-900">
+      <aside className="flex h-full w-52 shrink-0 flex-col border-r border-zinc-200/60 bg-white/95 px-2.5 pb-3 pt-0 dark:border-white/[0.06] dark:bg-[#111216]">
         {reservesTrafficLightSpace && (
           <div onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="h-10 shrink-0 -mx-2.5" />
         )}
         <div className="flex min-h-0 flex-1 flex-col justify-between">
-        <div className="overflow-y-auto">
+        {/* 工作台区独立滚动：工具增多时不会把「系统与审计」顶出视口；
+            底部渐隐提示还有未显示的条目，避免行被硬切一半 */}
+        <div className="mask-fade-b min-h-0 flex-1 overflow-y-auto pb-2">
           <div
             onMouseDown={isWindows ? onTitleBarMouseDown : undefined}
             onDoubleClick={isWindows ? onTitleBarDoubleClick : undefined}
@@ -808,6 +934,85 @@ export function Dashboard({
                     {accounts.length}
                   </span>
                 </button>
+
+                {/* 工具作用域 = 侧栏二级导航。
+                    原先用顶部横向 Tabs，9 个工具就要靠 computeVisibleToolCount()
+                    逐个 offsetWidth 测量 + 「展开 N」兜底；纵向列表天然可扩展，
+                    也不再需要把布局宽度塞进状态。 */}
+                <div
+                  role="navigation"
+                  aria-label="账号视图导航"
+                  className="mt-0.5 mb-1 ml-2 space-y-px border-l border-zinc-200/70 pl-1.5 dark:border-white/[0.08]"
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHighlightAgentId(null);
+                      setNav("all");
+                    }}
+                    aria-current={nav === "all" ? "page" : undefined}
+                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-[11.5px] transition ${
+                      nav === "all"
+                        ? "bg-zinc-900/[0.055] font-semibold text-zinc-900 dark:bg-white/[0.08] dark:text-zinc-50"
+                        : "text-zinc-500 hover:bg-zinc-900/[0.035] hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-white/[0.05] dark:hover:text-zinc-100"
+                    }`}
+                  >
+                    <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] bg-zinc-100 text-zinc-500 ring-1 ring-black/6 dark:bg-zinc-800/80 dark:text-zinc-400 dark:ring-white/10">
+                      <Layers className="h-2.5 w-2.5" aria-hidden="true" />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-left">全部账号</span>
+                    <span
+                      className={`shrink-0 tabular-nums text-[10.5px] ${
+                        nav === "all"
+                          ? "text-zinc-600 dark:text-zinc-300"
+                          : "text-zinc-400 dark:text-zinc-500"
+                      }`}
+                    >
+                      {accounts.length}
+                    </span>
+                  </button>
+
+                  {sidebarTools.map((tool) => {
+                    const count = accountCountByTool.get(tool.id) ?? 0;
+                    const running = Boolean(clientStatuses[tool.id]?.isRunning);
+                    const active = nav === tool.id;
+                    return (
+                      <button
+                        key={tool.id}
+                        type="button"
+                        onClick={() => {
+                          setHighlightAgentId(null);
+                          setNav(tool.id);
+                        }}
+                        aria-current={active ? "page" : undefined}
+                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-[11.5px] transition ${
+                          active
+                            ? "bg-zinc-900/[0.055] font-semibold text-zinc-900 dark:bg-white/[0.08] dark:text-zinc-50"
+                            : "text-zinc-500 hover:bg-zinc-900/[0.035] hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-white/[0.05] dark:hover:text-zinc-100"
+                        }`}
+                      >
+                        <ToolBrandIcon toolId={tool.id} size="xs" decorative />
+                        <span className="min-w-0 flex-1 truncate text-left">{tool.name}</span>
+                        {running && count > 0 && (
+                          <span
+                            aria-hidden="true"
+                            title="客户端运行中"
+                            className="h-1 w-1 shrink-0 rounded-full bg-emerald-500"
+                          />
+                        )}
+                        <span
+                          className={`shrink-0 tabular-nums text-[10.5px] ${
+                            active
+                              ? "text-zinc-600 dark:text-zinc-300"
+                              : "text-zinc-400 dark:text-zinc-500"
+                          }`}
+                        >
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
 
                 <button
                   type="button"
@@ -861,7 +1066,10 @@ export function Dashboard({
               </nav>
             </div>
 
-            <div>
+        </div>
+        </div>
+
+        <div className="shrink-0 pt-3">
               <div className="mb-1.5 px-1.5 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase dark:text-zinc-400">
                 系统与审计
               </div>
@@ -907,12 +1115,9 @@ export function Dashboard({
                 </button>
               </nav>
             </div>
-          </div>
-        </div>
-
-        <div className="space-y-2 border-t border-zinc-200/70 pt-3 dark:border-zinc-800/80">
+        <div className="space-y-2 border-t border-zinc-200/60 pt-3 dark:border-white/[0.06]">
           {/* 本地网关快捷启停控制（以启动/关闭为主交互，隐藏原始端口号） */}
-          <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-1.5 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-900/70">
+          <div className="flex items-center justify-between gap-2 rounded-xl bg-zinc-100/80 px-2 py-2 text-xs transition-colors hover:bg-zinc-100 dark:bg-white/[0.04] dark:hover:bg-white/[0.06]">
             <button
               type="button"
               onClick={() => setNav("agents")}
@@ -922,7 +1127,9 @@ export function Dashboard({
               <span
                 aria-hidden="true"
                 className={`h-2 w-2 shrink-0 rounded-full ${
-                  gateway.running ? "bg-emerald-500" : "bg-zinc-400"
+                  gateway.running
+                    ? "bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.18)]"
+                    : "bg-zinc-400"
                 }`}
               />
               <span className="truncate">
@@ -1015,7 +1222,7 @@ export function Dashboard({
         <header
           onMouseDown={usesCustomTitleBar ? onTitleBarMouseDown : undefined}
           onDoubleClick={usesCustomTitleBar ? onTitleBarDoubleClick : undefined}
-          className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70"
+          className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-zinc-200/60 bg-white/80 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-white/[0.06] dark:bg-[#111216]/80"
         >
           <div className="flex min-w-[160px] flex-1 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
@@ -1251,159 +1458,7 @@ export function Dashboard({
           {isAccountSection && (
             <>
               {/* 统一吸顶控制区（紧贴顶栏无缝衔接，内部包含工具切换 / 核心指标 / 搜索筛选，且全区支持滚轮滚动） */}
-              <div className="sticky top-0 z-10 space-y-2.5 border-b border-zinc-200/90 bg-zinc-50 px-5 py-3 shadow-2xs dark:border-zinc-800 dark:bg-zinc-950">
-                <div ref={toolNavContainerRef} className="relative flex items-start gap-1.5">
-                  <div
-                    aria-hidden="true"
-                    className="pointer-events-none invisible absolute inset-x-0 top-0 overflow-hidden"
-                  >
-                    <div
-                      ref={toolNavMeasureRef}
-                      className="flex w-max flex-nowrap items-center gap-1.5 whitespace-nowrap"
-                    >
-                    <div
-                      data-measure-all
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium"
-                    >
-                      <Layers className="h-3.5 w-3.5 shrink-0" />
-                      <span>全部账号</span>
-                      <span className="rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums">
-                        {accounts.length}
-                      </span>
-                    </div>
-                    {orderedVisibleTools.map((tool) => {
-                      const count = accountCountByTool.get(tool.id) ?? 0;
-                      const isRunning = Boolean(clientStatuses[tool.id]?.isRunning);
-                      return (
-                        <div
-                          key={tool.id}
-                          data-measure-tool
-                          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium"
-                        >
-                          <ToolBrandIcon toolId={tool.id} size="xs" decorative />
-                          <span>{tool.name}</span>
-                          {isRunning && count > 0 && <span className="h-1.5 w-1.5 shrink-0" />}
-                          <span className="rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums">
-                            {count}
-                          </span>
-                        </div>
-                      );
-                    })}
-                    </div>
-                  </div>
-
-                  <nav
-                    aria-label="账号视图导航"
-                    className={`flex min-w-0 flex-1 items-center gap-1.5 py-0.5 ${
-                      toolNavExpanded ? "flex-wrap" : "flex-nowrap"
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setNav("all")}
-                      aria-current={nav === "all" ? "page" : undefined}
-                      className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
-                        nav === "all"
-                          ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
-                          : "bg-white text-zinc-700 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-800 dark:hover:bg-zinc-800"
-                      }`}
-                    >
-                      <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                      <span>全部账号</span>
-                      <span
-                        className={`rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums ${
-                          nav === "all"
-                            ? "bg-white/20 text-white dark:bg-zinc-950/15 dark:text-zinc-950"
-                            : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                        }`}
-                      >
-                        {accounts.length}
-                      </span>
-                    </button>
-
-                    {(toolNavExpanded ? orderedVisibleTools : inlineTools).map((tool) => {
-                      const active = nav === tool.id;
-                      const count = accountCountByTool.get(tool.id) ?? 0;
-                      const isRunning = clientStatuses[tool.id]?.isRunning;
-                      return (
-                        <button
-                          key={tool.id}
-                          type="button"
-                          onClick={() => setNav(tool.id)}
-                          aria-current={active ? "page" : undefined}
-                          className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
-                            active
-                              ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
-                              : count > 0
-                                ? "bg-white text-zinc-700 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-800 dark:hover:bg-zinc-800"
-                                : "bg-white/60 text-zinc-500 ring-1 ring-zinc-200/70 hover:bg-white hover:text-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400 dark:ring-zinc-800/80 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
-                          }`}
-                        >
-                          <ToolBrandIcon toolId={tool.id} size="xs" decorative />
-                          <span>{tool.name}</span>
-                          {isRunning && count > 0 && (
-                            <span
-                              title="本机客户端运行中"
-                              aria-hidden="true"
-                              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                                active ? "bg-white dark:bg-zinc-950" : "bg-emerald-500"
-                              }`}
-                            />
-                          )}
-                          <span
-                            className={`rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums ${
-                              active
-                                ? "bg-white/20 text-white dark:bg-zinc-950/15 dark:text-zinc-950"
-                                : count > 0
-                                  ? "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                                  : "bg-zinc-100/70 text-zinc-400 dark:bg-zinc-800/70 dark:text-zinc-500"
-                            }`}
-                          >
-                            {count}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </nav>
-
-                  {overflowTools.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setToolNavExpanded((prev) => !prev)}
-                      aria-expanded={toolNavExpanded}
-                      aria-label={
-                        toolNavExpanded
-                          ? "收起更多工具类型"
-                          : `展开其余 ${overflowTools.length} 个工具类型`
-                      }
-                      className={`mt-0.5 inline-flex shrink-0 items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs font-medium whitespace-nowrap transition ${
-                        !toolNavExpanded && activeOverflowTool
-                          ? "bg-brand-700 text-white shadow-2xs dark:bg-brand-400 dark:text-zinc-950"
-                          : "bg-white text-zinc-700 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-800 dark:hover:bg-zinc-800"
-                      }`}
-                    >
-                      <span>{toolNavExpanded ? "收起" : "展开"}</span>
-                      {!toolNavExpanded && (
-                        <span
-                          className={`rounded-md px-1.5 py-0.5 text-[11px] leading-none font-semibold tabular-nums ${
-                            activeOverflowTool
-                              ? "bg-white/20 text-white dark:bg-zinc-950/15 dark:text-zinc-950"
-                              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                          }`}
-                        >
-                          {overflowTools.length}
-                        </span>
-                      )}
-                      <ChevronDown
-                        className={`h-3.5 w-3.5 shrink-0 transition-transform ${
-                          toolNavExpanded ? "rotate-180" : ""
-                        }`}
-                        aria-hidden="true"
-                      />
-                    </button>
-                  )}
-                </div>
-
+              <div className="sticky top-0 z-10 space-y-2.5 border-b border-zinc-200/50 bg-[#f6f7f9]/85 px-5 py-3 backdrop-blur-md dark:border-white/[0.05] dark:bg-[#0c0d10]/85">
                 {showFilterToolbar && (
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                     <div className="relative min-w-[180px] flex-1 max-w-xs">
@@ -1418,7 +1473,7 @@ export function Dashboard({
                         onChange={(e) => setSearchQuery(e.target.value)}
                         placeholder="搜索昵称、UID、手机号或套餐..."
                         aria-label="搜索账号"
-                        className="w-full rounded-lg border border-zinc-200 bg-white py-1 pr-10 pl-8 text-xs text-zinc-900 transition focus:border-brand-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-brand-500"
+                        className="field-input w-full py-1 pr-10 pl-8"
                       />
                       {searchQuery ? (
                         <button
@@ -1439,79 +1494,241 @@ export function Dashboard({
                       )}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div role="group" aria-label="账号状态筛选" className="flex flex-wrap items-center gap-1">
-                        {(
-                          [
-                            { id: "all", label: "全部" },
-                            { id: "active_client", label: "使用中" },
-                            { id: "claimable", label: "待领" },
-                            { id: "attention", label: "待完善" },
-                          ] as const
-                        ).map((f) => {
-                          const active = statusFilter === f.id;
-                          const cnt = scopedStats.filterCounts[f.id];
-                          return (
-                            <button
-                              key={f.id}
-                              type="button"
-                              aria-pressed={active}
-                              onClick={() => setStatusFilter(f.id)}
-                              className={`chip ${active ? "chip-active" : ""}`}
-                            >
-                              <span>{f.label}</span>
-                              <span
-                                className={`text-[11px] tabular-nums ${
-                                  active ? "opacity-80" : "text-zinc-500 dark:text-zinc-400"
-                                }`}
-                              >
-                                {cnt}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
+                    {viewMode === "ledger" && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLedgerSort((prev) => {
+                            const order: LedgerSortKey[] = ["risk", "quota-asc", "quota-desc", "recent"];
+                            return order[(order.indexOf(prev) + 1) % order.length];
+                          })
+                        }
+                        title="切换台账排序方式"
+                        className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-zinc-600 transition hover:bg-zinc-900/[0.05] hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50"
+                      >
+                        <ArrowUpDown className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        {LEDGER_SORT_LABEL[ledgerSort]}
+                      </button>
+                    )}
 
-                      {nav === "all" && (
-                        <div
-                          role="group"
-                          aria-label="视图模式"
-                          className="inline-flex shrink-0 rounded-lg border border-zinc-200 bg-white p-0.5 dark:border-zinc-700 dark:bg-zinc-900"
-                        >
+                    {/* 视图切换：台账为默认，卡片两档保留给需要富信息的场景。
+                        状态筛选已收敛到下方指标条，此处不再重复第二套胶囊。 */}
+                    <div
+                      role="group"
+                      aria-label="视图模式"
+                      className="ml-auto inline-flex shrink-0 rounded-lg bg-zinc-200/65 p-0.5 dark:bg-white/[0.06]"
+                    >
+                      {(
+                        nav === "all"
+                          ? ([
+                              { id: "ledger", label: "台账", icon: Table2, title: "水位台账：一屏看完全部账号" },
+                              { id: "grouped", label: "分组", icon: LayoutList, title: "按平台分组的卡片墙" },
+                              { id: "flat", label: "平铺", icon: LayoutGrid, title: "不分组的卡片平铺" },
+                            ] as const)
+                          : ([
+                              { id: "ledger", label: "台账", icon: Table2, title: "水位台账：一屏看完全部账号" },
+                              { id: "flat", label: "卡片", icon: LayoutGrid, title: "卡片视图" },
+                            ] as const)
+                      ).map((v) => {
+                        // 工具作用域下 grouped 会回落成 flat，这里按真实渲染结果标注选中态
+                        const shown = nav === "all" || viewMode === "ledger" ? viewMode : "flat";
+                        const active = shown === v.id;
+                        return (
                           <button
+                            key={v.id}
                             type="button"
-                            aria-pressed={viewMode === "grouped"}
-                            onClick={() => setViewMode("grouped")}
-                            title="按平台模块化分类展示"
+                            aria-pressed={active}
+                            onClick={() => setViewMode(v.id)}
+                            title={v.title}
                             className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                              viewMode === "grouped"
-                                ? "bg-zinc-100 text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                                : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                              active
+                                ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-800 dark:text-zinc-100"
+                                : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
                             }`}
                           >
-                            <LayoutList className="h-3 w-3 shrink-0" aria-hidden="true" />
-                            分组
+                            <v.icon className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            {v.label}
                           </button>
-                          <button
-                            type="button"
-                            aria-pressed={viewMode === "flat"}
-                            onClick={() => setViewMode("flat")}
-                            title="紧凑平铺展示"
-                            className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                              viewMode === "flat"
-                                ? "bg-zinc-100 text-zinc-900 shadow-2xs dark:bg-zinc-700 dark:text-zinc-100"
-                                : "text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
-                            }`}
-                          >
-                            <LayoutGrid className="h-3 w-3 shrink-0" aria-hidden="true" />
-                            平铺
-                          </button>
-                        </div>
-                      )}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
+                {/* 指标条即状态筛选：随吸顶区一起固定，滚动时始终可切换作用域。
+                    它曾经在内容流里，滚一屏就消失，用户要滚回顶部才能改筛选。 */}
+              {/* 紧凑单行指标条：4 项指标收敛为一体式分层条带，兼顾窄高窗口空间与单行不折行 */}
+              <section
+                aria-label="当前作用域核心指标"
+                className="surface-card grid grid-cols-2 divide-y divide-slate-900/[0.06] overflow-hidden rounded-xl @3xl:grid-cols-4 @3xl:divide-x @3xl:divide-y-0 dark:divide-white/[0.06]"
+              >
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter("all")}
+                  aria-pressed={statusFilter === "all"}
+                  title="显示全部账号"
+                  className={`relative flex min-w-0 items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors ${
+                    statusFilter === "all"
+                      ? "bg-brand-500/[0.06] after:absolute after:inset-x-3 after:bottom-0 after:h-[2px] after:rounded-full after:bg-brand-500 dark:bg-brand-400/[0.08]"
+                      : "hover:bg-slate-900/[0.025] dark:hover:bg-white/[0.03]"
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <Layers
+                      className="h-3.5 w-3.5 shrink-0 text-brand-600 dark:text-brand-400"
+                      aria-hidden="true"
+                    />
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                      {activeToolMeta ? `${activeToolMeta.name}` : "纳管账号"}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-baseline gap-0.5">
+                    <span className="text-sm leading-none font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-50">
+                      {scopedStats.total}
+                    </span>
+                    <span className="text-[11px] text-zinc-500 dark:text-zinc-400">个</span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setStatusFilter((prev) => (prev === "active_client" ? "all" : "active_client"))
+                  }
+                  aria-pressed={statusFilter === "active_client"}
+                  title="仅显示本机客户端正在使用的账号"
+                  className={`relative flex min-w-0 items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors ${
+                    statusFilter === "active_client"
+                      ? "bg-emerald-500/[0.06] after:absolute after:inset-x-3 after:bottom-0 after:h-[2px] after:rounded-full after:bg-emerald-500 dark:bg-emerald-400/[0.08]"
+                      : "hover:bg-slate-900/[0.025] dark:hover:bg-white/[0.03]"
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <MonitorCheck
+                      className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
+                      aria-hidden="true"
+                    />
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                      本机挂载
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <span className="text-sm leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                      {scopedStats.activeClientsCount}
+                      <span className="text-[11px] font-normal text-zinc-400 dark:text-zinc-500">
+                        /{scopedStats.scopeToolCapacity}
+                      </span>
+                    </span>
+                    <span
+                      className={`shrink-0 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] leading-none font-medium ${
+                        scopedStats.total > 0 && scopedStats.runningClientsCount > 0
+                          ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                          : "bg-zinc-900/[0.055] text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300"
+                      }`}
+                    >
+                      {scopedStats.total === 0
+                        ? "无"
+                        : scopedStats.runningClientsCount > 0
+                          ? "运行"
+                          : "待启"}
+                    </span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setStatusFilter((prev) => (prev === "claimable" ? "all" : "claimable"))
+                  }
+                  aria-pressed={statusFilter === "claimable"}
+                  title="仅显示今日待领取额度的账号"
+                  className={`relative flex min-w-0 items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors ${
+                    statusFilter === "claimable"
+                      ? "bg-sky-500/[0.06] after:absolute after:inset-x-3 after:bottom-0 after:h-[2px] after:rounded-full after:bg-sky-500 dark:bg-sky-400/[0.08]"
+                      : "hover:bg-slate-900/[0.025] dark:hover:bg-white/[0.03]"
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <CheckCircle2
+                      className="h-3.5 w-3.5 shrink-0 text-sky-600 dark:text-sky-400"
+                      aria-hidden="true"
+                    />
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                      今日待领
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <span className="text-sm leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                      {scopedStats.claimableCount}
+                    </span>
+                    <span
+                      className={`shrink-0 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] leading-none font-medium ${
+                        scopedStats.claimableCount > 0
+                          ? "bg-sky-500/12 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300"
+                          : scopedStats.unclaimedAuthMissingCount > 0
+                            ? "bg-amber-500/12 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
+                            : scopedStats.allClaimed
+                              ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                              : "bg-zinc-900/[0.055] text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300"
+                      }`}
+                    >
+                      {scopedStats.unclaimedAuthMissingCount > 0 &&
+                      scopedStats.eligibleClaimTotal === 0
+                        ? "授权后可签"
+                        : scopedStats.eligibleClaimTotal > 0
+                          ? `已签 ${scopedStats.claimedCount}/${scopedStats.eligibleClaimTotal}`
+                          : "无可签"}
+                    </span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setStatusFilter((prev) => (prev === "attention" ? "all" : "attention"))
+                  }
+                  aria-pressed={statusFilter === "attention"}
+                  title="仅显示凭据过期、风险暂停或待授权的账号"
+                  className={`relative flex min-w-0 items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors ${
+                    statusFilter === "attention"
+                      ? "bg-amber-500/[0.06] after:absolute after:inset-x-3 after:bottom-0 after:h-[2px] after:rounded-full after:bg-amber-500 dark:bg-amber-400/[0.08]"
+                      : "hover:bg-slate-900/[0.025] dark:hover:bg-white/[0.03]"
+                  }`}
+                >
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <Activity
+                      className={`h-3.5 w-3.5 shrink-0 ${
+                        scopedStats.attentionCount > 0
+                          ? "text-amber-600 dark:text-amber-400"
+                          : "text-emerald-600 dark:text-emerald-400"
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                      待完善
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <span className="text-sm leading-none font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                      {scopedStats.attentionCount}
+                    </span>
+                    <span
+                      className={`shrink-0 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] leading-none font-medium ${
+                        scopedStats.attentionCount > 0
+                          ? "bg-amber-500/12 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300"
+                          : "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300"
+                      }`}
+                    >
+                      {scopedStats.attentionCount > 0
+                        ? `正常 ${scopedStats.healthyCount}`
+                        : scopedStats.disabledCount > 0
+                          ? `停用 ${scopedStats.disabledCount}`
+                          : "全部正常"}
+                    </span>
+                  </div>
+                </button>
+              </section>
               </div>
+
 
               <div className="space-y-3.5 px-5 py-3.5">
                 <UpdateBanner
@@ -1519,174 +1736,6 @@ export function Dashboard({
                   dismissed={updateBannerDismissed}
                   onDismiss={() => setUpdateBannerDismissed(true)}
                 />
-
-                {/* 核心指标筛选卡随内容区滚动，避免在 768px 窄高窗口吸顶挤压账号列表 */}
-                <section
-                  aria-label="当前作用域核心指标"
-                  className="grid grid-cols-2 gap-2 @3xl:grid-cols-4"
-                >
-                  <button
-                    type="button"
-                    onClick={() => setStatusFilter("all")}
-                    aria-pressed={statusFilter === "all"}
-                    title="显示全部账号"
-                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
-                      statusFilter === "all" ? "border-brand-500/60 ring-1 ring-brand-500/20" : ""
-                    }`}
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand-500/12 text-brand-700 dark:text-brand-400">
-                        <Layers className="h-3.5 w-3.5" aria-hidden="true" />
-                      </span>
-                      <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                        {activeToolMeta ? `${activeToolMeta.name}` : "纳管账号"}
-                      </span>
-                    </div>
-                    <div className="flex shrink-0 items-baseline gap-0.5">
-                      <span className="text-sm leading-none font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-100">
-                        {scopedStats.total}
-                      </span>
-                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400">个</span>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setStatusFilter((prev) => (prev === "active_client" ? "all" : "active_client"))
-                    }
-                    aria-pressed={statusFilter === "active_client"}
-                    title="仅显示本机客户端正在使用的账号"
-                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
-                      statusFilter === "active_client"
-                        ? "border-emerald-500/60 ring-1 ring-emerald-500/20"
-                        : ""
-                    }`}
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-emerald-500/12 text-emerald-700 dark:text-emerald-400">
-                        <MonitorCheck className="h-3.5 w-3.5" aria-hidden="true" />
-                      </span>
-                      <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                        本机挂载
-                      </span>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <span className="text-xs font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                        {scopedStats.activeClientsCount}
-                        <span className="text-[11px] font-normal text-zinc-500 dark:text-zinc-400">
-                          /{scopedStats.scopeToolCapacity}
-                        </span>
-                      </span>
-                      <span
-                        className={`badge shrink-0 whitespace-nowrap ${
-                          scopedStats.total > 0 && scopedStats.runningClientsCount > 0
-                            ? "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                            : "badge-neutral"
-                        }`}
-                      >
-                        {scopedStats.total === 0
-                          ? "无"
-                          : scopedStats.runningClientsCount > 0
-                            ? "运行"
-                            : "待启"}
-                      </span>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setStatusFilter((prev) => (prev === "claimable" ? "all" : "claimable"))
-                    }
-                    aria-pressed={statusFilter === "claimable"}
-                    title="仅显示今日待领取额度的账号"
-                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
-                      statusFilter === "claimable"
-                        ? "border-sky-500/60 ring-1 ring-sky-500/20"
-                        : ""
-                    }`}
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-500/12 text-sky-700 dark:text-sky-400">
-                        <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                      </span>
-                      <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                        今日待领
-                      </span>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <span className="text-xs font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                        {scopedStats.claimableCount}
-                      </span>
-                      <span
-                        className={`badge shrink-0 whitespace-nowrap ${
-                          scopedStats.claimableCount > 0
-                            ? "border-sky-500/25 bg-sky-500/12 text-sky-800 dark:text-sky-300"
-                            : scopedStats.unclaimedAuthMissingCount > 0
-                              ? "border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300"
-                              : scopedStats.allClaimed
-                                ? "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                                : "badge-neutral"
-                        }`}
-                      >
-                        {scopedStats.unclaimedAuthMissingCount > 0 &&
-                        scopedStats.eligibleClaimTotal === 0
-                          ? "授权后可签"
-                          : scopedStats.eligibleClaimTotal > 0
-                            ? `已签 ${scopedStats.claimedCount}/${scopedStats.eligibleClaimTotal}`
-                            : "无可签"}
-                      </span>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setStatusFilter((prev) => (prev === "attention" ? "all" : "attention"))
-                    }
-                    aria-pressed={statusFilter === "attention"}
-                    title="仅显示凭据过期、风险暂停或待授权的账号"
-                    className={`surface-card surface-interactive flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl px-3 py-2 text-left ${
-                      statusFilter === "attention"
-                        ? "border-amber-500/60 ring-1 ring-amber-500/20"
-                        : ""
-                    }`}
-                  >
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span
-                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
-                          scopedStats.attentionCount > 0
-                            ? "bg-amber-500/12 text-amber-700 dark:text-amber-400"
-                            : "bg-emerald-500/12 text-emerald-700 dark:text-emerald-400"
-                        }`}
-                      >
-                        <Activity className="h-3.5 w-3.5" aria-hidden="true" />
-                      </span>
-                      <span className="truncate text-xs font-medium text-zinc-600 dark:text-zinc-400">
-                        待完善
-                      </span>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <span className="text-xs font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">
-                        {scopedStats.attentionCount}
-                      </span>
-                      <span
-                        className={`badge shrink-0 whitespace-nowrap ${
-                          scopedStats.attentionCount > 0
-                            ? "border-amber-500/25 bg-amber-500/12 text-amber-800 dark:text-amber-300"
-                            : "border-emerald-500/25 bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                        }`}
-                      >
-                        {scopedStats.attentionCount > 0
-                          ? `正常 ${scopedStats.healthyCount}`
-                          : scopedStats.disabledCount > 0
-                            ? `停用 ${scopedStats.disabledCount}`
-                            : "全部正常"}
-                      </span>
-                    </div>
-                  </button>
-                </section>
 
                 {isInitializing && scopeAccounts.length === 0 ? (
                 <div
@@ -1773,42 +1822,73 @@ export function Dashboard({
                     清除筛选条件
                   </button>
                 </div>
+              ) : viewMode === "ledger" ? (
+                <AccountLedger
+                  accounts={filteredAccounts}
+                  sort={ledgerSort}
+                  onSortChange={setLedgerSort}
+                  selectedIds={selectedAccountIds}
+                  onSelectedIdsChange={setSelectedAccountIds}
+                  hiddenSelectedCount={
+                    [...selectedAccountIds].filter(
+                      (id) => !filteredAccounts.some((a) => a.id === id)
+                    ).length
+                  }
+                  onOpenDetail={(acc) => {
+                    detailReturnFocusRef.current =
+                      document.activeElement instanceof HTMLElement
+                        ? document.activeElement
+                        : null;
+                    setDetailAccountId(acc.id);
+                  }}
+                />
               ) : nav === "all" && viewMode === "grouped" ? (
-                <div className="space-y-4">
+                <div className="space-y-6">
                   {groupedModules.map((group) => (
-                    <section
-                      key={group.id}
-                      className="rounded-2xl bg-zinc-100/55 p-3.5 dark:bg-zinc-900/35"
-                    >
-                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-0.5">
+                    <section key={group.id}>
+                      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 px-0.5">
                         <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            aria-hidden="true"
+                            className={`h-3.5 w-[3px] shrink-0 rounded-full ${
+                              group.isRunning
+                                ? "bg-emerald-500"
+                                : "bg-zinc-300 dark:bg-zinc-700"
+                            }`}
+                          />
                           <ToolBrandIcon toolId={group.id} size="sm" decorative />
-                          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                          <h2 className="text-[13px] font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
                             {group.name}
                           </h2>
-                          <span className="rounded-full bg-zinc-200/80 px-2 py-0.5 text-[11px] font-medium tabular-nums text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                          <span className="text-[11px] font-medium tabular-nums text-zinc-500 dark:text-zinc-400">
                             {group.accounts.length} 个账号
                           </span>
+                          <span className="text-zinc-300 dark:text-zinc-700" aria-hidden="true">
+                            ·
+                          </span>
                           <span
-                            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                            className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${
                               group.isRunning
-                                ? "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300"
-                                : "bg-zinc-200/60 text-zinc-600 dark:bg-zinc-800/80 dark:text-zinc-400"
+                                ? "text-emerald-700 dark:text-emerald-400"
+                                : "text-zinc-500 dark:text-zinc-400"
                             }`}
                           >
                             {group.isRunning && (
-                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+                              <span
+                                className="h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.2)]"
+                                aria-hidden="true"
+                              />
                             )}
                             {group.isRunning ? "桌面端运行中" : "桌面端未运行"}
                           </span>
                           {group.activeAccount && (
-                            <span className="hidden text-[11px] text-zinc-600 sm:inline dark:text-zinc-400">
+                            <span className="hidden text-[11px] text-zinc-500 sm:inline dark:text-zinc-400">
                               · 当前挂载：{group.activeAccount.label}
                             </span>
                           )}
                         </div>
 
-                        <div className="flex shrink-0 items-center gap-1.5">
+                        <div className="flex shrink-0 items-center gap-1">
                           <button
                             type="button"
                             onClick={() => void handleLaunchToolClient(group.id)}
@@ -1823,7 +1903,7 @@ export function Dashboard({
                                 ? `唤起 ${group.name} 客户端`
                                 : `快捷启动 ${group.name} 客户端`
                             }
-                            className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                            className="btn btn-xs btn-ghost shrink-0 gap-1 whitespace-nowrap"
                           >
                             {launchingToolId === group.id ? (
                               <Loader2
@@ -1839,7 +1919,7 @@ export function Dashboard({
                           <button
                             type="button"
                             onClick={() => openImportModal(undefined, group.id)}
-                            className="btn btn-xs btn-secondary shrink-0 gap-1 whitespace-nowrap"
+                            className="btn btn-xs btn-ghost shrink-0 gap-1 whitespace-nowrap"
                           >
                             <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
                             添加账号
@@ -1847,7 +1927,7 @@ export function Dashboard({
                         </div>
                       </div>
 
-                      <div className="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))]">
+                      <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))]">
                         {group.accounts.map((acc) => (
                           <AccountCard key={acc.id} account={acc} onOpenBindModal={openBindModal} />
                         ))}
@@ -1981,6 +2061,18 @@ export function Dashboard({
           setConfirmQuitOpen(false);
           await quitApp();
         }}
+      />
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        items={paletteItems}
+      />
+
+      <AccountDrawer
+        account={detailAccount}
+        returnFocusTo={detailReturnFocusRef.current}
+        onClose={() => setDetailAccountId(null)}
       />
     </div>
   );

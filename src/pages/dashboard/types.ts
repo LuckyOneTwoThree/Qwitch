@@ -8,7 +8,13 @@ export type NavSection =
   | "logs"
   | "settings"
   | ToolId;
-export type AllViewMode = "grouped" | "flat";
+/**
+ * 账号主视图的三种排布：
+ * - ledger  ：水位台账（默认，行 × 列，可排序可多选）
+ * - grouped ：按工具分组的卡片墙（保留给需要富信息的场景）
+ * - flat    ：不分组的卡片平铺
+ */
+export type AllViewMode = "ledger" | "grouped" | "flat";
 export type LogActionFilter = "all" | ActionLogItem["actionType"];
 export type LogResultFilter = "all" | ActionLogItem["resultStatus"];
 

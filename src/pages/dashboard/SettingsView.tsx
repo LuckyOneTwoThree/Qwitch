@@ -227,10 +227,12 @@ export function SettingsView({
   );
 
   return (
-    <div className="space-y-4">
+    // 限宽居中：宽屏下标签与右侧控件原本相距 1100px+，视线要横跨整个窗口才能配对。
+    // 880px 是「标签 + 说明 + 控件」三者在一次注视内可读的上限。
+    <div className="mx-auto w-full max-w-[880px] space-y-4">
       <nav
         aria-label="设置分类导航"
-        className="surface-card flex flex-wrap items-center justify-between gap-2 p-2"
+        className="surface-card flex flex-wrap items-center justify-between gap-2 p-1.5"
       >
         <div
           role="tablist"

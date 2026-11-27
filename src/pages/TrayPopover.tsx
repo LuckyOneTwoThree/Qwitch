@@ -28,6 +28,7 @@ import { computeAgentExposedModels } from "../data/mockPoolData";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
 import { ColdSwitchModal } from "../components/ColdSwitchModal";
 import { AccountStatusBadge, ClaimStatusBadge } from "../components/StatusBadge";
+import { toQuotaView } from "../components/ledger/ledgerModel";
 import { QwitchLogo, ToolBrandIcon } from "../components/ToolBrandIcon";
 import { AgentBrandIcon } from "../components/AgentBrandIcon";
 import type { ToolId } from "../types/qwitch";
@@ -286,7 +287,7 @@ export function TrayPopover({
       <button
         type="button"
         disabled
-        className="btn btn-md min-w-0 flex-1 shrink-0 gap-1.5 whitespace-nowrap border border-zinc-200 bg-zinc-100 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-800/80 dark:text-zinc-400"
+        className="btn btn-md min-w-0 flex-1 shrink-0 gap-1.5 whitespace-nowrap bg-zinc-900/[0.05] text-zinc-500 dark:bg-white/[0.06] dark:text-zinc-400"
       >
         {globalStats.unclaimedAuthMissingCount > 0
           ? `${globalStats.unclaimedAuthMissingCount} 个账号待主面板授权`
@@ -296,7 +297,7 @@ export function TrayPopover({
   };
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden rounded-[18px] border border-black/[0.08] bg-zinc-50/95 text-zinc-900 shadow-float backdrop-blur-xl dark:border-white/[0.12] dark:bg-zinc-950/95 dark:text-zinc-100">
+    <div className="flex h-full w-full flex-col overflow-hidden rounded-[18px] bg-[#f6f7f9]/95 text-zinc-900 shadow-float ring-1 ring-black/[0.07] backdrop-blur-xl dark:bg-[#0c0d10]/95 dark:text-zinc-100 dark:ring-white/[0.1]">
       {/* 顶部栏 */}
       {/* 更新条带：仅在确实有新版本时出现。
           设计要点：
@@ -846,24 +847,17 @@ export function TrayPopover({
                       const missingLocal = supportsSwitch && acc.hasLocalSnapshot === false;
                       const isDisabled = acc.status === "disabled";
                       const firstBucket = acc.latestQuota?.buckets[0];
-                      const isQoderClaimBucket =
-                        group.id === "qoder_cn" && firstBucket?.key === "daily_credits";
+                      // 额度判定统一走 ledgerModel：托盘曾把「Qoder 签到桶 / 无总量桶 / 百分比桶」
+                      // 的规则在这里重写了一遍，与主窗台账各改各的迟早分叉。
+                      const quotaView = toQuotaView(acc);
+                      const isQoderClaimBucket = quotaView.kind === "claim";
                       const isQoderClaimed =
                         isQoderClaimBucket && effectiveClaim === "claimed";
                       const isQoderPendingVerify =
                         isQoderClaimBucket &&
                         !isQoderClaimed &&
                         effectiveClaim !== "available";
-                      const pct = isQoderClaimed
-                        ? 100
-                        : isQoderPendingVerify
-                          ? 0
-                          : firstBucket && firstBucket.hasTotal !== false && firstBucket.total > 0
-                            ? Math.min(
-                                100,
-                                Math.round((firstBucket.remaining / firstBucket.total) * 100)
-                              )
-                            : null;
+                      const pct = isQoderClaimed ? 100 : isQoderPendingVerify ? 0 : quotaView.pct;
 
                       const claimNeedsDesktopSession =
                         acc.toolId === "doubaowork" && !acc.isActiveOnClient;
@@ -1063,7 +1057,7 @@ export function TrayPopover({
               <button
                 type="button"
                 onClick={() => onOpenMain?.()}
-                className="flex w-full items-center justify-between gap-2 rounded-xl border border-dashed border-zinc-200 bg-white/80 px-3 py-2 text-left text-[11px] text-zinc-600 transition hover:border-zinc-300 hover:bg-white hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200"
+                className="flex w-full items-center justify-between gap-2 rounded-xl border border-dashed border-zinc-900/[0.1] bg-white/80 px-3 py-2 text-left text-[11px] text-zinc-600 transition hover:border-zinc-900/[0.18] hover:bg-white hover:text-zinc-900 dark:border-white/[0.1] dark:bg-white/[0.03] dark:text-zinc-400 dark:hover:border-white/[0.18] dark:hover:text-zinc-200"
               >
                 <span className="truncate">
                   未导入：{emptyToolNames.join(" · ")}
@@ -1080,7 +1074,7 @@ export function TrayPopover({
       </div>
 
       {/* 底部智能操作栏 */}
-      <footer className="flex shrink-0 items-center gap-2 border-t border-zinc-200/80 bg-white/90 px-3.5 py-2.5 dark:border-zinc-800 dark:bg-zinc-900/90">
+      <footer className="flex shrink-0 items-center gap-2 border-t border-zinc-200/60 bg-white/85 px-3.5 py-2.5 backdrop-blur-md dark:border-white/[0.06] dark:bg-[#111216]/85">
         {trayTab === "pools" ? (
           <button
             type="button"

@@ -1604,10 +1604,147 @@ fn uuid_like() -> String {
     )
 }
 
+type LocalActiveUidCacheKey = (PathBuf, Option<std::time::SystemTime>, u64);
+type LocalActiveUidCacheEntry = (LocalActiveUidCacheKey, Option<String>);
+
+static LOCAL_ACTIVE_UID_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<LocalActiveUidCacheEntry>>,
+> = std::sync::OnceLock::new();
+
+fn invalidate_local_active_uid_cache() {
+    if let Some(cell) = LOCAL_ACTIVE_UID_CACHE.get() {
+        if let Ok(mut guard) = cell.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// 将切号时的 `{session, loginContext}` 快照与当前最新凭据对齐（含 `expiresAt`、`updatedAt`）。
+fn patch_session_snapshot_for_switch(
+    cred: &CredentialEnvelope,
+    now_ms: i64,
+) -> Result<Value, AdapterError> {
+    let CredentialPayload::Token {
+        refresh_token,
+        expires_at,
+        extra,
+        ..
+    } = &cred.payload
+    else {
+        return Err(AdapterError::Unified {
+            code: UnifiedErrorCode::UnsupportedCapability,
+            message: "码道 CodeArts 暂不支持该凭据形态的本地切号".into(),
+        });
+    };
+    let Some(snapshot_b64) = extra.get(EXTRA_SESSION_SNAPSHOT) else {
+        return Err(AdapterError::Unified {
+            code: UnifiedErrorCode::UnsupportedCapability,
+            message: "该账号没有本机会话快照（独立 OAuth 授权导入），无法写回客户端。\
+                      请先在码道客户端登录该账号，再用「本机导入」补一次快照"
+                .into(),
+        });
+    };
+
+    let raw = BASE64
+        .decode(snapshot_b64.trim())
+        .map_err(|e| AdapterError::Unified {
+            code: UnifiedErrorCode::InvalidCredential,
+            message: format!("码道会话快照不是合法 base64: {e}"),
+        })?;
+    let mut snapshot: Value = serde_json::from_slice(&raw).map_err(|e| AdapterError::Unified {
+        code: UnifiedErrorCode::InvalidCredential,
+        message: format!("码道会话快照结构解析失败: {e}"),
+    })?;
+
+    if let Some(session) = snapshot.get_mut("session").and_then(|v| v.as_object_mut()) {
+        for (key, extra_key) in [
+            ("accessKey", EXTRA_ACCESS_KEY),
+            ("secretKey", EXTRA_SECRET_KEY),
+            ("securityToken", EXTRA_SECURITY_TOKEN),
+        ] {
+            if let Some(value) = extra.get(extra_key) {
+                session.insert(key.to_string(), Value::String(value.clone()));
+            }
+        }
+        if let Some(exp) = expires_at {
+            let exp_ms = if *exp > 0 && *exp < 10_000_000_000 {
+                exp.saturating_mul(1000)
+            } else {
+                *exp
+            };
+            session.insert("expiresAt".to_string(), Value::from(exp_ms));
+        }
+        session.insert("updatedAt".to_string(), Value::from(now_ms));
+
+        // 非独立 OAuth 账号才同步回写 refreshToken；独立 OAuth 拥有独立的 DPoP 密钥对，
+        // 绝不能把 Qwitch 的刷新令牌塞给桌面端以免双方互相刷废。
+        if extra.get(EXTRA_CODEARTS_MODE).map(String::as_str) != Some("isolated_oauth") {
+            if let Some(rt) = refresh_token.as_ref().filter(|s| !s.trim().is_empty()) {
+                session.insert("refreshToken".to_string(), Value::String(rt.clone()));
+            }
+        }
+    }
+
+    let final_exp_ms = snapshot
+        .get("session")
+        .and_then(|s| s.get("expiresAt").or_else(|| s.get("expires_at")))
+        .and_then(normalize_epoch_ms);
+    if final_exp_ms.is_some_and(|exp| exp <= now_ms) {
+        return Err(AdapterError::Unified {
+            code: UnifiedErrorCode::AuthExpired,
+            message:
+                "该码道账号的本地 STS 凭据已过期，写回后客户端仍会要求重新登录；请先刷新凭据或在客户端登录后重新导入"
+                    .into(),
+        });
+    }
+
+    Ok(snapshot)
+}
+
 #[async_trait]
 impl ToolAdapter for CodeArtsAdapter {
     fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
+        let dir = Self::resolve_secret_dir(host).ok()?;
+        let file = dir.join(Self::secret_file_name(&format!(
+            "authSession:{DEFAULT_REGION}"
+        )));
+        if !file.is_file() {
+            return None;
+        }
+        let meta = std::fs::metadata(&file).ok()?;
+        let key: LocalActiveUidCacheKey = (file, meta.modified().ok(), meta.len());
+        let cache = LOCAL_ACTIVE_UID_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+        if let Ok(guard) = cache.lock() {
+            if let Some((cached_key, cached_uid)) = guard.as_ref() {
+                if cached_key == &key {
+                    return cached_uid.clone();
+                }
+            }
+        }
+        let uid = Self::load_session(host).ok().and_then(|session| {
+            let s = session.get("session")?;
+            non_empty(s, "userId").or_else(|| non_empty(s, "userName"))
+        });
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some((key, uid.clone()));
+        }
+        uid
+    }
+
+    fn detect_local_logged_out(&self, host: &dyn PlatformHost) -> Option<bool> {
+        let dir = Self::resolve_secret_dir(host).ok()?;
+        let file = dir.join(Self::secret_file_name(&format!(
+            "authSession:{DEFAULT_REGION}"
+        )));
+        if dir.exists() && !file.is_file() {
+            Some(true)
+        } else {
+            None
+        }
     }
 
     async fn import_from_local(
@@ -1897,47 +2034,8 @@ impl ToolAdapter for CodeArtsAdapter {
         //
         // 前提：必须持有**该账号在本机登录时**留下的完整会话快照 —— 独立 OAuth
         // 授权只有 AK/SK/STS，拼不出客户端认可的 loginContext。
-        let CredentialPayload::Token { extra, .. } = &cred.payload else {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::UnsupportedCapability,
-                message: "码道 CodeArts 暂不支持该凭据形态的本地切号".into(),
-            });
-        };
-        let Some(snapshot_b64) = extra.get(EXTRA_SESSION_SNAPSHOT) else {
-            return Err(AdapterError::Unified {
-                code: UnifiedErrorCode::UnsupportedCapability,
-                message: "该账号没有本机会话快照（独立 OAuth 授权导入），无法写回客户端。\
-                          请先在码道客户端登录该账号，再用「本机导入」补一次快照"
-                    .into(),
-            });
-        };
         Self::ensure_not_expired(cred)?;
-
-        let raw = BASE64
-            .decode(snapshot_b64.trim())
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: format!("码道会话快照不是合法 base64: {e}"),
-            })?;
-        let mut snapshot: Value =
-            serde_json::from_slice(&raw).map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::InvalidCredential,
-                message: format!("码道会话快照结构解析失败: {e}"),
-            })?;
-
-        // 用当前凭据里的临时凭据覆盖快照内的同名字段：快照是导入当时的，
-        // STS 会轮换；不覆盖的话写回去的会话可能已经过期。
-        if let Some(session) = snapshot.get_mut("session").and_then(|v| v.as_object_mut()) {
-            for (key, extra_key) in [
-                ("accessKey", EXTRA_ACCESS_KEY),
-                ("secretKey", EXTRA_SECRET_KEY),
-                ("securityToken", EXTRA_SECURITY_TOKEN),
-            ] {
-                if let Some(value) = extra.get(extra_key) {
-                    session.insert(key.to_string(), Value::String(value.clone()));
-                }
-            }
-        }
+        let snapshot = patch_session_snapshot_for_switch(cred, Utc::now().timestamp_millis())?;
 
         let patched = serde_json::to_vec(&snapshot).map_err(|e| AdapterError::Unified {
             code: UnifiedErrorCode::InternalError,
@@ -1952,7 +2050,9 @@ impl ToolAdapter for CodeArtsAdapter {
         let file = dir.join(Self::secret_file_name(&format!(
             "authSession:{DEFAULT_REGION}"
         )));
-        crate::adapter::write_private_file_atomic(&file, encoded.as_bytes())
+        crate::adapter::write_private_file_atomic(&file, encoded.as_bytes())?;
+        invalidate_local_active_uid_cache();
+        Ok(())
     }
 
     async fn backup_session(&self, host: &dyn PlatformHost) -> Result<SessionBackup, AdapterError> {
@@ -2977,5 +3077,124 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn patch_session_snapshot_updates_expires_at_and_preserves_isolated_oauth_refresh_token() {
+        let now_ms = 2_000_000_000_000_i64;
+        let stale_snap = serde_json::json!({
+            "session": {
+                "userId": "u1",
+                "accessKey": "OLD_AK",
+                "secretKey": "OLD_SK",
+                "securityToken": "OLD_STS",
+                "refreshToken": "SNAP_RT",
+                "expiresAt": now_ms - 60_000,
+                "updatedAt": now_ms - 120_000
+            },
+            "loginContext": { "pkcePair": {} }
+        });
+        let snap_b64 = BASE64.encode(serde_json::to_vec(&stale_snap).unwrap());
+
+        let mut extra = HashMap::new();
+        extra.insert(EXTRA_ACCESS_KEY.into(), "NEW_AK".into());
+        extra.insert(EXTRA_SECRET_KEY.into(), "NEW_SK".into());
+        extra.insert(EXTRA_SECURITY_TOKEN.into(), "NEW_STS".into());
+        extra.insert(EXTRA_SESSION_SNAPSHOT.into(), snap_b64.clone());
+        extra.insert(EXTRA_CODEARTS_MODE.into(), "isolated_oauth".into());
+
+        // 秒级新有效期应自动归一化为毫秒并覆写旧快照，且 isolated_oauth 不覆写快照里的 refreshToken
+        let isolated_cred = CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "u1".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: String::new(),
+                refresh_token: Some("QWITCH_ISOLATED_RT".into()),
+                expires_at: Some((now_ms + 3_600_000) / 1000),
+                extra: extra.clone(),
+            },
+        };
+        let patched_iso = patch_session_snapshot_for_switch(&isolated_cred, now_ms).unwrap();
+        assert_eq!(patched_iso["session"]["accessKey"], "NEW_AK");
+        assert_eq!(
+            patched_iso["session"]["expiresAt"].as_i64(),
+            Some(now_ms + 3_600_000)
+        );
+        assert_eq!(patched_iso["session"]["updatedAt"].as_i64(), Some(now_ms));
+        assert_eq!(patched_iso["session"]["refreshToken"], "SNAP_RT");
+
+        // 非 isolated_oauth 账号有更新的 refresh_token 时应同步回写
+        extra.remove(EXTRA_CODEARTS_MODE);
+        let local_cred = CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "u1".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: String::new(),
+                refresh_token: Some("NEW_LOCAL_RT".into()),
+                expires_at: Some(now_ms + 3_600_000),
+                extra,
+            },
+        };
+        let patched_local = patch_session_snapshot_for_switch(&local_cred, now_ms).unwrap();
+        assert_eq!(patched_local["session"]["refreshToken"], "NEW_LOCAL_RT");
+    }
+
+    #[test]
+    fn patch_session_snapshot_rejects_expired_session() {
+        let now_ms = 2_000_000_000_000_i64;
+        let stale_snap = serde_json::json!({
+            "session": {
+                "userId": "u1",
+                "expiresAt": now_ms - 10_000
+            }
+        });
+        let mut extra = HashMap::new();
+        extra.insert(
+            EXTRA_SESSION_SNAPSHOT.into(),
+            BASE64.encode(serde_json::to_vec(&stale_snap).unwrap()),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "u1".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: String::new(),
+                refresh_token: None,
+                expires_at: Some(now_ms - 5_000),
+                extra,
+            },
+        };
+        let err = patch_session_snapshot_for_switch(&cred, now_ms).unwrap_err();
+        assert!(matches!(
+            err,
+            AdapterError::Unified {
+                code: UnifiedErrorCode::AuthExpired,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn detect_local_logged_out_returns_true_when_enc_file_missing() {
+        let tmp = std::env::temp_dir().join(format!("qwitch_codearts_test_{}", uuid_like()));
+        let config_dir = tmp.join("codearts");
+        let secret_dir = config_dir.join("secretStorage");
+        std::fs::create_dir_all(&secret_dir).unwrap();
+        let host = DummyHost { root: config_dir };
+        let adapter = CodeArtsAdapter::new();
+
+        assert_eq!(adapter.detect_local_logged_out(&host), Some(true));
+
+        let enc_file = secret_dir.join(CodeArtsAdapter::secret_file_name(&format!(
+            "authSession:{DEFAULT_REGION}"
+        )));
+        std::fs::write(&enc_file, b"dummy").unwrap();
+        assert_eq!(adapter.detect_local_logged_out(&host), None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

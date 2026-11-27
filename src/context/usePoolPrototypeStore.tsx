@@ -1810,10 +1810,11 @@ export function PoolPrototypeProvider({
             };
           }
           const needsRestart =
-          agentId === "claude_desktop" ||
-          agentId === "codex_desktop" ||
-          agentId === "mimo" ||
-          agentId === "zcode";
+            b.running &&
+            (agentId === "claude_desktop" ||
+              agentId === "codex_desktop" ||
+              agentId === "mimo" ||
+              agentId === "zcode");
           const nextDefault = resolveValidDefaultModelKey(
             agentId,
             uniqueIds,
@@ -1826,8 +1827,9 @@ export function PoolPrototypeProvider({
             defaultModelKey: nextDefault,
             status: needsRestart ? "needs_restart" : "bound",
             driftReason: undefined,
-            restartHint:
-              agentId === "claude_desktop"
+            restartHint: !needsRestart
+              ? undefined
+              : agentId === "claude_desktop"
                 ? "Claude 桌面版仅在启动时读取 3p 配置，请重启以拉取最新多号池 /v1/models"
                 : agentId === "codex_desktop"
                   ? "已写入 ~/.codex/config.toml，请重启 app-server（无需关闭桌面窗口）"
@@ -1881,15 +1883,17 @@ export function PoolPrototypeProvider({
           const nextMounted = b.mountedPoolIds.includes(poolId)
             ? b.mountedPoolIds
             : [...b.mountedPoolIds, poolId];
+          const needsRestart = agentId === "codex_desktop" && b.running;
           return {
             ...b,
             mountedPoolIds: nextMounted,
             defaultModelKey: modelKey,
-            status: agentId === "codex_desktop" ? "needs_restart" : b.status === "unbound" ? "bound" : b.status,
-            restartHint:
-              agentId === "codex_desktop"
-                ? "默认模型已变更，请重启 app-server 使新线程默认生效"
-                : b.restartHint,
+            status: needsRestart ? "needs_restart" : b.status === "unbound" ? "bound" : b.status,
+            restartHint: needsRestart
+              ? "默认模型已变更，请重启 app-server 使新线程默认生效"
+              : b.status === "needs_restart"
+                ? b.restartHint
+                : undefined,
           };
         })
       );
@@ -1912,10 +1916,11 @@ export function PoolPrototypeProvider({
             ? b.mountedPoolIds
             : [...b.mountedPoolIds, poolId];
           const needsRestart =
-            b.agentId === "claude_desktop" ||
+            b.running &&
+            (b.agentId === "claude_desktop" ||
               b.agentId === "codex_desktop" ||
               b.agentId === "mimo" ||
-              b.agentId === "zcode";
+              b.agentId === "zcode");
           const nextDefault = resolveValidDefaultModelKey(
             b.agentId,
             nextMounted,
@@ -1928,8 +1933,9 @@ export function PoolPrototypeProvider({
             defaultModelKey: nextDefault,
             status: needsRestart ? "needs_restart" : "bound",
             driftReason: undefined,
-            restartHint:
-              b.agentId === "claude_desktop"
+            restartHint: !needsRestart
+              ? undefined
+              : b.agentId === "claude_desktop"
                 ? "Claude 桌面版仅在启动时读取 3p 配置，请重启使新挂载号池进入下拉清单"
                 : b.agentId === "codex_desktop"
                   ? "已追加写入 ~/.codex/config.toml，请重启 app-server 生效"
@@ -2194,24 +2200,34 @@ export function PoolPrototypeProvider({
     }
   }, [applyWorkspaceState, detectingAgents, isTauriRuntime, notify]);
 
-  // 轻量刷新各目标应用「运行中/未运行」状态（仅合并 running 字段，不整包覆盖，避免打断交互）
+  // 轻量刷新各目标应用「运行中/未运行」状态（同步自动清除已关闭或已手动重启的「待重启生效」）
   const refreshAgentRunning = useCallback(() => {
     if (!isTauriRuntime) return;
     void (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        // 只取 6 个 bool：此前每 6 秒拉一次 200KB 全量快照（含进程探测与磁盘读），
+        // 只取 6 个轻量状态：此前每 6 秒拉一次 200KB 全量快照（含进程探测与磁盘读），
         // 是停留在此页时的周期性卡顿来源。
-        const states = await invoke<Array<{ agentId: TargetAgentId; running: boolean }>>(
-          "detect_agent_running_cmd"
-        );
+        const states = await invoke<
+          Array<{ agentId: TargetAgentId; running: boolean; clearedPendingRestart?: boolean }>
+        >("detect_agent_running_cmd");
         setRawBindings((prev) => {
           let changed = false;
           const next = prev.map((b) => {
             const found = states.find((s) => s.agentId === b.agentId);
-            if (!found || found.running === b.running) return b;
+            if (!found) return b;
+            const shouldClearRestart =
+              b.status === "needs_restart" &&
+              (Boolean(found.clearedPendingRestart) || !found.running);
+            if (found.running === b.running && !shouldClearRestart) return b;
             changed = true;
-            return { ...b, running: found.running };
+            return {
+              ...b,
+              running: found.running,
+              ...(shouldClearRestart
+                ? { status: "bound" as const, restartHint: undefined }
+                : {}),
+            };
           });
           // 状态没变化时必须返回原引用，否则整页会跟着重渲染
           return changed ? next : prev;
@@ -2746,10 +2762,11 @@ export function PoolPrototypeProvider({
           );
         computedDefaultKey = validDefault;
         const needsRestart =
-          agentId === "claude_desktop" ||
-          agentId === "codex_desktop" ||
-          agentId === "mimo" ||
-          agentId === "zcode";
+          b.running &&
+          (agentId === "claude_desktop" ||
+            agentId === "codex_desktop" ||
+            agentId === "mimo" ||
+            agentId === "zcode");
         const nextStatus: AgentBinding["status"] =
           b.status === "drifted"
             ? "bound"
@@ -2762,8 +2779,9 @@ export function PoolPrototypeProvider({
           defaultModelKey: validDefault,
           status: nextStatus,
           driftReason: undefined,
-          restartHint:
-            agentId === "claude_desktop"
+          restartHint: !needsRestart
+            ? undefined
+            : agentId === "claude_desktop"
               ? "Claude 桌面版模型清单已更新，请重启以拉取最新 /v1/models"
               : agentId === "codex_desktop"
                 ? "已更新 Codex Catalog，请重启 app-server 使新模型清单生效"
@@ -2913,10 +2931,11 @@ export function PoolPrototypeProvider({
       const updatedBindings: AgentBinding[] = nextBindings.map((b) => {
         if (b.agentId !== agentId) return b;
         const needsRestart =
-          agentId === "claude_desktop" ||
-          agentId === "codex_desktop" ||
-          agentId === "mimo" ||
-          agentId === "zcode";
+          b.running &&
+          (agentId === "claude_desktop" ||
+            agentId === "codex_desktop" ||
+            agentId === "mimo" ||
+            agentId === "zcode");
         const nextStatus: AgentBinding["status"] = needsRestart
           ? "needs_restart"
           : "bound";

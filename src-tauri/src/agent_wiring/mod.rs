@@ -811,7 +811,7 @@ fn process_snapshot() -> String {
             }
         }
         Command::new("ps")
-            .args(["-Ao", "command="])
+            .args(["-Ao", "pid=,command="])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default()
@@ -847,7 +847,7 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 }
 
 /// 在给定快照里判定某 Agent 是否在运行（纯函数，便于单测）。
-fn agent_running_in_snapshot(agent_id: TargetAgentId, snapshot: &str) -> bool {
+pub fn agent_running_in_snapshot(agent_id: TargetAgentId, snapshot: &str) -> bool {
     if snapshot.is_empty() {
         return false;
     }
@@ -878,6 +878,145 @@ fn agent_running_in_snapshot(agent_id: TargetAgentId, snapshot: &str) -> bool {
 
 fn is_agent_app_running(agent_id: TargetAgentId) -> bool {
     agent_running_in_snapshot(agent_id, &process_snapshot())
+}
+
+fn is_restartable_desktop_agent(agent_id: TargetAgentId) -> bool {
+    matches!(
+        agent_id,
+        TargetAgentId::ClaudeDesktop
+            | TargetAgentId::CodexDesktop
+            | TargetAgentId::Mimo
+            | TargetAgentId::Zcode
+    )
+}
+
+/// 从进程快照中提取指定 Agent 当前正在运行的主进程 PID 列表（升序去重）。
+pub fn agent_pids_in_snapshot(agent_id: TargetAgentId, snapshot: &str) -> Vec<u32> {
+    if snapshot.is_empty() {
+        return Vec::new();
+    }
+    let mut pids = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        let patterns = running_patterns(agent_id);
+        for line in snapshot.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !patterns.iter().any(|p| trimmed.contains(p)) {
+                continue;
+            }
+            if let Some(pid_token) = trimmed.split_whitespace().next() {
+                if let Ok(pid) = pid_token.parse::<u32>() {
+                    pids.push(pid);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let exes = running_exe_names(agent_id);
+        for line in snapshot.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('"') {
+                let mut cols = trimmed.split(',');
+                let img = cols.next().map(|c| c.trim_matches('"')).unwrap_or("");
+                if exes.iter().any(|exe| img.eq_ignore_ascii_case(exe)) {
+                    if let Some(pid_col) = cols.next() {
+                        if let Ok(pid) = pid_col.trim_matches('"').trim().parse::<u32>() {
+                            pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// 判定「待重启生效」是否已被满足：
+/// - 若当前无任何进程运行（用户已退出客户端，下次启动自然读取新配置），返回 true；
+/// - 若有写入前记录的 `stale_pids` 且当前运行进程中已无任何旧 PID（用户已完成手动重启），返回 true。
+pub fn is_pending_restart_satisfied(stale_pids: Option<&[u32]>, current_pids: &[u32]) -> bool {
+    if current_pids.is_empty() {
+        return true;
+    }
+    if let Some(stale) = stale_pids {
+        if !stale.is_empty() && !current_pids.iter().any(|pid| stale.contains(pid)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 根据给定进程快照自动对账所有 `NeedsRestart` 绑定：
+/// 若进程已关闭或已更换为新 PID，自动恢复为 `Bound` 并写回数据库。
+/// 返回本次被自动清除「待重启」状态的 Agent 列表。
+pub fn reconcile_pending_restarts_with_snapshot(
+    db: &QwitchDatabase,
+    snapshot: &str,
+) -> Vec<TargetAgentId> {
+    let Ok(stored_list) = db.get_stored_agent_bindings() else {
+        return Vec::new();
+    };
+    let mut cleared = Vec::new();
+    for mut stored in stored_list {
+        if stored.status != AgentBindingStatus::NeedsRestart {
+            continue;
+        }
+        if stored.mounted_pool_ids.is_empty() {
+            stored.status = AgentBindingStatus::Unbound;
+            stored.options.pending_restart_pids = None;
+            let _ = db.upsert_agent_binding(&stored);
+            cleared.push(stored.agent_id);
+            continue;
+        }
+        let current_pids = agent_pids_in_snapshot(stored.agent_id, snapshot);
+        if is_pending_restart_satisfied(
+            stored.options.pending_restart_pids.as_deref(),
+            &current_pids,
+        ) {
+            stored.status = AgentBindingStatus::Bound;
+            stored.options.pending_restart_pids = None;
+            if db.upsert_agent_binding(&stored).is_ok() {
+                cleared.push(stored.agent_id);
+            }
+        } else if stored.options.pending_restart_pids.is_none() && !current_pids.is_empty() {
+            // 兼容旧版本落盘的 NeedsRestart 记录：首次补录当前 PID，之后用户手动重启即可自动识别清除
+            stored.options.pending_restart_pids = Some(current_pids);
+            let _ = db.upsert_agent_binding(&stored);
+        }
+    }
+    cleared
+}
+
+/// 获取一次进程快照，并对账「待重启」状态后返回所有 Agent 的 `(agent_id, running, cleared_pending_restart)`。
+pub fn collect_agent_running_states_and_reconcile(
+    db: &QwitchDatabase,
+) -> Vec<(TargetAgentId, bool, bool)> {
+    let snapshot = process_snapshot();
+    let cleared = reconcile_pending_restarts_with_snapshot(db, &snapshot);
+    TargetAgentId::all()
+        .into_iter()
+        .map(|id| {
+            (
+                id,
+                agent_running_in_snapshot(id, &snapshot),
+                cleared.contains(&id),
+            )
+        })
+        .collect()
+}
+
+/// 获取一次进程快照（供前端轻量轮询）。
+pub fn take_process_snapshot() -> String {
+    process_snapshot()
 }
 
 /// 一次性返回所有 Agent 的运行状态，供前端轻量轮询使用（不构建整份工作区快照）。
@@ -1031,9 +1170,12 @@ pub fn inspect_all_agent_bindings(
     global_proxy: bool,
     base_dir_override: Option<&Path>,
 ) -> Result<Vec<AgentBinding>, String> {
-    let stored_list = db.get_stored_agent_bindings().map_err(|e| e.to_string())?;
     // 单个快照服务全部 6 个 Agent：避免每个 Agent 各起一个 pgrep（本机实测省下约 64ms）。
     let snapshot = process_snapshot();
+    if base_dir_override.is_none() {
+        let _ = reconcile_pending_restarts_with_snapshot(db, &snapshot);
+    }
+    let stored_list = db.get_stored_agent_bindings().map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(TargetAgentId::all().len());
     for agent_id in TargetAgentId::all() {
         let stored = stored_list
@@ -1977,16 +2119,25 @@ pub fn apply_agent_wiring(
         return Err(format!("写入 Agent 配置失败，已回滚原有配置：{e}"));
     }
 
-    let next_status = if matches!(
-        agent_id,
-        TargetAgentId::ClaudeDesktop
-            | TargetAgentId::CodexDesktop
-            | TargetAgentId::Mimo
-            | TargetAgentId::Zcode
-    ) {
-        AgentBindingStatus::NeedsRestart
+    let mut clean_opts = clean_opts;
+    let (next_status, running_snapshot) = if is_restartable_desktop_agent(agent_id) {
+        if base_dir_override.is_none() {
+            let snapshot = process_snapshot();
+            let pids = agent_pids_in_snapshot(agent_id, &snapshot);
+            if pids.is_empty() {
+                clean_opts.pending_restart_pids = None;
+                (AgentBindingStatus::Bound, Some(snapshot))
+            } else {
+                clean_opts.pending_restart_pids = Some(pids);
+                (AgentBindingStatus::NeedsRestart, Some(snapshot))
+            }
+        } else {
+            clean_opts.pending_restart_pids = None;
+            (AgentBindingStatus::NeedsRestart, None)
+        }
     } else {
-        AgentBindingStatus::Bound
+        clean_opts.pending_restart_pids = None;
+        (AgentBindingStatus::Bound, None)
     };
 
     let stored = StoredAgentBinding {
@@ -2007,7 +2158,7 @@ pub fn apply_agent_wiring(
         port,
         global_proxy,
         base_dir_override,
-        None,
+        running_snapshot.as_deref(),
     ))
 }
 
@@ -2278,6 +2429,8 @@ pub fn clear_agent_wiring(
     let paths = resolve_agent_paths(agent_id, &existing_opts, base_dir_override);
     remove_qwitch_writes(agent_id, &paths, &existing_opts)?;
     let _ = db.delete_agent_stashes(agent_id);
+    let mut existing_opts = existing_opts;
+    existing_opts.pending_restart_pids = None;
     let stored = StoredAgentBinding {
         agent_id,
         mounted_pool_ids: Vec::new(),
@@ -2372,6 +2525,8 @@ pub fn unbind_and_restore_agent(
         .map(|b| b.options)
         .unwrap_or_else(|| default_options_for_agent(agent_id));
 
+    let mut existing_opts = existing_opts;
+    existing_opts.pending_restart_pids = None;
     let stored = StoredAgentBinding {
         agent_id,
         mounted_pool_ids: Vec::new(),
@@ -2716,6 +2871,7 @@ pub fn restart_agent_process(
         }
     }
 
+    stored.options.pending_restart_pids = None;
     stored.status = if stored.mounted_pool_ids.is_empty() {
         AgentBindingStatus::Unbound
     } else {
@@ -2744,6 +2900,37 @@ mod tests {
     };
     use std::collections::HashMap;
     use uuid::Uuid;
+
+    #[test]
+    fn pending_restart_satisfied_on_exit_or_pid_rotation() {
+        assert!(is_pending_restart_satisfied(Some(&[101, 102]), &[]));
+        assert!(!is_pending_restart_satisfied(Some(&[101, 102]), &[101, 205]));
+        assert!(is_pending_restart_satisfied(Some(&[101, 102]), &[301, 302]));
+        assert!(!is_pending_restart_satisfied(None, &[301]));
+        assert!(is_pending_restart_satisfied(None, &[]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn agent_pids_parsed_from_macos_snapshot() {
+        let snap = "\
+1234 /Applications/Codex.app/Contents/MacOS/Codex
+5678 /Applications/Claude.app/Contents/MacOS/Claude
+9999 /usr/bin/python3
+";
+        assert_eq!(agent_pids_in_snapshot(TargetAgentId::CodexDesktop, snap), vec![1234]);
+        assert_eq!(agent_pids_in_snapshot(TargetAgentId::ClaudeDesktop, snap), vec![5678]);
+        assert!(agent_pids_in_snapshot(TargetAgentId::Zcode, snap).is_empty());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn agent_pids_parsed_from_windows_csv_snapshot() {
+        let snap = "\"Codex.exe\",\"4321\",\"Console\",\"1\",\"100,000 K\"\r\n\"zcode.exe\",\"8765\",\"Console\",\"1\",\"80,000 K\"\r\n";
+        assert_eq!(agent_pids_in_snapshot(TargetAgentId::CodexDesktop, snap), vec![4321]);
+        assert_eq!(agent_pids_in_snapshot(TargetAgentId::Zcode, snap), vec![8765]);
+        assert!(agent_pids_in_snapshot(TargetAgentId::ClaudeDesktop, snap).is_empty());
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

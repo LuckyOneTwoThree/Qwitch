@@ -251,6 +251,9 @@ pub struct AgentBindingOptions {
     pub codex_preserve_table: Option<bool>,
     pub dsh_dual_creds_written: Option<bool>,
     pub opencode_schema_version: Option<String>,
+    /// 写入配置时记录当时仍在运行的进程 PID，用于在用户手动关闭/重启后自动消除「待重启生效」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_restart_pids: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

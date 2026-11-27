@@ -3,8 +3,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::agent_wiring::{
-    apply_agent_wiring, clear_agent_wiring, collect_agent_running_states,
-    inspect_all_agent_bindings, restart_agent_process, unbind_and_restore_agent,
+    agent_running_in_snapshot, apply_agent_wiring, clear_agent_wiring,
+    inspect_all_agent_bindings, reconcile_pending_restarts_with_snapshot, restart_agent_process,
+    take_process_snapshot, unbind_and_restore_agent,
 };
 use crate::commands::{load_app_settings, AppState, SETTINGS_KEY};
 use crate::domain::{
@@ -32,6 +33,7 @@ pub struct ClearAllAgentsResult {
 pub struct AgentRunningState {
     pub agent_id: TargetAgentId,
     pub running: bool,
+    pub cleared_pending_restart: bool,
 }
 
 #[derive(Serialize)]
@@ -136,15 +138,19 @@ pub async fn get_pool_workspace_state(
 /// 前端每 6 秒刷新按钮状态时曾调用 `get_pool_workspace_state`，
 /// 每次都要构建 200KB 全量快照；此命令只做一次进程快照。
 #[tauri::command]
-pub async fn detect_agent_running_cmd() -> Vec<AgentRunningState> {
-    tokio::task::spawn_blocking(|| {
-        collect_agent_running_states()
-            .into_iter()
-            .map(|(agent_id, running)| AgentRunningState { agent_id, running })
-            .collect()
-    })
-    .await
-    .unwrap_or_default()
+pub async fn detect_agent_running_cmd(state: State<'_, AppState>) -> Result<Vec<AgentRunningState>, String> {
+    let snapshot = tokio::task::spawn_blocking(take_process_snapshot)
+        .await
+        .map_err(|e| e.to_string())?;
+    let cleared = reconcile_pending_restarts_with_snapshot(&state.db, &snapshot);
+    Ok(TargetAgentId::all()
+        .into_iter()
+        .map(|agent_id| AgentRunningState {
+            agent_id,
+            running: agent_running_in_snapshot(agent_id, &snapshot),
+            cleared_pending_restart: cleared.contains(&agent_id),
+        })
+        .collect())
 }
 
 /// 套用工具级「内置推荐目录」（码道 / 有道龙虾 / 豆包工作等无探测接口的工具）。

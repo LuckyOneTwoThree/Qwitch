@@ -769,6 +769,9 @@ pub async fn claim_daily_batch(
     let master_key = state.master_key;
     let adapters = Arc::clone(&state.adapters);
     let scheduler = Arc::clone(&state.scheduler);
+    let host = Arc::clone(&state.host);
+    let switching_in_progress = Arc::clone(&state.switching_in_progress);
+    let tray_blur_suppress_until_ms = Arc::clone(&state.tray_blur_suppress_until_ms);
     let guard = scheduler
         .queue_lock()
         .try_lock_owned()
@@ -797,9 +800,64 @@ pub async fn claim_daily_batch(
 
     tokio::spawn(async move {
         let _guard = guard;
-        let _ = scheduler
-            .run_daily_claim_batch(&app, &db, &master_key, &adapters, account_ids, jitter)
-            .await;
+
+        // 按「是否需要冷切桌面端」分流：豆包等签到绑定本机在登账号的工具，
+        // 必须串行冷切后领取；其余纯网络工具沿用现有并发批处理。
+        let (switch_ids, network_ids): (Vec<String>, Vec<String>) = {
+            let mut switch_ids = Vec::new();
+            let mut network_ids = Vec::new();
+            for id in &account_ids {
+                let needs_switch = db
+                    .get_account_summary(id)
+                    .ok()
+                    .and_then(|s| adapters.get(&s.tool_id).cloned())
+                    .map(|a| a.manifest().capabilities.supports_client_switch)
+                    .unwrap_or(false);
+                if needs_switch {
+                    switch_ids.push(id.clone());
+                } else {
+                    network_ids.push(id.clone());
+                }
+            }
+            (switch_ids, network_ids)
+        };
+
+        if !network_ids.is_empty() {
+            let _ = scheduler
+                .run_daily_claim_batch(
+                    &app,
+                    &db,
+                    &master_key,
+                    &adapters,
+                    network_ids,
+                    jitter.clone(),
+                )
+                .await;
+        }
+
+        if !switch_ids.is_empty() {
+            let switcher = crate::commands::switch::AppStateClientSwitcher {
+                app: app.clone(),
+                db: Arc::clone(&db),
+                master_key,
+                host: Arc::clone(&host),
+                adapters: Arc::clone(&adapters),
+                switching_in_progress: Arc::clone(&switching_in_progress),
+                tray_blur_suppress_until_ms: Arc::clone(&tray_blur_suppress_until_ms),
+                force_kill: true,
+            };
+            let _ = scheduler
+                .run_daily_claim_switch_batch_with_sink(
+                    &app,
+                    &switcher,
+                    &db,
+                    &master_key,
+                    &adapters,
+                    switch_ids,
+                    jitter,
+                )
+                .await;
+        }
     });
 
     Ok(())

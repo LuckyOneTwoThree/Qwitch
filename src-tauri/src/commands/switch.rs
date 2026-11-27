@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -114,20 +115,47 @@ pub async fn switch_desktop_account(
         .try_lock_owned()
         .map_err(|_| "已有批量查额或签到任务正在进行，请等待完成后再试".to_string())?;
 
-    let (summary, cred) = state
-        .db
-        .get_account_credential(&state.master_key, &account_id)
+    perform_switch_core(
+        &app,
+        &state.db,
+        &state.master_key,
+        &state.host,
+        &state.adapters,
+        &state.tray_blur_suppress_until_ms,
+        &account_id,
+        force_kill,
+    )
+    .await
+}
+
+/// 切号核心实现（不含队列锁 / 切号哨兵获取，由调用方负责互斥）。
+///
+/// 单账号命令 `switch_desktop_account` 与批量冷切领取的 `ClientSwitcher` 共用本函数：
+/// 都走「关客户端 → 备份会话 → 写新会话 → 拉起 → 存活确认 → 落盘活跃」的完整链路，
+/// 保证行为一致，避免两套切号逻辑分叉。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn perform_switch_core(
+    app: &AppHandle,
+    db: &QwitchDatabase,
+    master_key: &[u8; 32],
+    host: &Arc<dyn PlatformHost>,
+    adapters: &HashMap<String, Arc<dyn ToolAdapter>>,
+    tray_blur_suppress_until_ms: &AtomicU64,
+    account_id: &str,
+    force_kill: bool,
+) -> Result<SwitchDesktopAccountResult, String> {
+    let (summary, cred) = db
+        .get_account_credential(master_key, account_id)
         .map_err(|e| e.to_string())?;
 
-    let adapter = state
-        .adapters
+    let adapter = adapters
         .get(&summary.tool_id)
         .ok_or_else(|| format!("适配器 {} 尚未注册", summary.tool_id))?;
     if !adapter.manifest().capabilities.supports_client_switch {
         let msg = format!("适配器 {} 不支持桌面端切号", summary.tool_id);
         log_switch_failure(
-            &state.db,
-            &app,
+            db,
+            app,
             &summary,
             UnifiedErrorCode::UnsupportedCapability,
             &msg,
@@ -135,16 +163,16 @@ pub async fn switch_desktop_account(
         return Err(msg);
     }
 
-    let settings = load_app_settings(&state.db);
-    let Some(exe) = resolve_client_executable(state.host.as_ref(), &settings, &summary.tool_id)
+    let settings = load_app_settings(db);
+    let Some(exe) = resolve_client_executable(host.as_ref(), &settings, &summary.tool_id)
     else {
         let msg = format!(
             "未检测到 {} 客户端安装路径，请在设置中配置自定义路径后再切换",
             summary.tool_id
         );
         log_switch_failure(
-            &state.db,
-            &app,
+            db,
+            app,
             &summary,
             UnifiedErrorCode::ClientNotFound,
             &msg,
@@ -152,12 +180,12 @@ pub async fn switch_desktop_account(
         return Err(msg);
     };
 
-    let running = match check_client_running_async(&state.host, &summary.tool_id).await {
+    let running = match check_client_running_async(host, &summary.tool_id).await {
         Ok(r) => r,
         Err(e) => {
             log_switch_failure(
-                &state.db,
-                &app,
+                db,
+                app,
                 &summary,
                 UnifiedErrorCode::InternalError,
                 &e,
@@ -178,15 +206,14 @@ pub async fn switch_desktop_account(
                 phase: "closing".into(),
             },
         );
-        if let Err(e) = state
-            .host
+        if let Err(e) = host
             .terminate_client_gracefully(&summary.tool_id, 3000)
             .await
         {
             let msg = e.to_string();
             log_switch_failure(
-                &state.db,
-                &app,
+                db,
+                app,
                 &summary,
                 UnifiedErrorCode::ClientRunning,
                 &msg,
@@ -196,11 +223,11 @@ pub async fn switch_desktop_account(
     }
 
     // 终止后备份权威会话（避免读到运行中半写文件）；备份失败则重拉原客户端
-    let backup = match adapter.backup_session(state.host.as_ref()).await {
+    let backup = match adapter.backup_session(host.as_ref()).await {
         Ok(b) => b,
         Err(e) => {
             if running {
-                let _ = state.host.launch_client(&exe, &[]);
+                let _ = host.launch_client(&exe, &[]);
             }
             let msg = format!(
                 "备份客户端会话失败{}: {e}",
@@ -211,8 +238,8 @@ pub async fn switch_desktop_account(
                 }
             );
             log_switch_failure(
-                &state.db,
-                &app,
+                db,
+                app,
                 &summary,
                 UnifiedErrorCode::InternalError,
                 &msg,
@@ -229,15 +256,15 @@ pub async fn switch_desktop_account(
         },
     );
 
-    if let Err(e) = adapter.apply_session(state.host.as_ref(), &cred).await {
-        let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
+    if let Err(e) = adapter.apply_session(host.as_ref(), &cred).await {
+        let note = restore_session_note(adapter, host.as_ref(), &backup).await;
         if running {
-            let _ = state.host.launch_client(&exe, &[]);
+            let _ = host.launch_client(&exe, &[]);
         }
         let msg = format!("写入新会话失败，{note}: {e}");
         log_switch_failure(
-            &state.db,
-            &app,
+            db,
+            app,
             &summary,
             UnifiedErrorCode::InternalError,
             &msg,
@@ -253,12 +280,12 @@ pub async fn switch_desktop_account(
         },
     );
 
-    if let Err(e) = state.host.launch_client(&exe, &[]) {
-        let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
+    if let Err(e) = host.launch_client(&exe, &[]) {
+        let note = restore_session_note(adapter, host.as_ref(), &backup).await;
         let msg = format!("拉起客户端失败，{note}（客户端当前处于关闭状态，请手动启动）: {e}");
         log_switch_failure(
-            &state.db,
-            &app,
+            db,
+            app,
             &summary,
             UnifiedErrorCode::InternalError,
             &msg,
@@ -275,12 +302,12 @@ pub async fn switch_desktop_account(
     let mut alive = false;
     for _ in 0..40 {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        if check_client_running_async(&state.host, &summary.tool_id)
+        if check_client_running_async(host, &summary.tool_id)
             .await
             .unwrap_or(false)
         {
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-            if check_client_running_async(&state.host, &summary.tool_id)
+            if check_client_running_async(host, &summary.tool_id)
                 .await
                 .unwrap_or(false)
             {
@@ -292,7 +319,7 @@ pub async fn switch_desktop_account(
     if !alive {
         // 迟到进程二次确认：超时后才出现的进程视为启动成功，
         // 不回滚正在读取新会话的客户端
-        alive = check_client_running_async(&state.host, &summary.tool_id)
+        alive = check_client_running_async(host, &summary.tool_id)
             .await
             .unwrap_or(false);
     }
@@ -302,15 +329,15 @@ pub async fn switch_desktop_account(
     // 把「切换其实已生效」变成「切换被撤销」。
     let mut liveness_confirmed = alive;
     if !alive {
-        alive = client_process_present_async(&state.host, &summary.tool_id)
+        alive = client_process_present_async(host, &summary.tool_id)
             .await
             .unwrap_or(false);
         liveness_confirmed = false;
     }
     if !alive {
-        let note = restore_session_note(adapter, state.host.as_ref(), &backup).await;
+        let note = restore_session_note(adapter, host.as_ref(), &backup).await;
         // 失败后尽力把原客户端重新拉起，避免用户被留在“客户端已关闭”状态
-        let relaunch_note = match state.host.launch_client(&exe, &[]) {
+        let relaunch_note = match host.launch_client(&exe, &[]) {
             Ok(()) => "，已尝试重新拉起客户端".to_string(),
             Err(e) => format!("，重新拉起客户端失败（{e}）"),
         };
@@ -318,8 +345,8 @@ pub async fn switch_desktop_account(
             "客户端启动后 12 秒内未确认存活，{note}{relaunch_note}；若仍无法启动请手动检查或重启系统"
         );
         log_switch_failure(
-            &state.db,
-            &app,
+            db,
+            app,
             &summary,
             UnifiedErrorCode::InternalError,
             &msg,
@@ -327,14 +354,12 @@ pub async fn switch_desktop_account(
         return Err(msg);
     }
 
-    let mut set_active_err = state
-        .db
+    let mut set_active_err = db
         .set_active_on_client(&summary.tool_id, &summary.id)
         .err();
     if set_active_err.is_some() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        set_active_err = state
-            .db
+        set_active_err = db
             .set_active_on_client(&summary.tool_id, &summary.id)
             .err();
     }
@@ -343,8 +368,8 @@ pub async fn switch_desktop_account(
             "客户端已完成切号并重启，但本地活跃状态落盘失败（{e}）；无需重复切号，请刷新界面后重试"
         );
         log_switch_failure(
-            &state.db,
-            &app,
+            db,
+            app,
             &summary,
             UnifiedErrorCode::InternalError,
             &msg,
@@ -361,7 +386,7 @@ pub async fn switch_desktop_account(
         )
     };
 
-    let _ = state.db.append_action_log(
+    let _ = db.append_action_log(
         Some(&summary.id),
         &summary.tool_id,
         "switch",
@@ -386,8 +411,7 @@ pub async fn switch_desktop_account(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    state
-        .tray_blur_suppress_until_ms
+    tray_blur_suppress_until_ms
         .store(now_ms.saturating_add(1800), Ordering::SeqCst);
     let app_for_tray = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -406,10 +430,47 @@ pub async fn switch_desktop_account(
     })
 }
 
+/// 基于 `AppState` 的真实冷切号实现，供批量冷切领取引擎（`ClientSwitcher`）调用。
+///
+/// 每次 `switch_to` 复用 `perform_switch_core` 的完整链路，并独占切号哨兵，
+/// 与手动切号命令互斥，避免批量与手动同时改本机会话文件。
+pub(crate) struct AppStateClientSwitcher {
+    pub app: AppHandle,
+    pub db: Arc<QwitchDatabase>,
+    pub master_key: [u8; 32],
+    pub host: Arc<dyn PlatformHost>,
+    pub adapters: Arc<HashMap<String, Arc<dyn ToolAdapter>>>,
+    pub switching_in_progress: Arc<AtomicBool>,
+    pub tray_blur_suppress_until_ms: Arc<AtomicU64>,
+    pub force_kill: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::scheduler::ClientSwitcher for AppStateClientSwitcher {
+    async fn switch_to(&self, account_id: &str) -> Result<(), String> {
+        let _guard = SwitchFlagGuard::try_acquire(Arc::clone(&self.switching_in_progress))?;
+        perform_switch_core(
+            &self.app,
+            &self.db,
+            &self.master_key,
+            &self.host,
+            &self.adapters,
+            &self.tray_blur_suppress_until_ms,
+            account_id,
+            self.force_kill,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    fn current_active_account_id(&self, tool_id: &str) -> Option<String> {
+        self.db.get_active_account_id(tool_id).ok().flatten()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn switch_guard_rejects_concurrent_acquire_and_resets_on_drop() {
         let flag = Arc::new(AtomicBool::new(false));

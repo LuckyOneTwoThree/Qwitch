@@ -59,6 +59,21 @@ impl SchedulerEventSink for AppHandle {
     }
 }
 
+/// 桌面端冷切号能力抽象。
+///
+/// 豆包等工具的签到写接口把「设备 + 桌面端当前登录账号」绑死，多账号一键领取
+/// 唯一可行路径是「切到账号 → 领取 → 下一个」。批处理引擎通过本 trait 调用宿主
+/// 提供的真实切号实现（`commands::switch::perform_switch_core`），从而自身不依赖
+/// Tauri `AppHandle`，可用测试替身完整回放编排逻辑。
+#[async_trait::async_trait]
+pub trait ClientSwitcher: Send + Sync {
+    /// 把本机桌面客户端切到目标账号（关→备份→写会话→拉起→存活确认→落盘活跃）。
+    async fn switch_to(&self, account_id: &str) -> Result<(), String>;
+
+    /// 读取当前本机桌面端"使用中"账号在库中的 account_id（用于冷切前判断是否需要真正切换）。
+    fn current_active_account_id(&self, tool_id: &str) -> Option<String>;
+}
+
 /// 同一工具连续出现网络/服务端错误（5xx、超时、连接失败）达到该次数后，
 /// 本批次熔断该工具剩余账号。
 ///
@@ -87,6 +102,25 @@ fn remember_device_claim_limit(db: &QwitchDatabase, marker_key: &str) {
     if let Ok(value_json) = serde_json::to_string(&Utc::now().to_rfc3339()) {
         let _ = db.set_setting(marker_key, &value_json);
     }
+}
+
+/// 冷切批量领取的「不可领取」前置判定：返回 Some(原因) 表示该账号应跳过。
+fn claim_switch_skip_reason(summary: &crate::domain::AccountSummary) -> Option<String> {
+    if summary.status != AccountStatus::Active {
+        return Some("状态非激活，已跳过签到".to_string());
+    }
+    if !summary.has_api_token {
+        return Some("尚未完成在线授权，已自动跳过签到".to_string());
+    }
+    None
+}
+
+/// 批次处理完成后，本机当前在登账号是否已不是原账号（需要切回）。
+/// 若原账号本人也在本批次内被处理过，则同样需要切回。
+fn switches_left_account(account_ids: &[String], restore_id: &str) -> bool {
+    // 保守策略：只要发生过冷切（本批次非空）就尝试切回原账号，
+    // 由 ClientSwitcher 内部对「已是目标账号」做幂等短路。
+    !account_ids.is_empty() && !restore_id.is_empty()
 }
 
 impl AntiRiskScheduler {
@@ -568,6 +602,265 @@ impl AntiRiskScheduler {
         });
         sink.emit_logs_updated();
 
+        Ok(())
+    }
+
+    /// 串行冷切批量领取（豆包等「签到绑定桌面在登账号」的工具）。
+    ///
+    /// 与 `run_daily_claim_batch_with_sink` 的纯网络循环不同：本引擎在领取前会先通过
+    /// `switcher` 把本机桌面客户端切到目标账号，再调用 `claim_daily`（此时 `active_uid`
+    /// 校验才会通过），逐账号串行执行、失败隔离，结束切回原始在登账号。
+    ///
+    /// 调用方必须已持有 queue_lock（见 queue_lock()），本函数内部**不再**获取队列锁，
+    /// 但每个账号切换时会短暂持有切号哨兵（由 `switcher` 实现负责）。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_daily_claim_switch_batch_with_sink<S, W>(
+        &self,
+        sink: &S,
+        switcher: &W,
+        db: &Arc<QwitchDatabase>,
+        master_key: &[u8; 32],
+        adapters: &HashMap<String, Arc<dyn ToolAdapter>>,
+        account_ids: Vec<String>,
+        jitter: JitterConfig,
+    ) -> Result<(), String>
+    where
+        S: SchedulerEventSink + ?Sized,
+        W: ClientSwitcher + ?Sized,
+    {
+        let total = account_ids.len();
+        if total == 0 {
+            return Ok(());
+        }
+
+        // 记录批次开始前本机在登账号，结束后切回，避免把用户留在「批量临停账号」上。
+        let original_active: Option<(String, String)> = account_ids
+            .first()
+            .and_then(|first| db.get_account_summary(first).ok())
+            .and_then(|s| {
+                db.get_active_account_id(&s.tool_id)
+                    .ok()
+                    .flatten()
+                    .map(|id| (s.tool_id.clone(), id))
+            });
+
+        sink.emit_batch_progress(BatchProgressEvent {
+            action: "claim".into(),
+            running: true,
+            total,
+            completed: 0,
+            current_label: None,
+            phase: "checking".into(),
+            jitter_seconds: None,
+            summary_text: Some("正在准备串行冷切领取…".into()),
+        });
+
+        let mut claimed_count: usize = 0;
+        let mut skipped_count: usize = 0;
+        let mut failed_count: usize = 0;
+        let mut switch_failed: Vec<String> = Vec::new();
+
+        for (idx, account_id) in account_ids.iter().enumerate() {
+            let (summary, cred) = match db.get_account_credential(master_key, account_id) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    failed_count += 1;
+                    let _ = db.append_action_log(
+                        Some(account_id),
+                        "unknown",
+                        "claim",
+                        "failed",
+                        Some(&UnifiedErrorCode::InternalError),
+                        &format!("读取账号凭据失败: {e}"),
+                    );
+                    sink.emit_account_updated(account_id);
+                    continue;
+                }
+            };
+
+            let skip = claim_switch_skip_reason(&summary);
+            let adapter = adapters.get(&summary.tool_id);
+            let (skip, adapter) = match (skip, adapter) {
+                (Some(r), _) => (Some(r), adapter),
+                (None, None) => (Some("适配器尚未注册".to_string()), None),
+                (None, Some(a)) => (None, Some(a)),
+            };
+            let Some(adapter) = adapter else {
+                skipped_count += 1;
+                if let Some(r) = skip {
+                    let _ = db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "claim",
+                        "skipped",
+                        None,
+                        &format!("{} {r}", summary.label),
+                    );
+                }
+                sink.emit_account_updated(&summary.id);
+                continue;
+            };
+            if let Some(r) = skip {
+                skipped_count += 1;
+                let _ = db.append_action_log(
+                    Some(&summary.id),
+                    &summary.tool_id,
+                    "claim",
+                    "skipped",
+                    None,
+                    &format!("{} {r}", summary.label),
+                );
+                sink.emit_account_updated(&summary.id);
+                continue;
+            }
+            if !adapter.manifest().capabilities.supports_daily_claim {
+                skipped_count += 1;
+                sink.emit_account_updated(&summary.id);
+                continue;
+            }
+
+            // 若本机在登账号已是目标账号，跳过冷切，直接领取。
+            let already_active = switcher
+                .current_active_account_id(&summary.tool_id)
+                .as_deref()
+                == Some(summary.id.as_str());
+
+            if !already_active {
+                sink.emit_batch_progress(BatchProgressEvent {
+                    action: "claim".into(),
+                    running: true,
+                    total,
+                    completed: idx,
+                    current_label: Some(summary.label.clone()),
+                    phase: "switching".into(),
+                    jitter_seconds: None,
+                    summary_text: Some(format!("正在切换桌面端到 {}…", summary.label)),
+                });
+                if let Err(e) = switcher.switch_to(&summary.id).await {
+                    failed_count += 1;
+                    switch_failed.push(summary.label.clone());
+                    let _ = db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "claim",
+                        "failed",
+                        Some(&UnifiedErrorCode::InternalError),
+                        &format!("{} 冷切号失败，已跳过领取：{e}", summary.label),
+                    );
+                    sink.emit_account_updated(&summary.id);
+                    continue;
+                }
+            }
+
+            sink.emit_batch_progress(BatchProgressEvent {
+                action: "claim".into(),
+                running: true,
+                total,
+                completed: idx,
+                current_label: Some(summary.label.clone()),
+                phase: "claiming".into(),
+                jitter_seconds: None,
+                summary_text: None,
+            });
+
+            match adapter.claim_daily(&cred, None).await {
+                Ok(result) => {
+                    if result.claimed {
+                        claimed_count += 1;
+                        let _ =
+                            db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
+                    } else {
+                        skipped_count += 1;
+                    }
+                    let _ = db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "claim",
+                        if result.claimed { "success" } else { "skipped" },
+                        None,
+                        &result.reward_summary,
+                    );
+                    if let Some(q) = result.updated_quota.as_ref() {
+                        let _ = db.save_quota_snapshot(&summary.id, q);
+                    }
+                    sink.emit_account_updated(&summary.id);
+                }
+                Err(err) => {
+                    failed_count += 1;
+                    handle_adapter_failure(
+                        db,
+                        &summary.id,
+                        &summary.tool_id,
+                        &summary.label,
+                        "claim",
+                        err,
+                    );
+                    sink.emit_account_updated(&summary.id);
+                }
+            }
+
+            // 账号间抖动，避免密集切号时序过于规律。
+            if idx + 1 < total {
+                let min_ms = jitter.min_ms;
+                let max_ms = jitter.max_ms.max(min_ms);
+                let wait_ms = if max_ms == 0 {
+                    0
+                } else {
+                    rand::thread_rng().gen_range(min_ms..=max_ms)
+                };
+                if wait_ms > 0 {
+                    sink.emit_batch_progress(BatchProgressEvent {
+                        action: "claim".into(),
+                        running: true,
+                        total,
+                        completed: idx + 1,
+                        current_label: None,
+                        phase: "jitter_wait".into(),
+                        jitter_seconds: Some((wait_ms as f64) / 1000.0),
+                        summary_text: None,
+                    });
+                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                }
+            }
+        }
+
+        // 结束切回批次前在登账号（尽力而为，失败不影响已完成结果）。
+        if let Some((_tool_id, restore_id)) = original_active.as_ref() {
+            let restore_needed = switches_left_account(&account_ids, restore_id);
+            if restore_needed {
+                sink.emit_batch_progress(BatchProgressEvent {
+                    action: "claim".into(),
+                    running: true,
+                    total,
+                    completed: total,
+                    current_label: None,
+                    phase: "restoring".into(),
+                    jitter_seconds: None,
+                    summary_text: Some("正在切回原桌面端账号…".into()),
+                });
+                let _ = switcher.switch_to(restore_id).await;
+            }
+        }
+
+        let switch_note = if switch_failed.is_empty() {
+            String::new()
+        } else {
+            format!("（{} 个账号冷切失败）", switch_failed.len())
+        };
+        let summary_text = format!(
+            "冷切领取完成：成功 {claimed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个{switch_note}"
+        );
+        sink.emit_batch_progress(BatchProgressEvent {
+            action: "claim".into(),
+            running: false,
+            total,
+            completed: total,
+            current_label: None,
+            phase: "done".into(),
+            jitter_seconds: None,
+            summary_text: Some(summary_text),
+        });
+        sink.emit_logs_updated();
         Ok(())
     }
 
@@ -1561,5 +1854,110 @@ mod tests {
         assert!(scheduler.queue_lock().try_lock_owned().is_err());
         drop(guard);
         assert!(scheduler.queue_lock().try_lock_owned().is_ok());
+    }
+
+    /// 可回放的冷切号替身：记录切换顺序、可注入指定账号切换失败。
+    #[derive(Default)]
+    struct MockSwitcher {
+        switches: StdMutex<Vec<String>>,
+        active: StdMutex<Option<String>>,
+        fail_for: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ClientSwitcher for MockSwitcher {
+        async fn switch_to(&self, account_id: &str) -> Result<(), String> {
+            if self
+                .fail_for
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|x| x == account_id)
+            {
+                return Err(format!("mock switch fail for {account_id}"));
+            }
+            self.switches.lock().unwrap().push(account_id.to_string());
+            *self.active.lock().unwrap() = Some(account_id.to_string());
+            Ok(())
+        }
+
+        fn current_active_account_id(&self, _tool_id: &str) -> Option<String> {
+            self.active.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_batch_switches_then_claims_isolates_and_restores() {
+        let (db_path, db, key) = open_test_db();
+        // 两个可领取账号（doubao 工具），均为 Token 凭据（可切换工具）。
+        let a1 = db
+            .upsert_account(&key, Some("acc1"), &token_env("doubao", "uid1", "t1"))
+            .unwrap()
+            .id;
+        let a2 = db
+            .upsert_account(&key, Some("acc2"), &token_env("doubao", "uid2", "t2"))
+            .unwrap()
+            .id;
+
+        let claim_calls = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let claim_calls_inner = Arc::clone(&claim_calls);
+        let mut adapter = MockAdapter::new("doubao");
+        adapter.claim_fn = StdMutex::new(Box::new(move |cred, _pre| {
+            claim_calls_inner.lock().unwrap().push(cred.uid.clone());
+            Ok(ClaimResult {
+                claimed: true,
+                reward_summary: "成功领取 +100".into(),
+                updated_quota: Some(snapshot(ClaimStatus::Claimed)),
+            })
+        }));
+        let mut adapters: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
+        adapters.insert("doubao".to_string(), Arc::new(adapter));
+
+        let switcher = MockSwitcher::default();
+        // acc2 冷切失败 → 应被隔离为异常，不影响 acc1 领取，也不触发 acc2 的 claim。
+        *switcher.fail_for.lock().unwrap() = vec![a2.clone()];
+
+        let scheduler = AntiRiskScheduler::new();
+        let sink = MockEventSink::default();
+        scheduler
+            .run_daily_claim_switch_batch_with_sink(
+                &sink,
+                &switcher,
+                &db,
+                &key,
+                &adapters,
+                vec![a1.clone(), a2.clone()],
+                JitterConfig {
+                    min_ms: 0,
+                    max_ms: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        // 只有 acc1 真正领取；acc2 因切换失败被跳过。
+        assert_eq!(*claim_calls.lock().unwrap(), vec!["uid1".to_string()]);
+        // 发生过 acc1 冷切（acc2 失败未记录为成功切换）。
+        assert_eq!(*switcher.switches.lock().unwrap(), vec![a1.clone()]);
+        // acc1 领取成功并落盘。
+        let s1 = db.get_account_summary(&a1).unwrap();
+        assert!(s1.last_claimed_at.is_some());
+
+        // 事件包含 switching / claiming / done，且汇总为 成功1 异常1。
+        let events = sink.progress.lock().unwrap();
+        assert!(events.iter().any(|e| e.phase == "switching"));
+        assert!(events.iter().any(|e| e.phase == "claiming"));
+        let done = events.last().expect("done event");
+        assert!(!done.running);
+        assert!(
+            done.summary_text
+                .as_deref()
+                .unwrap()
+                .contains("成功 1 个") && done.summary_text.as_deref().unwrap().contains("异常 1 个"),
+            "summary: {:?}",
+            done.summary_text
+        );
+
+        let _ = std::fs::remove_file(&db_path);
     }
 }

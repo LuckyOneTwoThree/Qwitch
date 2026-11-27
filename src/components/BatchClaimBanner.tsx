@@ -34,6 +34,13 @@ export function BatchClaimBanner({
         : "2.0";
     statusLine = batchProgress.summaryText?.trim() || `防风控错峰等待 ${secs}s...`;
     inlineLabel = `等待 ${secs}s`;
+  } else if (batchProgress.phase === "switching") {
+    const label = batchProgress.currentLabel ?? "";
+    statusLine = `正在切换桌面端：${label}...`;
+    inlineLabel = `切换 ${label}`;
+  } else if (batchProgress.phase === "restoring") {
+    statusLine = batchProgress.summaryText?.trim() || "正在切回原桌面端账号...";
+    inlineLabel = "切回原账号";
   } else {
     statusLine =
       batchProgress.summaryText ?? (isRefresh ? "批量查额已完成" : "领取队列已完成");

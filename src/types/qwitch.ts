@@ -209,7 +209,7 @@ export interface BatchProgressState {
   total: number;
   completed: number;
   currentLabel?: string;
-  phase: "checking" | "claiming" | "jitter_wait" | "done";
+  phase: "checking" | "claiming" | "jitter_wait" | "switching" | "restoring" | "done";
   jitterSeconds?: number;
   summaryText?: string;
 }

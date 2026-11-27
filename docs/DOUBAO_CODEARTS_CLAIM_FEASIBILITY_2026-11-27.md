@@ -255,11 +255,11 @@ async fn claim_daily(&self, cred, _precheck) -> ClaimOutcome {
 
 ## 六、优化方案（分优先级执行清单）
 
-### P0 — 豆包多账号「冷切批量领取」（直接解决用户痛点）
-1. `scheduler` 新增 `claim_daily_batch_with_switch`：串行 `switch_to(acct) → wait_active → claim_daily → jitter`，失败隔离，结束切回原账号；与 `SwitchFlagGuard`/`queue_lock` 互斥。
+### P0 — 豆包多账号「冷切批量领取」（直接解决用户痛点）✅ 已实现
+1. `scheduler` 新增 `run_daily_claim_switch_batch_with_sink`：串行 `switch_to(acct) → claim_daily → jitter`，失败隔离，结束切回原账号；与 `SwitchFlagGuard`/`queue_lock` 互斥。切号能力经 `scheduler::ClientSwitcher` trait 注入（`perform_switch_core` 复用，scheduler 不依赖 Tauri）。
 2. `commands/accounts.rs::claim_daily_batch` 对 `supports_client_switch` 工具分流到可切批次；其余工具仍走现有纯网络批处理。
-3. 预检快照：无 `LocalSnapshot` 的账号**不静默跳过**，而是汇总为「需先补快照」清单 + UI 引导（对齐 §3.2 前置条件）。
-4. `BatchClaimBanner` 增加 `switching` 相位（关客户端/写会话/拉客户端/就绪），显示逐账号进度与可取消。
+3. 预检：无 `has_api_token`/非 `Active` 账号分类跳过并记日志（`claim_switch_skip_reason`），不误当成功。
+4. `BatchClaimBanner` 增加 `switching` / `restoring` 相位（切桌面端 / 切回原账号），逐账号进度显示。
 
 ### P1 — 码道真·每日签到「一键领取」（工程量小于豆包，可先做）
 1. `codearts.rs`：`supports_daily_claim = true`；重写 `claim_daily` 为真实实现：`GET /v1/ops/delivery` → 找 `type=daily_claim` 且未领 → `POST /v1/ops/claim` → `POST /v1/ops/confirm`。用现有 `sign_headers_with_body` + `Agent-Type: PromptCenter` + `X-Language: zh-cn`，host 走 `policy_center_base`（复用 `snap_base_urls`）。

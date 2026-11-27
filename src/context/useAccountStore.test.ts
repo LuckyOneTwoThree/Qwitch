@@ -143,6 +143,71 @@ describe("useAccountStore", () => {
     expect(h.invoke).not.toHaveBeenCalledWith("claim_daily_batch", expect.anything());
   });
 
+  it("缺本机快照的冷切账号：批量领取给出补快照引导，不发 IPC", async () => {
+    const { deps, spies } = makeDeps();
+    h.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_accounts") {
+        return [
+          {
+            id: "acc-snap",
+            toolId: "doubaowork",
+            label: "豆包-乙",
+            uidMasked: "u_2***",
+            status: "active",
+            isActiveOnClient: false,
+            hasApiToken: true,
+            hasLocalSnapshot: false,
+            latestQuota: {
+              claimStatus: "available",
+              fetchedAt: new Date().toISOString(),
+              buckets: [],
+            },
+            updatedAt: new Date().toISOString(),
+          },
+        ];
+      }
+      if (cmd === "list_adapters") {
+        return [
+          {
+            id: "doubaowork",
+            name: "豆包工作",
+            version: "1",
+            isBuiltin: true,
+            capabilities: {
+              authMethods: ["local_import"],
+              supportsQuotaQuery: true,
+              supportsDailyClaim: true,
+              supportsClientSwitch: true,
+              supportsMultiInstance: false,
+            },
+          },
+        ];
+      }
+      if (cmd === "get_action_logs") return [];
+      if (cmd === "get_action_log_stats") {
+        return { activeCount: 0, archivedCount: 0, failedActiveCount: 0, noiseActiveCount: 0 };
+      }
+      if (cmd === "get_app_settings") return DEFAULT_SETTINGS;
+      return [];
+    });
+
+    const { result } = renderHook(() => useAccountStore(deps));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await result.current.claimDailyBatch(["acc-snap"]);
+    });
+
+    expect(h.invoke).not.toHaveBeenCalledWith("claim_daily_batch", expect.anything());
+    expect(spies.showToast).toHaveBeenCalledWith(
+      expect.stringContaining("补快照"),
+      "warning"
+    );
+  });
+
   it("批量领取启动后立即进入运行态，并在 IPC 失败时回滚进度", async () => {
     const { deps, spies } = makeDeps();
     // 首次同步返回一个可领账号

@@ -133,6 +133,11 @@ export function selectClaimCandidates(
     ) {
       return false;
     }
+    // 冷切型工具（如豆包工作）如果没有本机快照，冷切必失败——不应纳入批量候选，
+    // 否则只会被隔离成「切换失败」。这类账号由 UI 汇总成「需先补快照」引导。
+    if (isAccountMissingLocalSnapshot(acc, adapters)) {
+      return false;
+    }
     if (opts.targetIds) return true;
     const effectiveClaim = getEffectiveClaimStatus(acc);
     return (
@@ -152,6 +157,8 @@ export interface ScopedStats {
   claimedCount: number;
   unsupportedClaimCount: number;
   unclaimedAuthMissingCount: number;
+  /** 需先补本机快照才能冷切领取的账号数（豆包等多账号冷切场景）。 */
+  unclaimedSnapshotMissingCount: number;
   unknownClaimCount: number;
   allClaimed: boolean;
   claimActionState: ClaimActionState;
@@ -181,6 +188,7 @@ export function selectScopedStats(
   let claimedCount = 0;
   let unsupportedClaimCount = 0;
   let unclaimedAuthMissingCount = 0;
+  let unclaimedSnapshotMissingCount = 0;
   let unknownClaimCount = 0;
   let activeClientsCount = 0;
 
@@ -203,6 +211,10 @@ export function selectScopedStats(
     if (supportsClaim && acc.status === "active") {
       if (acc.hasApiToken === false) {
         unclaimedAuthMissingCount += 1;
+      } else if (isAccountMissingLocalSnapshot(acc, adapters)) {
+        // 冷切型工具缺快照：虽已授权，但无法冷切领取，归入「需补快照」而非「待领」，
+        // 避免徽标显示「N 待领」却批量领取时全部失败。
+        unclaimedSnapshotMissingCount += 1;
       } else {
         const effectiveClaim = getEffectiveClaimStatus(acc);
         if (effectiveClaim === "unsupported") {
@@ -238,6 +250,8 @@ export function selectScopedStats(
     claimBadgeText = `${claimableCount} 待领`;
   } else if (unclaimedAuthMissingCount > 0) {
     claimBadgeText = `${unclaimedAuthMissingCount} 待授权`;
+  } else if (unclaimedSnapshotMissingCount > 0) {
+    claimBadgeText = `${unclaimedSnapshotMissingCount} 待补快照`;
   } else if (unknownClaimCount > 0) {
     claimBadgeText = `${unknownClaimCount} 待核实`;
   } else if (claimedCount > 0) {
@@ -258,6 +272,7 @@ export function selectScopedStats(
     claimedCount,
     unsupportedClaimCount,
     unclaimedAuthMissingCount,
+    unclaimedSnapshotMissingCount,
     unknownClaimCount,
     allClaimed,
     claimActionState,

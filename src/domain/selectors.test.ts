@@ -212,6 +212,36 @@ describe("selectClaimCandidates", () => {
     const candidates = selectClaimCandidates(accounts, adapters, { toolId: "qoder_cn" });
     expect(candidates.map((c) => c.id)).toEqual(["b"]);
   });
+
+  it("缺本机快照的冷切账号不计入候选（避免批量切换失败）", () => {
+    const accounts = [
+      makeAcc({ id: "a", latestQuota: available }),
+      makeAcc({ id: "b", hasLocalSnapshot: false, latestQuota: available }),
+    ];
+    const candidates = selectClaimCandidates(accounts, adapters);
+    expect(candidates.map((c) => c.id)).toEqual(["a"]);
+    // 定向点击也不应把缺快照账号放进批量队列
+    const targeted = selectClaimCandidates(accounts, adapters, { targetIds: ["b"] });
+    expect(targeted.map((c) => c.id)).toEqual([]);
+  });
+});
+
+describe("selectScopedStats 缺快照统计", () => {
+  const adapters = [makeAdapter("doubaowork"), makeAdapter("trae_cn")];
+  it("缺快照账号归入 unclaimedSnapshotMissingCount 而非待领", () => {
+    const accounts = [
+      makeAcc({
+        id: "a",
+        toolId: "doubaowork",
+        hasLocalSnapshot: false,
+        latestQuota: { claimStatus: "available", buckets: [], fetchedAt: NOW_ISO },
+      }),
+    ];
+    const stats = selectScopedStats(accounts, adapters, {});
+    expect(stats.unclaimedSnapshotMissingCount).toBe(1);
+    expect(stats.claimableCount).toBe(0);
+    expect(stats.claimBadgeText).toBe("1 待补快照");
+  });
 });
 describe("sortAccountsForFlatView", () => {
   const adapters = [

@@ -258,8 +258,9 @@ async fn claim_daily(&self, cred, _precheck) -> ClaimOutcome {
 ### P0 — 豆包多账号「冷切批量领取」（直接解决用户痛点）✅ 已实现
 1. `scheduler` 新增 `run_daily_claim_switch_batch_with_sink`：串行 `switch_to(acct) → claim_daily → jitter`，失败隔离，结束切回原账号；与 `SwitchFlagGuard`/`queue_lock` 互斥。切号能力经 `scheduler::ClientSwitcher` trait 注入（`perform_switch_core` 复用，scheduler 不依赖 Tauri）。
 2. `commands/accounts.rs::claim_daily_batch` 对 `supports_client_switch` 工具分流到可切批次；其余工具仍走现有纯网络批处理。
-3. 预检：无 `has_api_token`/非 `Active` 账号分类跳过并记日志（`claim_switch_skip_reason`），不误当成功。
+3. 预检：无 `has_api_token`/非 `Active` 账号分类跳过并记日志（`claim_switch_skip_reason`），不误当成功。**缺本机快照的冷切账号**同样前置跳过并提示「补快照」，避免切到一半报 `switch_failed`。
 4. `BatchClaimBanner` 增加 `switching` / `restoring` 相位（切桌面端 / 切回原账号），逐账号进度显示。
+5. **补快照引导显性化（收尾）**：`selectClaimCandidates` 剔除「缺本机快照」的冷切账号（`isAccountMissingLocalSnapshot`），不再让它们进批量队列被动失败；`selectScopedStats` 新增 `unclaimedSnapshotMissingCount`，徽标显示「N 待补快照」而非误报「N 待领」；Dashboard 待领区新增「N 待补快照」引导按钮（跳转重点关注筛选），`claimDailyBatch` 空候选时给出「有 N 个账号缺本机快照…请补快照/重新导入」定向提示。前后端双保险（`claim_switch_skip_reason` 也拦快照缺失）。
 
 ### P1 — 码道真·每日签到「一键领取」（工程量小于豆包，可先做）
 1. `codearts.rs`：`supports_daily_claim = true`；重写 `claim_daily` 为真实实现：`GET /v1/ops/delivery` → 找 `type=daily_claim` 且未领 → `POST /v1/ops/claim` → `POST /v1/ops/confirm`。用现有 `sign_headers_with_body` + `Agent-Type: PromptCenter` + `X-Language: zh-cn`，host 走 `policy_center_base`（复用 `snap_base_urls`）。

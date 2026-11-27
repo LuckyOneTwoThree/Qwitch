@@ -4,6 +4,7 @@ import {
   Activity,
   CheckCircle2,
   ChevronDown,
+  CircleAlert,
   Download,
   Globe,
   HardDriveDownload,
@@ -1075,6 +1076,16 @@ export function Dashboard({
                       >
                         <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         {`核实并领取 (${scopedStats.unknownClaimCount})`}
+                      </button>
+                    ) : scopedStats.unclaimedSnapshotMissingCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setStatusFilter("attention")}
+                        title="这些账号缺本机快照，无法冷切领取；请在卡片上「补快照」或重新导入本机"
+                        className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                      >
+                        <CircleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        {`${scopedStats.unclaimedSnapshotMissingCount} 待补快照`}
                       </button>
                     ) : null}
                   </>

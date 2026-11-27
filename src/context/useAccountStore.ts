@@ -14,7 +14,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getMockAccounts, getMockAdapters } from "../data/mockStoreLoader";
-import { getEffectiveClaimStatus, selectClaimCandidates, toCstDayKey } from "../domain/selectors";
+import { getEffectiveClaimStatus, isAccountMissingLocalSnapshot, selectClaimCandidates, toCstDayKey } from "../domain/selectors";
 import type {
   AccountSummary,
   ActionLogItem,
@@ -656,17 +656,30 @@ export function useAccountStore({
             Boolean(adapter?.capabilities.supportsDailyClaim)
           );
         }).length;
-        if (alreadyClaimedCount > 0 && missingTokenCount === 0 && unknownCount === 0) {
+        const missingSnapshotCount = accounts.filter((acc) => {
+          if (targetIds && !targetIds.includes(acc.id)) return false;
+          if (!targetIds && toolId && acc.toolId !== toolId) return false;
+          const adapter = adapters.find((ad) => ad.id === acc.toolId);
+          return (
+            acc.status === "active" &&
+            acc.hasApiToken !== false &&
+            Boolean(adapter?.capabilities.supportsDailyClaim) &&
+            isAccountMissingLocalSnapshot(acc, adapters)
+          );
+        }).length;
+        if (alreadyClaimedCount > 0 && missingTokenCount === 0 && unknownCount === 0 && missingSnapshotCount === 0) {
           showToast(`今日可签到账号已全部领取完成 (${alreadyClaimedCount} 个)`, "success");
           return;
         }
         showToast(
           missingTokenCount > 0
             ? "账号尚未完成在线授权，请先点击卡片「在线授权」后再领取"
-            : unknownCount > 0
-              ? `存在 ${unknownCount} 个待核实账号，请点击「核实并领取」先查状态再领取`
-              : "当前范围下没有可参与领取的正常账号",
-          missingTokenCount > 0 ? "warning" : "info"
+            : missingSnapshotCount > 0
+              ? `有 ${missingSnapshotCount} 个账号缺本机快照，无法冷切领取，请在对应卡片「补快照」/ 重新导入本机后重试`
+              : unknownCount > 0
+                ? `存在 ${unknownCount} 个待核实账号，请点击「核实并领取」先查状态再领取`
+                : "当前范围下没有可参与领取的正常账号",
+          missingTokenCount > 0 || missingSnapshotCount > 0 ? "warning" : "info"
         );
         return;
       }

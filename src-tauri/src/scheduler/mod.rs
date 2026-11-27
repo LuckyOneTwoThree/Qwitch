@@ -112,6 +112,11 @@ fn claim_switch_skip_reason(summary: &crate::domain::AccountSummary) -> Option<S
     if !summary.has_api_token {
         return Some("尚未完成在线授权，已自动跳过签到".to_string());
     }
+    // 冷切型（如豆包工作）缺本机快照：冷切必失败，提前跳过并给出「补快照」指引，
+    // 而不是切到一半报 switch_failed 造成误导。前端已在候选阶段过滤，此处兜底。
+    if !summary.has_local_snapshot {
+        return Some("缺少本机快照，无法冷切领取，请先在账号卡片「补快照」或重新导入本机".to_string());
+    }
     None
 }
 
@@ -1365,6 +1370,21 @@ mod tests {
         }
     }
 
+    /// 真实豆包工作账号形态：本机快照且含 decrypted_token.txt，capability_flags = (true, true)。
+    /// 冷切型工具只有带本机快照才能参与冷切领取，测试须用此形态而非纯 Token。
+    fn doubao_snapshot_env(uid: &str, tok: &str) -> CredentialEnvelope {
+        let mut files = HashMap::new();
+        files.insert("storage.json".to_string(), "e30=".to_string());
+        files.insert("decrypted_token.txt".to_string(), tok.to_string());
+        CredentialEnvelope {
+            tool_id: "doubaowork".to_string(),
+            uid: uid.to_string(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        }
+    }
+
     fn open_test_db() -> (std::path::PathBuf, Arc<QwitchDatabase>, [u8; 32]) {
         let db_path =
             std::env::temp_dir().join(format!("qwitch_sched_{}.db", uuid::Uuid::new_v4()));
@@ -1891,17 +1911,17 @@ mod tests {
         let (db_path, db, key) = open_test_db();
         // 两个可领取账号（doubao 工具），均为 Token 凭据（可切换工具）。
         let a1 = db
-            .upsert_account(&key, Some("acc1"), &token_env("doubao", "uid1", "t1"))
+            .upsert_account(&key, Some("acc1"), &doubao_snapshot_env("uid1", "t1"))
             .unwrap()
             .id;
         let a2 = db
-            .upsert_account(&key, Some("acc2"), &token_env("doubao", "uid2", "t2"))
+            .upsert_account(&key, Some("acc2"), &doubao_snapshot_env("uid2", "t2"))
             .unwrap()
             .id;
 
         let claim_calls = Arc::new(StdMutex::new(Vec::<String>::new()));
         let claim_calls_inner = Arc::clone(&claim_calls);
-        let mut adapter = MockAdapter::new("doubao");
+        let mut adapter = MockAdapter::new("doubaowork");
         adapter.claim_fn = StdMutex::new(Box::new(move |cred, _pre| {
             claim_calls_inner.lock().unwrap().push(cred.uid.clone());
             Ok(ClaimResult {
@@ -1911,7 +1931,7 @@ mod tests {
             })
         }));
         let mut adapters: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
-        adapters.insert("doubao".to_string(), Arc::new(adapter));
+        adapters.insert("doubaowork".to_string(), Arc::new(adapter));
 
         let switcher = MockSwitcher::default();
         // acc2 冷切失败 → 应被隔离为异常，不影响 acc1 领取，也不触发 acc2 的 claim。
@@ -1959,5 +1979,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// P0：缺本机快照的冷切账号必须被前置跳并给出补快照指引，而不是切到一半失败。
+    #[test]
+    fn claim_switch_skip_reason_flags_missing_snapshot() {
+        let base = || crate::domain::AccountSummary {
+            id: "a".into(),
+            tool_id: "doubao".into(),
+            label: "豆包".into(),
+            account_name: None,
+            uid_masked: "u_1***".into(),
+            email_masked: None,
+            status: AccountStatus::Active,
+            is_active_on_client: false,
+            has_local_snapshot: true,
+            has_api_token: true,
+            device_id_masked: None,
+            device_type: None,
+            latest_quota: None,
+            last_claimed_at: None,
+            credential_expires_at: None,
+            renewal_mode: None,
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        // 正常账号不跳过
+        assert!(claim_switch_skip_reason(&base()).is_none());
+
+        // 缺快照 → 跳过并提示补快照
+        let mut no_snap = base();
+        no_snap.has_local_snapshot = false;
+        let reason = claim_switch_skip_reason(&no_snap).expect("缺快照应跳过");
+        assert!(reason.contains("快照"), "reason: {reason}");
+
+        // 未授权优先于缺快照
+        let mut unauth = base();
+        unauth.has_api_token = false;
+        unauth.has_local_snapshot = false;
+        assert!(claim_switch_skip_reason(&unauth)
+            .expect("未授权应跳过")
+            .contains("在线授权"));
     }
 }

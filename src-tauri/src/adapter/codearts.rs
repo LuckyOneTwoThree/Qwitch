@@ -409,6 +409,14 @@ impl CodeArtsAdapter {
         })
     }
 
+    /// 仅从本机 `secretStorage` 读取并构造最新凭据快照（纯本地读取，不发网络请求）。
+    pub(crate) fn snapshot_local_envelope(
+        host: &dyn PlatformHost,
+    ) -> Result<CredentialEnvelope, AdapterError> {
+        let session = Self::load_session(host)?;
+        Self::envelope_from_session(&session)
+    }
+
     /// 码道数据面（snap-access）的候选 host 列表，按凭据里的 region 选择国内/国际站。
     /// 国内站主域名 `.myhuaweicloud.com` 在部分代理/TUN 环境下 TLS 握手会 reset，
     /// 因此附上码道官方内置的 `.myhuaweicloud.cn` 备用域名按序回退。
@@ -1657,43 +1665,60 @@ fn patch_session_snapshot_for_switch(
     })?;
 
     if let Some(session) = snapshot.get_mut("session").and_then(|v| v.as_object_mut()) {
-        for (key, extra_key) in [
-            ("accessKey", EXTRA_ACCESS_KEY),
-            ("secretKey", EXTRA_SECRET_KEY),
-            ("securityToken", EXTRA_SECURITY_TOKEN),
-        ] {
-            if let Some(value) = extra.get(extra_key) {
-                session.insert(key.to_string(), Value::String(value.clone()));
-            }
-        }
-        if let Some(exp) = expires_at {
-            let exp_ms = if *exp > 0 && *exp < 10_000_000_000 {
+        let snap_exp_ms = session
+            .get("expiresAt")
+            .or_else(|| session.get("expires_at"))
+            .and_then(normalize_epoch_ms);
+        let cred_exp_ms = expires_at.map(|exp| {
+            if exp > 0 && exp < 10_000_000_000 {
                 exp.saturating_mul(1000)
             } else {
-                *exp
-            };
-            session.insert("expiresAt".to_string(), Value::from(exp_ms));
-        }
-        session.insert("updatedAt".to_string(), Value::from(now_ms));
-
-        // 非独立 OAuth 账号才同步回写 refreshToken；独立 OAuth 拥有独立的 DPoP 密钥对，
-        // 绝不能把 Qwitch 的刷新令牌塞给桌面端以免双方互相刷废。
-        if extra.get(EXTRA_CODEARTS_MODE).map(String::as_str) != Some("isolated_oauth") {
-            if let Some(rt) = refresh_token.as_ref().filter(|s| !s.trim().is_empty()) {
-                session.insert("refreshToken".to_string(), Value::String(rt.clone()));
+                exp
+            }
+        });
+        let cred_is_newer = match (cred_exp_ms, snap_exp_ms) {
+            (Some(ce), Some(se)) => ce > se,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if cred_is_newer {
+            for (key, extra_key) in [
+                ("accessKey", EXTRA_ACCESS_KEY),
+                ("secretKey", EXTRA_SECRET_KEY),
+                ("securityToken", EXTRA_SECURITY_TOKEN),
+            ] {
+                if let Some(value) = extra.get(extra_key) {
+                    session.insert(key.to_string(), Value::String(value.clone()));
+                }
+            }
+            if let Some(exp_ms) = cred_exp_ms {
+                session.insert("expiresAt".to_string(), Value::from(exp_ms));
+            }
+            // 非独立 OAuth 账号才同步回写 refreshToken；独立 OAuth 拥有独立的 DPoP 密钥对，
+            // 绝不能把 Qwitch 的刷新令牌塞给桌面端以免双方互相刷废。
+            if extra.get(EXTRA_CODEARTS_MODE).map(String::as_str) != Some("isolated_oauth") {
+                if let Some(rt) = refresh_token.as_ref().filter(|s| !s.trim().is_empty()) {
+                    session.insert("refreshToken".to_string(), Value::String(rt.clone()));
+                }
             }
         }
+        session.insert("updatedAt".to_string(), Value::from(now_ms));
     }
 
     let final_exp_ms = snapshot
         .get("session")
         .and_then(|s| s.get("expiresAt").or_else(|| s.get("expires_at")))
         .and_then(normalize_epoch_ms);
-    if final_exp_ms.is_some_and(|exp| exp <= now_ms) {
+    let has_refresh_token = snapshot
+        .get("session")
+        .and_then(|s| s.get("refreshToken"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    if final_exp_ms.is_some_and(|exp| exp <= now_ms) && !has_refresh_token {
         return Err(AdapterError::Unified {
             code: UnifiedErrorCode::AuthExpired,
             message:
-                "该码道账号的本地 STS 凭据已过期，写回后客户端仍会要求重新登录；请先刷新凭据或在客户端登录后重新导入"
+                "该码道账号的本地 STS 凭据已过期且缺少 refreshToken，写回后客户端仍会要求重新登录；请在客户端登录后重新导入"
                     .into(),
         });
     }
@@ -2034,7 +2059,6 @@ impl ToolAdapter for CodeArtsAdapter {
         //
         // 前提：必须持有**该账号在本机登录时**留下的完整会话快照 —— 独立 OAuth
         // 授权只有 AK/SK/STS，拼不出客户端认可的 loginContext。
-        Self::ensure_not_expired(cred)?;
         let snapshot = patch_session_snapshot_for_switch(cred, Utc::now().timestamp_millis())?;
 
         let patched = serde_json::to_vec(&snapshot).map_err(|e| AdapterError::Unified {
@@ -3144,7 +3168,7 @@ mod tests {
     }
 
     #[test]
-    fn patch_session_snapshot_rejects_expired_session() {
+    fn patch_session_snapshot_rejects_expired_session_without_refresh_token() {
         let now_ms = 2_000_000_000_000_i64;
         let stale_snap = serde_json::json!({
             "session": {
@@ -3177,6 +3201,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn patch_session_snapshot_allows_expired_sts_when_refresh_token_present() {
+        let now_ms = 2_000_000_000_000_i64;
+        let snap = serde_json::json!({
+            "session": {
+                "userId": "u1",
+                "accessKey": "AK_SNAP",
+                "secretKey": "SK_SNAP",
+                "securityToken": "STS_SNAP",
+                "refreshToken": "RT_SNAP",
+                "expiresAt": now_ms - 60_000
+            },
+            "loginContext": { "dpopKeyPair": {} }
+        });
+        let mut extra = HashMap::new();
+        extra.insert(
+            EXTRA_SESSION_SNAPSHOT.into(),
+            BASE64.encode(serde_json::to_vec(&snap).unwrap()),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "u1".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: String::new(),
+                refresh_token: Some("RT_SNAP".into()),
+                expires_at: Some(now_ms - 60_000),
+                extra,
+            },
+        };
+        let patched = patch_session_snapshot_for_switch(&cred, now_ms).unwrap();
+        assert_eq!(patched["session"]["refreshToken"], "RT_SNAP");
+        assert_eq!(patched["session"]["updatedAt"].as_i64(), Some(now_ms));
     }
 
     #[test]

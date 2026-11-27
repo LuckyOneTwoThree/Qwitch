@@ -223,6 +223,66 @@ pub(crate) async fn perform_switch_core(
         }
     };
 
+    // 码道切号前把即将被覆盖的本机在登会话回吸进对应账号库：
+    // 码道客户端每 1 小时会自动轮换一次性 refreshToken，若直接覆盖而不先回存，
+    // 等会儿再切回这个账号时库里只剩旧的已消费 refreshToken，客户端会直接跳「重新登录」。
+    if summary.tool_id == "codearts" {
+        if let Ok(outgoing_env) =
+            crate::adapter::codearts::CodeArtsAdapter::snapshot_local_envelope(host.as_ref())
+        {
+            if !outgoing_env.uid.trim().is_empty()
+                && !crate::domain::CredentialEnvelope::is_fallback_uid(&outgoing_env.uid)
+            {
+                if let Ok(Some((outgoing_id, _))) =
+                    db.find_account_id_by_uid(master_key, "codearts", &outgoing_env.uid)
+                {
+                    if outgoing_id != summary.id {
+                        if let Ok((_, mut existing_cred)) =
+                            db.get_account_credential(master_key, &outgoing_id)
+                        {
+                            let is_isolated = matches!(
+                                &existing_cred.payload,
+                                crate::domain::CredentialPayload::Token { extra, .. }
+                                    if extra.get("codearts_mode").map(String::as_str)
+                                        == Some("isolated_oauth")
+                            );
+                            let updated_cred = if is_isolated {
+                                // 独立 OAuth 账号保留 Qwitch 自持的 refreshToken 与 DPoP 密钥对，仅更新本机快照
+                                if let (
+                                    crate::domain::CredentialPayload::Token {
+                                        extra: dst_extra,
+                                        ..
+                                    },
+                                    crate::domain::CredentialPayload::Token {
+                                        extra: src_extra,
+                                        ..
+                                    },
+                                ) = (&mut existing_cred.payload, &outgoing_env.payload)
+                                {
+                                    if let Some(snap) = src_extra.get("session_snapshot_b64") {
+                                        dst_extra.insert(
+                                            "session_snapshot_b64".to_string(),
+                                            snap.clone(),
+                                        );
+                                    }
+                                }
+                                existing_cred
+                            } else {
+                                existing_cred.merge_from(&outgoing_env)
+                            };
+                            let _ = db.bind_account_credential(
+                                master_key,
+                                &outgoing_id,
+                                None,
+                                &updated_cred,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let _ = app.emit(
         "qwitch://switch-progress",
         SwitchProgressEvent {

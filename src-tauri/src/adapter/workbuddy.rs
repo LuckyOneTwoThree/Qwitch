@@ -201,6 +201,7 @@ impl WorkBuddyAdapter {
                     supports_quota_query: true,
                     supports_daily_claim: true,
                     supports_client_switch: true,
+                    claim_requires_client_switch: false,
                     supports_multi_instance: false,
                 },
             },

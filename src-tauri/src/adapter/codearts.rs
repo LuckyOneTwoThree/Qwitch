@@ -269,6 +269,7 @@ impl CodeArtsAdapter {
                     supports_daily_claim: true,
                     // 切号 = safeStorage 重加密写回，仅 macOS 可复现（Windows 走 DPAPI）
                     supports_client_switch: cfg!(target_os = "macos"),
+                    claim_requires_client_switch: false,
                     supports_multi_instance: false,
                 },
             },
@@ -620,17 +621,56 @@ impl CodeArtsAdapter {
             req = req.header(k.as_str(), v.as_str());
         }
 
-        let resp = req.send().await.map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::NetworkError,
-            message: format!("{context}失败: {}", e.without_url()),
-        })?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(first_err) => {
+                if url.contains(".myhuaweicloud.com") {
+                    let cn_url = url.replace(".myhuaweicloud.com", ".myhuaweicloud.cn");
+                    if let Ok(cn_parsed) = reqwest::Url::parse(&cn_url) {
+                        let cn_headers =
+                            Self::sign_headers("GET", &cn_parsed, creds, extra_headers);
+                        let mut cn_req = self
+                            .http
+                            .get(cn_parsed)
+                            .header(ACCEPT, "application/json")
+                            .header(USER_AGENT, USER_AGENT_VALUE);
+                        for (k, v) in &cn_headers {
+                            cn_req = cn_req.header(k.as_str(), v.as_str());
+                        }
+                        cn_req.send().await.map_err(|e| AdapterError::Unified {
+                            code: UnifiedErrorCode::NetworkError,
+                            message: format!("{context}失败: {}", e.without_url()),
+                        })?
+                    } else {
+                        return Err(AdapterError::Unified {
+                            code: UnifiedErrorCode::NetworkError,
+                            message: format!("{context}失败: {}", first_err.without_url()),
+                        });
+                    }
+                } else {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        message: format!("{context}失败: {}", first_err.without_url()),
+                    });
+                }
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
-            // 401/APIG.0301 表示 AK/SK 签名校验失败 → 凭据失效而非网络问题
-            if status.as_u16() == 401 {
+            let body_text = resp.text().await.unwrap_or_default();
+            let lower = body_text.to_ascii_lowercase();
+            // 401 或 APIG.0301 / APIG.0602 表示 STS/AK/SK 签名或令牌失效 → 凭据失效而非网络问题
+            if status.as_u16() == 401
+                || lower.contains("apig.0602")
+                || lower.contains("apig.0301")
+                || lower.contains("security token has expired")
+            {
                 return Err(AdapterError::Unified {
                     code: UnifiedErrorCode::AuthExpired,
-                    message: format!("{context}: 华为云签名校验失败 (HTTP 401)，凭据可能已过期"),
+                    message: format!(
+                        "{context}: 华为云鉴权/签名失效 (HTTP {})，凭据可能已过期",
+                        status.as_u16()
+                    ),
                 });
             }
             return Err(map_http_status(status, context));
@@ -671,27 +711,70 @@ impl CodeArtsAdapter {
             .post(parsed)
             .header(ACCEPT, "application/json")
             .header(USER_AGENT, USER_AGENT_VALUE)
-            .body(body_bytes);
+            .body(body_bytes.clone());
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str());
         }
 
-        let resp = req.send().await.map_err(|e| AdapterError::Unified {
-            code: UnifiedErrorCode::NetworkError,
-            message: format!("{context}失败: {}", e.without_url()),
-        })?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(first_err) => {
+                if url.contains(".myhuaweicloud.com") {
+                    let cn_url = url.replace(".myhuaweicloud.com", ".myhuaweicloud.cn");
+                    if let Ok(cn_parsed) = reqwest::Url::parse(&cn_url) {
+                        let cn_headers = Self::sign_headers_with_body(
+                            "POST",
+                            &cn_parsed,
+                            creds,
+                            extra_headers,
+                            &body_bytes,
+                        );
+                        let mut cn_req = self
+                            .http
+                            .post(cn_parsed)
+                            .header(ACCEPT, "application/json")
+                            .header(USER_AGENT, USER_AGENT_VALUE)
+                            .body(body_bytes);
+                        for (k, v) in &cn_headers {
+                            cn_req = cn_req.header(k.as_str(), v.as_str());
+                        }
+                        cn_req.send().await.map_err(|e| AdapterError::Unified {
+                            code: UnifiedErrorCode::NetworkError,
+                            message: format!("{context}失败: {}", e.without_url()),
+                        })?
+                    } else {
+                        return Err(AdapterError::Unified {
+                            code: UnifiedErrorCode::NetworkError,
+                            message: format!("{context}失败: {}", first_err.without_url()),
+                        });
+                    }
+                } else {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        message: format!("{context}失败: {}", first_err.without_url()),
+                    });
+                }
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
-            if status.as_u16() == 401 {
-                let body = if std::env::var("CODEARTS_PROBE_DUMP_401").as_deref() == Ok("1") {
-                    resp.text().await.unwrap_or_default()
+            let body_text = resp.text().await.unwrap_or_default();
+            let lower = body_text.to_ascii_lowercase();
+            if status.as_u16() == 401
+                || lower.contains("apig.0602")
+                || lower.contains("apig.0301")
+                || lower.contains("security token has expired")
+            {
+                let detail = if std::env::var("CODEARTS_PROBE_DUMP_401").as_deref() == Ok("1") {
+                    body_text
                 } else {
                     String::new()
                 };
                 return Err(AdapterError::Unified {
                     code: UnifiedErrorCode::AuthExpired,
                     message: format!(
-                        "{context}: 华为云签名校验失败 (HTTP 401)，凭据可能已过期 {body}"
+                        "{context}: 华为云鉴权/签名失效 (HTTP {})，凭据可能已过期 {detail}",
+                        status.as_u16()
                     ),
                 });
             }
@@ -1007,7 +1090,7 @@ impl CodeArtsAdapter {
         let url = format!("{}/v1/oauth2/tokens", self.iam_sts);
         let dpop = Self::sign_dpop_jws(dpop_pkcs8, "POST", &url)?;
 
-        let resp = self
+        let resp = match self
             .http
             .post(&url)
             .header(ACCEPT, "application/json")
@@ -1015,10 +1098,34 @@ impl CodeArtsAdapter {
             .form(form)
             .send()
             .await
-            .map_err(|e| AdapterError::Unified {
-                code: UnifiedErrorCode::NetworkError,
-                message: format!("请求 CodeArts STS 令牌接口失败: {}", e.without_url()),
-            })?;
+        {
+            Ok(r) => r,
+            Err(first_err) => {
+                if url.contains(".myhuaweicloud.com") {
+                    let cn_url = url.replace(".myhuaweicloud.com", ".myhuaweicloud.cn");
+                    let cn_dpop = Self::sign_dpop_jws(dpop_pkcs8, "POST", &cn_url)?;
+                    self.http
+                        .post(&cn_url)
+                        .header(ACCEPT, "application/json")
+                        .header("DPoP", cn_dpop)
+                        .form(form)
+                        .send()
+                        .await
+                        .map_err(|e| AdapterError::Unified {
+                            code: UnifiedErrorCode::NetworkError,
+                            message: format!("请求 CodeArts STS 令牌接口失败: {}", e.without_url()),
+                        })?
+                } else {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::NetworkError,
+                        message: format!(
+                            "请求 CodeArts STS 令牌接口失败: {}",
+                            first_err.without_url()
+                        ),
+                    });
+                }
+            }
+        };
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -1853,10 +1960,7 @@ impl ToolAdapter for CodeArtsAdapter {
         let file = dir.join(Self::secret_file_name(&format!(
             "authSession:{DEFAULT_REGION}"
         )));
-        let content = std::fs::read(&file).ok();
-        Ok(SessionBackup {
-            files: vec![(file, content)],
-        })
+        crate::adapter::backup_files(&[file])
     }
 }
 

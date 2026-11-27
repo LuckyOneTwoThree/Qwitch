@@ -811,7 +811,7 @@ pub async fn claim_daily_batch(
                     .get_account_summary(id)
                     .ok()
                     .and_then(|s| adapters.get(&s.tool_id).cloned())
-                    .map(|a| a.manifest().capabilities.supports_client_switch)
+                    .map(|a| a.manifest().capabilities.claim_requires_client_switch)
                     .unwrap_or(false);
                 if needs_switch {
                     switch_ids.push(id.clone());

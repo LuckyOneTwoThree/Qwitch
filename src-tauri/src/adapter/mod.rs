@@ -36,6 +36,8 @@ pub struct AdapterCapabilities {
     pub supports_quota_query: bool,
     pub supports_daily_claim: bool,
     pub supports_client_switch: bool,
+    #[serde(default)]
+    pub claim_requires_client_switch: bool,
     pub supports_multi_instance: bool,
 }
 

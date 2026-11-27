@@ -56,7 +56,7 @@ pub struct ExternalAdapterInfo {
 /// 「信任插件 → 加载插件 → 插件读取本机凭据」的链路。
 #[tauri::command]
 pub async fn request_plugin_trust(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     adapter_id: String,
 ) -> Result<String, String> {
@@ -88,8 +88,9 @@ pub async fn request_plugin_trust(
     let id_for_dialog = id.clone();
     let display = format!("{} ({})", found.name, found.version);
 
-    // 原生模态对话框必须在主线程执行，且是阻塞调用 → 放到阻塞线程池
-    let confirmed = tokio::task::spawn_blocking(move || {
+    // 原生模态对话框（AppKit NSAlert 等）必须在主线程执行
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
         let title = if already_trusted {
             "确认重新信任已变更的外部插件"
         } else {
@@ -116,10 +117,12 @@ pub async fn request_plugin_trust(
             .set_level(rfd::MessageLevel::Warning)
             .set_buttons(rfd::MessageButtons::YesNo)
             .show();
-        result == rfd::MessageDialogResult::Yes
+        let _ = tx.send(result == rfd::MessageDialogResult::Yes);
     })
-    .await
-    .map_err(|e| format!("信任确认对话框执行失败: {e}"))?;
+    .map_err(|e| format!("调度信任确认对话框失败: {e}"))?;
+    let confirmed = rx
+        .await
+        .map_err(|e| format!("信任确认对话框执行失败: {e}"))?;
 
     if !confirmed {
         return Err("已取消：未授予该插件的信任".into());

@@ -577,6 +577,35 @@ impl CredentialEnvelope {
                 }
                 CredentialPayload::LocalSnapshot { files }
             }
+            (
+                CredentialPayload::Token {
+                    refresh_token: old_rt,
+                    extra: old_extra,
+                    ..
+                },
+                CredentialPayload::Token {
+                    access_token,
+                    refresh_token: new_rt,
+                    expires_at,
+                    extra: new_extra,
+                },
+            ) => {
+                let mut merged_extra = old_extra.clone();
+                for (k, v) in new_extra {
+                    merged_extra.insert(k.clone(), v.clone());
+                }
+                let refresh_token = new_rt
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+                    .or_else(|| old_rt.clone());
+                CredentialPayload::Token {
+                    access_token: access_token.clone(),
+                    refresh_token,
+                    expires_at: *expires_at,
+                    extra: merged_extra,
+                }
+            }
             _ => incoming.payload.clone(),
         };
 
@@ -736,5 +765,71 @@ mod tests {
         assert!(!parsed.auto_claim_daily);
         assert!(parsed.trusted_adapters.is_empty());
         assert!(parsed.trusted_adapter_hashes.is_empty());
+    }
+
+    #[test]
+    fn merge_from_token_token_preserves_extra_and_refresh_token() {
+        use std::collections::HashMap;
+        let mut old_extra = HashMap::new();
+        old_extra.insert("session_snapshot_b64".into(), "snap123".into());
+        old_extra.insert("codearts_mode".into(), "isolated_oauth".into());
+        old_extra.insert("dpop_pkcs8_b64".into(), "dpop_key".into());
+        old_extra.insert("code_verifier".into(), "verifier_1".into());
+        let existing = CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "u1".into(),
+            display_name: Some("old".into()),
+            display_email: None,
+            payload: CredentialPayload::Token {
+                access_token: "old_tok".into(),
+                refresh_token: Some("old_rt".into()),
+                expires_at: Some(1000),
+                extra: old_extra,
+            },
+        };
+
+        let mut new_extra = HashMap::new();
+        new_extra.insert("codearts_mode".into(), "isolated_oauth".into());
+        let incoming = CredentialEnvelope {
+            tool_id: "codearts".into(),
+            uid: "u1".into(),
+            display_name: None,
+            display_email: Some("a@b.com".into()),
+            payload: CredentialPayload::Token {
+                access_token: "new_tok".into(),
+                refresh_token: None,
+                expires_at: Some(2000),
+                extra: new_extra,
+            },
+        };
+
+        let merged = existing.merge_from(&incoming);
+        assert_eq!(merged.display_name.as_deref(), Some("old"));
+        assert_eq!(merged.display_email.as_deref(), Some("a@b.com"));
+        match merged.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token,
+                expires_at,
+                extra,
+            } => {
+                assert_eq!(access_token, "new_tok");
+                assert_eq!(refresh_token.as_deref(), Some("old_rt"));
+                assert_eq!(expires_at, Some(2000));
+                assert_eq!(
+                    extra.get("session_snapshot_b64").map(String::as_str),
+                    Some("snap123")
+                );
+                assert_eq!(
+                    extra.get("dpop_pkcs8_b64").map(String::as_str),
+                    Some("dpop_key")
+                );
+                assert_eq!(
+                    extra.get("code_verifier").map(String::as_str),
+                    Some("verifier_1")
+                );
+            }
+            _ => panic!("expected Token payload"),
+        }
     }
 }

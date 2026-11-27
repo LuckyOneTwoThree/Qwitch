@@ -60,6 +60,8 @@ pub struct ExternalCapabilities {
     #[serde(default)]
     pub supports_client_switch: bool,
     #[serde(default)]
+    pub claim_requires_client_switch: bool,
+    #[serde(default)]
     pub supports_multi_instance: bool,
 }
 
@@ -122,6 +124,7 @@ impl ExternalAdapter {
                     supports_quota_query: raw.capabilities.supports_quota_query,
                     supports_daily_claim: raw.capabilities.supports_daily_claim,
                     supports_client_switch: raw.capabilities.supports_client_switch,
+                    claim_requires_client_switch: raw.capabilities.claim_requires_client_switch,
                     supports_multi_instance: raw.capabilities.supports_multi_instance,
                 },
             },
@@ -806,6 +809,7 @@ mod tests {
                     supports_quota_query: true,
                     supports_daily_claim: false,
                     supports_client_switch: false,
+                    claim_requires_client_switch: false,
                     supports_multi_instance: false,
                 },
             },
@@ -1060,6 +1064,7 @@ mod tests {
                 supports_quota_query: true,
                 supports_daily_claim: false,
                 supports_client_switch: false,
+                claim_requires_client_switch: false,
                 supports_multi_instance: false,
             },
         };

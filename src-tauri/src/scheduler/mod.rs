@@ -640,16 +640,18 @@ impl AntiRiskScheduler {
             return Ok(());
         }
 
-        // 记录批次开始前本机在登账号，结束后切回，避免把用户留在「批量临停账号」上。
-        let original_active: Option<(String, String)> = account_ids
-            .first()
-            .and_then(|first| db.get_account_summary(first).ok())
-            .and_then(|s| {
-                db.get_active_account_id(&s.tool_id)
-                    .ok()
-                    .flatten()
-                    .map(|id| (s.tool_id.clone(), id))
-            });
+        // 记录批次开始前各工具本机在登账号，结束后逐一切回，避免把用户留在「批量临停账号」上。
+        let mut original_active_by_tool: Vec<(String, String)> = Vec::new();
+        let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for id in &account_ids {
+            if let Ok(s) = db.get_account_summary(id) {
+                if seen_tools.insert(s.tool_id.clone()) {
+                    if let Ok(Some(active_id)) = db.get_active_account_id(&s.tool_id) {
+                        original_active_by_tool.push((s.tool_id, active_id));
+                    }
+                }
+            }
+        }
 
         sink.emit_batch_progress(BatchProgressEvent {
             action: "claim".into(),
@@ -831,19 +833,25 @@ impl AntiRiskScheduler {
         }
 
         // 结束切回批次前在登账号（尽力而为，失败不影响已完成结果）。
-        if let Some((_tool_id, restore_id)) = original_active.as_ref() {
-            let restore_needed = switches_left_account(&account_ids, restore_id);
-            if restore_needed {
-                sink.emit_batch_progress(BatchProgressEvent {
-                    action: "claim".into(),
-                    running: true,
-                    total,
-                    completed: total,
-                    current_label: None,
-                    phase: "restoring".into(),
-                    jitter_seconds: None,
-                    summary_text: Some("正在切回原桌面端账号…".into()),
-                });
+        let mut restored_any = false;
+        for (tool_id, restore_id) in &original_active_by_tool {
+            let current_active = switcher.current_active_account_id(tool_id);
+            let needs_restore = current_active.as_deref() != Some(restore_id.as_str())
+                && switches_left_account(&account_ids, restore_id);
+            if needs_restore {
+                if !restored_any {
+                    restored_any = true;
+                    sink.emit_batch_progress(BatchProgressEvent {
+                        action: "claim".into(),
+                        running: true,
+                        total,
+                        completed: total,
+                        current_label: None,
+                        phase: "restoring".into(),
+                        jitter_seconds: None,
+                        summary_text: Some("正在切回原桌面端账号…".into()),
+                    });
+                }
                 let _ = switcher.switch_to(restore_id).await;
             }
         }
@@ -1263,6 +1271,7 @@ mod tests {
                         supports_quota_query: true,
                         supports_daily_claim: true,
                         supports_client_switch: false,
+                        claim_requires_client_switch: false,
                         supports_multi_instance: false,
                     },
                 },

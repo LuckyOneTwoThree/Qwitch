@@ -178,6 +178,7 @@ impl QoderAdapter {
                     supports_quota_query: true,
                     supports_daily_claim: true,
                     supports_client_switch: true,
+                    claim_requires_client_switch: false,
                     supports_multi_instance: false,
                 },
             },
@@ -785,20 +786,34 @@ impl QoderAdapter {
         cred: &CredentialEnvelope,
         force: bool,
     ) -> Result<Option<CredentialEnvelope>, AdapterError> {
-        let CredentialPayload::Token {
-            refresh_token,
-            expires_at,
-            ..
-        } = &cred.payload
-        else {
-            return Ok(None);
-        };
-        let Some(rt) = refresh_token
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        else {
-            return Ok(None);
+        let (rt, expires_at) = match &cred.payload {
+            CredentialPayload::Token {
+                refresh_token,
+                expires_at,
+                ..
+            } => {
+                let Some(rt) = refresh_token
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Ok(None);
+                };
+                (rt, *expires_at)
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                let Some(rt) = files
+                    .get("decrypted_refresh_token.txt")
+                    .and_then(|b64| BASE64.decode(b64).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Ok(None);
+                };
+                (rt, None)
+            }
+            _ => return Ok(None),
         };
 
         let now_ms = Utc::now().timestamp_millis();
@@ -867,16 +882,28 @@ impl QoderAdapter {
         let new_expires_at = Self::parse_token_expiry_ms(&body);
 
         let mut updated = cred.clone();
-        if let CredentialPayload::Token {
-            access_token,
-            refresh_token: rt_slot,
-            expires_at: exp_slot,
-            ..
-        } = &mut updated.payload
-        {
-            *access_token = token;
-            *rt_slot = Some(new_refresh);
-            *exp_slot = new_expires_at;
+        match &mut updated.payload {
+            CredentialPayload::Token {
+                access_token,
+                refresh_token: rt_slot,
+                expires_at: exp_slot,
+                ..
+            } => {
+                *access_token = token;
+                *rt_slot = Some(new_refresh);
+                *exp_slot = new_expires_at;
+            }
+            CredentialPayload::LocalSnapshot { files } => {
+                files.insert(
+                    "decrypted_token.txt".to_string(),
+                    BASE64.encode(token.as_bytes()),
+                );
+                files.insert(
+                    "decrypted_refresh_token.txt".to_string(),
+                    BASE64.encode(new_refresh.as_bytes()),
+                );
+            }
+            _ => {}
         }
         Ok(Some(updated))
     }
@@ -1837,5 +1864,64 @@ mod capture_snapshot_tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn force_refresh_updates_local_snapshot_tokens() {
+        use super::*;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/deviceToken/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "new_snap_tok",
+                "refresh_token": "new_snap_rt",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = QoderAdapter::with_base_url(server.uri());
+        let mut files = std::collections::HashMap::new();
+        files.insert(
+            "decrypted_token.txt".to_string(),
+            BASE64.encode(b"old_snap_tok"),
+        );
+        files.insert(
+            "decrypted_refresh_token.txt".to_string(),
+            BASE64.encode(b"old_snap_rt"),
+        );
+        let cred = CredentialEnvelope {
+            tool_id: "qoder_cn".into(),
+            uid: "u_snap".into(),
+            display_name: None,
+            display_email: None,
+            payload: CredentialPayload::LocalSnapshot { files },
+        };
+
+        let refreshed = adapter
+            .force_refresh_credential(&cred)
+            .await
+            .expect("refresh ok")
+            .expect("should return updated envelope");
+        match refreshed.payload {
+            CredentialPayload::LocalSnapshot { files } => {
+                assert_eq!(
+                    BASE64
+                        .decode(files.get("decrypted_token.txt").unwrap())
+                        .unwrap(),
+                    b"new_snap_tok"
+                );
+                assert_eq!(
+                    BASE64
+                        .decode(files.get("decrypted_refresh_token.txt").unwrap())
+                        .unwrap(),
+                    b"new_snap_rt"
+                );
+            }
+            _ => panic!("expected LocalSnapshot"),
+        }
     }
 }

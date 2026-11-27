@@ -164,32 +164,19 @@ pub(crate) async fn perform_switch_core(
     }
 
     let settings = load_app_settings(db);
-    let Some(exe) = resolve_client_executable(host.as_ref(), &settings, &summary.tool_id)
-    else {
+    let Some(exe) = resolve_client_executable(host.as_ref(), &settings, &summary.tool_id) else {
         let msg = format!(
             "未检测到 {} 客户端安装路径，请在设置中配置自定义路径后再切换",
             summary.tool_id
         );
-        log_switch_failure(
-            db,
-            app,
-            &summary,
-            UnifiedErrorCode::ClientNotFound,
-            &msg,
-        );
+        log_switch_failure(db, app, &summary, UnifiedErrorCode::ClientNotFound, &msg);
         return Err(msg);
     };
 
     let running = match check_client_running_async(host, &summary.tool_id).await {
         Ok(r) => r,
         Err(e) => {
-            log_switch_failure(
-                db,
-                app,
-                &summary,
-                UnifiedErrorCode::InternalError,
-                &e,
-            );
+            log_switch_failure(db, app, &summary, UnifiedErrorCode::InternalError, &e);
             return Err(e);
         }
     };
@@ -211,13 +198,7 @@ pub(crate) async fn perform_switch_core(
             .await
         {
             let msg = e.to_string();
-            log_switch_failure(
-                db,
-                app,
-                &summary,
-                UnifiedErrorCode::ClientRunning,
-                &msg,
-            );
+            log_switch_failure(db, app, &summary, UnifiedErrorCode::ClientRunning, &msg);
             return Err(msg);
         }
     }
@@ -237,13 +218,7 @@ pub(crate) async fn perform_switch_core(
                     "（客户端未做任何改动）"
                 }
             );
-            log_switch_failure(
-                db,
-                app,
-                &summary,
-                UnifiedErrorCode::InternalError,
-                &msg,
-            );
+            log_switch_failure(db, app, &summary, UnifiedErrorCode::InternalError, &msg);
             return Err(msg);
         }
     };
@@ -262,13 +237,7 @@ pub(crate) async fn perform_switch_core(
             let _ = host.launch_client(&exe, &[]);
         }
         let msg = format!("写入新会话失败，{note}: {e}");
-        log_switch_failure(
-            db,
-            app,
-            &summary,
-            UnifiedErrorCode::InternalError,
-            &msg,
-        );
+        log_switch_failure(db, app, &summary, UnifiedErrorCode::InternalError, &msg);
         return Err(msg);
     }
 
@@ -283,13 +252,7 @@ pub(crate) async fn perform_switch_core(
     if let Err(e) = host.launch_client(&exe, &[]) {
         let note = restore_session_note(adapter, host.as_ref(), &backup).await;
         let msg = format!("拉起客户端失败，{note}（客户端当前处于关闭状态，请手动启动）: {e}");
-        log_switch_failure(
-            db,
-            app,
-            &summary,
-            UnifiedErrorCode::InternalError,
-            &msg,
-        );
+        log_switch_failure(db, app, &summary, UnifiedErrorCode::InternalError, &msg);
         return Err(msg);
     }
 
@@ -344,36 +307,20 @@ pub(crate) async fn perform_switch_core(
         let msg = format!(
             "客户端启动后 12 秒内未确认存活，{note}{relaunch_note}；若仍无法启动请手动检查或重启系统"
         );
-        log_switch_failure(
-            db,
-            app,
-            &summary,
-            UnifiedErrorCode::InternalError,
-            &msg,
-        );
+        log_switch_failure(db, app, &summary, UnifiedErrorCode::InternalError, &msg);
         return Err(msg);
     }
 
-    let mut set_active_err = db
-        .set_active_on_client(&summary.tool_id, &summary.id)
-        .err();
+    let mut set_active_err = db.set_active_on_client(&summary.tool_id, &summary.id).err();
     if set_active_err.is_some() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        set_active_err = db
-            .set_active_on_client(&summary.tool_id, &summary.id)
-            .err();
+        set_active_err = db.set_active_on_client(&summary.tool_id, &summary.id).err();
     }
     if let Some(e) = set_active_err {
         let msg = format!(
             "客户端已完成切号并重启，但本地活跃状态落盘失败（{e}）；无需重复切号，请刷新界面后重试"
         );
-        log_switch_failure(
-            db,
-            app,
-            &summary,
-            UnifiedErrorCode::InternalError,
-            &msg,
-        );
+        log_switch_failure(db, app, &summary, UnifiedErrorCode::InternalError, &msg);
         return Err(msg);
     }
 
@@ -411,8 +358,7 @@ pub(crate) async fn perform_switch_core(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    tray_blur_suppress_until_ms
-        .store(now_ms.saturating_add(1800), Ordering::SeqCst);
+    tray_blur_suppress_until_ms.store(now_ms.saturating_add(1800), Ordering::SeqCst);
     let app_for_tray = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(1800)).await;

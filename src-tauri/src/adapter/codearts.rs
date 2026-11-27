@@ -663,7 +663,8 @@ impl CodeArtsAdapter {
             code: UnifiedErrorCode::InternalError,
             message: format!("{context}: 序列化请求体失败 ({e})"),
         })?;
-        let headers = Self::sign_headers_with_body("POST", &parsed, creds, extra_headers, &body_bytes);
+        let headers =
+            Self::sign_headers_with_body("POST", &parsed, creds, extra_headers, &body_bytes);
 
         let mut req = self
             .http
@@ -1485,9 +1486,7 @@ fn now_ms() -> i64 {
 /// 生成一个 UUID v4 形式字符串（用于 `x-snap-traceid`），避免引入新依赖。
 fn uuid_like() -> String {
     let mut b = [0u8; 16];
-    SystemRandom::new()
-        .fill(&mut b)
-        .expect("系统随机源不可用");
+    SystemRandom::new().fill(&mut b).expect("系统随机源不可用");
     // 版本位/变体位，凑成合法 v4 形态
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
@@ -1744,10 +1743,12 @@ impl ToolAdapter for CodeArtsAdapter {
                 Err(AdapterError::Unified {
                     code: UnifiedErrorCode::AuthExpired,
                     ..
-                }) => return Err(AdapterError::Unified {
-                    code: UnifiedErrorCode::AuthExpired,
-                    message: "码道每日签到领取成功但确认时凭据过期，请稍后重试".into(),
-                }),
+                }) => {
+                    return Err(AdapterError::Unified {
+                        code: UnifiedErrorCode::AuthExpired,
+                        message: "码道每日签到领取成功但确认时凭据过期，请稍后重试".into(),
+                    })
+                }
                 Err(e) => confirm_note = format!("（确认阶段异常，可稍后重试：{e}）"),
             }
         }
@@ -2121,7 +2122,9 @@ mod tests {
         // 3) 确认
         Mock::given(method("POST"))
             .and(path("/v1/ops/confirm"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": {} })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": {} })),
+            )
             .mount(&server)
             .await;
 
@@ -2179,7 +2182,9 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/v1/ops/confirm"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": {} })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": {} })),
+            )
             .mount(&server)
             .await;
 
@@ -2198,7 +2203,10 @@ mod tests {
             .expect("claim called");
         let body: Value = serde_json::from_slice(claim_req.body.as_ref()).unwrap();
         assert_eq!(body.get("campaignId").and_then(|v| v.as_str()), Some("34"));
-        assert_eq!(body.get("channel").and_then(|v| v.as_str()), Some("DESKTOP"));
+        assert_eq!(
+            body.get("channel").and_then(|v| v.as_str()),
+            Some("DESKTOP")
+        );
     }
 
     #[tokio::test]
@@ -2220,7 +2228,11 @@ mod tests {
             .await
             .expect("ok");
         assert!(!res.claimed);
-        assert!(res.reward_summary.contains("已领取"), "{}", res.reward_summary);
+        assert!(
+            res.reward_summary.contains("已领取"),
+            "{}",
+            res.reward_summary
+        );
 
         let reqs = server.received_requests().await.unwrap();
         assert!(
@@ -2684,7 +2696,10 @@ mod tests {
         if let CredentialPayload::Token { expires_at, .. } = &mut soft.payload {
             *expires_at = Some(chrono::Utc::now().timestamp_millis() + 2 * 60 * 1000);
         }
-        let q = adapter.inspect_quota(&soft).await.expect("soft expiry 应放行联网");
+        let q = adapter
+            .inspect_quota(&soft)
+            .await
+            .expect("soft expiry 应放行联网");
         assert!(!q.buckets.is_empty(), "软过期凭据应拿到额度结果");
         assert!(
             !server.received_requests().await.unwrap().is_empty(),

@@ -115,7 +115,9 @@ fn claim_switch_skip_reason(summary: &crate::domain::AccountSummary) -> Option<S
     // 冷切型（如豆包工作）缺本机快照：冷切必失败，提前跳过并给出「补快照」指引，
     // 而不是切到一半报 switch_failed 造成误导。前端已在候选阶段过滤，此处兜底。
     if !summary.has_local_snapshot {
-        return Some("缺少本机快照，无法冷切领取，请先在账号卡片「补快照」或重新导入本机".to_string());
+        return Some(
+            "缺少本机快照，无法冷切领取，请先在账号卡片「补快照」或重新导入本机".to_string(),
+        );
     }
     None
 }
@@ -772,8 +774,7 @@ impl AntiRiskScheduler {
                 Ok(result) => {
                     if result.claimed {
                         claimed_count += 1;
-                        let _ =
-                            db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
+                        let _ = db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
                     } else {
                         skipped_count += 1;
                     }
@@ -1970,10 +1971,8 @@ mod tests {
         let done = events.last().expect("done event");
         assert!(!done.running);
         assert!(
-            done.summary_text
-                .as_deref()
-                .unwrap()
-                .contains("成功 1 个") && done.summary_text.as_deref().unwrap().contains("异常 1 个"),
+            done.summary_text.as_deref().unwrap().contains("成功 1 个")
+                && done.summary_text.as_deref().unwrap().contains("异常 1 个"),
             "summary: {:?}",
             done.summary_text
         );

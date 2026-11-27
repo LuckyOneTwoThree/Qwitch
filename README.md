@@ -413,6 +413,10 @@ Qwitch/
 
 遇到问题、发现某个工具或 Agent 不工作，或者想讨论新功能，请到 [Issues](https://github.com/LuckyOneTwoThree/Qwitch/issues) 反馈。
 
+## 致谢
+
+感谢 [LINUX DO](https://linux.do/) 社区对本项目的开源推广支持与交流反馈。
+
 ## 许可证与免责声明
 
 [MIT](LICENSE) © Qwitch Contributors

@@ -219,12 +219,10 @@ Cookies、分区属性、sdk_storage）。要新增账号，必须在该账号�
 
 ---
 
-## 2.6 码道 CodeArts（`codearts`）—— 额度监控型
+## 2.6 码道 CodeArts（`codearts`）
 
-> **与其它适配器的本质差异**：CodeArts **没有「每日签到」机制**。
-> 对 `app.asar` 主进程代码全文检索 `每日` / `签到` / `打卡` / `daily` 均为 0 命中，
-> 仅存在一次性权益领取 `BenefitService.claimBenefit`。因此本适配器
-> `supports_daily_claim = false`，`claim_daily` 不做任何网络请求。
+> **每日签到机制**：CodeArts 通过活动交付与领取接口提供 `USER_LOGIN` 每日签到
+> （`supports_daily_claim = true`，走 `/v1/ops/*` 纯服务端签名接口，无需冷切桌面端）。
 
 * **客户端**：`com.codearts.work` v0.2.3（Electron）。
 * **凭据位置**：`~/Library/Application Support/codearts/secretStorage/<sha256(key)>.enc`，
@@ -263,37 +261,15 @@ Cookies、分区属性、sdk_storage）。要新增账号，必须在该账号�
   `all_credit_package`（总积分）/ `basic_package`（基础套餐）/ `bonus_credit_package`（赠送），
   字段为 `package_credit_amount` / `package_credit_used` / `package_credit_remain`。
 
-* **已知约束**：
-  * `claim_status` 恒为 `Unsupported`，UI 不显示可领按钮，调度器跳过领取。
+* **已知约束与本机切号**：
+  * **本机登录态与登出检测**：实现 `detect_local_active_uid`（按 `.enc` 文件路径 + `mtime` + 大小缓存解密结果，避免高频调用 `security`）与 `detect_local_logged_out`（`.enc` 缺失即判定已登出）。
   * **本地切号（仅 macOS）**：`supports_client_switch = cfg!(target_os = "macos")`。
-    `apply_session` 用同一套 safeStorage 参数**加密**（此前只实现了解密）把
-    `{session, loginContext}` 重新写回 `secretStorage/<sha256(key)>.enc`，
-    写前用凭据里最新的 AK/SK/STS 覆盖快照内的同名字段。
-    前提是「本机导入」时留下的完整会话快照（存于凭据 `extra.session_snapshot_b64`，
-    内含 `loginContext` 的 pkcePair / dpopKeyPair 与 refreshToken，随凭据一起用
-    AES-256-GCM 加密落库，不额外落明文）；
-    独立 OAuth 授权的账号没有 loginContext，`apply_session` 返回
-    `UnsupportedCapability` 并提示先做一次本机导入。Windows 无法复现，返回不支持。
-  * **凭据过期：Qwitch 只检测，不代刷。**
-    AK/SK 为华为云 STS 临时凭据，`tokenRefreshInterval` 为 1 小时，
-    且 **refresh token 是一次性轮换的**（消费后必须立刻持有新 token，
-    否则原 token 立即作废）。若 Qwitch 与客户端都尝试刷新，必然有一方
-    把对方的 token 废掉，结果是用户被迫重新登录。
-
-    官方客户端在**剩余 1 小时**时就会自行刷新（`startRefreshTimer` 里
-    `expiresAt - TOKEN_REFRESH_INTERVAL` 加随机抖动），因此 Qwitch 采取
-    「只读监控 + 引导用户」策略：
-
-    - `ensure_not_expired` 仅比对凭据自带的 `expiresAt`，**不发任何网络请求**
-    - 剩余 ≤ 5 分钟（`EXPIRY_SKEW_MS`）即判 `AuthExpired`
-    - 错误文案直接给出行动指引：打开客户端 → 客户端自动刷新 → 回来重新导入
-    - UI 在 `expired` 状态下为 `codearts` 提供「打开客户端」按钮
-      （`launch_tool_client` 命令，可执行文件经与切号同一套白名单校验）
-    - `claim_daily` **不**做过期检查：它是 no-op，若在此报 `AuthExpired`
-      会让账号被误标为过期、连带打断额度监控
-
-    恢复流程（用户视角两次点击）：
-    凭据过期 → 点「打开客户端」→ 客户端自动刷新 → 回 Qwitch 重新导入。
+    `apply_session` 用同一套 safeStorage 参数**加密**把 `{session, loginContext}` 重新写回 `secretStorage/<sha256(key)>.enc`：
+    * 切号覆盖前先无网络只读回吸即将被切走账号的最新本机快照（保存客户端轮换后的新 `refreshToken` 与 `expiresAt`）；
+    * 写回时仅在库中凭据比快照更新时才覆写 `accessKey`/`secretKey`/`securityToken`/`expiresAt`（非 `isolated_oauth` 同步更新 `refreshToken`），并更新 `updatedAt`；若 `expiresAt` 已过期但快照携带 `refreshToken`，允许写回由码道启动自动续期；
+    * 前提是「本机导入」时留下的完整会话快照（`extra.session_snapshot_b64`）；独立 OAuth 授权的账号没有 `loginContext`，`apply_session` 返回 `UnsupportedCapability`。Windows 因 DPAPI 限制暂不支持。
+  * **凭据过期与软过期容错**：
+    AK/SK 为华为云 STS 临时凭据（`refreshToken` 一次性轮换），客户端在临近过期时自行刷新。`ensure_not_expired` 仅在超过硬过期容差时拦截；`isolated_oauth` 账号支持网关内单飞 DPoP 刷新（且后台本机回吸 `sync_active_local_credential_if_fresher` 会跳过 `isolated_oauth` 账号，防止覆盖独立 OAuth 令牌）。
   * 实测账号在 `benefit/claim` 上返回
     `error_code=4000 invalid channel, group not found`（不在任何权益组），
     与额度查询无关，不影响本适配器。

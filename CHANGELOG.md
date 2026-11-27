@@ -17,6 +17,20 @@
 - **安全**：凭据、权限、依赖漏洞相关
 - **升级注意**：升级到该版本时必须知道的事
 
+## [0.7.2] - 2026-11-27
+
+以「码道本机登录检测与双向切号闭环、文档同步」为主的维护更新。
+
+### 修复
+
+- **码道 CodeArts 本机登录/登出实时检测**：补齐 `detect_local_active_uid`（按文件 `mtime` + 大小缓存，避免每 3 秒重复调用 `security`）与 `detect_local_logged_out`，客户端切号或登出后 Qwitch「本机使用中」状态可准确同步。
+- **码道双向切号不掉登录**：切号写回 `secretStorage` 时同步更新 `session.expiresAt`（归一化毫秒）与 `updatedAt`，非 `isolated_oauth` 账号同步回写更新的 `refreshToken`；STS 已过期但快照携带 `refreshToken` 时允许写回交由码道启动自动续期；切号覆盖前先无网络只读回吸被切走账号最新轮换的 `refreshToken`。
+- **码道 `isolated_oauth` 后台回吸隔离**：`sync_active_local_credential_if_fresher` 跳过 `isolated_oauth` 账号，防止后台巡检用本机桌面端会话覆盖 Qwitch 独立 OAuth 的 `refreshToken` 与 DPoP 密钥对。
+
+### 文档
+
+- 同步更新 `README.md` 与 `docs/ADAPTER_SPEC.md` 中的码道每日签到、macOS 双向切号、豆包冷切批量领取与最新测试规模说明。
+
 ## [0.7.1] - 2026-11-27
 
 以「码道每日签到、网关稳定性加固与全端体验修复」为主的维护更新。

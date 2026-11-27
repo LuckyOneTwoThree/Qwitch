@@ -3406,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "qwitch"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes",
  "aes-gcm",

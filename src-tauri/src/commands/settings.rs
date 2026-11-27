@@ -583,6 +583,15 @@ pub(crate) async fn sync_active_local_credential_if_fresher(
     if summary.status == AccountStatus::Disabled {
         return false;
     }
+    if summary.tool_id == "codearts"
+        && matches!(
+            &stored_cred.payload,
+            CredentialPayload::Token { extra, .. }
+                if extra.get("codearts_mode").map(String::as_str) == Some("isolated_oauth")
+        )
+    {
+        return false;
+    }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let stored_exp = credential_expires_at_ms(&stored_cred);

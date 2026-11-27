@@ -17,6 +17,23 @@
 - **安全**：凭据、权限、依赖漏洞相关
 - **升级注意**：升级到该版本时必须知道的事
 
+## [0.7.1] - 2026-11-27
+
+以「码道每日签到、网关稳定性加固与全端体验修复」为主的维护更新。
+
+### 新增
+
+- **码道 CodeArts 每日签到一键领取**：接入真机实测的 `USER_LOGIN` 每日签到活动并支持一键领取。
+- **豆包工作多账号冷切批量领取 & 缺快照引导**：支持串行冷切批量领取并在卡片显性化「待补快照」提示。
+
+### 修复
+
+- **批量签到不再误切纯网络工具**：拆出独立的 `claim_requires_client_switch` 能力位（仅豆包走冷切），按工具分别恢复批次前原在登账号。
+- **本地网关与协议稳定性**：修复 `QuotaFirst` 跨工具同优先级排序 panic 风险；合并 Anthropic 多工具结果连续同角色消息与 Responses `system`/`developer`/扁平 `tool_choice` 转换；修复 `RefreshSingleFlight` 并发 401 重复刷新与重试持锁问题；真实请求成功路径写回 `session_affinity`；支持 IPv6 `[::1]` 回环 Host 与禁用模型策略拦截；修复豆包空 `tool_calls` 重复输出与冷却竞态。
+- **适配器与凭据安全**：修复 CodeArts 软过期误判与 `(Token, Token)` 合并丢失 `extra`/独立 OAuth 字段的问题，补齐 `.myhuaweicloud.cn` 回退与 `APIG.0602` 识别、`backup_session` 安全回滚；修复 Qoder CN `LocalSnapshot` 账号无法强制刷新 Token 的问题；修复 macOS 外部插件信任弹窗在非主线程调用 AppKit 的崩溃风险。
+- **Windows 客户端挂载与进程检测**：修正 Windows Claude Desktop 配置路径、改用 `tasklist /FO CSV /NH` 并补齐 `Codex.exe`、`taskkill /T` 清理子进程、重启剥离 `ELECTRON_RUN_AS_NODE`/`NODE_OPTIONS` 并支持 Claude 双开参数；进程探测命令移出 UI 主线程。
+- **前端交互与托盘一致**：修复防抖模型勾选在设默认模型/改排序时被误清；补齐模型规格徽章（上下文/输出 Token）；修复托盘无总量/百分比桶展示、禁用/忙态冷切守卫、豆包内联领取条件、`ColdSwitchModal` 完成态关闭、路由观测空态重置漏清 `toolFilter`、解绑 Diff 真实配置对比、抖动间隔自动钳制，以及 Windows 顶栏拖拽与 `Ctrl K` 提示。
+
 ## [0.7.0] - 2026-11-26
 
 以「多账号切号、额度口径、发布可追溯性」为主的一次大版本。移除了一项旧功能，

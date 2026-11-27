@@ -268,10 +268,11 @@ async fn claim_daily(&self, cred, _precheck) -> ClaimOutcome {
 4. 额度：`refresh_quota_batch` 照旧；可选把 delivery 结果缓存用于 UI「今日已领/待领」。
 5. 删/改模块注释与单测（`manifest_declares_no_daily_claim`、`claim_daily_is_noop_without_network` 需反转）。
 
-### P2 — 降低码道「频繁关联本机」
-1. STS 加密保活池：本地用 master_key 加密缓存最近 `{session,loginContext}` + 解密派生口令；`refresh_credential` 在客户端未运行时优先用缓存快照，仅在缓存 STS 真正过期才要求回客户端。
-2. 保活循环把「临期回吸」窗口用满（30min 提前量已够，重点是回吸失败不要误标 Expired，改为「待确认」并重试）。
-3. 产品分流：纯网关账号引导用「独立 OAuth」（近乎零关联），需桌面切号的用「本机导入」。
+### P2 — 降低码道「频繁关联本机」✅ 已实现（核心软过期修复）
+1. **软过期修复（关键）**：`ensure_not_expired` 过去「剩余 < 5 分钟即判 `AuthExpired`」会把**服务端其实仍可用**的 STS 误标为过期，逼用户「打开客户端重新关联本机」——这正是频繁关联痛感来源。改为：仅当有效期**真正越过**（含 60s 容差）才本地拦截；临期未过期窗口**放行请求，由服务端 401 确证**（`EXPIRY_HARD_TOLERANCE_MS`）。真正过期仍会被本地快速拦截（单测覆盖）。
+2. **STS 加密保活池**：本地导入时已把完整 `{session, loginContext}` 存进凭据 `extra.session_snapshot_b64`（凭据整体按 master_key 加密落库），即「加密保活池」已存在；`refresh_credential` 在客户端未运行时只做只读回吸（`import_from_local` 失败返回 `Ok(None)`，不报错、不翻状态），不会误标 Expired。
+3. **不改服务端一次性 refresh token 的轮换策略**（防与客户端互踢）：Qwitch 仍不主动消费 refresh token；`isolated_oauth` 账号才走 DPoP 自刷新。
+4. **产品分流**：`isolated_oauth`（独立 OAuth，近乎零关联）与本机导入（需冷切/回吸）在 `refresh_credential` 内已按 `codearts_mode` 分支。
 
 ### P3 — 通用健壮性
 - 批量领取/切号的「设备额度记忆 + 跨设备节流」逻辑对冷切场景复核（冷切不换设备身份，`device_scope` 应保持稳定）。

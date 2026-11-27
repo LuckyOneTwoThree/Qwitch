@@ -111,12 +111,18 @@ const CODEARTS_LOGIN_PLUGIN_NAME: &str = "snap_AIIDE";
 const CODEARTS_LOGIN_PLUGIN_VERSION: &str = "5.2.0";
 const CODEARTS_REFRESH_LEAD_MS: i64 = 30 * 60 * 1000;
 
-/// 凭据剩余有效期低于该阈值即视为「需要刷新」，提前拦截避免发出注定 401 的请求。
+/// 凭据**硬过期**兜底阈值：只有当本地记录的有效期已经越过「当前时间 + 该容差」时才在
+/// 本地直接拦截（避免发出注定 401 的请求）。
 ///
-/// 客户端在剩余 1 小时时就会自行刷新（`startRefreshTimer` 里
-/// `expiresAt - TOKEN_REFRESH_INTERVAL`），因此这里只留 5 分钟余量：
-/// 真正的刷新责任交给客户端，Qwitch 只做只读监控。
-const EXPIRY_SKEW_MS: i64 = 5 * 60 * 1000;
+/// **为什么不再用 5 分钟窗口硬拦**：华为云 STS 的过期以服务端为准，本地 `expiresAt`
+/// 只是客户端某次写入的快照，可能早于服务端真实失效时间（时钟漂移、客户端未及时回写）。
+/// 过去「剩余 < 5 分钟即判 AuthExpired」会把**服务端其实仍可用**的 STS 误标为过期，
+/// 从而逼用户「打开码道客户端重新关联本机」——这正是「频繁关联本机」痛感的来源之一。
+/// 现在改为：只要**尚未真正越过有效期**，就放行请求、由服务端 401 来确证失效；
+/// 仅当已明显越界（含容差）时才本地快速失败。真正过期的凭据仍会被拦截（见单测）。
+/// 本地「硬过期」判定容差：有效期越过 `now + 该值` 才本地拦截。
+/// 取 60 秒，足以吸收时钟抖动又不放行真正过期的凭据。
+const EXPIRY_HARD_TOLERANCE_MS: i64 = 60 * 1000;
 
 /// 凭据过期时给用户的行动指引。
 const EXPIRED_HINT: &str =
@@ -820,6 +826,10 @@ impl CodeArtsAdapter {
     /// 谁消费谁必须立刻持有新的 token。若 Qwitch 与客户端都尝试刷新，必然有一方
     /// 把对方的 token 作废，结果是用户被迫重新登录——代价远大于「点一下打开客户端」。
     /// 官方客户端在剩余 1 小时时就会自行刷新，因此这里只做检测与引导。
+    ///
+    /// **软过期（P2 优化）**：仅当本地 `expiresAt` 已真正越过（含 `EXPIRY_HARD_TOLERANCE_MS`
+    /// 容差）时才本地拦截；处于「临期但未过期」窗口时不再硬拦，放行请求由服务端
+    /// 401 确证，避免把服务端仍可用的 STS 误标为过期、减少无谓的「重新关联本机」。
     fn ensure_not_expired(cred: &CredentialEnvelope) -> Result<(), AdapterError> {
         // 真机调试旁路：设置 CODEARTS_PROBE_IGNORE_EXPIRY=1 时跳过本地过期拦截，
         // 直接让服务端判定 STS 是否仍有效（用于验证领取链路/排查误标过期）。
@@ -841,7 +851,7 @@ impl CodeArtsAdapter {
         } else {
             *expires_at
         };
-        if expires_at_ms - now <= EXPIRY_SKEW_MS {
+        if expires_at_ms - now <= EXPIRY_HARD_TOLERANCE_MS {
             let fmt = |ms: i64| {
                 chrono::DateTime::from_timestamp_millis(ms)
                     .map(|dt| {
@@ -2299,10 +2309,10 @@ mod tests {
     }
 
     #[test]
-    fn expiry_check_blocks_expired_and_near_expiry() {
+    fn expiry_check_blocks_only_truly_expired_and_allows_soft_window() {
         let now = chrono::Utc::now().timestamp_millis();
 
-        // 已过期
+        // 已过期（越过有效期 1 秒）→ 本地拦截
         let err =
             CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(Some(now - 1000))).unwrap_err();
         match err {
@@ -2313,16 +2323,12 @@ mod tests {
             }
         }
 
-        // 剩余 2 分钟 < 5 分钟余量 → 视为需要刷新
-        let err = CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(Some(now + 2 * 60 * 1000)))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            AdapterError::Unified {
-                code: UnifiedErrorCode::AuthExpired,
-                ..
-            }
-        ));
+        // 临期但未过期（剩余 2 分钟）→ 软过期，**放行**交服务端判定（P2：减少误标过期）
+        assert!(
+            CodeArtsAdapter::ensure_not_expired(&cred_with_expiry(Some(now + 2 * 60 * 1000)))
+                .is_ok(),
+            "临期但未过期的凭据不得被本地硬拦，应由服务端 401 确证"
+        );
 
         // 剩余 30 分钟 → 放行
         assert!(
@@ -2644,6 +2650,46 @@ mod tests {
             }
         ));
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// P2：软过期（临期但未真正过期）的 STS **不应**在本地被硬拦，
+    /// 必须放行到服务端判定——这是「减少频繁关联本机」的核心行为。
+    #[tokio::test]
+    async fn soft_expiry_window_still_reaches_server_instead_of_forced_relink() {
+        let server = MockServer::start().await;
+        let adapter = CodeArtsAdapter::with_base_urls(server.uri(), server.uri());
+        // 额度接口响应（证明软过期凭据确实发出了请求，而非被本地拦截）
+        Mock::given(method("GET"))
+            .and(path("/v1/ops/delivery"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "data": { "items": [] } })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/snap-manager/v1/package/overview"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "all_credit_package": {
+                    "package_credit_amount": 100.0,
+                    "package_credit_used": 0.0,
+                    "package_credit_remain": 100.0
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // 剩余 2 分钟：过去会被本地判 AuthExpired，现在应放行并真实联网。
+        let mut soft = cred_with("AK", "SK", "STS");
+        if let CredentialPayload::Token { expires_at, .. } = &mut soft.payload {
+            *expires_at = Some(chrono::Utc::now().timestamp_millis() + 2 * 60 * 1000);
+        }
+        let q = adapter.inspect_quota(&soft).await.expect("soft expiry 应放行联网");
+        assert!(!q.buckets.is_empty(), "软过期凭据应拿到额度结果");
+        assert!(
+            !server.received_requests().await.unwrap().is_empty(),
+            "软过期凭据必须实际发出请求，交服务端判定而非本地硬拦"
+        );
     }
 
     #[test]

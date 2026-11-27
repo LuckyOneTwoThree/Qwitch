@@ -858,17 +858,21 @@ export function TrayPopover({
                         ? 100
                         : isQoderPendingVerify
                           ? 0
-                          : firstBucket && firstBucket.total > 0
+                          : firstBucket && firstBucket.hasTotal !== false && firstBucket.total > 0
                             ? Math.min(
                                 100,
                                 Math.round((firstBucket.remaining / firstBucket.total) * 100)
                               )
                             : null;
 
+                      const claimNeedsDesktopSession =
+                        acc.toolId === "doubaowork" && !acc.isActiveOnClient;
                       const canInlineClaim =
                         supportsClaim &&
                         acc.status === "active" &&
                         !missingApiToken &&
+                        !missingLocal &&
+                        !claimNeedsDesktopSession &&
                         effectiveClaim === "available";
 
                       // 托盘是「快速判断」入口：额度数字必须自带新鲜度信号，
@@ -944,11 +948,13 @@ export function TrayPopover({
                                     </span>
                                   )}
                                   <span className="shrink-0 font-medium tabular-nums text-zinc-800 dark:text-zinc-200">
-                                    {isQoderClaimBucket ? (
+                                    {isQoderClaimBucket || firstBucket.hasTotal === false ? (
                                       <>
                                         {formatCompactQuota(firstBucket.remaining)}{" "}
                                         {firstBucket.unit}
                                       </>
+                                    ) : firstBucket.unit === "%" ? (
+                                      <>{formatCompactQuota(firstBucket.remaining)}%</>
                                     ) : (
                                       <>
                                         {formatCompactQuota(firstBucket.remaining)} /{" "}
@@ -1030,6 +1036,8 @@ export function TrayPopover({
                                 <button
                                   type="button"
                                   disabled={
+                                    isDisabled ||
+                                    isBusy ||
                                     adapters.find((a) => a.id === acc.toolId)?.capabilities
                                       .supportsClientSwitch !== true
                                   }

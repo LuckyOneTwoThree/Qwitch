@@ -144,9 +144,9 @@ export function useSettingsStore({
             next.logMaxActiveCount !== undefined;
           const payload = buildSettingsSavePayload(sanitizedNext, previous);
 
-          if (touchesJitter && payload.jitterMinMs > payload.jitterMaxMs) {
-            showToast("保存失败：最小间隔不能大于最大间隔", "error");
-            return false;
+          if (touchesJitter) {
+            payload.jitterMinMs = Math.max(500, payload.jitterMinMs);
+            payload.jitterMaxMs = Math.max(payload.jitterMinMs, payload.jitterMaxMs);
           }
 
           if (sanitizedNext.autoClaimDaily === false) {

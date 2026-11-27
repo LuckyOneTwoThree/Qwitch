@@ -234,11 +234,24 @@ export function AgentBindingsView({
     }
   }, [highlightAgentId]);
 
-  // 每 6s 轻量刷新各目标应用运行状态，使按钮在「启动 / 重启」间自动切换
+  // 每 6s 轻量刷新各目标应用运行状态，使按钮在「启动 / 重启」间自动切换（隐藏至托盘时暂停轮询）
   useEffect(() => {
     refreshAgentRunning();
-    const timer = window.setInterval(() => refreshAgentRunning(), 6000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        refreshAgentRunning();
+      }
+    }, 6000);
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refreshAgentRunning();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
   }, [refreshAgentRunning]);
 
   const activeBinding = useMemo(
@@ -440,15 +453,24 @@ export function AgentBindingsView({
   };
 
   const openDiffForMountChange = (binding: AgentBinding, nextPoolIds: string[]) => {
-    const snippets = buildAgentConfigSnippets(
-      binding.agentId,
-      nextPoolIds,
-      binding.defaultModelKey,
-      pools,
-      gateway,
-      binding.options,
-      false
-    );
+    const useRealUnbindSnippets =
+      nextPoolIds.length === 0 &&
+      Boolean(binding.beforeSnippet?.trim()) &&
+      Boolean(binding.afterSnippet?.trim());
+    const snippets = useRealUnbindSnippets
+      ? {
+          beforeSnippet: binding.beforeSnippet,
+          afterSnippet: binding.afterSnippet,
+        }
+      : buildAgentConfigSnippets(
+          binding.agentId,
+          nextPoolIds,
+          binding.defaultModelKey,
+          pools,
+          gateway,
+          binding.options,
+          false
+        );
     const exposed = computeAgentExposedModels(
       {
         agentId: binding.agentId,

@@ -940,11 +940,11 @@ export function PoolPrototypeProvider({
     [flushModelWrites]
   );
 
-  const cancelPendingModelWrites = useCallback((agentId?: TargetAgentId) => {
+  const cancelPendingModelWrites = useCallback((agentId?: TargetAgentId, toolId?: string) => {
     if (agentId) {
-      const prefix = `${agentId}:`;
+      const prefix = toolId ? `${agentId}:${toolId}` : `${agentId}:`;
       for (const key of Array.from(pendingModelWritesRef.current.keys())) {
-        if (key.startsWith(prefix)) {
+        if (toolId ? key === prefix : key.startsWith(prefix)) {
           pendingModelWritesRef.current.delete(key);
         }
       }
@@ -2936,7 +2936,8 @@ export function PoolPrototypeProvider({
       const toolLabel = TOOL_SHORT_LABELS[toolId] ?? toolId;
       notify(`已将 ${toolLabel} · ${bare} 设为默认首选模型`, "success");
 
-      cancelPendingModelWrites(agentId);
+      cancelPendingModelWrites(agentId, toolId);
+      flushModelWrites();
       void syncWorkspaceCommand("set_agent_tool_models_cmd", {
         agentId,
         toolId,
@@ -2944,7 +2945,7 @@ export function PoolPrototypeProvider({
         defaultModelKey: nextDefaultKey,
       });
     },
-    [cancelPendingModelWrites, candidates, getAgentToolEnabledModelIds, notify, syncWorkspaceCommand]
+    [cancelPendingModelWrites, candidates, flushModelWrites, getAgentToolEnabledModelIds, notify, syncWorkspaceCommand]
   );
 
   const commitAgentToolAccountSchedule = useCallback(
@@ -3017,7 +3018,7 @@ export function PoolPrototypeProvider({
         notify(toastMsg, "success");
       }
 
-      cancelPendingModelWrites(agentId);
+      flushModelWrites();
       void syncWorkspaceCommand("update_agent_tool_schedule_cmd", {
         agentId,
         toolId,
@@ -3028,7 +3029,7 @@ export function PoolPrototypeProvider({
         cooldownSeconds: patch?.cooldownSeconds ?? null,
       });
     },
-    [cancelPendingModelWrites, candidates, notify, syncWorkspaceCommand]
+    [candidates, flushModelWrites, notify, syncWorkspaceCommand]
   );
 
   const promoteAgentToolPrimaryAccount = useCallback(

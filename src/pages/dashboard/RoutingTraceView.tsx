@@ -576,6 +576,7 @@ export function RoutingTraceView({
                   onClick={() => {
                     setSearch("");
                     setAgentFilter("all");
+                    setToolFilter("all");
                     setStatusFilter("all");
                   }}
                   className="btn btn-sm btn-secondary mt-3"

@@ -97,6 +97,7 @@ export function isAccountClaimable(
     supportsClaim &&
     acc.status === "active" &&
     acc.hasApiToken !== false &&
+    !(adapter?.capabilities.supportsClientSwitch === true && acc.hasLocalSnapshot === false) &&
     getEffectiveClaimStatus(acc) === "available"
   );
 }
@@ -339,6 +340,7 @@ function isAccountClaimableWithAdapter(
     supportsClaim &&
     acc.status === "active" &&
     acc.hasApiToken !== false &&
+    !(adapter?.capabilities.supportsClientSwitch === true && acc.hasLocalSnapshot === false) &&
     getEffectiveClaimStatus(acc) === "available"
   );
 }

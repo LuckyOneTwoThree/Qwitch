@@ -284,6 +284,7 @@ export function useAccountStore({
           return;
         }
         const list = fetched as AccountSummary[];
+        accountSyncSeqRef.current += 1;
         setAccounts((prev) => {
           const byId = new Map(list.map((a) => [a.id, a] as const));
           // 若本次更新含某个工具新的本机使用中账号，清除本地同工具下其他账号的旧标记，
@@ -879,23 +880,23 @@ export function useAccountStore({
         });
         await syncFromBackend();
         void refreshClientStatuses([target.toolId]);
+        coldSwitchSubmittingRef.current = false;
         setSwitchDialog((prev) => ({ ...prev, account: target, phase: "done" }));
+        // 快照写入成功 ≠ 客户端已确认存活：两者分开播报，不一律报成功
+        if (result && result.livenessConfirmed === false) {
+          showToast(
+            `已切换至 ${target.label}，但未确认客户端存活${result.note ? `：${result.note}` : ""}`,
+            "warning"
+          );
+        } else {
+          showToast(`本机客户端已切换至 ${target.label}`, "success");
+        }
         if (coldSwitchDoneTimerRef.current !== null) {
           window.clearTimeout(coldSwitchDoneTimerRef.current);
         }
         coldSwitchDoneTimerRef.current = window.setTimeout(() => {
           coldSwitchDoneTimerRef.current = null;
-          coldSwitchSubmittingRef.current = false;
           setSwitchDialog({ account: null, phase: "confirm" });
-          // 快照写入成功 ≠ 客户端已确认存活：两者分开播报，不一律报成功
-          if (result && result.livenessConfirmed === false) {
-            showToast(
-              `已切换至 ${target.label}，但未确认客户端存活${result.note ? `：${result.note}` : ""}`,
-              "warning"
-            );
-          } else {
-            showToast(`本机客户端已切换至 ${target.label}`, "success");
-          }
         }, 650);
       } catch (err) {
         coldSwitchSubmittingRef.current = false;

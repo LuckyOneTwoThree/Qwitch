@@ -653,6 +653,8 @@ export function getCatalogModelsForTool(
           (toolId === "minimax_code_cn" ? "anthropic_messages" : "openai_chat"),
         creditMultiplier: opt.creditMultiplier ?? base?.creditMultiplier,
         isFree: opt.isFree ?? base?.isFree ?? false,
+        contextWindow: opt.contextWindow ?? base?.contextWindow,
+        maxOutputTokens: opt.maxOutputTokens ?? base?.maxOutputTokens,
         source: opt.source || base?.source || "catalog",
       });
     }

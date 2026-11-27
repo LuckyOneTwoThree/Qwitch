@@ -1002,7 +1002,11 @@ export function Dashboard({
       </aside>
 
       <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <header onMouseDown={onTitleBarMouseDown} onDoubleClick={onTitleBarDoubleClick} className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70">
+        <header
+          onMouseDown={reservesTrafficLightSpace ? onTitleBarMouseDown : undefined}
+          onDoubleClick={reservesTrafficLightSpace ? onTitleBarDoubleClick : undefined}
+          className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-zinc-200 bg-white/85 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-zinc-800 dark:bg-zinc-900/70"
+        >
           <div className="flex min-w-[160px] flex-1 items-center gap-2.5">
             {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
             <div className="min-w-0">
@@ -1418,7 +1422,7 @@ export function Dashboard({
                           aria-hidden="true"
                           className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded border border-zinc-200 bg-zinc-50 px-1 py-0.5 font-mono text-[10px] leading-none text-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-500"
                         >
-                          ⌘K
+                          {reservesTrafficLightSpace ? "⌘K" : "Ctrl K"}
                         </kbd>
                       )}
                     </div>

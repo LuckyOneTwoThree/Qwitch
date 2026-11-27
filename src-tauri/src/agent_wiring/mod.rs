@@ -2904,7 +2904,10 @@ mod tests {
     #[test]
     fn pending_restart_satisfied_on_exit_or_pid_rotation() {
         assert!(is_pending_restart_satisfied(Some(&[101, 102]), &[]));
-        assert!(!is_pending_restart_satisfied(Some(&[101, 102]), &[101, 205]));
+        assert!(!is_pending_restart_satisfied(
+            Some(&[101, 102]),
+            &[101, 205]
+        ));
         assert!(is_pending_restart_satisfied(Some(&[101, 102]), &[301, 302]));
         assert!(!is_pending_restart_satisfied(None, &[301]));
         assert!(is_pending_restart_satisfied(None, &[]));
@@ -2918,8 +2921,14 @@ mod tests {
 5678 /Applications/Claude.app/Contents/MacOS/Claude
 9999 /usr/bin/python3
 ";
-        assert_eq!(agent_pids_in_snapshot(TargetAgentId::CodexDesktop, snap), vec![1234]);
-        assert_eq!(agent_pids_in_snapshot(TargetAgentId::ClaudeDesktop, snap), vec![5678]);
+        assert_eq!(
+            agent_pids_in_snapshot(TargetAgentId::CodexDesktop, snap),
+            vec![1234]
+        );
+        assert_eq!(
+            agent_pids_in_snapshot(TargetAgentId::ClaudeDesktop, snap),
+            vec![5678]
+        );
         assert!(agent_pids_in_snapshot(TargetAgentId::Zcode, snap).is_empty());
     }
 
@@ -2927,8 +2936,14 @@ mod tests {
     #[test]
     fn agent_pids_parsed_from_windows_csv_snapshot() {
         let snap = "\"Codex.exe\",\"4321\",\"Console\",\"1\",\"100,000 K\"\r\n\"zcode.exe\",\"8765\",\"Console\",\"1\",\"80,000 K\"\r\n";
-        assert_eq!(agent_pids_in_snapshot(TargetAgentId::CodexDesktop, snap), vec![4321]);
-        assert_eq!(agent_pids_in_snapshot(TargetAgentId::Zcode, snap), vec![8765]);
+        assert_eq!(
+            agent_pids_in_snapshot(TargetAgentId::CodexDesktop, snap),
+            vec![4321]
+        );
+        assert_eq!(
+            agent_pids_in_snapshot(TargetAgentId::Zcode, snap),
+            vec![8765]
+        );
         assert!(agent_pids_in_snapshot(TargetAgentId::ClaudeDesktop, snap).is_empty());
     }
 

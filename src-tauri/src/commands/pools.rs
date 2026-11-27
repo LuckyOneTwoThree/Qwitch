@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::agent_wiring::{
-    agent_running_in_snapshot, apply_agent_wiring, clear_agent_wiring,
-    inspect_all_agent_bindings, reconcile_pending_restarts_with_snapshot, restart_agent_process,
-    take_process_snapshot, unbind_and_restore_agent,
+    agent_running_in_snapshot, apply_agent_wiring, clear_agent_wiring, inspect_all_agent_bindings,
+    reconcile_pending_restarts_with_snapshot, restart_agent_process, take_process_snapshot,
+    unbind_and_restore_agent,
 };
 use crate::commands::{load_app_settings, AppState, SETTINGS_KEY};
 use crate::domain::{
@@ -138,7 +138,9 @@ pub async fn get_pool_workspace_state(
 /// 前端每 6 秒刷新按钮状态时曾调用 `get_pool_workspace_state`，
 /// 每次都要构建 200KB 全量快照；此命令只做一次进程快照。
 #[tauri::command]
-pub async fn detect_agent_running_cmd(state: State<'_, AppState>) -> Result<Vec<AgentRunningState>, String> {
+pub async fn detect_agent_running_cmd(
+    state: State<'_, AppState>,
+) -> Result<Vec<AgentRunningState>, String> {
     let snapshot = tokio::task::spawn_blocking(take_process_snapshot)
         .await
         .map_err(|e| e.to_string())?;

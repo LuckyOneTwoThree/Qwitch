@@ -136,11 +136,15 @@ pub async fn get_pool_workspace_state(
 /// 前端每 6 秒刷新按钮状态时曾调用 `get_pool_workspace_state`，
 /// 每次都要构建 200KB 全量快照；此命令只做一次进程快照。
 #[tauri::command]
-pub fn detect_agent_running_cmd() -> Vec<AgentRunningState> {
-    collect_agent_running_states()
-        .into_iter()
-        .map(|(agent_id, running)| AgentRunningState { agent_id, running })
-        .collect()
+pub async fn detect_agent_running_cmd() -> Vec<AgentRunningState> {
+    tokio::task::spawn_blocking(|| {
+        collect_agent_running_states()
+            .into_iter()
+            .map(|(agent_id, running)| AgentRunningState { agent_id, running })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// 套用工具级「内置推荐目录」（码道 / 有道龙虾 / 豆包工作等无探测接口的工具）。

@@ -234,7 +234,10 @@ fn resolve_agent_paths(
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    active_dir.join("claude_desktop_config.json")
+                    let roaming = std::env::var_os("APPDATA")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join("AppData/Roaming"));
+                    roaming.join("Claude/claude_desktop_config.json")
                 }
             };
             let lib_dir = active_dir.join("configLibrary");
@@ -767,14 +770,14 @@ fn running_patterns(agent_id: TargetAgentId) -> &'static [&'static str] {
 
 /// 一次快照内判定某 Agent 是否在运行所需的进程名（Windows）。
 #[cfg(not(target_os = "macos"))]
-fn running_exe_name(agent_id: TargetAgentId) -> &'static str {
+fn running_exe_names(agent_id: TargetAgentId) -> &'static [&'static str] {
     match agent_id {
-        TargetAgentId::CodexDesktop => "ChatGPT.exe",
-        TargetAgentId::ClaudeDesktop => "Claude.exe",
-        TargetAgentId::Dsh => "DeepSeek Harness.exe",
-        TargetAgentId::Mimo => "Xiaomi MiMo.exe",
-        TargetAgentId::Zcode => "ZCode.exe",
-        TargetAgentId::Opencode => "opencode.exe",
+        TargetAgentId::CodexDesktop => &["Codex.exe", "ChatGPT.exe"],
+        TargetAgentId::ClaudeDesktop => &["Claude.exe"],
+        TargetAgentId::Dsh => &["DeepSeek Harness.exe"],
+        TargetAgentId::Mimo => &["Xiaomi MiMo.exe"],
+        TargetAgentId::Zcode => &["ZCode.exe"],
+        TargetAgentId::Opencode => &["opencode.exe"],
     }
 }
 
@@ -816,7 +819,7 @@ fn process_snapshot() -> String {
     #[cfg(not(target_os = "macos"))]
     {
         let mut cmd = Command::new("tasklist");
-        cmd.args(["/NH"]);
+        cmd.args(["/FO", "CSV", "/NH"]);
         // 该函数被前端每 6s 轮询一次；Windows 上若弹控制台黑框会形成周期性闪烁
         crate::platform::hide_console_std(&mut cmd);
         cmd.output()
@@ -856,7 +859,20 @@ fn agent_running_in_snapshot(agent_id: TargetAgentId, snapshot: &str) -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        contains_ignore_ascii_case(snapshot, running_exe_name(agent_id))
+        running_exe_names(agent_id).iter().any(|exe| {
+            snapshot.lines().any(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('"') {
+                    trimmed
+                        .split(',')
+                        .next()
+                        .map(|col| col.trim_matches('"').eq_ignore_ascii_case(exe))
+                        .unwrap_or(false)
+                } else {
+                    contains_ignore_ascii_case(trimmed, exe)
+                }
+            })
+        })
     }
 }
 
@@ -2577,7 +2593,7 @@ fn terminate_windows_process(exe_name: &str) {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
     let mut force = Command::new("taskkill");
-    force.args(["/F", "/IM", exe_name]);
+    force.args(["/F", "/T", "/IM", exe_name]);
     crate::platform::hide_console_std(&mut force);
     let _ = force.output();
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -2587,20 +2603,45 @@ fn terminate_windows_process(exe_name: &str) {
 ///
 /// 与 macOS 的差异：Windows 没有 `open -a <bundle-id>` 这种按应用标识启动的机制，
 /// 只能依赖进程自身的可执行文件路径；因此**仅在客户端正在运行时**才能完成重启。
-/// 若取不到路径，退化为只结束不拉起（不谎报成功），由用户手动打开。
+/// 若取不到路径或拉起失败，返回 `Err` 以免前端误以为已重启生效。
 #[cfg(target_os = "windows")]
-fn restart_windows_app(agent_id: TargetAgentId) {
-    let exe_name = running_exe_name(agent_id);
-    if !contains_ignore_ascii_case(&process_snapshot(), exe_name) {
-        return;
-    }
-    let exe_path = windows_process_exe_path(exe_name);
+fn restart_windows_app(agent_id: TargetAgentId, claude_isolated: bool) -> Result<(), String> {
+    let snap = process_snapshot();
+    let Some(exe_name) = running_exe_names(agent_id).iter().copied().find(|exe| {
+        snap.lines().any(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('"') {
+                trimmed
+                    .split(',')
+                    .next()
+                    .map(|col| col.trim_matches('"').eq_ignore_ascii_case(exe))
+                    .unwrap_or(false)
+            } else {
+                contains_ignore_ascii_case(trimmed, exe)
+            }
+        })
+    }) else {
+        return Ok(());
+    };
+    let exe_path = windows_process_exe_path(exe_name).filter(|p| p.is_file());
     terminate_windows_process(exe_name);
-    if let Some(path) = exe_path.filter(|p| p.is_file()) {
-        let mut cmd = Command::new(path);
-        crate::platform::hide_console_std(&mut cmd);
-        let _ = cmd.spawn();
+    let Some(path) = exe_path else {
+        return Err(format!(
+            "已关闭 {exe_name}，但未能定位其可执行文件路径，请手动重新打开客户端"
+        ));
+    };
+    let mut cmd = Command::new(path);
+    cmd.env_remove("ELECTRON_RUN_AS_NODE")
+        .env_remove("NODE_OPTIONS");
+    if agent_id == TargetAgentId::ClaudeDesktop && claude_isolated {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let isolated_dir = PathBuf::from(local_app_data).join("Claude-Qwitch-3p");
+            cmd.arg(format!("--user-data-dir={}", isolated_dir.display()));
+        }
     }
+    cmd.spawn()
+        .map_err(|e| format!("重新启动 {exe_name} 失败: {e}"))?;
+    Ok(())
 }
 
 pub fn restart_agent_process(
@@ -2669,7 +2710,10 @@ pub fn restart_agent_process(
         // Windows：此前完全没有分支，导致「重启客户端」只重写了配置文件、进程没重启，
         // UI 却返回成功 —— 用户误以为新端口/新号池已生效。
         #[cfg(target_os = "windows")]
-        restart_windows_app(agent_id);
+        {
+            let isolated = stored.options.claude_isolated_twin.unwrap_or(false);
+            restart_windows_app(agent_id, isolated)?;
+        }
     }
 
     stored.status = if stored.mounted_pool_ids.is_empty() {

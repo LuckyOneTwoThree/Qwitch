@@ -369,29 +369,32 @@ pub fn save_app_settings(
 }
 
 #[tauri::command]
-pub fn detect_client_status(
+pub async fn detect_client_status(
     state: State<'_, AppState>,
     tool_id: String,
 ) -> Result<ClientHostStatus, String> {
     let settings = load_app_settings(&state.db);
-    let executable_path = resolve_client_executable(state.host.as_ref(), &settings, &tool_id)
-        .map(|p| p.to_string_lossy().to_string());
-    let config_dir = state
-        .host
-        .client_config_dir(&tool_id)
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-    let is_running = state
-        .host
-        .is_client_running(&tool_id)
-        .map_err(|e| e.to_string())?;
+    let host = Arc::clone(&state.host);
+    tokio::task::spawn_blocking(move || {
+        let executable_path = resolve_client_executable(host.as_ref(), &settings, &tool_id)
+            .map(|p| p.to_string_lossy().to_string());
+        let config_dir = host
+            .client_config_dir(&tool_id)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let is_running = host
+            .is_client_running(&tool_id)
+            .map_err(|e| e.to_string())?;
 
-    Ok(ClientHostStatus {
-        tool_id,
-        executable_path,
-        config_dir,
-        is_running,
+        Ok(ClientHostStatus {
+            tool_id,
+            executable_path,
+            config_dir,
+            is_running,
+        })
     })
+    .await
+    .map_err(|e| format!("探测客户端状态失败: {e}"))?
 }
 
 /// 校正“本机使用中”标记：纯本地只读探测各工具客户端当前真实登录账号，

@@ -430,9 +430,29 @@ pub fn run() {
                                             let _ = app_ka.emit("qwitch://logs-updated", ());
                                         }
                                     }
-                                    Err(_) => {
+                                    Err(err) => {
+                                        // 非鉴权类失败（网络/服务端异常）此前完全静默退避，
+                                        // 用户看不到任何痕迹。仅在「新进入退避」时写一条日志，
+                                        // 6 小时退避期内不重复刷屏。
+                                        let newly_backoff = failed_until
+                                            .get(&acc.id)
+                                            .is_none_or(|until| now_inst >= *until);
                                         failed_until
                                             .insert(acc.id.clone(), now_inst + retry_backoff);
+                                        if newly_backoff {
+                                            let _ = db_ka.append_action_log(
+                                                Some(&acc.id),
+                                                &summary.tool_id,
+                                                "keepalive",
+                                                "failed",
+                                                None,
+                                                &format!(
+                                                    "{} 后台保活续期失败（{}），已安排稍后重试",
+                                                    summary.label, err
+                                                ),
+                                            );
+                                            let _ = app_ka.emit("qwitch://logs-updated", ());
+                                        }
                                     }
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;

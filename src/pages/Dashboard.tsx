@@ -1335,15 +1335,15 @@ export function Dashboard({
                         {`${scopedStats.unclaimedSnapshotMissingCount} 待补快照`}
                       </button>
                     ) : scopedStats.claimBlockedCount > 0 ? (
-                      <button
-                        type="button"
-                        onClick={() => setStatusFilter("attention")}
+                      // 非交互徽章：今日不可领是正常业务状态（按设备每日一次），
+                      // 不是待完善，点击过滤没有意义
+                      <span
                         title="该活动按设备限制每日一次：本设备今天已有账号完成签到，其他账号卡片上有说明；明日资格刷新后可再试"
-                        className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                        className="inline-flex items-center gap-1.5 rounded-[var(--radius-control)] border border-zinc-300/70 bg-zinc-100/80 px-2.5 py-1.5 text-xs font-medium text-zinc-600 dark:border-zinc-600/40 dark:bg-zinc-800/60 dark:text-zinc-300"
                       >
                         <CircleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         {`${scopedStats.claimBlockedCount} 今日不可领`}
-                      </button>
+                      </span>
                     ) : null}
                   </>
                 )}

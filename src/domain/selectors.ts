@@ -84,9 +84,8 @@ export function isAccountNeedingAttention(
     acc.status === "expired" ||
     acc.status === "risk_paused" ||
     acc.hasApiToken === false ||
-    // 豆包「按设备每日一次」今日不可领：阻断账号归入 attention，
-    // 「N 今日不可领」按钮的过滤器才能对上计数
-    Boolean(acc.claimBlockReason) ||
+    // 注意：claimBlockReason（豆包「今日不可领」）不是「待完善」——那是正常
+    // 业务状态，归入这里会让健康账号出现在待完善 KPI 里
     isAccountMissingLocalSnapshot(acc, adapters)
   );
 }

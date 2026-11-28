@@ -1447,9 +1447,10 @@ impl CodeArtsAdapter {
                 if exp - now_ms >= CODEARTS_REFRESH_LEAD_MS {
                     return Ok(None);
                 }
-            } else {
-                return Ok(None);
             }
+            // expires_at 未知时必须照常尝试续期：旧行为直接跳过，导致 STS 过期后
+            // 保活循环永远「无事可做」，账号永久停在「凭据过期」只能手动重新授权。
+            // 续期成功会回落真实过期时间，之后恢复正常临期判定；失败走既有退避。
         }
 
         let body = self

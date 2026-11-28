@@ -414,50 +414,59 @@ pub async fn refresh_account_quota(
         return Err(format!("适配器 {} 不支持额度查询", summary.tool_id));
     }
 
-    // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），刷新结果立即加密落盘
-    let cred = match adapter.refresh_credential(&cred).await {
-        Ok(Some(updated)) => {
-            if let Err(e) =
-                state
-                    .db
-                    .bind_account_credential(&state.master_key, &summary.id, None, &updated)
-            {
+    // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），刷新结果立即加密落盘。
+    //
+    // 这里必须与「后台保活循环 / 网关 401 刷新」共享同一把**账号级单飞锁**：
+    // 旋转型 refresh_token（码道 CodeArts、MiniMax 等）一旦被并发消费，
+    // 后到的一方拿到的一定是 invalid_grant，账号随即被标记过期并冻结 6 小时。
+    // 这正是「码道在线凭据老是过期、要反复重新授权」的主要来源。
+    let cred = {
+        let refresh_lock = state.gateway.refresh_lock_for(&summary.id);
+        let _refresh_guard = refresh_lock.lock().await;
+        match adapter.refresh_credential(&cred).await {
+            Ok(Some(updated)) => {
+                if let Err(e) =
+                    state
+                        .db
+                        .bind_account_credential(&state.master_key, &summary.id, None, &updated)
+                {
+                    let _ = state.db.append_action_log(
+                        Some(&summary.id),
+                        &summary.tool_id,
+                        "query",
+                        "failed",
+                        Some(&UnifiedErrorCode::InternalError),
+                        &format!("{} 刷新后的凭据落盘失败：{e}", summary.label),
+                    );
+                }
+                updated
+            }
+            Ok(None) => cred,
+            Err(AdapterError::Unified { code, message }) => {
+                if matches!(code, UnifiedErrorCode::AuthExpired) {
+                    let _ = state
+                        .db
+                        .update_account_status(&summary.id, AccountStatus::Expired);
+                } else if matches!(
+                    code,
+                    UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
+                ) {
+                    let _ = state
+                        .db
+                        .update_account_status(&summary.id, AccountStatus::RiskPaused);
+                }
                 let _ = state.db.append_action_log(
                     Some(&summary.id),
                     &summary.tool_id,
                     "query",
                     "failed",
-                    Some(&UnifiedErrorCode::InternalError),
-                    &format!("{} 刷新后的凭据落盘失败：{e}", summary.label),
+                    Some(&code),
+                    &format!("{} 刷新凭据失败：{message}", summary.label),
                 );
+                let _ = app.emit("qwitch://account-updated", &summary.id);
+                let _ = app.emit("qwitch://logs-updated", ());
+                return Err(message);
             }
-            updated
-        }
-        Ok(None) => cred,
-        Err(AdapterError::Unified { code, message }) => {
-            if matches!(code, UnifiedErrorCode::AuthExpired) {
-                let _ = state
-                    .db
-                    .update_account_status(&summary.id, AccountStatus::Expired);
-            } else if matches!(
-                code,
-                UnifiedErrorCode::RiskTriggered | UnifiedErrorCode::RateLimited
-            ) {
-                let _ = state
-                    .db
-                    .update_account_status(&summary.id, AccountStatus::RiskPaused);
-            }
-            let _ = state.db.append_action_log(
-                Some(&summary.id),
-                &summary.tool_id,
-                "query",
-                "failed",
-                Some(&code),
-                &format!("{} 刷新凭据失败：{message}", summary.label),
-            );
-            let _ = app.emit("qwitch://account-updated", &summary.id);
-            let _ = app.emit("qwitch://logs-updated", ());
-            return Err(message);
         }
     };
 

@@ -309,6 +309,13 @@ pub fn run() {
                                     .await
                                 {
                                     failed_until.remove(&acc.id);
+                                    // 回吸到客户端自刷新的新凭据，同样意味着账号已恢复可用
+                                    if acc.status == domain::AccountStatus::Expired {
+                                        let _ = db_ka.update_account_status(
+                                            &acc.id,
+                                            domain::AccountStatus::Active,
+                                        );
+                                    }
                                     let _ = app_ka.emit("qwitch://account-updated", &acc.id);
                                     let _ = app_ka.emit("qwitch://logs-updated", ());
                                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -346,6 +353,18 @@ pub fn run() {
                                             let _ =
                                                 app_ka.emit("qwitch://account-updated", &acc.id);
                                             let _ = app_ka.emit("qwitch://logs-updated", ());
+                                            // 续期成功即说明凭据已恢复可用。此前若因一次刷新
+                                            // 失败（含并发消费 refresh_token 导致的 invalid_grant）
+                                            // 被标记为 Expired，这里必须清掉——否则凭据明明已经
+                                            // 有效，界面却一直显示「凭据过期」并引导用户重新授权。
+                                            if summary.status == domain::AccountStatus::Expired {
+                                                let _ = db_ka.update_account_status(
+                                                    &acc.id,
+                                                    domain::AccountStatus::Active,
+                                                );
+                                                let _ = app_ka
+                                                    .emit("qwitch://account-updated", &acc.id);
+                                            }
                                         }
                                     }
                                     Ok(None) => {

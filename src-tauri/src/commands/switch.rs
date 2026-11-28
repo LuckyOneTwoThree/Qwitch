@@ -227,59 +227,91 @@ pub(crate) async fn perform_switch_core(
     // 码道客户端每 1 小时会自动轮换一次性 refreshToken，若直接覆盖而不先回存，
     // 等会儿再切回这个账号时库里只剩旧的已消费 refreshToken，客户端会直接跳「重新登录」。
     if summary.tool_id == "codearts" {
-        if let Ok(outgoing_env) =
-            crate::adapter::codearts::CodeArtsAdapter::snapshot_local_envelope(host.as_ref())
-        {
-            if !outgoing_env.uid.trim().is_empty()
-                && !crate::domain::CredentialEnvelope::is_fallback_uid(&outgoing_env.uid)
-            {
-                if let Ok(Some((outgoing_id, _))) =
-                    db.find_account_id_by_uid(master_key, "codearts", &outgoing_env.uid)
+        // 回吸任何一步失败都必须留痕：码道 refreshToken 每小时轮换，回吸失败意味着
+        // 库里只剩已被客户端消费的旧令牌，下次切回该账号会跳「重新登录」且无从排查。
+        let reclaim_failure = |msg: String| {
+            let _ = db.append_action_log(
+                Some(&summary.id),
+                &summary.tool_id,
+                "switch",
+                "failed",
+                Some(&UnifiedErrorCode::InternalError),
+                &msg,
+            );
+        };
+        match crate::adapter::codearts::CodeArtsAdapter::snapshot_local_envelope(host.as_ref()) {
+            Ok(outgoing_env) => {
+                if outgoing_env.uid.trim().is_empty()
+                    || crate::domain::CredentialEnvelope::is_fallback_uid(&outgoing_env.uid)
                 {
-                    if outgoing_id != summary.id {
-                        if let Ok((_, mut existing_cred)) =
-                            db.get_account_credential(master_key, &outgoing_id)
-                        {
-                            let is_isolated = matches!(
-                                &existing_cred.payload,
-                                crate::domain::CredentialPayload::Token { extra, .. }
-                                    if extra.get("codearts_mode").map(String::as_str)
-                                        == Some("isolated_oauth")
-                            );
-                            let updated_cred = if is_isolated {
-                                // 独立 OAuth 账号保留 Qwitch 自持的 refreshToken 与 DPoP 密钥对，仅更新本机快照
-                                if let (
-                                    crate::domain::CredentialPayload::Token {
-                                        extra: dst_extra,
-                                        ..
-                                    },
-                                    crate::domain::CredentialPayload::Token {
-                                        extra: src_extra,
-                                        ..
-                                    },
-                                ) = (&mut existing_cred.payload, &outgoing_env.payload)
-                                {
-                                    if let Some(snap) = src_extra.get("session_snapshot_b64") {
-                                        dst_extra.insert(
-                                            "session_snapshot_b64".to_string(),
-                                            snap.clone(),
+                    // 本机在登会话无法归属到具体账号（无 UID / fallback UID），不回吸也不算失败
+                } else {
+                    match db.find_account_id_by_uid(master_key, "codearts", &outgoing_env.uid) {
+                        Ok(Some((outgoing_id, _))) => {
+                            if outgoing_id != summary.id {
+                                match db.get_account_credential(master_key, &outgoing_id) {
+                                    Ok((_, mut existing_cred)) => {
+                                        let is_isolated = matches!(
+                                            &existing_cred.payload,
+                                            crate::domain::CredentialPayload::Token { extra, .. }
+                                                if extra.get("codearts_mode").map(String::as_str)
+                                                    == Some("isolated_oauth")
                                         );
+                                        let updated_cred = if is_isolated {
+                                            // 独立 OAuth 账号保留 Qwitch 自持的 refreshToken 与 DPoP 密钥对，仅更新本机快照
+                                            if let (
+                                                crate::domain::CredentialPayload::Token {
+                                                    extra: dst_extra,
+                                                    ..
+                                                },
+                                                crate::domain::CredentialPayload::Token {
+                                                    extra: src_extra,
+                                                    ..
+                                                },
+                                            ) = (&mut existing_cred.payload, &outgoing_env.payload)
+                                            {
+                                                if let Some(snap) =
+                                                    src_extra.get("session_snapshot_b64")
+                                                {
+                                                    dst_extra.insert(
+                                                        "session_snapshot_b64".to_string(),
+                                                        snap.clone(),
+                                                    );
+                                                }
+                                            }
+                                            existing_cred
+                                        } else {
+                                            existing_cred.merge_from(&outgoing_env)
+                                        };
+                                        if let Err(e) = db.bind_account_credential(
+                                            master_key,
+                                            &outgoing_id,
+                                            None,
+                                            &updated_cred,
+                                        ) {
+                                            reclaim_failure(format!(
+                                                "码道切号回吸：最新本机会话写回账号库失败：{e}；下次切回该账号可能需要重新登录"
+                                            ));
+                                        }
                                     }
+                                    Err(e) => reclaim_failure(format!(
+                                        "码道切号回吸：读取被切走账号凭据失败：{e}；下次切回该账号可能需要重新登录"
+                                    )),
                                 }
-                                existing_cred
-                            } else {
-                                existing_cred.merge_from(&outgoing_env)
-                            };
-                            let _ = db.bind_account_credential(
-                                master_key,
-                                &outgoing_id,
-                                None,
-                                &updated_cred,
-                            );
+                            }
                         }
+                        Ok(None) => {
+                            // 本机在登账号不在 Qwitch 库中，无需回吸
+                        }
+                        Err(e) => reclaim_failure(format!(
+                            "码道切号回吸：查找被切走账号失败：{e}；下次切回该账号可能需要重新登录"
+                        )),
                     }
                 }
             }
+            Err(e) => reclaim_failure(format!(
+                "码道切号前回吸本机会话失败（快照读取）：{e}；若该账号 refreshToken 已被客户端轮换，下次切回可能需要重新登录"
+            )),
         }
     }
 

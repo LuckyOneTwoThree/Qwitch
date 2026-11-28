@@ -162,11 +162,19 @@ impl SubprocessPluginHost {
         })
         .await;
 
-        let _ = child.wait().await;
         match result {
-            Ok(inner) => inner,
-            Err(_) => {
+            Ok(inner) => {
+                // 请求已返回；若插件未随响应退出（例如又拉起了继承管道的孙进程），
+                // 主动回收，避免下面的 wait() 在管道未关闭时永久挂起。
                 let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                inner
+            }
+            Err(_) => {
+                // 超时：必须先 start_kill 再 wait。旧实现先 wait 后 kill，
+                // 插件不退出时 wait 永久阻塞，kill 永远不会执行（请求挂死）。
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
                 Err(format!("插件 {} discover_models 超时", self.manifest.id))
             }
         }
@@ -279,11 +287,17 @@ impl SubprocessPluginHost {
         })
         .await;
 
-        let _ = child.wait().await;
         match res {
-            Ok(inner) => inner,
-            Err(_) => {
+            Ok(inner) => {
+                // 请求已返回；主动回收未退出的插件进程（原因同 discover_models）。
                 let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                inner
+            }
+            Err(_) => {
+                // 超时：先 start_kill 再 wait，防止插件不退出导致请求挂死。
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
                 Err(format!("外部插件 {} 执行超时", self.manifest.id))
             }
         }

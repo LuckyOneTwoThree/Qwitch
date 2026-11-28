@@ -2677,9 +2677,21 @@ async fn relay_openai_chat_to_anthropic(
         stop_reason: "end_turn".into(),
         ..Default::default()
     };
-    while let Ok(Some(bytes)) = resp.chunk().await {
-        decoder.push_chunk(&bytes, &mut buf);
-        drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
+    // 上游中途断流/传输错误必须显式上报：旧实现 `while let Ok(..)` 会静默吞掉
+    // Err 并伪造正常收尾帧，客户端把截断内容当作完整回合写入会话历史。
+    let mut upstream_interrupted: Option<String> = None;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                decoder.push_chunk(&bytes, &mut buf);
+                drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                upstream_interrupted = Some(e.to_string());
+                break;
+            }
+        }
     }
     decoder.finish(&mut buf);
     drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
@@ -2698,6 +2710,16 @@ async fn relay_openai_chat_to_anthropic(
             &json!({"type":"content_block_stop","index":ti}).to_string(),
         )
         .await?;
+    }
+    if let Some(err) = upstream_interrupted {
+        // Anthropic 客户端：以 error 事件终止本轮，不伪造 message_delta/message_stop。
+        write_sse_frame(
+            stream,
+            Some("error"),
+            &json!({"type":"error","error":{"type":"api_error","message":format!("上游流中断，本次回复不完整: {err}")}}).to_string(),
+        )
+        .await?;
+        return Ok(());
     }
     let tools = st.tools.clone();
     for (_oi, id, name, args) in &tools {
@@ -2850,13 +2872,34 @@ async fn relay_anthropic_to_openai_chat(
         stop_reason: "stop".into(),
         ..Default::default()
     };
-    while let Ok(Some(bytes)) = resp.chunk().await {
-        decoder.push_chunk(&bytes, &mut buf);
-        drain_anthropic_events_to_openai(&mut buf, stream, &id, model, &mut st).await?;
+    // 上游中途断流/传输错误必须显式上报（原因同 relay_openai_chat_to_anthropic）。
+    let mut upstream_interrupted: Option<String> = None;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                decoder.push_chunk(&bytes, &mut buf);
+                drain_anthropic_events_to_openai(&mut buf, stream, &id, model, &mut st).await?;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                upstream_interrupted = Some(e.to_string());
+                break;
+            }
+        }
     }
     decoder.finish(&mut buf);
     drain_anthropic_events_to_openai(&mut buf, stream, &id, model, &mut st).await?;
     let _ = st.in_tokens;
+    if let Some(err) = upstream_interrupted {
+        // OpenAI Chat 客户端：以兼容的 error 块终止，不伪造 finish_reason 正常收尾。
+        write_sse_frame(
+            stream,
+            None,
+            &json!({"error":{"message":format!("上游流中断，本次回复不完整: {err}"),"type":"api_error"}}).to_string(),
+        )
+        .await?;
+        return write_sse_frame(stream, None, "[DONE]").await;
+    }
     let tools = st.tools.clone();
     for (i, (_bi, tid, name, args)) in tools.iter().enumerate() {
         let first = json!({"id":id,"object":"chat.completion.chunk","created":chrono::Utc::now().timestamp(),"model":model,"choices":[{"index":0,"delta":{"tool_calls":[{"index":i,"id":tid,"type":"function","function":{"name":name,"arguments":""}}]},"finish_reason":null}]});
@@ -3209,12 +3252,33 @@ async fn relay_openai_chat_to_responses(
     responses_emit_created(&st, model, stream).await?;
     let mut buf = String::new();
     let mut decoder = Utf8SseDecoder::default();
-    while let Ok(Some(bytes)) = resp.chunk().await {
-        decoder.push_chunk(&bytes, &mut buf);
-        drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    // 上游中途断流/传输错误必须显式上报（原因同 relay_openai_chat_to_anthropic）。
+    let mut upstream_interrupted: Option<String> = None;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                decoder.push_chunk(&bytes, &mut buf);
+                drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                upstream_interrupted = Some(e.to_string());
+                break;
+            }
+        }
     }
     decoder.finish(&mut buf);
     drain_openai_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    if let Some(err) = upstream_interrupted {
+        // Responses 客户端：response.failed 显式终止，不伪造 response.completed。
+        write_sse_frame(
+            stream,
+            Some("response.failed"),
+            &json!({"type":"response.failed","response":{"id":format!("resp_{}",st.resp_id),"object":"response","status":"failed","model":model,"error":{"code":"upstream_stream_interrupted","message":format!("上游流中断，本次回复不完整: {err}")}}}).to_string(),
+        )
+        .await?;
+        return Ok(());
+    }
     responses_finish(&mut st, model, stream).await
 }
 
@@ -3229,12 +3293,33 @@ async fn relay_anthropic_to_responses(
     responses_emit_created(&st, model, stream).await?;
     let mut buf = String::new();
     let mut decoder = Utf8SseDecoder::default();
-    while let Ok(Some(bytes)) = resp.chunk().await {
-        decoder.push_chunk(&bytes, &mut buf);
-        drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    // 上游中途断流/传输错误必须显式上报（原因同 relay_openai_chat_to_anthropic）。
+    let mut upstream_interrupted: Option<String> = None;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(bytes)) => {
+                decoder.push_chunk(&bytes, &mut buf);
+                drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                upstream_interrupted = Some(e.to_string());
+                break;
+            }
+        }
     }
     decoder.finish(&mut buf);
     drain_anthropic_events_to_responses(&mut buf, model, stream, &mut st).await?;
+    if let Some(err) = upstream_interrupted {
+        // Responses 客户端：response.failed 显式终止，不伪造 response.completed。
+        write_sse_frame(
+            stream,
+            Some("response.failed"),
+            &json!({"type":"response.failed","response":{"id":format!("resp_{}",st.resp_id),"object":"response","status":"failed","model":model,"error":{"code":"upstream_stream_interrupted","message":format!("上游流中断，本次回复不完整: {err}")}}}).to_string(),
+        )
+        .await?;
+        return Ok(());
+    }
     responses_finish(&mut st, model, stream).await
 }
 
@@ -3759,14 +3844,48 @@ fn conn_timeout_err() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, "connection read timeout")
 }
 
+/// `read_line_capped` 的错误：`TooLong` 由调用方映射为对应 HTTP 响应码（414/431）。
+enum ReadLineError {
+    Io(std::io::Error),
+    TooLong,
+}
+
+/// 单行限量读取。`read_line` 会先把整行（无长度上限）读进内存、之后调用方才检查
+/// 总量上限——一条不带换行的超长行可以在检查生效前把内存撑爆（防护形同虚设，
+/// 本机任意进程无需令牌即可触发）。这里用 `take(cap + 1)` 限量读取，超限即报错。
+async fn read_line_capped(
+    reader: &mut BufReader<&mut TcpStream>,
+    cap: usize,
+    out: &mut String,
+) -> Result<usize, ReadLineError> {
+    let mut raw: Vec<u8> = Vec::with_capacity(256);
+    let mut taken = (&mut *reader).take((cap + 1) as u64);
+    let n = tokio::time::timeout(conn_read_timeout(), taken.read_until(b'\n', &mut raw))
+        .await
+        .map_err(|_| ReadLineError::Io(conn_timeout_err()))?
+        .map_err(ReadLineError::Io)?;
+    if raw.len() > cap {
+        return Err(ReadLineError::TooLong);
+    }
+    out.push_str(&String::from_utf8_lossy(&raw));
+    Ok(n)
+}
+
 /// 读取 `Transfer-Encoding: chunked` 请求体，带总大小上限与逐块读超时。
 async fn read_chunked_body(reader: &mut BufReader<&mut TcpStream>) -> std::io::Result<Vec<u8>> {
     let mut body: Vec<u8> = Vec::new();
     loop {
         let mut size_line = String::new();
-        let n = tokio::time::timeout(conn_read_timeout(), reader.read_line(&mut size_line))
-            .await
-            .map_err(|_| conn_timeout_err())??;
+        let n = match read_line_capped(reader, 1024, &mut size_line).await {
+            Ok(n) => n,
+            Err(ReadLineError::TooLong) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "chunk size line too long",
+                ));
+            }
+            Err(ReadLineError::Io(e)) => return Err(e),
+        };
         if n == 0 {
             break;
         }
@@ -3803,21 +3922,22 @@ async fn handle_http_connection(
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(&mut stream);
     let mut request_line = String::new();
-    let n = tokio::time::timeout(conn_read_timeout(), reader.read_line(&mut request_line))
-        .await
-        .map_err(|_| conn_timeout_err())??;
+    let n = match read_line_capped(&mut reader, MAX_REQUEST_LINE_BYTES, &mut request_line).await {
+        Ok(n) => n,
+        Err(ReadLineError::TooLong) => {
+            return write_http_response(
+                stream_from_reader(reader),
+                "414 URI Too Long",
+                "application/json",
+                br#"{"error":"Request line too long"}"#,
+                &[],
+            )
+            .await;
+        }
+        Err(ReadLineError::Io(e)) => return Err(e),
+    };
     if n == 0 {
         return Ok(());
-    }
-    if request_line.len() > MAX_REQUEST_LINE_BYTES {
-        return write_http_response(
-            stream_from_reader(reader),
-            "414 URI Too Long",
-            "application/json",
-            br#"{"error":"Request line too long"}"#,
-            &[],
-        )
-        .await;
     }
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -3842,9 +3962,20 @@ async fn handle_http_connection(
     let mut header_bytes = request_line.len();
     loop {
         let mut line = String::new();
-        let n = tokio::time::timeout(conn_read_timeout(), reader.read_line(&mut line))
-            .await
-            .map_err(|_| conn_timeout_err())??;
+        let n = match read_line_capped(&mut reader, MAX_HEADER_BYTES, &mut line).await {
+            Ok(n) => n,
+            Err(ReadLineError::TooLong) => {
+                return write_http_response(
+                    stream_from_reader(reader),
+                    "431 Request Header Fields Too Large",
+                    "application/json",
+                    br#"{"error":"Headers too large"}"#,
+                    &[],
+                )
+                .await;
+            }
+            Err(ReadLineError::Io(e)) => return Err(e),
+        };
         if n == 0 {
             break;
         }
@@ -4174,8 +4305,12 @@ async fn handle_http_connection(
         match resolve_target_pool_and_model(&routed_pools, caller_agent, &ir_req.model) {
             Some(found) => found,
             None => {
-                if matches!(path.as_str(), "/v1/responses" | "/v1/responses/compact")
-                    || caller_agent == Some(TargetAgentId::CodexDesktop)
+                // 自有登录直通必须同时满足：调用方是 Codex 桌面端 + 路径是 Responses。
+                // 旧条件「任意 Agent 的 /v1/responses 未匹配模型」会读 ~/.codex/auth.json
+                // 把请求静默转发到用户个人 ChatGPT/OpenAI 计费；非 Responses 路径对
+                // ChatGPT 令牌分支也构造不出正确端点，一并收敛。
+                if caller_agent == Some(TargetAgentId::CodexDesktop)
+                    && matches!(path.as_str(), "/v1/responses" | "/v1/responses/compact")
                 {
                     if let Some(own_auth) =
                         resolve_codex_own_auth(&path, &headers, auth_token, None)

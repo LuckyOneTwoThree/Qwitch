@@ -607,10 +607,20 @@ fn classify_doubao_error_status(code_str: &str, msg: &str) -> u16 {
     {
         return 401;
     }
+    // 仅把明确的风控/人机挑战信号判为 403（会触发 5 分钟账号冷却）。
+    // 旧的裸 "verify"/"验证" 子串匹配会把「参数验证失败」「签名验证错误」这类
+    // 普通校验错误也当成风控，导致账号被误锁 5 分钟、请求被冷却拒绝。
     if lower.contains("captcha")
-        || lower.contains("verify")
+        || lower.contains("人机验证")
+        || lower.contains("安全验证")
+        || lower.contains("验证码")
+        || lower.contains("滑块")
+        || lower.contains("请完成验证")
         || lower.contains("风控")
-        || lower.contains("验证")
+        || lower.contains("human verification")
+        || lower.contains("security check")
+        || lower.contains("please verify")
+        || lower.contains("challenge")
         || code_lower.contains("captcha")
         || code_str == "403"
     {

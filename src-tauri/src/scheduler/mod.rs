@@ -486,11 +486,22 @@ impl AntiRiskScheduler {
                                 .updated_quota
                                 .as_ref()
                                 .is_some_and(|q| q.claim_status == ClaimStatus::Claimed);
+                            let had_updated_quota = res.updated_quota.is_some();
                             if let Some(updated_q) = res.updated_quota {
                                 let _ = db.save_quota_snapshot(&summary.id, &updated_q);
                             }
                             if res.claimed {
                                 claimed_count += 1;
+                                // 部分适配器的领取结果不带新额度快照：领取后立即补一次
+                                // 查额并落库，让卡片水位马上反映领取结果，而不是等下一次
+                                // 手动/自动刷新（用户感知「跟没领一样」的根源）。
+                                if !had_updated_quota
+                                    && adapter.manifest().capabilities.supports_quota_query
+                                {
+                                    if let Ok(snapshot) = adapter.inspect_quota(&cred).await {
+                                        let _ = db.save_quota_snapshot(&summary.id, &snapshot);
+                                    }
+                                }
                                 if let (Some(scope), Some(marker_key)) =
                                     (device_scope.as_ref(), device_marker_key.as_deref())
                                 {
@@ -866,6 +877,15 @@ impl AntiRiskScheduler {
                         // 领取成功即占用本设备今日签到资格，剩余账号次日再试
                         if let Some(key) = device_marker_key.as_deref() {
                             remember_device_claim_limit(db, key);
+                        }
+                        // 领取结果不带新额度快照时立即补查（同网络批量），卡片水位
+                        // 马上反映领取结果
+                        if result.updated_quota.is_none()
+                            && adapter.manifest().capabilities.supports_quota_query
+                        {
+                            if let Ok(snapshot) = adapter.inspect_quota(&cred).await {
+                                let _ = db.save_quota_snapshot(&summary.id, &snapshot);
+                            }
                         }
                     } else {
                         skipped_count += 1;

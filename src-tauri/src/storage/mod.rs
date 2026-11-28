@@ -1612,11 +1612,15 @@ fn apply_doubaowork_claim_block(db: &QwitchDatabase, accounts: &mut [AccountSumm
             );
             continue;
         }
+        // 注意：设置值是 JSON 字符串（serde_json::to_string 写入，带引号），
+        // 必须反序列化后再解析日期——直接把原始 JSON 喂给 is_today_cst 会
+        // 因引号解析失败，阻断提示永远不会生效。
         let rejected_today = db
             .get_setting(&doubaowork_claim_reject_key(&acc.id))
             .ok()
             .flatten()
-            .is_some_and(|day| is_today_cst(&day));
+            .and_then(|json| serde_json::from_str::<String>(&json).ok())
+            .is_some_and(|rejected_at| is_today_cst(&rejected_at));
         if rejected_today {
             acc.claim_block_reason = Some(
                 "今日签到被服务端拒绝（710010702）：设备名额可能已被其他账号占用，或该账号未获活动资格；明日资格刷新后可再试"

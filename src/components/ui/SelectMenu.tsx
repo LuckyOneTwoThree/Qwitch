@@ -38,7 +38,9 @@ export function SelectMenu({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  const selected = options.find((o) => o.value === value) ?? options[0];
+  // 不回退到 options[0]：value 不在选项里时（如模型刚被移除）静默显示第一项
+  // 会误导用户以为已选中它；显示原始 value 才是诚实的。
+  const selected = options.find((o) => o.value === value);
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -152,7 +154,7 @@ export function SelectMenu({
         <span className="flex min-w-0 items-center gap-1.5">
           {selected?.icon && <span className="shrink-0">{selected.icon}</span>}
           <span className="truncate font-medium text-zinc-800 dark:text-zinc-100">
-            {selected?.label ?? ""}
+            {selected?.label ?? value}
           </span>
         </span>
         <ChevronDown

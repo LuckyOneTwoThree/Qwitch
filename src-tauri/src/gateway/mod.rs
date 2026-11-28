@@ -41,6 +41,8 @@ struct GatewayInner {
     port: u16,
     cooldowns: HashMap<String, i64>,
     session_affinity: HashMap<String, String>,
+    /// 会话亲和的插入顺序（与 session_affinity 同步维护），超限时按序淘汰最早键
+    affinity_order: std::collections::VecDeque<String>,
     sim_proxy_override: Option<bool>,
     sim_bridge_override: Option<(String, String)>,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -71,6 +73,7 @@ impl GatewayRuntime {
                 port: 8187,
                 cooldowns: HashMap::new(),
                 session_affinity: HashMap::new(),
+                affinity_order: std::collections::VecDeque::new(),
                 sim_proxy_override: None,
                 sim_bridge_override: None,
                 shutdown_tx: None,
@@ -474,11 +477,7 @@ impl GatewayRuntime {
                     input.session_key.as_deref().unwrap_or("default")
                 );
                 let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-                if g.session_affinity.len() >= 4096 {
-                    g.session_affinity.clear();
-                }
-                g.session_affinity
-                    .insert(aff_key, winner.account_id.clone());
+                record_affinity_inner(&mut g, aff_key, winner.account_id.clone());
             }
         }
 
@@ -657,6 +656,25 @@ fn is_session_cap_body(body_txt: &str) -> bool {
     lower.contains("tm.00001041") || body_txt.contains("并发会话数已达上限")
 }
 
+/// 记录会话亲和：容量 4096，超限时按插入顺序淘汰最早键，而不是全表清空——
+/// 全清会把所有活跃会话的 Prompt Cache 亲和一次打掉，高峰期命中率雪崩。
+fn record_affinity_inner(g: &mut GatewayInner, key: String, account_id: String) {
+    const AFFINITY_CAP: usize = 4096;
+    if !g.session_affinity.contains_key(&key) && g.session_affinity.len() >= AFFINITY_CAP {
+        while g.session_affinity.len() >= AFFINITY_CAP {
+            match g.affinity_order.pop_front() {
+                Some(oldest) => {
+                    g.session_affinity.remove(&oldest);
+                }
+                None => break,
+            }
+        }
+    }
+    if g.session_affinity.insert(key.clone(), account_id).is_none() {
+        g.affinity_order.push_back(key);
+    }
+}
+
 fn record_session_affinity(
     runtime: &GatewayRuntime,
     pool: &AccountPool,
@@ -672,11 +690,7 @@ fn record_session_affinity(
             session_key.unwrap_or("default")
         );
         let mut g = runtime.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if g.session_affinity.len() >= 4096 {
-            g.session_affinity.clear();
-        }
-        g.session_affinity
-            .insert(aff_key, winner_account_id.to_string());
+        record_affinity_inner(&mut g, aff_key, winner_account_id.to_string());
     }
 }
 
@@ -4031,6 +4045,27 @@ async fn handle_http_connection(
         .await;
     }
 
+    // 强制鉴权前置：未授权请求在读 body 之前就拒绝。body 上限 16MB，旧顺序
+    // 先读满再 401，本机任意进程（无需令牌）可白白消耗内存与 IO。
+    let auth_token = headers
+        .get("authorization")
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
+        .or_else(|| headers.get("x-api-key").map(String::as_str))
+        .unwrap_or("");
+    if agent_id_from_token(auth_token).is_none() {
+        return write_http_response(
+            stream_from_reader(reader),
+            "401 Unauthorized",
+            "application/json",
+            br#"{"error":"Missing or invalid gateway binding token"}"#,
+            &[],
+        )
+        .await;
+    }
+
     let is_chunked = headers
         .get("transfer-encoding")
         .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
@@ -4085,14 +4120,6 @@ async fn handle_http_connection(
         .await;
     }
 
-    let auth_token = headers
-        .get("authorization")
-        .and_then(|s| {
-            s.strip_prefix("Bearer ")
-                .or_else(|| s.strip_prefix("bearer "))
-        })
-        .or_else(|| headers.get("x-api-key").map(String::as_str))
-        .unwrap_or("");
     let query_agent = query_str
         .split('&')
         .filter_map(|kv| kv.split_once('='))
@@ -4120,19 +4147,8 @@ async fn handle_http_connection(
         .get("x-openai-actor-authorization")
         .filter(|v| v.trim().eq_ignore_ascii_case("qwitch"))
         .map(|_| TargetAgentId::CodexDesktop);
-    // 强制鉴权：仅接受携带有效绑定令牌的请求，杜绝任意本机进程白嫖号池额度或本机 OAuth。
-    let token_agent = agent_id_from_token(auth_token);
-    if token_agent.is_none() {
-        return write_http_response(
-            stream,
-            "401 Unauthorized",
-            "application/json",
-            br#"{"error":"Missing or invalid gateway binding token"}"#,
-            &[],
-        )
-        .await;
-    }
-    let caller_agent = token_agent
+    // 鉴权已前置到读 body 之前（见上）；这里仅回收调用方身份供路由使用。
+    let caller_agent = agent_id_from_token(auth_token)
         .or(query_agent)
         .or(actor_agent)
         .or(ua_agent)
@@ -4599,7 +4615,21 @@ async fn handle_http_connection(
                             final_account_label: cand.label.clone(),
                             final_tool_id: cand.tool_id.clone(),
                             final_model: plan.effective_model.clone(),
-                            status: if attempts.len() > 1 {
+                            // FailoverSuccess 只统计真实的上游尝试：护栏跳过
+                            // （SkippedActive/SkippedIncompatible）不应把「一次直连成功」
+                            // 记成「切换后成功」，否则观测页的 Failover 统计虚高
+                            status: if attempts
+                                .iter()
+                                .filter(|a| {
+                                    !matches!(
+                                        a.outcome,
+                                        RoutingAttemptOutcome::SkippedActive
+                                            | RoutingAttemptOutcome::SkippedIncompatible
+                                    )
+                                })
+                                .count()
+                                > 1
+                            {
                                 RoutingTraceStatus::FailoverSuccess
                             } else {
                                 RoutingTraceStatus::Success
@@ -5043,7 +5073,19 @@ async fn handle_http_connection(
         final_account_label: winner.label.clone(),
         final_tool_id: winner.tool_id.clone(),
         final_model: plan.effective_model.clone(),
-        status: if attempts.len() > 1 {
+        // 同流式路径：护栏跳过不计入 Failover 判定
+        status: if attempts
+            .iter()
+            .filter(|a| {
+                !matches!(
+                    a.outcome,
+                    RoutingAttemptOutcome::SkippedActive
+                        | RoutingAttemptOutcome::SkippedIncompatible
+                )
+            })
+            .count()
+            > 1
+        {
             RoutingTraceStatus::FailoverSuccess
         } else {
             RoutingTraceStatus::Success
@@ -5480,9 +5522,10 @@ mod tests {
             .unwrap();
         assert_eq!(bad_token.status().as_u16(), 401);
 
-        // 2. Codex WebSocket 升级返回 426
+        // 2. Codex WebSocket 升级返回 426（鉴权已前置：无令牌的 WS 会先得 401）
         let ws = client
             .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .bearer_auth("qwitch-bind-opencode")
             .header("Upgrade", "websocket")
             .send()
             .await

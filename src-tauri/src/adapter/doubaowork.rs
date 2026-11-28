@@ -1183,11 +1183,11 @@ impl DoubaoWorkAdapter {
             }
 
             if raw.get("code").and_then(int_field) != Some(0) {
-                let dump = raw.to_string();
-                eprintln!(
-                    "[doubaowork][claim] checkin 响应异常：{}",
-                    &dump[..dump.len().min(500)]
-                );
+                // 按字符截断而非字节：AGW 错误响应几乎必含中文，字节切片落在
+                // 多字节字符中间会 panic 并击穿整个批量任务（跳过 done 事件与
+                // 切回原账号的恢复逻辑）。
+                let dump: String = raw.to_string().chars().take(500).collect();
+                eprintln!("[doubaowork][claim] checkin 响应异常：{dump}");
             }
             let attempt_err = match Self::check_agw_code(&raw, "领取豆包工作每日签到额度", true)
             {
@@ -2346,11 +2346,13 @@ impl ToolAdapter for DoubaoWorkAdapter {
                 code: UnifiedErrorCode::UnsupportedCapability,
                 ..
             }) => {
-                // 710010702 有两种成因（真机文档 §五.2）：设备/账号绑定未就绪 vs 活动
-                // 试用天数超限。前置 trial 检查若瞬时失败会静默跳过，这里失败后再归因
-                // 一次：超限 → 转为明确的「不可领」说明（跳过，不再反复撞写接口）；
-                // 未超限/未知 → 保持原错误，由调度器退避重试（每次重试都会重新读取
-                // 实时 Cookie）。
+                // 710010702 有两种成因（真机文档 §五.2）：活动试用天数超限 vs
+                // 设备/账号资格问题。前置 trial 检查若瞬时失败会静默跳过，这里
+                // 失败后再归因一次：超限 → 转为「试用上限」说明；未超限/未知 →
+                // 真机实证（2026-11-28）为确定性拒绝（客户端内手动签到同样被拒，
+                // 重试/换 Cookie/冷切均无效），一律转为「不可领」跳过并写当日
+                // 拒绝标记（storage 组装摘要时生成 claimBlockReason），不再作为
+                // 可重试错误。
                 let trial = self.fetch_campaign_trial_days(&cookie, cred).await;
                 eprintln!(
                     "[doubaowork][claim] 710010702 归因：trial_days={trial:?}（Some(>上限)=超限，None=订阅接口判定失败）"

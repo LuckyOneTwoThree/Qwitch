@@ -84,6 +84,9 @@ export function isAccountNeedingAttention(
     acc.status === "expired" ||
     acc.status === "risk_paused" ||
     acc.hasApiToken === false ||
+    // 豆包「按设备每日一次」今日不可领：阻断账号归入 attention，
+    // 「N 今日不可领」按钮的过滤器才能对上计数
+    Boolean(acc.claimBlockReason) ||
     isAccountMissingLocalSnapshot(acc, adapters)
   );
 }
@@ -372,6 +375,7 @@ function isAccountClaimableWithAdapter(
     acc.status === "active" &&
     acc.hasApiToken !== false &&
     !(claimRequiresSwitch && acc.hasLocalSnapshot === false) &&
+    !acc.claimBlockReason &&
     getEffectiveClaimStatus(acc) === "available"
   );
 }

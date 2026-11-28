@@ -1605,6 +1605,11 @@ fn apply_doubaowork_claim_block(db: &QwitchDatabase, accounts: &mut [AccountSumm
         if acc.tool_id != "doubaowork" {
             continue;
         }
+        // 今天刚领取成功的账号不标注阻断：否则 claimedCount 恒为 0，
+        // 前端「今日已全签」横幅与统计口径全部失效
+        if acc.last_claimed_at.as_deref().is_some_and(is_today_cst) {
+            continue;
+        }
         if device_used_today {
             acc.claim_block_reason = Some(
                 "本设备今天已有豆包账号完成签到（该活动按设备每日一次），明日资格刷新后可再试"

@@ -251,12 +251,18 @@ pub(crate) async fn perform_switch_core(
                             if outgoing_id != summary.id {
                                 match db.get_account_credential(master_key, &outgoing_id) {
                                     Ok((_, mut existing_cred)) => {
-                                        let is_isolated = matches!(
-                                            &existing_cred.payload,
-                                            crate::domain::CredentialPayload::Token { extra, .. }
-                                                if extra.get("codearts_mode").map(String::as_str)
+                                        let is_isolated = match &existing_cred.payload {
+                                            crate::domain::CredentialPayload::Token { extra, .. } => {
+                                                extra.get("codearts_mode").map(String::as_str)
                                                     == Some("isolated_oauth")
-                                        );
+                                            }
+                                            // LocalSnapshot 形态的隔离账号同样不吸收本机会话
+                                            crate::domain::CredentialPayload::LocalSnapshot {
+                                                files,
+                                                ..
+                                            } => files.contains_key("isolated_oauth.json"),
+                                            _ => false,
+                                        };
                                         let updated_cred = if is_isolated {
                                             // 独立 OAuth 账号保留 Qwitch 自持的 refreshToken 与 DPoP 密钥对，仅更新本机快照
                                             if let (

@@ -586,11 +586,18 @@ pub(crate) async fn sync_active_local_credential_if_fresher(
         return false;
     }
     if summary.tool_id == "codearts"
-        && matches!(
-            &stored_cred.payload,
-            CredentialPayload::Token { extra, .. }
-                if extra.get("codearts_mode").map(String::as_str) == Some("isolated_oauth")
-        )
+        && match &stored_cred.payload {
+            // Token 形态：独立 OAuth 标记在 extra
+            CredentialPayload::Token { extra, .. } => {
+                extra.get("codearts_mode").map(String::as_str) == Some("isolated_oauth")
+            }
+            // LocalSnapshot 形态：独立 OAuth 标记是快照内的 marker 文件
+            // （此前只排除 Token 形态，隔离账号被保活回吸成本机会话）
+            CredentialPayload::LocalSnapshot { files, .. } => {
+                files.contains_key("isolated_oauth.json")
+            }
+            _ => false,
+        }
     {
         return false;
     }

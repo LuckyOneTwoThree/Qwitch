@@ -803,6 +803,33 @@ impl AntiRiskScheduler {
                 continue;
             }
 
+            // 单账号当日拒绝标记（710010702）：确定性拒绝，不再冷切撞墙。
+            // 设备标记只拦「Qwitch 成功领过」的场景；名额被客户端内手动签到
+            // 消耗时没有标记，靠这里兜底（自动领取路径也可能直接调用进来）。
+            let account_rejected_today = db
+                .get_setting(&crate::storage::doubaowork_claim_reject_key(&summary.id))
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str::<String>(&json).ok())
+                .is_some_and(|at| crate::storage::is_today_cst(&at));
+            if account_rejected_today {
+                skipped_count += 1;
+                device_limit_skipped_count += 1;
+                let _ = db.append_action_log(
+                    Some(&summary.id),
+                    &summary.tool_id,
+                    "claim",
+                    "skipped",
+                    None,
+                    &format!(
+                        "{} 今日签到已被服务端拒绝过（710010702，按设备每日一次），已跳过冷切领取",
+                        summary.label
+                    ),
+                );
+                sink.emit_account_updated(&summary.id);
+                continue;
+            }
+
             if !already_active {
                 sink.emit_batch_progress(BatchProgressEvent {
                     action: "claim".into(),

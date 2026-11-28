@@ -18,7 +18,7 @@
 ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-0078D4?logo=windows&logoColor=white)
 
-**[下载](https://github.com/LuckyOneTwoThree/Qwitch/releases/latest)** · **[功能](#能做什么)** · **[支持的账号与 Agent](#支持的账号与-agent)** · **[安全与隐私](#安全与隐私)** · **[文档](#文档)** · **[问题反馈](https://github.com/LuckyOneTwoThree/Qwitch/issues)**
+**[下载](https://github.com/LuckyOneTwoThree/Qwitch/releases/latest)** · **[功能](#能做什么)** · **[支持的账号与 Agent](#支持的账号与-agent)** · **[插件扩展](#插件扩展实验性)** · **[安全与隐私](#安全与隐私)** · **[文档](#文档)** · **[问题反馈](https://github.com/LuckyOneTwoThree/Qwitch/issues)**
 
 </div>
 
@@ -38,6 +38,7 @@
 - 一键切换桌面客户端的登录账号，失败会回滚到原来的账号。
 - 在本机启动一个模型网关，把已有订阅账号接到不同的 Agent。
 - 修改 Agent 配置前先备份，随时可以还原。
+- 账号工具与 Agent 接入在内部统一以插件清单管理，也可以安装外部插件扩展入口与出口（实验性）。
 
 它适合同时使用多个工具、多个账号，或者多个 Agent 的人。如果你只有一个账号、只用一个官方客户端，Qwitch 不会带来太多帮助。它也不提供云端同步、团队共享、远程访问网关或自动批量注册账号，不会绕过平台的计费或限制，也不会在后台无人值守地操作账号。
 
@@ -78,7 +79,7 @@ Qwitch 目前内置 7 个账号适配器，另支持一个通用 API Key 作为�
 
 说明：
 
-- **全部 7 个内置账号工具均已通过 Rust 原生协议接入本地网关调度**。
+- **全部 7 个内置账号工具均已通过 Rust 原生协议接入本地网关调度**；v0.9.0 起它们与 Agent 接入统一以插件清单管理，可在「设置与环境 → 插件与关于」里统一启停。
 - **豆包工作**：已接入原生 HTTP/SSE 网关上游（支持流式与非流式对话、自动会话初始化与临时会话清理），模型目录支持从本机缓存目录读取。
 - **豆包工作切号**：需要该账号在本机登录过一次并做过「关联本机」（Qwitch 会保存整份 profile 快照，切号时写回）。**只写 Cookie 不够**：实测客户端还依赖分区 Cookie 属性与自身登录记录，单靠 passport Cookie 无法让它进入登录态（详见 `docs/QUOTA_SWITCH_AND_MODEL_PLAN_2026-11-26.md`）。
 - **码道 CodeArts**：支持 `USER_LOGIN` 每日签到一键领取；使用华为云 `SDK-HMAC-SHA256` 签名上游（支持 `.myhuaweicloud.cn` 回退与并发限流短冷却），模型目录从本机客户端配置读取；本机导入的 `client_readonly` 凭据可直接参与网关调度，但绝不主动消耗客户端一次性 `refreshToken`（STS 到期时尝试从本机磁盘只读重同步）；如需网关内自动刷新，可在号池入口单独完成一次 `isolated_oauth` 授权；macOS 支持本机登录态实时检测与双向切号（切号前自动回吸被切走账号最新轮换的 `refreshToken`）。
@@ -100,6 +101,8 @@ Qwitch 可以写入 6 个桌面客户端的配置，另外提供通用 OpenAI / 
 
 所有写入都会先做加密备份（Stash），修改前会显示配置差异。原文件解析失败时，Qwitch 会中止写入，不会用空配置覆盖你的文件。
 
+需要接入其它 OpenAI / Anthropic 兼容客户端（如 IDE、CLI 工具）时，可以编写声明式「入口插件」扩展，不用改 Qwitch 本体，见[插件扩展](#插件扩展实验性)。
+
 <details>
 <summary>各 Agent 的配置文件位置</summary>
 
@@ -116,13 +119,15 @@ Qwitch 可以写入 6 个桌面客户端的配置，另外提供通用 OpenAI / 
 
 ## 它怎么工作
 
-Qwitch 由三部分组成。
+Qwitch 由四部分组成。
 
 **账号库。** 导入的账号、加密后的凭据、额度快照和操作日志保存在本机 SQLite 数据库。主密钥优先放在系统钥匙串，同时保留一份权限受限的备份，方便重装或迁移。
 
 **本地网关。** 一个只监听 `127.0.0.1:8187` 的小服务，支持 OpenAI Chat、OpenAI Responses 和 Anthropic Messages 三种主流接口格式，并能在它们之间转换。Agent 把请求发给它，它按模型和号池规则选择一个账号，再转发到对应工具的上游。号池就是同一个工具的一组账号。
 
 **Agent 接入。** Qwitch 直接修改 Codex、Claude、DSH、OpenCode、MiMo、ZCode 的配置文件，把网关地址、令牌和模型清单写进去。修改前会备份，解绑时会还原。
+
+**插件底座（实验性）。** 入口插件声明客户端协议与配置写入方式，出口插件声明上游协议与能力供给，两类插件都经过同一个兼容引擎评估后参与路由。内置的账号工具与 Agent 接入也走这套清单，外部插件可从本地插件中心安装，默认不加载。
 
 ```
 Codex / Claude / DSH / OpenCode / MiMo / ZCode
@@ -145,11 +150,13 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 
 ### 账号、额度和签到
 
-- 查看每个账号的额度、套餐周期和签到状态，支持分组和平铺两种视图。
-- 单卡查额、批量查额、单卡领取、批量领取，批量操作会显示进度和失败原因；其中豆包工作支持串行冷切批量领取（结束后自动切回原账号），不干扰其它纯网络工具的并发领取。
+- 三种账号视图：**列表**（水位台账：行 × 列同列对齐，可直接横向比较，表头按风险 / 水位 / 同步时间排序，列随窗口宽度自动收敛）、**分组**（默认，按工具模块化展示）、**平铺**（卡片墙）。
+- 账号详情抽屉：`Enter` 或双击账号行，右侧滑出面板，展示全部额度桶、设备身份、续期方式、凭据剩余有效期与最近操作。
+- `⌘K` 命令面板：输入即搜账号（按风险排序），也可一键领取、刷新全部额度、导入账号、启停网关、跳转页面。
+- 单卡查额、单卡领取；行首勾选 + `Shift` 连选后，用底部浮动条批量查额、批量领取、批量停用，批量操作会显示进度和失败原因；其中豆包工作支持串行冷切批量领取（结束后自动切回原账号），不干扰其它纯网络工具的并发领取。
 - 支持签到的工具会区分「可领 / 已领 / 待核实 / 不支持」，避免把不支持签到的账号算进待领。
 - 额度只报服务端真正给出的数字：只有百分比水位时不再伪装成「剩余 100%」，只有剩余值（如 LobsterAI 跨池积分）时只显示余额、不画百分比进度条。
-- 操作日志记录每次查询、领取和切换，支持归档、恢复、筛选和导出，保留策略可配置。
+- 侧栏按工具分组导航，带账号计数与客户端运行状态；操作日志记录每次查询、领取和切换，支持归档、恢复、筛选和导出，保留策略可配置。
 
 ### 切换桌面账号
 
@@ -162,6 +169,7 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 - 同一个工具的多个账号可以组成号池，按主备顺序、剩余额度、单号耗尽或轮询选择。
 - 主账号返回 429 时自动冷却并换下一个；401 时按账号刷新 Token 并写回加密库；502/503 响应会透传真实上游错误摘要便于排查；可以配置一个通用 API Key 作为最后兜底。
 - 同一会话会尽量留在同一个账号，利用上游的 Prompt Cache，也就是同一会话的缓存；活跃桌面端互斥按工具精细控制（如 `lobsterai`、`qoder_cn` 免除活跃端跳过），避免互相踢下线。
+- 外部出口插件可以加入同一套号池调度，参与统一的兼容评估、冷却与凭据刷新。
 
 ### Agent 接入与还原
 
@@ -169,10 +177,35 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 - 模型方案可以整套复用，按作用范围分两层：**订阅工具区**的「全部订阅方案」负责跨订阅的批量复制/同步；**当前订阅面板**里的「复制本订阅 / 同步本订阅」只作用于这一个工具。新挂载 Agent 时不用逐个订阅重勾。
 - 支持自动探测上游真实模型目录（含 `trae_cn`、`minimax_code_cn`、`qoder_cn`、`lobsterai` 实时探测，以及 `doubaowork` / `codearts` 本机缓存目录），在界面标注目录来源（上游实时 / 本机缓存目录 / 推荐目录），并支持按「已勾选 / 免费低倍率 / 主力旗舰」筛选。
 - 修改前显示配置差异，原文件加密备份；支持配置漂移检测（配置文件被其他程序改动）、一键修复、解绑还原（同时清理休眠专属号池的残留模型，防止跨工具串选）、按 Agent 或全部强制清除 Qwitch 写入。
+- 写入 Agent 配置时会记录当时运行中的客户端进程；用户随后关闭或重启客户端后，「待重启生效」状态自动恢复为已生效，无需手动确认。
+- 每个订阅工具在接入面板上显示协议兼容徽章（兼容 / 降级可用 / 不兼容），跨协议调度时的降级策略一目了然。
 - 修改网关端口后，可以一键重启 Claude、Codex、MiMo Code、ZCode 等正在运行的客户端。
 - 可以重新探测本机 Agent 的安装路径和运行状态；未安装的客户端不会显示重启按钮。
 
 ![Agent 接入与号池调度](docs/assets/screenshots/agents-dark.png)
+
+### 插件扩展（实验性）
+
+v0.9.0 起提供本地插件中心（「设置与环境 → 插件与关于」），支持两类插件：
+
+- **入口插件**：把更多客户端接入本地网关，声明它讲的协议（OpenAI Chat / Anthropic Messages / OpenAI Responses）、硬性能力需求与配置文件写法。
+- **出口插件**：把订阅或 API Key 变成号池出口，声明上游协议与能力（流式 / 工具调用 / 视觉 / 思考等）。
+
+两种形态：
+
+- **声明式插件**：纯 JSON 清单、零代码。入口按模板改写客户端配置文件（JSON / JSONC），出口按声明直发标准 HTTP/SSE。
+- **脚本插件**：任意语言脚本，经 stdin/stdout 的 NDJSON JSON-RPC 与 Qwitch 通信，适合私有协议上游；凭据不落盘，只经内存单次注入。
+
+安全边界：
+
+- 外部插件默认不加载。安装需要系统原生对话框确认（名称、ID、版本、内容指纹）；覆盖内置插件会额外警告。
+- 插件目录按内容计算 SHA-256 钉扎，启动和每次调用前重新校验，篡改即拒绝执行。
+- 入口命令走白名单（仅常见脚本解释器，禁止系统 Shell 与内联求值参数），执行前清洗环境变量。
+- 同 ID 覆盖内置插件需二次确认，卸载后自动恢复内置版本。
+
+兼容性：入口与出口的每个组合都会实时评估，并标注 🟢 兼容 / 🟡 降级可用 / 🔴 不兼容；自动整形（如流式合成、系统提示词净化）会在徽章说明里列出。
+
+示例插件见 [`examples/plugins/`](examples/plugins/)（把 Qoder IDE 接成入口、把 ChatGPT 订阅变出口），完整设计见 [`docs/PLUGIN_ARCHITECTURE_DESIGN.md`](docs/PLUGIN_ARCHITECTURE_DESIGN.md)。
 
 ### 路由观测
 
@@ -206,7 +239,7 @@ Codex / Claude / DSH / OpenCode / MiMo / ZCode
 
 ### 设置与环境
 
-常用选项包括主题、关闭窗口行为、开机自启、本地网关端口、自动刷新、自动签到、日志保留和客户端路径。修改网关端口时会先检测占用，成功后同步所有已挂载 Agent，并可以一键重启正在运行的桌面客户端。
+常用选项包括主题、关闭窗口行为、开机自启、本地网关端口、自动刷新、自动签到、日志保留和客户端路径。修改网关端口时会先检测占用，成功后同步所有已挂载 Agent，并可以一键重启正在运行的桌面客户端。「插件与关于」提供插件中心（安装 / 启停 / 卸载外部插件）、适配器清单与版本更新。
 
 <details>
 <summary>设置与环境（深色）</summary>
@@ -255,7 +288,7 @@ Qwitch 没有云端账号，也不收集使用统计。账号、凭据、会话�
 
 **保存在本机的内容**
 
-- 业务凭据和 Agent 原文件备份使用 AES-256-GCM 加密。
+- 业务凭据和 Agent 原文件备份使用 AES-256-GCM 加密，密文绑定账号上下文（AAD），账号标识以主密钥 HMAC 哈希落库；删除数据时数据库页同步清零（SQLite `secure_delete`）。
 - 主密钥优先存放在 macOS Keychain / Windows Credential Manager，同时在数据目录保留一份 `master.key` 备份，方便重装或迁移。
 - 数据库和导出文件默认只有当前用户可读。macOS / Linux 上通过 `0600` / `0700` 权限位强制；Windows 上依赖 `%APPDATA%` 本身的用户专属 ACL（代码不会额外调用 `icacls` 收紧），因此同一台机器上的其他管理员账户仍可能读取数据目录。SQLite 开启 WAL。
 - 默认日志会脱敏邮箱、手机号、UID、Cookie 和 Token 片段。
@@ -266,7 +299,7 @@ Qwitch 没有云端账号，也不收集使用统计。账号、凭据、会话�
 - 校验 `Host` 头，拒绝携带跨站 `Origin` 或 `Sec-Fetch-Site` 的浏览器请求，降低 DNS Rebinding 和 CSRF 风险。
 - 上游 `base_url` 走白名单，请求体限制 16 MB，非流式响应限制 64 MB，并设置连接读超时。
 - 修改 Agent 配置前先加密备份；原文件解析失败时中止写入；多文件写入失败会按备份回滚。
-- 外部插件默认不加载。启用需要系统原生对话框确认，票据和插件内容哈希绑定，120 秒内有效，启动和每次调用前都会重新校验。
+- 外部适配器与外部插件默认不加载。外部插件的信任通过系统原生对话框确认，票据和插件内容哈希绑定，120 秒内有效，启动和每次调用前都会重新校验；插件入口命令走白名单并清洗执行环境。
 
 **数据目录**
 
@@ -330,14 +363,14 @@ npm run dev          # 浏览器 Mock 预览
 npm run tauri dev    # 桌面应用开发模式
 npm run build        # 类型检查 + 生产构建
 npm run lint         # ESLint，--max-warnings=0
-npm test             # 前端测试（30 个文件 / 190 个用例）
-cd src-tauri && cargo test   # 后端测试（309 个用例）
+npm test             # 前端测试（32 个文件 / 214 个用例）
+cd src-tauri && cargo test   # 后端测试（340 个用例）
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
-CI 在 macOS 和 Windows 上运行依赖审计、ESLint、前端构建与测试、Tauri `--no-bundle` 构建冒烟，以及 Rust `cargo audit`、fmt、clippy 和测试。当前 `npm audit` 与 `cargo audit`（含 `rsa 0.10` 升级修复）均为 0 漏洞。
+CI 在 macOS 和 Windows 双平台运行 npm audit、ESLint、前端构建与测试、Rust fmt / clippy / 全量测试，以及 Tauri `--no-bundle` 构建冒烟；另在 Linux 上运行 shellcheck 与 `cargo audit`（显式豁免 Tauri GTK 传递依赖 glib 的一条已知告警）。
 
-发布由 `v*` 标签触发，生成 macOS Apple Silicon、macOS Intel 和 Windows x64 三个安装包。
+发布由 `v*` 标签触发，先校验三处版本号与 CHANGELOG 段落一致，再生成 macOS Apple Silicon、macOS Intel 和 Windows x64 三个安装包并附 SHA256SUMS。
 
 <details>
 <summary>技术栈与项目结构</summary>
@@ -354,25 +387,27 @@ Qwitch/
 ├─ src/                      # 前端
 │  ├─ pages/                 # Dashboard 主窗口 / TrayPopover 托盘
 │  │  └─ dashboard/          # AgentBindingsView / RoutingTraceView / LogsView / SettingsView
-│  ├─ components/            # 账号卡片、导入/切号弹窗、gateway/ 端口弹窗、pool/ 演练与 Diff 弹窗
-│  ├─ context/               # 账号 / 日志 / 设置 / 反馈 / 号池网关
+│  ├─ components/            # 账号台账与抽屉、导入/切号弹窗、命令面板、插件中心、ui/ 基座
+│  ├─ context/               # 账号 / 日志 / 设置 / 反馈 / 号池网关工作区
 │  ├─ domain/                # 统计口径与工具注册表
 │  └─ data/                  # 开发态浏览器 Mock，生产构建自动剔除
 ├─ src-tauri/                # Rust 后端
 │  └─ src/
 │     ├─ commands/           # Tauri IPC 命令
-│     ├─ gateway/            # 本地多协议网关
-│     ├─ agent_wiring/       # Agent 探测、配置写入、备份还原、漂移检测与重启
+│     ├─ gateway/            # 本地多协议网关（ir.rs 三协议 IR / scheduler.rs 号池调度）
+│     ├─ plugins/            # 双端插件架构：清单 / 注册表 / 兼容引擎 / 安装器 / 子进程宿主
+│     ├─ agent_wiring/       # Agent 探测、事务写入、备份还原、漂移检测与进程对账
 │     ├─ adapter/            # 7 个内置适配器 + JSON-RPC 外部协议
 │     ├─ scheduler/          # 防风控串行调度器
 │     ├─ platform/           # 钥匙串 / 进程 / 路径 / 自启
-│     ├─ storage/            # SQLite / 加密 / 号池 / 模型发现 / 迁移
+│     ├─ storage/            # SQLite / 加密 / 号池 / 模型发现 / 插件状态 / 迁移
 │     └─ domain/             # 领域模型与设置
-├─ docs/                     # 架构、契约、适配器规范、号池网关设计与审计文档
+├─ examples/plugins/         # 入口 / 出口插件示例
+├─ docs/                     # 架构、契约、适配器规范、插件架构、号池网关设计与审计文档
 └─ .github/workflows/        # CI 双平台门禁 + Release 流水线
 ```
 
-后端注册了 76 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停、Agent 环境探测与热切/修复/重启、日志读取和更新检查所需的最小命令集。
+后端注册了 83 个 IPC 命令，按 `main` 和 `tray` 两个窗口拆分权限。托盘只开放查额、领取、切号、网关启停、Agent 环境探测与热切/修复/重启、日志读取和更新检查所需的最小命令集。
 
 发布前手工检查：空数据目录首装；备份恢复到冲突钥匙串环境；慢启动客户端切号；托盘和 Dock 行为；本地网关端到端路由与目标 Agent 重启生效。
 
@@ -383,6 +418,7 @@ Qwitch/
 | 文档 | 内容 |
 | --- | --- |
 | [变更记录](CHANGELOG.md) | 每个版本的 新增 / 修复 / 破坏性变更 / 升级注意（发布说明据此自动生成） |
+| [插件架构设计](docs/PLUGIN_ARCHITECTURE_DESIGN.md) | 双端插件模型、manifest 契约、信任与安装流程、兼容引擎 |
 | [v0.7.0 发版审查](docs/RELEASE_AUDIT_2026-11-26.md) | 发版前深度审查：阻断项、风险分级、验证清单 |
 | [架构与基线设计](docs/ARCHITECTURE.md) | 项目定位、模块划分、防风控规范、非目标与路线图 |
 | [核心契约与数据模型](docs/CORE_DESIGN.md) | 领域模型、Rust trait、JSON-RPC 协议、SQLite Schema、IPC 契约 |
@@ -400,7 +436,8 @@ Qwitch/
 ## 当前限制
 
 - macOS 安装包尚未签名和公证，首次打开需要手动放行。Windows 安装包也没有代码签名。
-- OpenAI Responses 的跨协议增量流式默认关闭。需要时设置 `QWITCH_GATEWAY_RESPONSES_STREAMING=1`；关闭时会把完整回复收完再返回，功能不受影响，只是首字节更慢。
+- OpenAI Responses 的跨协议增量流式默认关闭（带工具调用的跨协议请求即使开启也会缓冲）。需要时设置 `QWITCH_GATEWAY_RESPONSES_STREAMING=1`；关闭时会把完整回复收完再返回，功能不受影响，只是首字节更慢。
+- 插件系统为 v0.9.0 引入的实验性能力：能力探针目前基于插件清单声明，尚未做真实网络探测；声明式配置写入仅支持 JSON / JSONC；脚本插件当前仅支持出口方向（入口仅支持声明式）。
 - 暂不支持云端同步、团队共享、远程访问网关或无人值守批量注册。
 - 码道 CodeArts 切号依赖「本机会话快照」：只有在该账号登录过码道客户端并做过一次「本机导入」后才会出现切号按钮，切号时 Qwitch 用 safeStorage 重新加密 `authSession` 写回 `secretStorage`（仅 macOS；Windows 因 DPAPI 限制暂不支持），并在切走前自动回吸原在登账号最新轮换的 `refreshToken`、支持本机登录/登出实时检测。独立 OAuth 授权的账号没有这份快照，无法切号，但可参与网关调度且不会消耗客户端一次性 refreshToken（到期时自动重读本机缓存）。
 - 豆包工作的签到发放校验绑定「设备 + 桌面端当前登录账号」：网页登录导入的其他账号即使显示可领，写接口也只会返回 `710010702`。因此这类账号的「领取」按钮会禁用并提示先切到桌面端。

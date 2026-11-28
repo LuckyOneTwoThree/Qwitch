@@ -67,6 +67,11 @@ const SNAPSHOT_TOKEN_FILE: &str = "decrypted_token.txt";
 const SNAPSHOT_PROFILE_FILE: &str = "profile_dir.txt";
 const DEFAULT_PROFILE_NAME: &str = "Default";
 
+/// 设备级每日签到标记的 key（见 `daily_claim_device_key`）。标记存于本机 DB，
+/// 固定 key 即表达「这台机器的豆包客户端」；storage 组装账号摘要时用它计算
+/// `claimBlockReason`，前端据此禁用领取按钮。
+pub const DOUBAOWORK_DEVICE_CLAIM_KEY: &str = "doubaowork_desktop_client";
+
 const MAX_SNAPSHOT_ZIP_BYTES: usize = 80 * 1024 * 1024;
 const MAX_SNAPSHOT_ENTRIES: usize = 500;
 const MAX_SNAPSHOT_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
@@ -2012,7 +2017,7 @@ impl ToolAdapter for DoubaoWorkAdapter {
     /// 见 claim_daily 的 710010702 归因注释）。标记存于本机 DB，固定 key 即表达
     /// 「这台机器的豆包客户端」，冷切批量领取靠它跳过当日剩余账号。
     fn daily_claim_device_key(&self) -> Option<String> {
-        Some("doubaowork_desktop_client".to_string())
+        Some(DOUBAOWORK_DEVICE_CLAIM_KEY.to_string())
     }
 
     fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {

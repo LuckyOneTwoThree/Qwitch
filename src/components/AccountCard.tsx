@@ -95,6 +95,8 @@ export const AccountCard = React.memo(function AccountCard({
     account.toolId === "doubaowork" && !account.isActiveOnClient && missingLocalSnapshot;
   const claimWillAutoSwitch =
     account.toolId === "doubaowork" && !account.isActiveOnClient && !missingLocalSnapshot;
+  // 豆包「按设备每日一次」今日不可领（后端 claimBlockReason）：按钮禁用并显示提示徽章
+  const claimBlocked = Boolean(account.claimBlockReason);
   const isBatchRunning = Boolean(batchProgress?.running);
   const effectiveClaimStatus = getEffectiveClaimStatus(account);
 
@@ -742,26 +744,40 @@ export const AccountCard = React.memo(function AccountCard({
                 {canClaim &&
                   (effectiveClaimStatus === "available" ||
                     effectiveClaimStatus === "unknown") && (
-                    <button
-                      type="button"
-                      disabled={isBatchRunning || claimNeedsDesktopSession}
-                      title={
-                        claimNeedsDesktopSession
-                          ? "豆包工作签到需本机快照自动冷切：请先在菜单「补快照」或重新导入本机后再领取"
-                          : isBatchRunning
-                            ? "批量任务进行中"
-                            : claimWillAutoSwitch
-                              ? "将自动切换桌面端到该账号领取，完成后切回原账号"
-                              : effectiveClaimStatus === "unknown"
-                                ? "先核实今日签到状态，未领取则自动领取"
-                                : "领取今日签到福利"
-                      }
-                      onClick={() => void claimDailyBatch([account.id])}
-                      className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap disabled:opacity-45"
-                    >
-                      <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                      领取
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        disabled={
+                          isBatchRunning || claimNeedsDesktopSession || claimBlocked
+                        }
+                        title={
+                          claimBlocked
+                            ? (account.claimBlockReason ?? "")
+                            : claimNeedsDesktopSession
+                              ? "豆包工作签到需本机快照自动冷切：请先在菜单「补快照」或重新导入本机后再领取"
+                              : isBatchRunning
+                                ? "批量任务进行中"
+                                : claimWillAutoSwitch
+                                  ? "将自动切换桌面端到该账号领取，完成后切回原账号"
+                                  : effectiveClaimStatus === "unknown"
+                                    ? "先核实今日签到状态，未领取则自动领取"
+                                    : "领取今日签到福利"
+                        }
+                        onClick={() => void claimDailyBatch([account.id])}
+                        className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap disabled:opacity-45"
+                      >
+                        <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        领取
+                      </button>
+                      {claimBlocked && (
+                        <span
+                          title={account.claimBlockReason ?? ""}
+                          className="badge shrink-0 whitespace-nowrap border-amber-500/30 bg-amber-500/10 text-amber-800 dark:border-amber-400/25 dark:bg-amber-500/12 dark:text-amber-300"
+                        >
+                          今日不可领
+                        </span>
+                      )}
+                    </>
                   )}
               </>
             )}

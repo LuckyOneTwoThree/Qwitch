@@ -111,6 +111,7 @@ export function isAccountClaimable(
     acc.status === "active" &&
     acc.hasApiToken !== false &&
     !isAccountClaimBlockedByMissingSnapshot(acc, adapters) &&
+    !acc.claimBlockReason &&
     getEffectiveClaimStatus(acc) === "available"
   );
 }
@@ -152,6 +153,11 @@ export function selectClaimCandidates(
     if (isAccountClaimBlockedByMissingSnapshot(acc, adapters)) {
       return false;
     }
+    // 豆包「按设备每日一次」今日不可领（含用户显式指定的 targetIds）：
+    // 确定性拒绝，纳入候选只会白白冷切一次。
+    if (acc.claimBlockReason) {
+      return false;
+    }
     if (opts.targetIds) return true;
     const effectiveClaim = getEffectiveClaimStatus(acc);
     return (
@@ -173,6 +179,8 @@ export interface ScopedStats {
   unclaimedAuthMissingCount: number;
   /** 需先补本机快照才能冷切领取的账号数（豆包等多账号冷切场景）。 */
   unclaimedSnapshotMissingCount: number;
+  /** 豆包「按设备每日一次」今日不可领的账号数（claimBlockReason 命中）。 */
+  claimBlockedCount: number;
   unknownClaimCount: number;
   allClaimed: boolean;
   claimActionState: ClaimActionState;
@@ -203,6 +211,7 @@ export function selectScopedStats(
   let unsupportedClaimCount = 0;
   let unclaimedAuthMissingCount = 0;
   let unclaimedSnapshotMissingCount = 0;
+  let claimBlockedCount = 0;
   let unknownClaimCount = 0;
   let activeClientsCount = 0;
 
@@ -229,6 +238,10 @@ export function selectScopedStats(
         // 冷切型工具缺快照：虽已授权，但无法冷切领取，归入「需补快照」而非「待领」，
         // 避免徽标显示「N 待领」却批量领取时全部失败。
         unclaimedSnapshotMissingCount += 1;
+      } else if (acc.claimBlockReason) {
+        // 豆包「按设备每日一次」今日不可领：服务端状态仍是 available，但确定性
+        // 拒绝领取，归入独立提示而非「待领」，避免用户反复点领取。
+        claimBlockedCount += 1;
       } else {
         const effectiveClaim = getEffectiveClaimStatus(acc);
         if (effectiveClaim === "unsupported") {
@@ -266,6 +279,8 @@ export function selectScopedStats(
     claimBadgeText = `${unclaimedAuthMissingCount} 待授权`;
   } else if (unclaimedSnapshotMissingCount > 0) {
     claimBadgeText = `${unclaimedSnapshotMissingCount} 待补快照`;
+  } else if (claimBlockedCount > 0) {
+    claimBadgeText = `${claimBlockedCount} 今日不可领`;
   } else if (unknownClaimCount > 0) {
     claimBadgeText = `${unknownClaimCount} 待核实`;
   } else if (claimedCount > 0) {
@@ -287,6 +302,7 @@ export function selectScopedStats(
     unsupportedClaimCount,
     unclaimedAuthMissingCount,
     unclaimedSnapshotMissingCount,
+    claimBlockedCount,
     unknownClaimCount,
     allClaimed,
     claimActionState,

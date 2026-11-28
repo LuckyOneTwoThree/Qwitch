@@ -1334,6 +1334,16 @@ export function Dashboard({
                         <CircleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         {`${scopedStats.unclaimedSnapshotMissingCount} 待补快照`}
                       </button>
+                    ) : scopedStats.claimBlockedCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setStatusFilter("attention")}
+                        title="该活动按设备限制每日一次：本设备今天已有账号完成签到，其他账号卡片上有说明；明日资格刷新后可再试"
+                        className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                      >
+                        <CircleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        {`${scopedStats.claimBlockedCount} 今日不可领`}
+                      </button>
                     ) : null}
                   </>
                 )}

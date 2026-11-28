@@ -826,9 +826,11 @@ impl QwitchDatabase {
     }
 
     pub fn get_account_summary(&self, account_id: &str) -> Result<AccountSummary, StorageError> {
-        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let mut stmt = conn.prepare(
-            "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
+        // 查询收敛在独立作用域（同 list_accounts，避免与 apply 阶段的自锁死）。
+        let mut summary = {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let mut stmt = conn.prepare(
+                "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                     a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                     a.last_claimed_at, a.updated_at,
                     q.plan_name, q.claim_status, q.buckets_json, q.fetched_at, a.device_id_masked, a.device_type,
@@ -841,22 +843,28 @@ impl QwitchDatabase {
                  LIMIT 1
              )
              WHERE a.id = ?1",
-        )?;
+            )?;
 
-        stmt.query_row(params![account_id], map_account_row)
-            .optional()?
-            .ok_or_else(|| StorageError::NotFound(account_id.to_string()))
+            stmt.query_row(params![account_id], map_account_row)
+                .optional()?
+                .ok_or_else(|| StorageError::NotFound(account_id.to_string()))?
+        };
+        apply_doubaowork_claim_block(self, std::slice::from_mut(&mut summary));
+        Ok(summary)
     }
 
     pub fn list_accounts(
         &self,
         tool_id: Option<&str>,
     ) -> Result<Vec<AccountSummary>, StorageError> {
-        let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
-        let mut results = Vec::new();
+        // 查询收敛在独立作用域：后续 apply_doubaowork_claim_block 需要再次加锁读
+        // 设置项，不能与这里的 conn 锁重叠（否则自锁死）。
+        let mut results = {
+            let conn = self.conn.lock().map_err(|_| StorageError::LockPoisoned)?;
+            let mut results: Vec<AccountSummary> = Vec::new();
 
-        if let Some(tid) = tool_id {
-            let mut stmt = conn.prepare(
+            if let Some(tid) = tool_id {
+                let mut stmt = conn.prepare(
                 "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
@@ -872,12 +880,12 @@ impl QwitchDatabase {
                  WHERE a.tool_id = ?1
                  ORDER BY a.is_active_on_client DESC, julianday(a.created_at) ASC, a.rowid ASC",
             )?;
-            let rows = stmt.query_map(params![tid], map_account_row)?;
-            for row in rows {
-                results.push(row?);
-            }
-        } else {
-            let mut stmt = conn.prepare(
+                let rows = stmt.query_map(params![tid], map_account_row)?;
+                for row in rows {
+                    results.push(row?);
+                }
+            } else {
+                let mut stmt = conn.prepare(
                 "SELECT a.id, a.tool_id, a.label, a.uid_masked, a.email_masked, a.status,
                         a.is_active_on_client, a.has_local_snapshot, a.has_api_token,
                         a.last_claimed_at, a.updated_at,
@@ -892,12 +900,16 @@ impl QwitchDatabase {
                  )
                  ORDER BY a.tool_id ASC, a.is_active_on_client DESC, julianday(a.created_at) ASC, a.rowid ASC",
             )?;
-            let rows = stmt.query_map([], map_account_row)?;
-            for row in rows {
-                results.push(row?);
+                let rows = stmt.query_map([], map_account_row)?;
+                for row in rows {
+                    results.push(row?);
+                }
             }
-        }
 
+            results
+        };
+
+        apply_doubaowork_claim_block(self, &mut results);
         Ok(results)
     }
 
@@ -1568,7 +1580,50 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountSummary> 
         credential_expires_at: row.get(17)?,
         renewal_mode: row.get(18)?,
         updated_at,
+        claim_block_reason: None,
     })
+}
+
+/// 豆包「按设备每日一次」领取阻断的设置 key：当日该账号被服务端 710010702
+/// 拒绝过（值为拒绝时刻，按 CST 日判定）。scheduler 领取跳过时写入。
+pub fn doubaowork_claim_reject_key(account_id: &str) -> String {
+    format!("doubaowork_claim_reject:{account_id}")
+}
+
+/// 组装账号摘要后计算豆包领取阻断原因：
+/// - 设备标记显示今天已有账号成功领取（Qwitch 侧）；
+/// - 或该账号今天已被服务端 710010702 拒绝过。
+///
+/// 命中即填充 `claim_block_reason`，前端据此提示并禁用领取按钮。
+fn apply_doubaowork_claim_block(db: &QwitchDatabase, accounts: &mut [AccountSummary]) {
+    let device_marker = crate::scheduler::device_claim_marker_key(
+        "doubaowork",
+        crate::adapter::doubaowork::DOUBAOWORK_DEVICE_CLAIM_KEY,
+    );
+    let device_used_today = crate::scheduler::device_claim_limit_used_today(db, &device_marker);
+    for acc in accounts.iter_mut() {
+        if acc.tool_id != "doubaowork" {
+            continue;
+        }
+        if device_used_today {
+            acc.claim_block_reason = Some(
+                "本设备今天已有豆包账号完成签到（该活动按设备每日一次），明日资格刷新后可再试"
+                    .into(),
+            );
+            continue;
+        }
+        let rejected_today = db
+            .get_setting(&doubaowork_claim_reject_key(&acc.id))
+            .ok()
+            .flatten()
+            .is_some_and(|day| is_today_cst(&day));
+        if rejected_today {
+            acc.claim_block_reason = Some(
+                "今日签到被服务端拒绝（710010702）：设备名额可能已被其他账号占用，或该账号未获活动资格；明日资格刷新后可再试"
+                    .into(),
+            );
+        }
+    }
 }
 
 fn cst_offset() -> FixedOffset {

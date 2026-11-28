@@ -90,11 +90,11 @@ pub struct AntiRiskScheduler {
     refresh_gate: std::sync::OnceLock<Arc<crate::gateway::GatewayRuntime>>,
 }
 
-fn device_claim_marker_key(tool_id: &str, device_key: &str) -> String {
+pub(crate) fn device_claim_marker_key(tool_id: &str, device_key: &str) -> String {
     format!("daily_claim_device_limit:{tool_id}:{device_key}")
 }
 
-fn device_claim_limit_used_today(db: &QwitchDatabase, marker_key: &str) -> bool {
+pub(crate) fn device_claim_limit_used_today(db: &QwitchDatabase, marker_key: &str) -> bool {
     db.get_setting(marker_key)
         .ok()
         .flatten()
@@ -882,6 +882,16 @@ impl AntiRiskScheduler {
                                 .is_some_and(crate::storage::is_today_cst)
                         {
                             let _ = db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
+                        }
+                        // 710010702 是确定性拒绝（按设备每日一次/账号资格）：记当日
+                        // 拒绝标记，storage 组装摘要时据此生成 claimBlockReason，
+                        // 前端卡片提示并禁用领取按钮，避免用户反复点领取。
+                        if result.reward_summary.contains("710010702") {
+                            let _ = db.set_setting(
+                                &crate::storage::doubaowork_claim_reject_key(&summary.id),
+                                &serde_json::to_string(&Utc::now().to_rfc3339())
+                                    .unwrap_or_default(),
+                            );
                         }
                     }
                     let _ = db.append_action_log(
@@ -2133,6 +2143,7 @@ mod tests {
             credential_expires_at: None,
             renewal_mode: None,
             updated_at: Utc::now().to_rfc3339(),
+            claim_block_reason: None,
         };
 
         // 正常账号不跳过

@@ -85,6 +85,8 @@ export interface AccountSummary {
   lastClaimedAt?: string;
   credentialExpiresAt?: string;
   renewalMode?: "auto_refresh" | "cookie_keepalive" | "client_sync" | "manual";
+  /** 豆包「按设备每日一次」导致的今日领取阻断原因；非阻断为空 */
+  claimBlockReason?: string | null;
   updatedAt: string;
 }
 

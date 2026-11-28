@@ -100,6 +100,10 @@ pub struct AccountSummary {
     pub credential_expires_at: Option<String>,
     pub renewal_mode: Option<String>,
     pub updated_at: String,
+    /// 豆包「按设备每日一次」导致的今日领取阻断原因（仅 doubaowork；前端用于
+    /// 卡片提示、领取按钮禁用与统计口径排除）。非阻断为 None。
+    #[serde(default)]
+    pub claim_block_reason: Option<String>,
 }
 
 fn default_true() -> bool {

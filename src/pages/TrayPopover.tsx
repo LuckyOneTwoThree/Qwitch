@@ -868,6 +868,7 @@ export function TrayPopover({
                         acc.status === "active" &&
                         !missingApiToken &&
                         !isAccountClaimBlockedByMissingSnapshot(acc, adapters) &&
+                        !acc.claimBlockReason &&
                         effectiveClaim === "available";
 
                       // 托盘是「快速判断」入口：额度数字必须自带新鲜度信号，

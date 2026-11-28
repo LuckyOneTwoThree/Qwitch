@@ -1785,8 +1785,34 @@ impl PlatformHost for NativePlatformHost {
                 let plist = render_macos_launch_agent_plist(&exe);
                 std::fs::write(&plist_path, plist.as_bytes())
                     .map_err(|e| format!("写入开机自启配置失败: {e}"))?;
-                // 旧 job 若已加载，先卸下，使下次登录按新 plist 生效
+                // 旧 job 若已加载，先卸下；随后立即 bootstrap：
+                // 1) 本次设置即时生效，不必等下次登录；
+                // 2) 把 launchd / 系统策略的拒绝当场暴露为错误——macOS 13+ 的后台任务
+                //    管理（BTM）会在应用更新后重新登记登录项，若用户忽略了系统弹出的
+                //    「后台项目已添加」确认，登录时加载会被静默拦截（开关开了却不自启）。
+                //    只写 plist 不校验结果的旧实现完全无法发现这类失效。
                 bootout();
+                if let Some(uid) = macos_current_uid() {
+                    let out = Command::new("launchctl")
+                        .args([
+                            "bootstrap",
+                            &format!("gui/{uid}"),
+                            &plist_path.to_string_lossy(),
+                        ])
+                        .output()
+                        .map_err(|e| format!("执行 launchctl bootstrap 失败: {e}"))?;
+                    if !out.status.success() {
+                        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                        let detail = if detail.is_empty() {
+                            format!("launchctl 退出码 {}", out.status.code().unwrap_or(-1))
+                        } else {
+                            detail
+                        };
+                        return Err(format!(
+                            "注册开机自启失败（{detail}）。请到「系统设置 → 通用 → 登录项与扩展」检查 Qwitch 是否被禁用，或在弹出的系统确认里选择允许"
+                        ));
+                    }
+                }
                 Ok(())
             } else {
                 if plist_path.exists() {

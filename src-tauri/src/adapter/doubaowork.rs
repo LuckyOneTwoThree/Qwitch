@@ -1177,6 +1177,13 @@ impl DoubaoWorkAdapter {
                 });
             }
 
+            if raw.get("code").and_then(int_field) != Some(0) {
+                let dump = raw.to_string();
+                eprintln!(
+                    "[doubaowork][claim] checkin 响应异常：{}",
+                    &dump[..dump.len().min(500)]
+                );
+            }
             let attempt_err = match Self::check_agw_code(&raw, "领取豆包工作每日签到额度", true)
             {
                 Ok(()) => AdapterError::Unified {
@@ -1252,11 +1259,32 @@ impl DoubaoWorkAdapter {
     /// 解密失败）由调用方回退到快照 Cookie。
     fn live_client_cookie(&self) -> Option<String> {
         let host = self.host.as_deref()?;
-        let profile_root = Self::resolve_profile_root(host).ok()?;
+        let profile_root = match Self::resolve_profile_root(host) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("[doubaowork][claim] 实时 Cookie：profile root 解析失败: {e}");
+                return None;
+            }
+        };
         let profile_dir = profile_root.join(Self::active_profile_name(&profile_root));
-        let header = Self::read_client_cookie_header(&profile_dir).ok()?;
-        let normalized = normalize_cookie_header(&header).ok()?;
-        (!normalized.is_empty()).then_some(normalized)
+        let header = match Self::read_client_cookie_header(&profile_dir) {
+            Ok(header) => header,
+            Err(e) => {
+                eprintln!("[doubaowork][claim] 实时 Cookie：读取失败（{e}），回退快照");
+                return None;
+            }
+        };
+        match normalize_cookie_header(&header) {
+            Ok(normalized) if !normalized.is_empty() => Some(normalized),
+            Ok(_) => {
+                eprintln!("[doubaowork][claim] 实时 Cookie：归一化后为空，回退快照");
+                None
+            }
+            Err(e) => {
+                eprintln!("[doubaowork][claim] 实时 Cookie：归一化失败（{e}），回退快照");
+                None
+            }
+        }
     }
 
     /// 从订阅列表响应中取「活动赠送套餐」的最大天数。
@@ -1980,6 +2008,13 @@ impl ToolAdapter for DoubaoWorkAdapter {
         Some(Self::read_last_user(&profile_root).is_none())
     }
 
+    /// 设备维度每日额度 key：签到活动按「设备」限制每日一次（真机实证 2026-11-28，
+    /// 见 claim_daily 的 710010702 归因注释）。标记存于本机 DB，固定 key 即表达
+    /// 「这台机器的豆包客户端」，冷切批量领取靠它跳过当日剩余账号。
+    fn daily_claim_device_key(&self) -> Option<String> {
+        Some("doubaowork_desktop_client".to_string())
+    }
+
     fn detect_local_active_uid(&self, host: &dyn PlatformHost) -> Option<String> {
         let profile_root = Self::resolve_profile_root(host).ok()?;
         // 多账号客户端：当前账号在 `Local State.profile.last_used` 指定的 profile 里
@@ -2169,9 +2204,21 @@ impl ToolAdapter for DoubaoWorkAdapter {
         // 正在使用的 sid）；快照 Cookie 仅作回退，快照缺失时保留原错误语义。
         // 走到这里时本地在登校验已通过（客户端就是本账号），实时库里的会话必然
         // 属于本账号。
+        let snapshot_cookie = Self::extract_cookie(cred);
         let cookie = match self.live_client_cookie() {
-            Some(live) => live,
-            None => Self::extract_cookie(cred)?,
+            Some(live) => {
+                let snap_len = snapshot_cookie.as_ref().map(|c| c.len()).unwrap_or(0);
+                let differs = snapshot_cookie.as_ref().map(|c| *c != live).unwrap_or(true);
+                eprintln!(
+                    "[doubaowork][claim] 使用客户端实时 Cookie（len={}，快照 len={snap_len}，与快照不同={differs}）",
+                    live.len()
+                );
+                live
+            }
+            None => {
+                eprintln!("[doubaowork][claim] 未取得实时 Cookie，使用快照 Cookie");
+                snapshot_cookie?
+            }
         };
 
         // 签到写接口会核对「设备 + 桌面端当前登录账号」：网页登录导入的其他账号
@@ -2290,18 +2337,20 @@ impl ToolAdapter for DoubaoWorkAdapter {
             .await
         {
             Ok(res) => Ok(res),
-            Err(
-                err @ AdapterError::Unified {
-                    code: UnifiedErrorCode::UnsupportedCapability,
-                    ..
-                },
-            ) => {
+            Err(AdapterError::Unified {
+                code: UnifiedErrorCode::UnsupportedCapability,
+                ..
+            }) => {
                 // 710010702 有两种成因（真机文档 §五.2）：设备/账号绑定未就绪 vs 活动
                 // 试用天数超限。前置 trial 检查若瞬时失败会静默跳过，这里失败后再归因
                 // 一次：超限 → 转为明确的「不可领」说明（跳过，不再反复撞写接口）；
                 // 未超限/未知 → 保持原错误，由调度器退避重试（每次重试都会重新读取
                 // 实时 Cookie）。
-                if let Some(days) = self.fetch_campaign_trial_days(&cookie, cred).await {
+                let trial = self.fetch_campaign_trial_days(&cookie, cred).await;
+                eprintln!(
+                    "[doubaowork][claim] 710010702 归因：trial_days={trial:?}（Some(>上限)=超限，None=订阅接口判定失败）"
+                );
+                if let Some(days) = trial {
                     if Self::campaign_trial_capped(days) {
                         return Ok(ClaimResult {
                             claimed: false,
@@ -2312,7 +2361,15 @@ impl ToolAdapter for DoubaoWorkAdapter {
                         });
                     }
                 }
-                Err(err)
+                // 真机实证（2026-11-28）：该活动按「设备」限制每日一次——本设备任一
+                // 账号签到成功后，其他账号当天无论走 Qwitch 还是在客户端内手动签到
+                // 都会被拒 710010702，属确定性拒绝：重试/换 Cookie/冷切均无效。
+                // 转为明确的「不可领」跳过（调度器的设备标记会让剩余账号直接跳过）。
+                Ok(ClaimResult {
+                    claimed: false,
+                    reward_summary: "今日签到不可领（服务端 710010702）：该活动按设备限制每日一次——本设备今天已有账号签到成功，或该账号未获活动资格；在豆包客户端内手动签到同样会被拒绝，明日资格刷新后可再试".into(),
+                    updated_quota: None,
+                })
             }
             Err(err) => Err(err),
         }

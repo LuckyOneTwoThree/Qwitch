@@ -685,6 +685,7 @@ impl AntiRiskScheduler {
         let mut claimed_count: usize = 0;
         let mut skipped_count: usize = 0;
         let mut failed_count: usize = 0;
+        let mut device_limit_skipped_count: usize = 0;
         let mut switch_failed: Vec<String> = Vec::new();
 
         for (idx, account_id) in account_ids.iter().enumerate() {
@@ -763,6 +764,34 @@ impl AntiRiskScheduler {
                 continue;
             }
 
+            // 设备级每日额度：豆包签到活动按「设备」限制每日一次（真机实证：本设备
+            // 任一账号签到成功后，其他账号当天在客户端内手动签到也会被拒 710010702）。
+            // 已有账号领过就直接跳过剩余账号，避免无意义的反复冷切撞墙。
+            let device_marker_key = adapter
+                .daily_claim_device_key_for(&cred)
+                .as_deref()
+                .map(|key| device_claim_marker_key(&summary.tool_id, key));
+            if device_marker_key
+                .as_ref()
+                .is_some_and(|key| device_claim_limit_used_today(db, key))
+            {
+                skipped_count += 1;
+                device_limit_skipped_count += 1;
+                let _ = db.append_action_log(
+                    Some(&summary.id),
+                    &summary.tool_id,
+                    "claim",
+                    "skipped",
+                    None,
+                    &format!(
+                        "{} 所属设备今天已有豆包账号完成签到（该活动按设备每日一次），已跳过",
+                        summary.label
+                    ),
+                );
+                sink.emit_account_updated(&summary.id);
+                continue;
+            }
+
             if !already_active {
                 sink.emit_batch_progress(BatchProgressEvent {
                     action: "claim".into(),
@@ -834,6 +863,10 @@ impl AntiRiskScheduler {
                     if result.claimed {
                         claimed_count += 1;
                         let _ = db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
+                        // 领取成功即占用本设备今日签到资格，剩余账号次日再试
+                        if let Some(key) = device_marker_key.as_deref() {
+                            remember_device_claim_limit(db, key);
+                        }
                     } else {
                         skipped_count += 1;
                         // 与网络批量对齐：上游幂等确认「今日已签」时补写签到标记，
@@ -932,8 +965,13 @@ impl AntiRiskScheduler {
         } else {
             format!("（{} 个账号冷切失败）", switch_failed.len())
         };
+        let device_note = if device_limit_skipped_count > 0 {
+            format!("，设备日额度限制跳过 {device_limit_skipped_count} 个账号")
+        } else {
+            String::new()
+        };
         let summary_text = format!(
-            "冷切领取完成：成功 {claimed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个{switch_note}"
+            "冷切领取完成：成功 {claimed_count} 个，跳过 {skipped_count} 个，异常 {failed_count} 个{switch_note}{device_note}"
         );
         sink.emit_batch_progress(BatchProgressEvent {
             action: "claim".into(),

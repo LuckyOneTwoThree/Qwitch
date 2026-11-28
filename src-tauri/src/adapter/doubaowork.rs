@@ -1244,6 +1244,21 @@ impl DoubaoWorkAdapter {
         Some(Self::max_campaign_trial_days(data))
     }
 
+    /// 读取客户端 Cookies 库中「当前在登 profile」的实时 Cookie。
+    ///
+    /// 快照里的 decrypted_token.txt 是导入时抓取的静态副本，客户端在之后的使用中
+    /// 可能已经轮换 session；签到写接口的「设备↔当前会话」绑定跟随客户端正在使用
+    /// 的 sid，因此领取时应优先使用实时会话。读取失败（Windows DPAPI、库被锁、
+    /// 解密失败）由调用方回退到快照 Cookie。
+    fn live_client_cookie(&self) -> Option<String> {
+        let host = self.host.as_deref()?;
+        let profile_root = Self::resolve_profile_root(host).ok()?;
+        let profile_dir = profile_root.join(Self::active_profile_name(&profile_root));
+        let header = Self::read_client_cookie_header(&profile_dir).ok()?;
+        let normalized = normalize_cookie_header(&header).ok()?;
+        (!normalized.is_empty()).then_some(normalized)
+    }
+
     /// 从订阅列表响应中取「活动赠送套餐」的最大天数。
     ///
     /// 只统计 `campaign_infos[].display_duration_days` 且
@@ -2150,7 +2165,14 @@ impl ToolAdapter for DoubaoWorkAdapter {
         cred: &CredentialEnvelope,
         precheck: Option<&QuotaSnapshot>,
     ) -> Result<ClaimResult, AdapterError> {
-        let cookie = Self::extract_cookie(cred)?;
+        // 优先用客户端 Cookies 库的实时会话（服务端的「设备↔会话」绑定跟随客户端
+        // 正在使用的 sid）；快照 Cookie 仅作回退，快照缺失时保留原错误语义。
+        // 走到这里时本地在登校验已通过（客户端就是本账号），实时库里的会话必然
+        // 属于本账号。
+        let cookie = match self.live_client_cookie() {
+            Some(live) => live,
+            None => Self::extract_cookie(cred)?,
+        };
 
         // 签到写接口会核对「设备 + 桌面端当前登录账号」：网页登录导入的其他账号
         // 即使 landing 投放了签到卡片，写接口也只会稳定返回 710010702 系统错误。
@@ -2263,8 +2285,37 @@ impl ToolAdapter for DoubaoWorkAdapter {
         // 写接口：`landing/checkin`。
         // 官方客户端 2.37.19 的侧边栏签到按钮（`s2-ug-sidebar-popup-host`）就是调它；
         // 之前以为它已废弃是误判——它在超限账号上恒报 710010702，在正常账号上可用。
-        self.post_landing_checkin_claim(&cookie, cred, precheck, current_days)
+        match self
+            .post_landing_checkin_claim(&cookie, cred, precheck, current_days)
             .await
+        {
+            Ok(res) => Ok(res),
+            Err(
+                err @ AdapterError::Unified {
+                    code: UnifiedErrorCode::UnsupportedCapability,
+                    ..
+                },
+            ) => {
+                // 710010702 有两种成因（真机文档 §五.2）：设备/账号绑定未就绪 vs 活动
+                // 试用天数超限。前置 trial 检查若瞬时失败会静默跳过，这里失败后再归因
+                // 一次：超限 → 转为明确的「不可领」说明（跳过，不再反复撞写接口）；
+                // 未超限/未知 → 保持原错误，由调度器退避重试（每次重试都会重新读取
+                // 实时 Cookie）。
+                if let Some(days) = self.fetch_campaign_trial_days(&cookie, cred).await {
+                    if Self::campaign_trial_capped(days) {
+                        return Ok(ClaimResult {
+                            claimed: false,
+                            reward_summary: format!(
+                                "活动试用天数已达上限（当前 {days} 天 / 上限 {CAMPAIGN_TRIAL_CAP_DAYS} 天），套餐到期后可再签"
+                            ),
+                            updated_quota: None,
+                        });
+                    }
+                }
+                Err(err)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// 豆包工作 Cookie 轻量保活与 `Set-Cookie` 续期回写：

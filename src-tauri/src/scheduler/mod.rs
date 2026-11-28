@@ -809,7 +809,9 @@ impl AntiRiskScheduler {
             // - Ok(claimed=false) 且提示「暂不支持每日签到」：可能是切号后 v3
             //   活动数据未就绪的瞬时态，同样重查；「已签过」「试用上限」不重查。
             if !already_active {
-                for wait_ms in [2000u64, 4000u64] {
+                // 冷切拉起后客户端要完成启动 + 登录同步（Cookie 可能轮换），
+                // 每次重试都会经 claim_daily 重新读取实时 Cookie，窗口给足。
+                for wait_ms in [3000u64, 6000u64] {
                     let needs_retry = match &claim_res {
                         Err(crate::adapter::AdapterError::Unified {
                             code: UnifiedErrorCode::UnsupportedCapability,

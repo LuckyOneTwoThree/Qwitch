@@ -3,6 +3,16 @@ import { useLogStore } from "./useLogStore";
 import { useSettingsStore } from "./useSettingsStore";
 import { useFeedbackStore } from "./useFeedbackStore";
 import { useAccountStore } from "./useAccountStore";
+import { useApiProviderStore } from "./useApiProviderStore";
+import type {
+  AddApiProviderKeyInput,
+  ApiManualModelEntry,
+  ApiProviderRecord,
+  ApiProviderTestInput,
+  ApiProviderTestResult,
+  SaveApiProviderInput,
+  UpdateApiProviderKeyInput,
+} from "../types/apiProvider";
 import type {
   AccountSummary,
   ActionLogCleanupRequest,
@@ -102,6 +112,14 @@ interface QwitchContextValue {
     silent?: boolean;
   }) => Promise<AppUpdateInfo | null>;
   resetSettingsDrafts: () => void;
+  apiProviders: ApiProviderRecord[];
+  saveApiProvider: (input: SaveApiProviderInput) => Promise<ApiProviderRecord | null>;
+  deleteApiProvider: (id: string) => Promise<boolean>;
+  toggleApiProvider: (id: string, enabled: boolean) => Promise<void>;
+  testApiProvider: (input: ApiProviderTestInput) => Promise<ApiProviderTestResult>;
+  addApiProviderKey: (input: AddApiProviderKeyInput) => Promise<AccountSummary | null>;
+  updateApiProviderKey: (input: UpdateApiProviderKeyInput) => Promise<AccountSummary | null>;
+  saveApiProviderModels: (id: string, models: ApiManualModelEntry[]) => Promise<boolean>;
 }
 
 const QwitchContext = createContext<QwitchContextValue | null>(null);
@@ -221,8 +239,26 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
     launchToolClient,
     captureLocalSession,
     deleteAccount,
+    refreshAccounts,
     quitApp,
   } = accountStore;
+
+  const {
+    apiProviders,
+    saveApiProvider,
+    deleteApiProvider,
+    toggleApiProvider,
+    testApiProvider,
+    addApiProviderKey,
+    updateApiProviderKey,
+    saveApiProviderModels,
+  } = useApiProviderStore({
+    isTauriRuntime,
+    isTrayWindow,
+    showToast,
+    refreshAccounts,
+  });
+
   const contextValue = useMemo<QwitchContextValue>(
     () => ({
       isTauriRuntime,
@@ -282,6 +318,14 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       updateError,
       checkAppUpdate,
       resetSettingsDrafts,
+      apiProviders,
+      saveApiProvider,
+      deleteApiProvider,
+      toggleApiProvider,
+      testApiProvider,
+      addApiProviderKey,
+      updateApiProviderKey,
+      saveApiProviderModels,
     }),
     [
       isTauriRuntime,
@@ -341,6 +385,14 @@ export function QwitchProvider({ children }: { children: React.ReactNode }) {
       updateError,
       checkAppUpdate,
       resetSettingsDrafts,
+      apiProviders,
+      saveApiProvider,
+      deleteApiProvider,
+      toggleApiProvider,
+      testApiProvider,
+      addApiProviderKey,
+      updateApiProviderKey,
+      saveApiProviderModels,
     ]
   );
 
@@ -351,4 +403,8 @@ export function useQwitch() {
   const ctx = useContext(QwitchContext);
   if (!ctx) throw new Error("useQwitch must be used within QwitchProvider");
   return ctx;
+}
+
+export function useOptionalQwitch() {
+  return useContext(QwitchContext);
 }

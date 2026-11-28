@@ -31,7 +31,9 @@ import {
   X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { useOptionalQwitch } from "../../context/QwitchContext";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
+import { isApiProviderToolId } from "../../types/apiProvider";
 import {
   TOOL_SHORT_LABELS,
   WIRE_PROTOCOL_META,
@@ -43,8 +45,7 @@ import {
 } from "../../data/mockPoolData";
 import type { AgentBinding, PoolStrategy, TargetAgentId } from "../../types/pool";
 import type { CompatibilityReport } from "../../types/plugin";
-import { AgentBrandIcon } from "../../components/AgentBrandIcon";
-import { ToolBrandIcon } from "../../components/ToolBrandIcon";
+import { AgentBrandIcon, UpstreamMemberIcon } from "../../components/AgentBrandIcon";
 import { CompatibilityBadge } from "../../components/plugins/CompatibilityBadge";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { OverflowMenu } from "../../components/ui/OverflowMenu";
@@ -91,7 +92,6 @@ const DEFAULT_TOOL_ORDER = [
   "lobsterai",
   "doubaowork",
   "codearts",
-  "custom_api_key",
 ] as const;
 
 type ModelQuickFilter = "all" | "checked" | "low_rate" | "flagship";
@@ -177,6 +177,21 @@ export function AgentBindingsView({
   highlightAgentId?: TargetAgentId | null;
   onOpenPluginSettings?: () => void;
 }) {
+  const qwitchCtx = useOptionalQwitch();
+  const apiProviders = useMemo(
+    () => qwitchCtx?.apiProviders ?? [],
+    [qwitchCtx?.apiProviders]
+  );
+  const apiProviderMap = useMemo(
+    () => new Map(apiProviders.map((p) => [p.id, p])),
+    [apiProviders]
+  );
+  const resolveToolName = useMemo(
+    () => (tid: string) =>
+      apiProviderMap.get(tid)?.name ?? TOOL_SHORT_LABELS[tid] ?? tid,
+    [apiProviderMap]
+  );
+
   const {
     gateway,
     pools,
@@ -291,13 +306,16 @@ export function AgentBindingsView({
     [agentBindings, selectedAgentId]
   );
 
-  // 动态收敛工具顺序：有账号的工具排在前面，方便一眼点选
+  // 动态收敛工具顺序：有账号的工具排在前面，并纳入已启用的 API 资产厂商
   const orderedToolIds = useMemo(() => {
     const accountCounts = new Map<string, number>();
     for (const c of candidates) {
       accountCounts.set(c.toolId, (accountCounts.get(c.toolId) ?? 0) + 1);
     }
     const baseSet = new Set<string>(DEFAULT_TOOL_ORDER);
+    for (const p of apiProviders) {
+      if (p.enabled) baseSet.add(p.id);
+    }
     for (const tid of accountCounts.keys()) {
       baseSet.add(tid);
     }
@@ -312,7 +330,7 @@ export function AgentBindingsView({
       if (ib !== -1) return 1;
       return a.localeCompare(b);
     });
-  }, [candidates]);
+  }, [candidates, apiProviders]);
 
   const activeToolId = useMemo(
     () =>
@@ -463,10 +481,6 @@ export function AgentBindingsView({
         : [],
     [activeBinding, activeToolId, getAgentToolAccounts]
   );
-  // 标准 API（custom_api_key）是「通用 API Key」兜底工具：未配置该账号时，
-  // 模型勾选 / 调度编排不会产生任何路由效果——必须明示，而不是摆出完整交互
-  const standardApiUnconfigured =
-    activeToolId === "custom_api_key" && (toolAccounts?.length ?? 0) === 0;
 
   const [customModelWire, setCustomModelWire] = useState<string>("");
 
@@ -479,9 +493,9 @@ export function AgentBindingsView({
     }
     return toolModelOptions.slice(0, 6).map((m) => ({
       wireId: formatScopedModelId(activeToolId, m.id),
-      label: `${TOOL_SHORT_LABELS[activeToolId] ?? activeToolId} · ${m.displayName}`,
+      label: `${resolveToolName(activeToolId)} · ${m.displayName}`,
     }));
-  }, [activeExposedModels, toolModelOptions, activeToolId]);
+  }, [activeExposedModels, toolModelOptions, activeToolId, resolveToolName]);
 
   const effectiveCustomWire = useMemo(() => {
     if (customExportModels.some((m) => m.wireId === customModelWire)) {
@@ -558,7 +572,7 @@ export OPENAI_API_KEY=${resolvedGatewayToken}
 export ANTHROPIC_BASE_URL=http://${gateway.host}:${gateway.port}
 export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
 
-  const activeToolName = TOOL_SHORT_LABELS[activeToolId] ?? activeToolId;
+  const activeToolName = resolveToolName(activeToolId);
   // 该工具的账号是否全部为「本机只读凭据」：这类账号不参与网关，勾选模型不会生效
   const toolAccountsForScope = candidates.filter((c) => c.toolId === activeToolId);
   const scopeReadonly = isToolScopeReadonly(candidates, activeToolId);
@@ -616,7 +630,7 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
         >
           {orderedToolIds.map((toolId) => {
             const isActive = toolId === activeToolId;
-            const toolName = TOOL_SHORT_LABELS[toolId] ?? toolId;
+            const toolName = resolveToolName(toolId);
             const totalToolModels = getAgentToolModelOptions(toolId).length;
             const selectedToolCount = getAgentToolEnabledModelIds(
               activeBinding.agentId,
@@ -664,7 +678,7 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
                       : "bg-white/80 text-zinc-600 ring-1 ring-zinc-200/80 hover:bg-zinc-100 dark:bg-zinc-900/60 dark:text-zinc-400 dark:ring-zinc-800 dark:hover:bg-zinc-800"
                 }`}
               >
-                <ToolBrandIcon toolId={toolId} size="xs" decorative />
+                <UpstreamMemberIcon toolId={toolId} size="xs" />
                 <span>{toolName}</span>
                 {compat?.level === "compatible" ? (
                   <span
@@ -1369,11 +1383,9 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
           {/* 分区 1：模型配置（全宽订阅模型列表 + 底部实时预览） */}
           {subTab === "models" && (
             <div className="space-y-2.5">
-              {standardApiUnconfigured && (
+              {isApiProviderToolId(activeToolId) && toolAccounts.length === 0 && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] p-3 text-xs text-amber-800 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200">
-                  标准 API 是「通用 API Key」兜底工具，当前尚未配置该账号：请先到
-                  「账号资产 → 添加账号 → 通用 API Key」填写 Base URL 与 Key。未配置
-                  账号时，此处的模型勾选与调度编排不会产生任何路由效果。
+                  当前 API 厂商尚未添加 API Key：请先到「API 资产」为「{activeToolName}」添加至少一把 Key。
                 </div>
               )}
               <section
@@ -1796,10 +1808,9 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
           {/* 分区 2：账号调度（紧凑策略分段 + 主备顺位队列） */}
           {subTab === "scheduling" && (
             <div className="space-y-3">
-              {standardApiUnconfigured && (
+              {isApiProviderToolId(activeToolId) && toolAccounts.length === 0 && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] p-3 text-xs text-amber-800 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200">
-                  标准 API 尚未配置「通用 API Key」账号：请先到「账号资产 → 添加账号 →
-                  通用 API Key」完成配置；此处的调度编排与主备顺位在配置账号前不会生效。
+                  当前 API 厂商尚未添加 API Key：请先到「API 资产」添加 Key 后，即可在此编排多 Key 主备与轮询。
                 </div>
               )}
               <section

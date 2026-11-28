@@ -164,8 +164,10 @@ fn account_status_to_str(status: &AccountStatus) -> &'static str {
 }
 
 fn format_quota_stats(summary: &crate::domain::AccountSummary) -> (u8, String) {
-    if summary.tool_id == "custom_api_key" {
-        return (100, "按量计费 API Key".to_string());
+    if crate::domain::is_api_provider_tool_id(&summary.tool_id)
+        || summary.tool_id == "custom_api_key"
+    {
+        return (100, "API 密钥".to_string());
     }
     if let Some(q) = &summary.latest_quota {
         if let Some(b) = q.buckets.first() {
@@ -410,6 +412,12 @@ impl QwitchDatabase {
     ) -> Result<Vec<UpstreamAccountCandidate>, StorageError> {
         let accounts = self.list_accounts(None)?;
         let cached_map = self.load_cached_models_map().unwrap_or_default();
+        let api_providers_map: HashMap<String, crate::domain::ApiProviderRecord> = self
+            .list_api_providers()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| (p.id.clone(), p))
+            .collect();
         let mut tool_cache: HashMap<String, Vec<UpstreamModelOption>> = HashMap::new();
         let mut out = Vec::with_capacity(accounts.len());
         for acc in accounts {
@@ -427,7 +435,46 @@ impl QwitchDatabase {
             } else {
                 MemberTier::T1Primary
             };
-            let model_options = if let Some(cached) = cached_map.get(&acc.id) {
+            let model_options = if crate::domain::is_api_provider_tool_id(&acc.tool_id) {
+                let mut merged: Vec<UpstreamModelOption> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
+                if let Some(provider) = api_providers_map.get(&acc.tool_id) {
+                    for entry in &provider.manual_models {
+                        let wire_id = entry
+                            .vendor_wire_id
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(entry.id.trim());
+                        let mut opt = crate::domain::normalize_upstream_model(
+                            &acc.tool_id,
+                            wire_id,
+                            entry.display_name.as_deref(),
+                            None,
+                            false,
+                            "manual",
+                        );
+                        if let Some(ctx) = entry.context_window {
+                            opt.context_window = Some(u64::from(ctx));
+                        }
+                        if let Some(max_out) = entry.max_output_tokens {
+                            opt.max_output_tokens = Some(u64::from(max_out));
+                        }
+                        if seen.insert(opt.id.clone()) {
+                            merged.push(opt);
+                        }
+                    }
+                    crate::domain::register_live_wire_ids(&acc.tool_id, &merged);
+                }
+                if let Some(cached) = cached_map.get(&acc.id) {
+                    for opt in cached.iter().cloned().map(crate::domain::enrich_model_meta) {
+                        if seen.insert(opt.id.clone()) {
+                            merged.push(opt);
+                        }
+                    }
+                }
+                merged
+            } else if let Some(cached) = cached_map.get(&acc.id) {
                 // 老缓存里没有 contextWindow/maxOutputTokens：读时补一次，
                 // 不必等 12h TTL 过期或手动刷新才能看到规格
                 cached

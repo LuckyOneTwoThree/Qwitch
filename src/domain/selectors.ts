@@ -7,6 +7,7 @@ import type {
 } from "../types/qwitch";
 import { getVisibleTools } from "./toolRegistry";
 import { isSameCstDay, toCstDayKey } from "./time";
+import { isApiProviderToolId } from "../types/apiProvider";
 
 // CST 日界计算已收敛到 domain/time.ts，此处转出以保持既有引用不变。
 export { isSameCstDay, toCstDayKey };
@@ -122,7 +123,9 @@ export function selectScopeAccounts(
   accounts: AccountSummary[],
   activeToolFilter?: ToolId
 ): AccountSummary[] {
-  if (!activeToolFilter) return accounts;
+  if (!activeToolFilter) {
+    return accounts.filter((a) => !isApiProviderToolId(a.toolId));
+  }
   return accounts.filter((a) => a.toolId === activeToolFilter);
 }
 

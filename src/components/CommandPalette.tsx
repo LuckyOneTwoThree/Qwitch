@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
 import { CornerDownLeft, Search } from "lucide-react";
 import { ToolBrandIcon } from "./ToolBrandIcon";
@@ -106,9 +107,9 @@ export function CommandPalette({
 
   let cursor = -1;
 
-  return (
+  const content = (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-zinc-950/25 px-4 pt-[12vh] backdrop-blur-[2px]"
+      className="fixed inset-0 z-[60] flex items-start justify-center bg-zinc-950/25 px-4 pt-[12vh] backdrop-blur-[2px]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -203,4 +204,6 @@ export function CommandPalette({
       </div>
     </div>
   );
+
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 }

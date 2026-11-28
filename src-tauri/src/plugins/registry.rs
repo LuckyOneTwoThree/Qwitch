@@ -2,8 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use crate::domain::{AuthMethod, WireProtocolKind};
-use crate::plugins::egress::{create_builtin_egress_transports, EgressTransport};
+use crate::domain::{is_api_provider_tool_id, ApiProviderRecord, AuthMethod, WireProtocolKind};
+use crate::plugins::egress::{
+    create_builtin_egress_transports, EgressTransport, StandardHttpEgress,
+};
 use crate::plugins::ingress::{create_builtin_ingress_plugins, IngressPlugin};
 use crate::plugins::manifest::{
     EgressAccountCapabilities, EgressConstraints, EgressProfile, EgressProvides, IngressOptional,
@@ -33,6 +35,7 @@ static GLOBAL_EGRESS_PROFILES: RwLock<Option<HashMap<String, EgressProfile>>> = 
 static GLOBAL_EGRESS_TRANSPORTS: RwLock<Option<HashMap<String, Arc<dyn EgressTransport>>>> =
     RwLock::new(None);
 static GLOBAL_DISABLED_PLUGINS: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+static GLOBAL_TOOL_DISPLAY_NAMES: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
 
 fn egress_manifest(
     id: &str,
@@ -105,7 +108,7 @@ fn standard_egress_provides() -> EgressProvides {
 
 pub fn builtin_default_manifests() -> Vec<PluginManifest> {
     vec![
-        // --- 8 Builtin Egress Plugins ---
+        // --- 7 Builtin Egress Plugins ---
         egress_manifest(
             "trae_cn",
             "Trae CN",
@@ -300,33 +303,6 @@ pub fn builtin_default_manifests() -> Vec<PluginManifest> {
                     must_stream: true,
                     ..Default::default()
                 },
-                declarative_http: None,
-                default_models: Vec::new(),
-            },
-        ),
-        egress_manifest(
-            "custom_api_key",
-            "标准 API Key",
-            "通用 OpenAI / Anthropic API Key 兜底",
-            "/icons/qwitch.svg",
-            "#71717a",
-            EgressProfile {
-                wire_protocols: vec![
-                    WireProtocolKind::OpenaiChat,
-                    WireProtocolKind::AnthropicMessages,
-                    WireProtocolKind::OpenaiResponses,
-                ],
-                auth_methods: vec![AuthMethod::TokenPaste],
-                account_capabilities: EgressAccountCapabilities {
-                    concurrent_with_desktop_client: true,
-                    ..Default::default()
-                },
-                provides: EgressProvides {
-                    vision: true,
-                    encrypted_reasoning: true,
-                    ..standard_egress_provides()
-                },
-                constraints: EgressConstraints::default(),
                 declarative_http: None,
                 default_models: Vec::new(),
             },
@@ -689,6 +665,81 @@ impl PluginRegistry {
         self.egress_profile(tool_id)
             .is_some_and(|p| p.account_capabilities.concurrent_with_desktop_client)
     }
+
+    /// 将 SQLite 中的用户级 API 厂商配置热同步进插件注册表（`api_<slug>`）。
+    pub fn sync_api_providers(&mut self, providers: &[ApiProviderRecord]) {
+        let old_ids: Vec<String> = self
+            .records
+            .keys()
+            .filter(|id| is_api_provider_tool_id(id))
+            .cloned()
+            .collect();
+        for id in old_ids {
+            self.records.remove(&id);
+            self.egress_transports.remove(&id);
+        }
+
+        for p in providers {
+            let extra_headers: Vec<(String, String)> = p
+                .extra_headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let transport = StandardHttpEgress::new(p.id.clone(), p.base_url.clone())
+                .with_headers(extra_headers)
+                .with_protocol(p.wire_protocol)
+                .with_auth(p.auth_scheme, p.auth_header_name.clone())
+                .with_allow_lan_http(p.allow_lan_http);
+            self.egress_transports
+                .insert(p.id.clone(), Arc::new(transport));
+
+            let profile = EgressProfile {
+                wire_protocols: vec![p.wire_protocol],
+                auth_methods: vec![AuthMethod::TokenPaste],
+                account_capabilities: EgressAccountCapabilities {
+                    concurrent_with_desktop_client: true,
+                    ..Default::default()
+                },
+                provides: EgressProvides {
+                    vision: true,
+                    encrypted_reasoning: true,
+                    ..standard_egress_provides()
+                },
+                constraints: EgressConstraints::default(),
+                declarative_http: None,
+                default_models: p.manual_models.iter().map(|m| m.id.clone()).collect(),
+            };
+            let manifest = PluginManifest {
+                schema_version: 2,
+                id: p.id.clone(),
+                name: p.name.clone(),
+                version: "1.0.0".to_string(),
+                kind: PluginKind::Egress,
+                transport: PluginTransport::Declarative,
+                platforms: Vec::new(),
+                brand: PluginBrand {
+                    short_tagline: format!("API · {}", p.name),
+                    tagline: Some(p.base_url.clone()),
+                    icon: p.icon.clone(),
+                    accent_color: p.accent_color.clone(),
+                },
+                entry: None,
+                egress_profile: Some(profile),
+                ingress_profile: None,
+            };
+            self.records.insert(
+                p.id.clone(),
+                PluginRecord {
+                    manifest,
+                    source: PluginSource::Builtin,
+                    enabled: p.enabled,
+                    pinned_hash: None,
+                    overrides_builtin: false,
+                    plugin_dir: None,
+                },
+            );
+        }
+    }
 }
 
 fn canonical_tool_lookup_key(tool_id: &str) -> &str {
@@ -705,7 +756,9 @@ pub fn sync_global_registry_snapshot(registry: &PluginRegistry) {
     let mut profile_map = HashMap::new();
     let mut transport_map = HashMap::new();
     let mut disabled_set = HashSet::new();
+    let mut name_map = HashMap::new();
     for rec in registry.records.values() {
+        name_map.insert(rec.manifest.id.clone(), rec.manifest.name.clone());
         if !rec.enabled {
             disabled_set.insert(rec.manifest.id.clone());
             continue;
@@ -737,6 +790,22 @@ pub fn sync_global_registry_snapshot(registry: &PluginRegistry) {
             .unwrap_or_else(|e| e.into_inner());
         *guard = Some(disabled_set);
     }
+    {
+        let mut guard = GLOBAL_TOOL_DISPLAY_NAMES
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(name_map);
+    }
+}
+
+pub fn global_plugin_display_name(tool_id: &str) -> Option<String> {
+    let key = canonical_tool_lookup_key(tool_id);
+    if let Ok(guard) = GLOBAL_TOOL_DISPLAY_NAMES.read() {
+        if let Some(map) = guard.as_ref() {
+            return map.get(tool_id).or_else(|| map.get(key)).cloned();
+        }
+    }
+    None
 }
 
 pub fn global_is_plugin_enabled(plugin_id: &str) -> bool {
@@ -801,8 +870,7 @@ pub fn is_registered_egress_id(id: &str) -> bool {
             | "lobsterai"
             | "doubaowork"
             | "codearts"
-            | "custom_api_key"
-    )
+    ) || is_api_provider_tool_id(id)
 }
 
 pub fn global_egress_profile(tool_id: &str) -> Option<EgressProfile> {

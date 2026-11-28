@@ -118,7 +118,12 @@ fn list_dtos(state: &AppState) -> Result<Vec<PluginItemDto>, String> {
         .plugins
         .read()
         .map_err(|_| "插件注册表锁异常".to_string())?;
-    Ok(reg.list_all().into_iter().map(record_to_dto).collect())
+    Ok(reg
+        .list_all()
+        .into_iter()
+        .filter(|r| !crate::domain::is_api_provider_tool_id(&r.manifest.id))
+        .map(record_to_dto)
+        .collect())
 }
 
 #[tauri::command]

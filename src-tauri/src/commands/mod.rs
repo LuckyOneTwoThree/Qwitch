@@ -1,4 +1,5 @@
 mod accounts;
+mod api_providers;
 mod logs;
 mod oauth;
 mod plugins;
@@ -8,6 +9,7 @@ mod settings;
 mod switch;
 
 pub use accounts::*;
+pub use api_providers::*;
 pub use logs::*;
 pub use oauth::*;
 pub use plugins::*;

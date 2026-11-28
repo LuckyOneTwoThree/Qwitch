@@ -32,4 +32,13 @@ describe("ToastViewport", () => {
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  it("portals default toast viewport to document.body at z-[120] above modals", () => {
+    currentToast = { id: 3, message: "above modal", tone: "warning" };
+    const { container } = render(<ToastViewport />);
+    expect(container.firstChild).toBeNull();
+    const region = document.body.querySelector('[aria-live="polite"]') as HTMLElement | null;
+    expect(region).toBeTruthy();
+    expect(region?.className).toContain("z-[120]");
+  });
 });

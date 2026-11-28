@@ -48,14 +48,15 @@
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  Egress Plugins（出口 / 订阅与上游插件）                                    │
 │  • 默认内置：trae_cn · workbuddy · qoder_cn · minimax_code_cn · lobsterai  │
-│              doubaowork · codearts · custom_api_key                        │
+│              doubaowork · codearts                                         │
+│  • 用户级声明式 API 资产（`api_<slug>`，存 SQLite `api_providers` 热同步） │
 │  • 外部扩展：codex_sub · 社区订阅插件 · 单文件打包的 OpenCode 薄包装插件    │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.1 不可妥协的 4 条内核铁律
-1. **内置与外部平权**：现有 7+1 个出口与 6 个入口全部封装为内置默认插件，与外部插件实现同一套 `PluginManifest` 与 Trait 契约，统一受 `PluginRegistry` 管理。
-2. **热生效注册表**：将 `AppState.adapters` 升级为 `plugins: Arc<RwLock<PluginRegistry>>`，增删/启停/覆盖插件无需重启应用，网关与调度器实时读取最新快照。
+1. **内置与外部平权**：现有 7 个内置订阅出口、用户级声明式 API 出口（`api_<slug>`）与 6 个入口全部统一受 `PluginRegistry` 管理，实现同一套 `PluginManifest` 与 Trait 契约。
+2. **热生效注册表**：将 `AppState.adapters` 升级为 `plugins: Arc<RwLock<PluginRegistry>>`，增删/启停/覆盖插件及变更 `api_providers` 无需重启应用，网关与调度器实时读取最新快照（API 厂商由「API 资产」页独立管理，不与插件中心混淆）。
 3. **零明文凭据落盘**：严禁外部插件自建明文 auth 文件；所有凭据由 Rust 内核从 AES-256-GCM 加密的 `qwitch.db` 按需解密后通过内存通道单次注入，刷新后的新 Token 通过 `auth_refreshed` 事件回传 Rust 单飞落盘。
 4. **安全基线继承**：所有可执行子进程插件强制走目录 SHA-256 哈希钉扎、原生系统弹窗一次性信任票据、受控解释器白名单与环境变量白名单。
 

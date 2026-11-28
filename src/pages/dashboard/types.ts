@@ -2,6 +2,7 @@ import type { ActionLogItem, ToolId } from "../../types/qwitch";
 
 export type NavSection =
   | "all"
+  | "api_assets"
   | "pools"
   | "agents"
   | "routing"

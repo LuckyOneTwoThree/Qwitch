@@ -8,6 +8,7 @@ import {
   Download,
   Globe,
   HardDriveDownload,
+  KeyRound,
   Layers,
   LayoutGrid,
   LayoutList,
@@ -81,6 +82,8 @@ import { LogsPanel, LogsToolbar } from "./dashboard/LogsView";
 import { SettingsView, type SettingsTabId } from "./dashboard/SettingsView";
 import { AgentBindingsView } from "./dashboard/AgentBindingsView";
 import { RoutingTraceView } from "./dashboard/RoutingTraceView";
+import { ApiAssetsView } from "./dashboard/ApiAssetsView";
+import { isApiProviderToolId } from "../types/apiProvider";
 import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import type { TargetAgentId, TrayNavigateTarget } from "../types/pool";
@@ -179,6 +182,7 @@ export function Dashboard({
     isInitializing,
     isTauriRuntime,
     accounts,
+    apiProviders = [],
     logs,
     logScope,
     logStats,
@@ -226,6 +230,7 @@ export function Dashboard({
   const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
   const [confirmQuitOpen, setConfirmQuitOpen] = useState(false);
   const [simModalOpen, setSimModalOpen] = useState(false);
+  const [apiCreateSeq, setApiCreateSeq] = useState(0);
   const [simDefaultPoolId, setSimDefaultPoolId] = useState<string | undefined>(undefined);
   const [simDefaultModelId, setSimDefaultModelId] = useState<string | undefined>(undefined);
   const [highlightAgentId, setHighlightAgentId] = useState<TargetAgentId | null>(null);
@@ -348,23 +353,38 @@ export function Dashboard({
     return [...populated, ...empty];
   }, [visibleTools, accountCountByTool]);
 
+  const subscriptionAccounts = useMemo(
+    () => accounts.filter((a) => !isApiProviderToolId(a.toolId)),
+    [accounts]
+  );
+
+  const apiKeyCount = useMemo(
+    () => accounts.filter((a) => isApiProviderToolId(a.toolId)).length,
+    [accounts]
+  );
+
   // 侧栏只列「已有账号」的工具：0 账号的工具不占导航位（走「导入账号」入口），
   // 但空库时仍完整展示，避免新用户看到一个没有内容的侧栏。
   const sidebarTools = useMemo(
     () =>
       orderedVisibleTools.filter(
-        (t) => (accountCountByTool.get(t.id) ?? 0) > 0 || accounts.length === 0
+        (t) => (accountCountByTool.get(t.id) ?? 0) > 0 || subscriptionAccounts.length === 0
       ),
-    [orderedVisibleTools, accountCountByTool, accounts.length]
+    [orderedVisibleTools, accountCountByTool, subscriptionAccounts.length]
   );
+
+  const isApiAssetsSection = nav === "api_assets" || isApiProviderToolId(nav);
+  const selectedApiProviderId = isApiProviderToolId(nav) ? nav : null;
 
   const activeToolFilter: ToolId | undefined =
     nav !== "all" &&
+    nav !== "api_assets" &&
     nav !== "pools" &&
     nav !== "agents" &&
     nav !== "routing" &&
     nav !== "logs" &&
-    nav !== "settings"
+    nav !== "settings" &&
+    !isApiProviderToolId(nav)
       ? nav
       : undefined;
 
@@ -416,7 +436,8 @@ export function Dashboard({
     nav !== "agents" &&
     nav !== "routing" &&
     nav !== "logs" &&
-    nav !== "settings";
+    nav !== "settings" &&
+    !isApiAssetsSection;
 
   const scopeAccounts = useMemo(
     () => (isAccountSection ? selectScopeAccounts(accounts, activeToolFilter) : []),
@@ -777,6 +798,13 @@ export function Dashboard({
   );
 
   const headerTitle = useMemo(() => {
+    if (isApiAssetsSection) {
+      if (isApiProviderToolId(nav)) {
+        const provider = apiProviders.find((p) => p.id === nav);
+        if (provider) return `${provider.name} · API 资产`;
+      }
+      return "API 资产管理";
+    }
     if (nav === "pools" || nav === "agents") return "Agent 接入与号池调度";
     if (nav === "routing") return "网关路由观测与决策链路";
     if (nav === "logs") return "操作审计日志";
@@ -784,8 +812,8 @@ export function Dashboard({
     if (activeToolMeta) {
       return `${activeToolMeta.name} 账号管理`;
     }
-    return "账号与额度总览";
-  }, [nav, activeToolMeta]);
+    return "订阅账号与额度总览";
+  }, [nav, activeToolMeta, isApiAssetsSection, apiProviders]);
 
   // 副标题不再复述指标条里已经有的数字，改为「指标条没有的信息」：
   // 数据新鲜度与工具覆盖面。
@@ -802,6 +830,9 @@ export function Dashboard({
   }, [scopeAccounts]);
 
   const headerSubtitle = useMemo(() => {
+    if (isApiAssetsSection) {
+      return `${apiProviders.length} 个厂商 · ${apiKeyCount} 把 API Key · 显式协议声明与同厂商多 Key 号池`;
+    }
     if (nav === "pools" || nav === "agents") {
       return `已接入 ${boundAgentCount}/${agentBindings.length} 个目标 Agent · 在每个 Agent 下直接挑选订阅工具模型并编排同工具主备顺位${
         driftedAgentCount > 0 ? ` · ${driftedAgentCount} 个存在配置漂移待修复` : ""
@@ -837,6 +868,9 @@ export function Dashboard({
     adapters.length,
     scopedStats,
     activeToolMeta,
+    isApiAssetsSection,
+    apiProviders.length,
+    apiKeyCount,
   ]);
 
   const isInteractiveTarget = (target: EventTarget | null) => {
@@ -947,7 +981,7 @@ export function Dashboard({
                 >
                   <span className="flex min-w-0 items-center gap-2">
                     <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span className="truncate">账号资产</span>
+                    <span className="truncate">订阅账号</span>
                   </span>
                   <span
                     className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
@@ -956,7 +990,7 @@ export function Dashboard({
                         : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                     }`}
                   >
-                    {accounts.length}
+                    {subscriptionAccounts.length}
                   </span>
                 </button>
 
@@ -985,7 +1019,7 @@ export function Dashboard({
                     <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] bg-zinc-100 text-zinc-500 ring-1 ring-black/6 dark:bg-zinc-800/80 dark:text-zinc-400 dark:ring-white/10">
                       <Layers className="h-2.5 w-2.5" aria-hidden="true" />
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-left">全部账号</span>
+                    <span className="min-w-0 flex-1 truncate text-left">全部订阅</span>
                     <span
                       className={`shrink-0 tabular-nums text-[10.5px] ${
                         nav === "all"
@@ -993,7 +1027,7 @@ export function Dashboard({
                           : "text-zinc-400 dark:text-zinc-500"
                       }`}
                     >
-                      {accounts.length}
+                      {subscriptionAccounts.length}
                     </span>
                   </button>
 
@@ -1038,6 +1072,75 @@ export function Dashboard({
                     );
                   })}
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHighlightAgentId(null);
+                    setNav("api_assets");
+                  }}
+                  aria-current={isApiAssetsSection ? "page" : undefined}
+                  className={`nav-item ${isApiAssetsSection ? "nav-item-active" : ""}`}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <KeyRound className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">API 资产</span>
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                      isApiAssetsSection
+                        ? "bg-brand-600/15 text-brand-800 dark:bg-brand-400/20 dark:text-brand-200"
+                        : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                    }`}
+                  >
+                    {apiKeyCount}
+                  </span>
+                </button>
+
+                {apiProviders.length > 0 && (
+                  <div
+                    role="navigation"
+                    aria-label="API 厂商导航"
+                    className="mt-0.5 mb-1 ml-2 space-y-px border-l border-zinc-200/70 pl-1.5 dark:border-white/[0.08]"
+                  >
+                    {apiProviders.map((provider) => {
+                      const count = accountCountByTool.get(provider.id) ?? 0;
+                      const active = nav === provider.id;
+                      return (
+                        <button
+                          key={provider.id}
+                          type="button"
+                          onClick={() => {
+                            setHighlightAgentId(null);
+                            setNav(provider.id);
+                          }}
+                          aria-current={active ? "page" : undefined}
+                          className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-[11.5px] transition ${
+                            active
+                              ? "bg-zinc-900/[0.055] font-semibold text-zinc-900 dark:bg-white/[0.08] dark:text-zinc-50"
+                              : "text-zinc-500 hover:bg-zinc-900/[0.035] hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-white/[0.05] dark:hover:text-zinc-100"
+                          }`}
+                        >
+                          <span
+                            className="h-2 w-2 shrink-0 rounded-full"
+                            style={{ backgroundColor: provider.accentColor || "#4d6bfe" }}
+                            aria-hidden="true"
+                          />
+                          <span className="min-w-0 flex-1 truncate text-left">{provider.name}</span>
+                          <span
+                            className={`shrink-0 tabular-nums text-[10.5px] ${
+                              active
+                                ? "text-zinc-600 dark:text-zinc-300"
+                                : "text-zinc-400 dark:text-zinc-500"
+                            }`}
+                          >
+                            {count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
 
                 <button
                   type="button"
@@ -1361,7 +1464,37 @@ export function Dashboard({
               </>
             )}
 
-            {(nav === "agents" || nav === "pools") && (
+            {isApiAssetsSection && (
+              <>
+                {selectedApiProviderId && (
+                  <button
+                    type="button"
+                    onClick={() => setNav("api_assets")}
+                    className="btn btn-sm btn-secondary whitespace-nowrap"
+                  >
+                    返回全部厂商
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setNav("agents")}
+                  className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
+                >
+                  <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  去接入 Agent
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setApiCreateSeq((n) => n + 1)}
+                  className="btn btn-sm btn-primary gap-1.5 whitespace-nowrap"
+                >
+                  <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  添加 API 厂商
+                </button>
+              </>
+            )}
+
+          {(nav === "agents" || nav === "pools") && (
               <>
                 <button
                   type="button"
@@ -2067,6 +2200,14 @@ export function Dashboard({
               )}
               </div>
             </>
+          )}
+
+          {isApiAssetsSection && (
+            <ApiAssetsView
+              selectedProviderId={selectedApiProviderId}
+              onSelectProvider={(id) => setNav(id ?? "api_assets")}
+              createTriggerSeq={apiCreateSeq}
+            />
           )}
 
           {(nav === "agents" || nav === "pools") && (

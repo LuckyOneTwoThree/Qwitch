@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { SelectMenu } from "../../components/ui/SelectMenu";
 import { usePoolPrototype } from "../../context/usePoolPrototypeStore";
+import { useOptionalQwitch } from "../../context/QwitchContext";
 import {
   MEMBER_TIER_META,
   TOOL_SHORT_LABELS,
@@ -207,6 +208,16 @@ export function RoutingTraceView({
     };
   }, [traces, candidates]);
 
+  const qwitchCtx = useOptionalQwitch();
+  const apiProviders = useMemo(
+    () => qwitchCtx?.apiProviders ?? [],
+    [qwitchCtx?.apiProviders]
+  );
+  const apiProviderNameMap = useMemo(
+    () => new Map(apiProviders.map((p) => [p.id, p.name])),
+    [apiProviders]
+  );
+
   const toolFilterItems = useMemo(() => {
     const ordered: string[] = [...BUILTIN_TOOL_ORDER];
     const extras = new Set<string>();
@@ -222,7 +233,7 @@ export function RoutingTraceView({
     return allIds
       .map((tid) => ({
         toolId: tid,
-        label: TOOL_SHORT_LABELS[tid] ?? tid,
+        label: apiProviderNameMap.get(tid) ?? TOOL_SHORT_LABELS[tid] ?? tid,
         count: traces.filter((t) => traceMatchesTool(t, tid)).length,
       }))
       .filter(
@@ -231,7 +242,7 @@ export function RoutingTraceView({
           candidates.some((c) => c.toolId === item.toolId) ||
           toolFilter === item.toolId
       );
-  }, [candidates, traces, toolFilter]);
+  }, [candidates, traces, toolFilter, apiProviderNameMap]);
 
   const filteredTraces = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -240,7 +251,11 @@ export function RoutingTraceView({
       if (toolFilter !== "all" && !traceMatchesTool(t, toolFilter)) return false;
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (!q) return true;
-      const toolName = (TOOL_SHORT_LABELS[t.finalToolId] ?? t.finalToolId).toLowerCase();
+      const toolName = (
+        apiProviderNameMap.get(t.finalToolId) ??
+        TOOL_SHORT_LABELS[t.finalToolId] ??
+        t.finalToolId
+      ).toLowerCase();
       return (
         t.poolName.toLowerCase().includes(q) ||
         t.finalAccountLabel.toLowerCase().includes(q) ||
@@ -249,7 +264,7 @@ export function RoutingTraceView({
         toolName.includes(q)
       );
     });
-  }, [traces, agentFilter, toolFilter, statusFilter, search]);
+  }, [traces, agentFilter, toolFilter, statusFilter, search, apiProviderNameMap]);
 
   useEffect(() => {
     if (filteredTraces.length === 0) {

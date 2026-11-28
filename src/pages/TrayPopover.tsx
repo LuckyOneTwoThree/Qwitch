@@ -19,6 +19,7 @@ import {
   Unlink,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
+import { isApiProviderToolId } from "../types/apiProvider";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
@@ -50,7 +51,7 @@ export function TrayPopover({
 }) {
   const {
     adapters,
-    accounts,
+    accounts: allAccounts,
     isInitializing,
     clientStatuses,
     claimDailyBatch,
@@ -67,6 +68,11 @@ export function TrayPopover({
     updateInfo,
     isTauriRuntime,
   } = useQwitch();
+
+  const accounts = useMemo(
+    () => allAccounts.filter((a) => !isApiProviderToolId(a.toolId)),
+    [allAccounts]
+  );
 
   const [trayTab, setTrayTab] = useState<"accounts" | "pools">("accounts");
   const [confirmUnbindAgentId, setConfirmUnbindAgentId] = useState<string | null>(null);

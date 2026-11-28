@@ -1463,19 +1463,50 @@ fn is_workbuddy_channel_blocked(status: u16, body: &str) -> bool {
 #[allow(clippy::type_complexity)]
 const MAX_UPSTREAM_BODY: u64 = 64 * 1024 * 1024;
 
-fn validate_custom_base_url(
+fn is_lan_http_url(raw: &str) -> bool {
+    let Some(rest) = raw.strip_prefix("http://") else {
+        return false;
+    };
+    let host_port = rest.split('/').next().unwrap_or("");
+    let host = host_port
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    if host.ends_with(".local") || host == "host.docker.internal" {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        let octets = ip.octets();
+        return octets[0] == 10
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+            || octets[0] == 127;
+    }
+    false
+}
+
+fn validate_custom_base_url_with_lan(
     label: &str,
     custom_base: Option<String>,
     default_base: String,
+    allow_lan_http: bool,
 ) -> Result<String, String> {
     match custom_base {
         Some(b) => {
             let is_loopback_http = b.starts_with("http://127.0.0.1")
                 || b.starts_with("http://localhost")
                 || b.starts_with("http://[::1]");
-            if !(b.starts_with("https://") || is_loopback_http) {
+            let is_allowed_lan = allow_lan_http && is_lan_http_url(&b);
+            if !(b.starts_with("https://") || is_loopback_http || is_allowed_lan) {
                 return Err(format!(
-                    "账号 {} 的 base_url 非法（仅支持 https 或本机 http）",
+                    "账号 {} 的 base_url 非法（仅支持 https 或本机 http；如需局域网 http 请在该厂商开启「允许局域网 HTTP」）",
                     label
                 ));
             }
@@ -1483,6 +1514,14 @@ fn validate_custom_base_url(
         }
         None => Ok(default_base),
     }
+}
+
+fn validate_custom_base_url(
+    label: &str,
+    custom_base: Option<String>,
+    default_base: String,
+) -> Result<String, String> {
+    validate_custom_base_url_with_lan(label, custom_base, default_base, false)
 }
 
 pub(super) async fn read_bounded_response_text(
@@ -1524,6 +1563,107 @@ fn resolve_upstream_auth_with_default(
     Ok((base_url, token, extra_headers))
 }
 
+pub(crate) struct StandardHttpOptions<'a> {
+    pub default_base: &'a str,
+    pub plugin_headers: &'a [(String, String)],
+    pub explicit_protocol: Option<WireProtocolKind>,
+    pub auth_scheme: crate::domain::ApiAuthScheme,
+    pub auth_header_name: Option<&'a str>,
+    pub allow_lan_http: bool,
+}
+
+impl<'a> StandardHttpOptions<'a> {
+    pub fn default_with_base(default_base: &'a str) -> Self {
+        Self {
+            default_base,
+            plugin_headers: &[],
+            explicit_protocol: None,
+            auth_scheme: crate::domain::ApiAuthScheme::Bearer,
+            auth_header_name: None,
+            allow_lan_http: false,
+        }
+    }
+}
+
+fn resolve_standard_http_auth(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    opts: &StandardHttpOptions<'_>,
+) -> Result<(String, String, Vec<(&'static str, String)>, Vec<(String, String)>), String> {
+    let (token_opt, custom_base, extra_headers) = extract_bearer_and_base_url(cred);
+    let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
+    let mut allow_lan = opts.allow_lan_http;
+    let mut cred_extra_headers: Vec<(String, String)> = Vec::new();
+    if let CredentialPayload::Token { extra, .. } = &cred.payload {
+        if extra.get("allow_lan_http").map(String::as_str) == Some("true") {
+            allow_lan = true;
+        }
+        if let Some(raw_json) = extra.get("extra_headers_json") {
+            if let Ok(map) =
+                serde_json::from_str::<std::collections::HashMap<String, String>>(raw_json)
+            {
+                for (k, v) in map {
+                    if !k.trim().is_empty() && !v.trim().is_empty() {
+                        cred_extra_headers.push((k, v));
+                    }
+                }
+            }
+        }
+    }
+    let base_url = validate_custom_base_url_with_lan(
+        &member.label,
+        custom_base,
+        opts.default_base.to_string(),
+        allow_lan,
+    )?;
+    Ok((base_url, token, extra_headers, cred_extra_headers))
+}
+
+fn apply_standard_http_auth(
+    mut req: reqwest::RequestBuilder,
+    protocol: WireProtocolKind,
+    token: &str,
+    opts: &StandardHttpOptions<'_>,
+) -> reqwest::RequestBuilder {
+    match opts.auth_scheme {
+        crate::domain::ApiAuthScheme::XApiKey => {
+            req = req.header("x-api-key", token);
+            if protocol == WireProtocolKind::AnthropicMessages {
+                req = req.header("anthropic-version", "2023-06-01");
+            }
+            req
+        }
+        crate::domain::ApiAuthScheme::CustomHeader => {
+            let hdr = opts
+                .auth_header_name
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Authorization");
+            if hdr.eq_ignore_ascii_case("authorization") {
+                req.bearer_auth(token)
+            } else {
+                req = req.header(hdr, token);
+                if protocol == WireProtocolKind::AnthropicMessages {
+                    req = req.header("anthropic-version", "2023-06-01");
+                }
+                req
+            }
+        }
+        crate::domain::ApiAuthScheme::Bearer => {
+            if opts.explicit_protocol.is_none() && protocol == WireProtocolKind::AnthropicMessages {
+                req.header("x-api-key", token)
+                    .header("anthropic-version", "2023-06-01")
+            } else {
+                req = req.bearer_auth(token);
+                if protocol == WireProtocolKind::AnthropicMessages {
+                    req = req.header("anthropic-version", "2023-06-01");
+                }
+                req
+            }
+        }
+    }
+}
+
 /// 以流式（SSE）方式向上游发起「与客户端同协议」的请求，返回未读取 body 的响应，
 /// 供调用方在首字节前完成状态判定后直接透传给客户端。
 async fn send_upstream_stream(
@@ -1542,8 +1682,7 @@ async fn send_upstream_stream(
         cred,
         ir_req,
         upstream_model,
-        "https://api.openai.com",
-        &[],
+        StandardHttpOptions::default_with_base("https://api.openai.com"),
     )
     .await
 }
@@ -1553,47 +1692,35 @@ pub(crate) async fn send_standard_http_stream(
     cred: &CredentialEnvelope,
     ir_req: &IrRequest,
     upstream_model: &str,
-    default_base: &str,
-    plugin_headers: &[(String, String)],
+    opts: StandardHttpOptions<'_>,
 ) -> Result<reqwest::Response, String> {
     let client = long_running_http_client();
     let (_, bare) = crate::domain::split_scoped_model_id(upstream_model);
     let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare);
-    let (base_url, token, extra_headers) =
-        resolve_upstream_auth_with_default(member, cred, default_base)?;
-    let base = base_url.trim_end_matches('/');
-    let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
+    let (base_url, token, extra_headers, cred_extra_headers) =
+        resolve_standard_http_auth(member, cred, &opts)?;
+    let protocol = opts
+        .explicit_protocol
+        .unwrap_or_else(|| upstream_model_protocol(&member.tool_id, &wire_model));
     let constraints =
         crate::plugins::registry::global_egress_profile(&member.tool_id).map(|p| p.constraints);
-    let (url, body, auth_x_api_key) = match protocol {
-        WireProtocolKind::AnthropicMessages => (
-            format!("{base}/v1/messages"),
-            to_upstream_anthropic_body(ir_req, &wire_model, true),
-            true,
-        ),
-        WireProtocolKind::OpenaiResponses => (
-            format!("{base}/v1/responses"),
-            to_upstream_openai_responses_body(ir_req, &wire_model, true, constraints.as_ref()),
-            false,
-        ),
-        _ => (
-            format!("{base}/v1/chat/completions"),
-            to_upstream_openai_chat_body(ir_req, &wire_model, true),
-            false,
-        ),
+    let url = crate::domain::build_upstream_endpoint(&base_url, protocol);
+    let body = match protocol {
+        WireProtocolKind::AnthropicMessages => to_upstream_anthropic_body(ir_req, &wire_model, true),
+        WireProtocolKind::OpenaiResponses => {
+            to_upstream_openai_responses_body(ir_req, &wire_model, true, constraints.as_ref())
+        }
+        WireProtocolKind::OpenaiChat => to_upstream_openai_chat_body(ir_req, &wire_model, true),
     };
     let mut req = client
         .post(&url)
         .json(&body)
         .header("Accept", "text/event-stream");
-    if auth_x_api_key {
-        req = req
-            .header("x-api-key", &token)
-            .header("anthropic-version", "2023-06-01");
-    } else {
-        req = req.bearer_auth(&token);
+    req = apply_standard_http_auth(req, protocol, &token, &opts);
+    for (k, v) in opts.plugin_headers {
+        req = req.header(k.as_str(), v.as_str());
     }
-    for (k, v) in plugin_headers {
+    for (k, v) in &cred_extra_headers {
         req = req.header(k.as_str(), v.as_str());
     }
     for (k, v) in &extra_headers {
@@ -3374,8 +3501,7 @@ async fn call_upstream_member(
         cred,
         ir_req,
         upstream_model,
-        "https://api.openai.com",
-        &[],
+        StandardHttpOptions::default_with_base("https://api.openai.com"),
     )
     .await
 }
@@ -3385,44 +3511,32 @@ pub(crate) async fn call_standard_http_buffered(
     cred: &CredentialEnvelope,
     ir_req: &IrRequest,
     upstream_model: &str,
-    default_base: &str,
-    plugin_headers: &[(String, String)],
+    opts: StandardHttpOptions<'_>,
 ) -> Result<(u16, String), String> {
     let client = long_running_http_client();
-    let (base_url, token, extra_headers) =
-        resolve_upstream_auth_with_default(member, cred, default_base)?;
+    let (base_url, token, extra_headers, cred_extra_headers) =
+        resolve_standard_http_auth(member, cred, &opts)?;
     let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
     let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
-    let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
-    let base = base_url.trim_end_matches('/');
+    let protocol = opts
+        .explicit_protocol
+        .unwrap_or_else(|| upstream_model_protocol(&member.tool_id, &wire_model));
     let constraints =
         crate::plugins::registry::global_egress_profile(&member.tool_id).map(|p| p.constraints);
-    let (url, body, auth_is_x_api_key) = match protocol {
-        WireProtocolKind::AnthropicMessages => (
-            format!("{base}/v1/messages"),
-            to_upstream_anthropic_body(ir_req, &wire_model, false),
-            true,
-        ),
-        WireProtocolKind::OpenaiResponses => (
-            format!("{base}/v1/responses"),
-            to_upstream_openai_responses_body(ir_req, &wire_model, false, constraints.as_ref()),
-            false,
-        ),
-        _ => (
-            format!("{base}/v1/chat/completions"),
-            to_upstream_openai_chat_body(ir_req, &wire_model, false),
-            false,
-        ),
+    let url = crate::domain::build_upstream_endpoint(&base_url, protocol);
+    let body = match protocol {
+        WireProtocolKind::AnthropicMessages => to_upstream_anthropic_body(ir_req, &wire_model, false),
+        WireProtocolKind::OpenaiResponses => {
+            to_upstream_openai_responses_body(ir_req, &wire_model, false, constraints.as_ref())
+        }
+        WireProtocolKind::OpenaiChat => to_upstream_openai_chat_body(ir_req, &wire_model, false),
     };
     let mut req = client.post(&url).json(&body);
-    if auth_is_x_api_key {
-        req = req
-            .header("x-api-key", &token)
-            .header("anthropic-version", "2023-06-01");
-    } else {
-        req = req.bearer_auth(&token);
+    req = apply_standard_http_auth(req, protocol, &token, &opts);
+    for (k, v) in opts.plugin_headers {
+        req = req.header(k.as_str(), v.as_str());
     }
-    for (k, v) in plugin_headers {
+    for (k, v) in &cred_extra_headers {
         req = req.header(k.as_str(), v.as_str());
     }
     for (k, v) in &extra_headers {
@@ -4699,6 +4813,7 @@ async fn handle_http_connection(
                             // 首次命中时尝试单飞刷新/本机回吸并重试一次，仍失效再标过期。
                             if !did_auth_refresh
                                 && pool.auto_refresh_on_401
+                                && !crate::domain::is_api_provider_tool_id(&cand.tool_id)
                                 && cand.tool_id != "custom_api_key"
                             {
                                 did_auth_refresh = true;
@@ -4823,6 +4938,7 @@ async fn handle_http_connection(
         if let Ok((code, ref body_txt)) = res {
             if is_auth_expired_response(code, body_txt)
                 && pool.auto_refresh_on_401
+                && !crate::domain::is_api_provider_tool_id(&cand.tool_id)
                 && cand.tool_id != "custom_api_key"
             {
                 if let Some(adapter) = adapters.get(&cand.tool_id) {

@@ -55,10 +55,10 @@ Rust 后端通过统一的平台宿主接口屏蔽操作系统差异：
 +-------------------------------------------------------------------+
                                   | Unified Adapter Contract (JSON Schema)
 +---------------------------------+---------------------------------+
-| 3a. 内置适配器 (Rust Native)    | 3b. 外部扩展适配器 (预留接口)   |
-|     - Trae / Trae CN            |     - manifest.json 注册发现    |
-|     - WorkBuddy                 |     - stdin/stdout JSON-RPC     |
-|     - Qoder / Qoder CN          |       (支持 Python/Node/Sidecar)|
+| 3a. 内置订阅适配器 (Rust Native)| 3b. API 资产与外部插件扩展         |
+|     - Trae CN / WorkBuddy       |     - 多厂商 API 资产 (api_<slug>) |
+|     - Qoder CN / MiniMax CN     |     - 声明式 JSON / NDJSON RPC     |
+|     - LobsterAI / 豆包 / 码道    |       (入口 & 出口双端统一插件底座)|
 +---------------------------------+---------------------------------+
                                   |
 +-------------------------------------------------------------------+
@@ -137,5 +137,7 @@ Rust 后端通过统一的平台宿主接口屏蔽操作系统差异：
 * 针对 VS Code 内核工具（Trae / Qoder）增加**多开实例管理**（基于 `--user-data-dir` 隔离）。
 * 支持加密 JSON 导入导出备份与多语言（中 / 英）。
 
-### Phase 3 — v0.3 进阶调度（远期延展）
-* 探索本地统一 API 网关 / 代理模式（针对支持标准协议的工具/账号池，提供本地端口自动故障转移与额度路由）。
+### Phase 3 — v0.3–v0.9+ 统一本地网关、双端插件与 API 资产
+* 落地基于星型 IR 的本地三协议跨协议网关（OpenAI Chat ↔ Anthropic Messages ↔ OpenAI Responses）。
+* 落地双端插件底座（Ingress 入口插件 + Egress 出口插件，支持纯声明式 JSON 与 SHA-256 钉扎子进程）。
+* 资产层拆分为「订阅账号」（7 大桌面客户端会话与每日签到）与「API 资产」（多厂商 API Key / Coding Plan / 中转站显式协议与同厂商多 Key 号池）。（详见 [API_ASSETS_DESIGN.md](API_ASSETS_DESIGN.md)）

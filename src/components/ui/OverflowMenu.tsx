@@ -133,7 +133,7 @@ export function OverflowMenu({
       aria-label={label}
       style={{ top: coords.top, left: coords.left }}
       data-placement={coords.placement}
-      className="fixed z-50 min-w-[8.5rem] animate-pop rounded-xl border border-zinc-200 bg-white p-1 shadow-float dark:border-zinc-700 dark:bg-zinc-800"
+      className="fixed z-[90] min-w-[8.5rem] animate-pop rounded-xl border border-zinc-200 bg-white p-1 shadow-float dark:border-zinc-700 dark:bg-zinc-800"
     >
       {items.map((item) => (
         <button

@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import { useQwitch } from "../../context/QwitchContext";
 import type { ToastTone } from "../../types/qwitch";
@@ -69,11 +70,11 @@ export function ToastViewport({
   const toneStyle = toast ? TONE_STYLES[toast.tone] : null;
   const Icon = toneStyle?.Icon;
 
-  return (
+  const node = (
     <div
       aria-live={toast?.tone === "error" ? "assertive" : "polite"}
       aria-atomic="true"
-      className={`pointer-events-none z-50 ${
+      className={`pointer-events-none z-[120] ${
         contained ? "absolute" : "fixed"
       } ${compact ? "right-3 bottom-14 left-3" : "right-5 bottom-5"}`}
     >
@@ -96,4 +97,9 @@ export function ToastViewport({
       )}
     </div>
   );
+
+  if (!contained && typeof document !== "undefined") {
+    return createPortal(node, document.body);
+  }
+  return node;
 }

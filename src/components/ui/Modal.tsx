@@ -128,7 +128,7 @@ export function Modal({
 
   const content = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/35 p-4 backdrop-blur-md dark:bg-black/65"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-950/35 p-4 backdrop-blur-md dark:bg-black/65"
       onMouseDown={(e) => {
         backdropMouseDownRef.current = e.target === e.currentTarget;
       }}

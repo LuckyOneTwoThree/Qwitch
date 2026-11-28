@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useState } from "react";
-import { Layers } from "lucide-react";
+import { KeyRound, Layers } from "lucide-react";
 import { getToolBrandMeta as resolveToolBrandMeta } from "../domain/toolRegistry";
+import { isApiProviderToolId } from "../types/apiProvider";
 import type { AdapterManifest } from "../types/qwitch";
 
 export { getToolBrandMeta, TOOL_BRAND_META, type ToolBrandMeta } from "../domain/toolRegistry";
@@ -39,12 +40,13 @@ export const ToolBrandIcon = React.memo(function ToolBrandIcon({
   }, [iconSrc]);
 
   if (!iconSrc || iconFailed) {
+    const FallbackIcon = isApiProviderToolId(toolId) ? KeyRound : Layers;
     return (
       <div
         aria-hidden={decorative || undefined}
         className={`inline-flex shrink-0 items-center justify-center bg-zinc-100 text-zinc-500 ring-1 ring-black/6 dark:bg-zinc-800/80 dark:text-zinc-400 dark:ring-white/10 ${sizeClass} ${className}`}
       >
-        <Layers
+        <FallbackIcon
           className={size === "xs" ? "h-2.5 w-2.5" : size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4"}
           aria-hidden="true"
         />

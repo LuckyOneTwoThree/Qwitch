@@ -127,6 +127,11 @@ pub fn run() {
                 migration_warnings.push(format!("历史数据脱敏未完成：{e}"));
             }
             let _ = db.backfill_account_names(&master_key);
+            if let Ok(migrated) = db.migrate_legacy_custom_api_key(&master_key) {
+                if migrated > 0 {
+                    eprintln!("Qwitch 已平滑迁移 {migrated} 个历史标准 API Key 至自定义 API 厂商");
+                }
+            }
             // 启动时清理已解绑 Agent 的休眠专属池残留模型与策略。
             if let Err(e) = db.cleanup_unbound_dedicated_pools() {
                 eprintln!("Qwitch 休眠专属池清理失败: {e}");
@@ -192,6 +197,9 @@ pub fn run() {
                 }
             }
             plugin_registry.apply_stored_states(&stored_states);
+            if let Ok(api_providers) = db.list_api_providers() {
+                plugin_registry.sync_api_providers(&api_providers);
+            }
             plugins::sync_global_registry_snapshot(&plugin_registry);
             let plugins = Arc::new(std::sync::RwLock::new(plugin_registry));
             let gateway_runtime = GatewayRuntime::new();
@@ -318,6 +326,9 @@ pub fn run() {
                                     .get(&acc.id)
                                     .is_some_and(|until| now_inst < *until)
                                 {
+                                    continue;
+                                }
+                                if domain::is_api_provider_tool_id(&acc.tool_id) {
                                     continue;
                                 }
                                 let Some(adapter) = adapters_ka.get(&acc.tool_id) else {
@@ -780,6 +791,14 @@ pub fn run() {
             commands::set_agent_tool_models_cmd,
             commands::set_agent_tool_models_batch_cmd,
             commands::update_agent_tool_schedule_cmd,
+            commands::list_api_providers_cmd,
+            commands::save_api_provider_cmd,
+            commands::delete_api_provider_cmd,
+            commands::toggle_api_provider_cmd,
+            commands::test_api_provider_cmd,
+            commands::add_api_provider_key_cmd,
+            commands::update_api_provider_key_cmd,
+            commands::save_api_provider_models_cmd,
             update::check_app_update,
             update::download_and_install_update,
             update::open_update_url

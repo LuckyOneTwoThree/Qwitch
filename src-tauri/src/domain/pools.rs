@@ -528,6 +528,22 @@ pub fn tool_short_display_name(tool_id: &str) -> &'static str {
     }
 }
 
+/// 动态解析工具/API 厂商展示名（内置表优先，其次查询 PluginRegistry 全局名称映射）。
+pub fn tool_display_name(tool_id: &str) -> String {
+    match tool_id {
+        "workbuddy" => "WorkBuddy".to_string(),
+        "minimax_code_cn" => "MiniMax".to_string(),
+        "qoder_cn" | "qoder" => "Qoder CN".to_string(),
+        "trae_cn" => "Trae CN".to_string(),
+        "lobsterai" => "有道龙虾".to_string(),
+        "doubaowork" => "豆包工作".to_string(),
+        "codearts" => "码道 CodeArts".to_string(),
+        "custom_api_key" => "标准 API".to_string(),
+        _ => crate::plugins::registry::global_plugin_display_name(tool_id)
+            .unwrap_or_else(|| tool_id.to_string()),
+    }
+}
+
 pub fn is_anthropic_model_name(model_id: &str) -> bool {
     let lower = model_id.to_ascii_lowercase();
     [
@@ -558,6 +574,9 @@ pub fn build_claude_model_alias(pool_slug: &str, model_id: &str) -> String {
 }
 
 pub fn default_channel_for_tool(tool_id: &str) -> UpstreamChannel {
+    if crate::domain::is_api_provider_tool_id(tool_id) {
+        return UpstreamChannel::ApiKey;
+    }
     match tool_id {
         "minimax_code_cn" => UpstreamChannel::RustNative,
         "custom_api_key" => UpstreamChannel::ApiKey,
@@ -1179,6 +1198,14 @@ pub fn recommended_model_options_for_tool(tool_id: &str) -> Vec<UpstreamModelOpt
 }
 
 pub fn upstream_model_protocol(tool_id: &str, model_id: &str) -> WireProtocolKind {
+    if crate::domain::is_api_provider_tool_id(tool_id) {
+        if let Some(proto) = crate::plugins::registry::global_egress_profile(tool_id)
+            .and_then(|p| p.wire_protocols.first().copied())
+        {
+            return proto;
+        }
+        return WireProtocolKind::OpenaiChat;
+    }
     if tool_id == "minimax_code_cn"
         || is_anthropic_model_name(model_id) && tool_id == "custom_api_key"
     {
@@ -1374,7 +1401,7 @@ pub fn compute_agent_exposed_models(
                             .map(|s| s.display_name.to_string())
                     })
                     .unwrap_or_else(|| bare_model.to_string());
-                let base_name = format!("{} · {}", tool_short_display_name(tid), human_label);
+                let base_name = format!("{} · {}", tool_display_name(tid), human_label);
                 if collision {
                     format!("{base_name} · {}", item.pool.name)
                 } else {

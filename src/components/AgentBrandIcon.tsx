@@ -66,6 +66,8 @@ export const AgentBrandIcon = React.memo(function AgentBrandIcon({
   );
 });
 
+import { isApiProviderToolId } from "../types/apiProvider";
+
 export const UpstreamMemberIcon = React.memo(function UpstreamMemberIcon({
   toolId,
   size = "sm",
@@ -75,7 +77,7 @@ export const UpstreamMemberIcon = React.memo(function UpstreamMemberIcon({
   size?: "xs" | "sm" | "md" | "lg";
   className?: string;
 }) {
-  if (toolId === "custom_api_key") {
+  if (toolId === "custom_api_key" || isApiProviderToolId(toolId)) {
     const boxClass = SIZE_CLASSES[size];
     const iconSize =
       size === "xs"

@@ -1,3 +1,4 @@
+pub mod api_providers;
 pub mod crypto;
 mod logs;
 pub mod model_discovery;
@@ -358,6 +359,29 @@ impl QwitchDatabase {
                 verified_at TEXT NOT NULL,
                 error_summary TEXT,
                 PRIMARY KEY (egress_plugin_id, model_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS api_providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                preset_id TEXT,
+                base_url TEXT NOT NULL,
+                wire_protocol TEXT NOT NULL DEFAULT 'openai_chat',
+                auth_scheme TEXT NOT NULL DEFAULT 'bearer',
+                auth_header_name TEXT,
+                extra_headers_json TEXT NOT NULL DEFAULT '{}',
+                models_path TEXT,
+                manual_models_json TEXT NOT NULL DEFAULT '[]',
+                allow_lan_http INTEGER NOT NULL DEFAULT 0,
+                accent_color TEXT,
+                icon TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_test_status TEXT,
+                last_test_latency_ms INTEGER,
+                last_test_error TEXT,
+                last_tested_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_pool_members_pool ON pool_members(pool_id, priority ASC);

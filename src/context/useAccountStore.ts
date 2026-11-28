@@ -1527,6 +1527,7 @@ export function useAccountStore({
     launchToolClient,
     captureLocalSession,
     deleteAccount,
+    refreshAccounts: syncFromBackend,
     quitApp,
   };
 }

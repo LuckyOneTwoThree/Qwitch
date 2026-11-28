@@ -1530,7 +1530,265 @@ async fn try_probe_live_models(
         "lobsterai" => probe_lobsterai_models(&client, cred).await,
         // 豆包工作没有模型接口：读 magpie 插件缓存里该账号真实的「工作任务」菜单
         "doubaowork" => probe_doubao_work_models(),
+        other if crate::domain::is_api_provider_tool_id(other) => {
+            let (token_opt, base_opt, _) = extract_token_and_extra(cred);
+            let token = token_opt.ok_or_else(|| "API 资产缺少有效密钥".to_string())?;
+            let base = base_opt
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "API 资产缺少 Base URL".to_string())?;
+            let (auth_scheme, auth_header_name, models_path, extra_headers) =
+                extract_api_provider_probe_meta(cred);
+            probe_standard_models_list(
+                &client,
+                other,
+                &base,
+                &token,
+                auth_scheme,
+                auth_header_name.as_deref(),
+                models_path.as_deref(),
+                &extra_headers,
+            )
+            .await
+        }
         other => Err(format!("工具 {other} 暂不支持实时模型目录探测")),
+    }
+}
+
+fn extract_api_provider_probe_meta(
+    cred: &CredentialEnvelope,
+) -> (
+    crate::domain::ApiAuthScheme,
+    Option<String>,
+    Option<String>,
+    HashMap<String, String>,
+) {
+    if let CredentialPayload::Token { extra, .. } = &cred.payload {
+        let auth_scheme = extra
+            .get("auth_scheme")
+            .map(|s| crate::domain::ApiAuthScheme::from_str_lossy(s))
+            .unwrap_or_default();
+        let auth_header_name = extra
+            .get("auth_header_name")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let models_path = extra
+            .get("models_path")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let extra_headers = extra
+            .get("extra_headers_json")
+            .and_then(|s| serde_json::from_str::<HashMap<String, String>>(s).ok())
+            .unwrap_or_default();
+        return (auth_scheme, auth_header_name, models_path, extra_headers);
+    }
+    (
+        crate::domain::ApiAuthScheme::Bearer,
+        None,
+        None,
+        HashMap::new(),
+    )
+}
+
+fn build_models_url_with_override(base: &str, models_path: Option<&str>) -> String {
+    if let Some(mp) = models_path.map(str::trim).filter(|s| !s.is_empty()) {
+        if mp.starts_with("http://") || mp.starts_with("https://") {
+            return mp.to_string();
+        }
+        let b = base.trim().trim_end_matches('#').trim_end_matches('/');
+        let p = mp.trim_start_matches('/');
+        return format!("{b}/{p}");
+    }
+    build_models_endpoint(base.trim().trim_end_matches('#'))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn probe_standard_models_list(
+    client: &reqwest::Client,
+    tool_id: &str,
+    base: &str,
+    token: &str,
+    auth_scheme: crate::domain::ApiAuthScheme,
+    auth_header_name: Option<&str>,
+    models_path: Option<&str>,
+    extra_headers: &HashMap<String, String>,
+) -> Result<Vec<UpstreamModelOption>, String> {
+    let mut all: Vec<UpstreamModelOption> = Vec::new();
+    let mut next_after: Option<String> = None;
+    for page in 0..10 {
+        let url = build_models_url_with_override(base, models_path);
+        let mut req = client.get(&url).header("Accept", "application/json");
+        match auth_scheme {
+            crate::domain::ApiAuthScheme::XApiKey => {
+                req = req
+                    .header("x-api-key", token)
+                    .header("anthropic-version", "2023-06-01");
+            }
+            crate::domain::ApiAuthScheme::CustomHeader => {
+                let hdr = auth_header_name
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Authorization");
+                if hdr.eq_ignore_ascii_case("authorization") {
+                    req = req.bearer_auth(token);
+                } else {
+                    req = req.header(hdr, token);
+                }
+            }
+            crate::domain::ApiAuthScheme::Bearer => {
+                req = req.bearer_auth(token);
+            }
+        }
+        for (k, v) in extra_headers {
+            if !k.trim().is_empty() && !v.trim().is_empty() {
+                req = req.header(k.as_str(), v.as_str());
+            }
+        }
+        if let Some(after) = next_after.as_deref() {
+            req = req.query(&[("limit", "100"), ("after_id", after)]);
+        }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if page > 0 && !all.is_empty() {
+                    break;
+                }
+                return Err(format!("请求模型目录失败: {}", e.without_url()));
+            }
+        };
+        if !resp.status().is_success() {
+            if page > 0 && !all.is_empty() {
+                break;
+            }
+            let status = resp.status();
+            if status.as_u16() == 404 || status.as_u16() == 405 {
+                return Err(format!(
+                    "模型目录接口返回 HTTP {status}（部分厂商/中转不开放 /models 列表，可手动添加模型 ID）"
+                ));
+            }
+            return Err(format!("模型目录返回 HTTP {status}"));
+        }
+        let json: Value = match resp.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                if page > 0 && !all.is_empty() {
+                    break;
+                }
+                return Err(format!("解析模型目录响应失败: {e}"));
+            }
+        };
+        all.extend(parse_openai_models_list(tool_id, &json));
+        let has_more = json
+            .get("has_more")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let last_id = json
+            .get("last_id")
+            .or_else(|| json.get("after_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        if !has_more {
+            break;
+        }
+        match last_id {
+            Some(id) if next_after.as_deref() != Some(id.as_str()) => {
+                next_after = Some(id);
+            }
+            _ => break,
+        }
+    }
+    let deduped = dedup_model_options(all);
+    if deduped.is_empty() {
+        Err("模型目录解析结果为空".into())
+    } else {
+        Ok(deduped)
+    }
+}
+
+pub async fn test_api_provider_connection(
+    input: &crate::domain::ApiProviderTestInput,
+    fallback_key: Option<&str>,
+) -> crate::domain::ApiProviderTestResult {
+    let endpoint_preview =
+        crate::domain::build_upstream_endpoint(&input.base_url, input.wire_protocol);
+    let key = input
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| fallback_key.map(str::trim).filter(|s| !s.is_empty()));
+    let Some(token) = key else {
+        return crate::domain::ApiProviderTestResult {
+            ok: false,
+            latency_ms: 0,
+            discovered_models: Vec::new(),
+            model_count: 0,
+            endpoint_preview,
+            error: Some("请先输入或添加一把 API Key 再测试连接".into()),
+        };
+    };
+
+    let base = input.base_url.trim();
+    if !(base.starts_with("https://")
+        || base.starts_with("http://127.0.0.1")
+        || base.starts_with("http://localhost")
+        || base.starts_with("http://[::1]")
+        || (input.allow_lan_http && base.starts_with("http://")))
+    {
+        return crate::domain::ApiProviderTestResult {
+            ok: false,
+            latency_ms: 0,
+            discovered_models: Vec::new(),
+            model_count: 0,
+            endpoint_preview,
+            error: Some("Base URL 仅支持 https:// 或本机 http://（局域网地址需开启「允许局域网 HTTP」）".into()),
+        };
+    }
+
+    let tool_id = input
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("api_preview");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let started = std::time::Instant::now();
+    let res = probe_standard_models_list(
+        &client,
+        tool_id,
+        base,
+        token,
+        input.auth_scheme,
+        input.auth_header_name.as_deref(),
+        input.models_path.as_deref(),
+        &input.extra_headers,
+    )
+    .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match res {
+        Ok(models) => {
+            let count = models.len();
+            crate::domain::ApiProviderTestResult {
+                ok: true,
+                latency_ms,
+                discovered_models: models,
+                model_count: count,
+                endpoint_preview,
+                error: None,
+            }
+        }
+        Err(err) => crate::domain::ApiProviderTestResult {
+            ok: false,
+            latency_ms,
+            discovered_models: Vec::new(),
+            model_count: 0,
+            endpoint_preview,
+            error: Some(err),
+        },
     }
 }
 

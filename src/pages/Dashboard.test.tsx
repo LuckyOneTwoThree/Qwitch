@@ -14,11 +14,13 @@ const launchToolClient = vi.fn().mockResolvedValue(undefined);
 const ctxValue = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
 vi.mock("../context/QwitchContext", () => ({
   useQwitch: () => ctxValue.current,
+  useOptionalQwitch: () => ctxValue.current,
 }));
 const baseCtx: Record<string, unknown> = {
   isInitializing: false,
   isTauriRuntime: false,
   accounts: INITIAL_ACCOUNTS,
+  apiProviders: [],
   logs: INITIAL_LOGS,
   logScope: "active",
   logStats: computeMockLogStats(INITIAL_LOGS),
@@ -81,7 +83,7 @@ describe("Dashboard navigation", () => {
     const mainAll = within(screen.getByRole("navigation", { name: "主功能导航" })).getAllByRole(
       "button"
     )[0];
-    expect(mainAll.textContent).toContain("账号资产");
+    expect(mainAll.textContent).toContain("订阅账号");
     expect(mainAll.getAttribute("aria-current")).toBe("page");
 
     const toolAll = within(screen.getByRole("navigation", { name: "账号视图导航" })).getAllByRole(
@@ -112,7 +114,7 @@ describe("Dashboard navigation", () => {
     render(<Dashboard />);
     fireEvent.click(navButton(/设置与环境/));
     expect(navButton(/设置与环境/).getAttribute("aria-current")).toBe("page");
-    expect(navButton(/账号资产/).getAttribute("aria-current")).toBeNull();
+    expect(navButton(/订阅账号/).getAttribute("aria-current")).toBeNull();
     expect(screen.getByTestId("settings-view")).toBeTruthy();
   });
 
@@ -130,7 +132,7 @@ describe("Dashboard navigation", () => {
     expect(resetSettingsDrafts).not.toHaveBeenCalled();
     fireEvent.click(navButton(/设置与环境/));
     expect(resetSettingsDrafts).not.toHaveBeenCalled();
-    fireEvent.click(navButton(/账号资产/));
+    fireEvent.click(navButton(/订阅账号/));
     expect(resetSettingsDrafts).toHaveBeenCalledTimes(1);
   });
 
@@ -174,7 +176,7 @@ describe("Dashboard navigation", () => {
     fireEvent.click(toolNav.getByRole("button", { name: /豆包工作/ }));
     expect(screen.queryByText("当前筛选条件下暂无匹配账号")).toBeNull();
 
-    fireEvent.click(toolNav.getByRole("button", { name: /全部账号/ }));
+    fireEvent.click(toolNav.getByRole("button", { name: /全部订阅/ }));
     const resetInput = screen.getByLabelText("搜索账号") as HTMLInputElement;
     expect(resetInput.value).toBe("");
   });
@@ -234,20 +236,20 @@ describe("Dashboard 导航可达性", () => {
     // 此时点击必须回到该分区根作用域，否则用户无法从侧栏回到全部账号。
     const mainNav = within(screen.getByRole("navigation", { name: "主功能导航" }));
     const accountAssets = mainNav.getAllByRole("button")[0];
-    expect(accountAssets.textContent).toContain("账号资产");
+    expect(accountAssets.textContent).toContain("订阅账号");
     fireEvent.click(accountAssets);
 
     const allBtn = within(
       screen.getByRole("navigation", { name: "账号视图导航" })
     ).getAllByRole("button")[0];
-    expect(allBtn.textContent).toContain("全部账号");
+    expect(allBtn.textContent).toContain("全部订阅");
     expect(allBtn.getAttribute("aria-current")).toBe("page");
   });
 
   it("从日志页点击侧栏「账号资产」同样回到全部账号视图", () => {
     render(<Dashboard />);
     fireEvent.click(navButton(/操作日志/));
-    fireEvent.click(navButton(/账号资产/));
+    fireEvent.click(navButton(/订阅账号/));
 
     const allBtn = within(
       screen.getByRole("navigation", { name: "账号视图导航" })
@@ -306,5 +308,13 @@ describe("Dashboard 指标口径自洽", () => {
     expect(card.className).toContain("flex");
     expect(card.className).toContain("items-center");
     expect(card.className).toContain("justify-between");
+  });
+
+  it("点击侧栏「API 资产」仅渲染单份主体且不出现「返回全部厂商」", () => {
+    render(<Dashboard />);
+    fireEvent.click(navButton(/API 资产/));
+    expect(screen.getAllByText("还没有添加任何 API 厂商资产")).toHaveLength(1);
+    expect(screen.queryByText("返回全部厂商")).toBeNull();
+    expect(screen.getAllByRole("button", { name: /添加 API 厂商/ })).toHaveLength(1);
   });
 });

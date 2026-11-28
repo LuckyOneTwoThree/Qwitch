@@ -1,5 +1,7 @@
+pub mod api_providers;
 pub mod model_meta;
 pub mod pools;
+pub use api_providers::*;
 pub use pools::*;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};

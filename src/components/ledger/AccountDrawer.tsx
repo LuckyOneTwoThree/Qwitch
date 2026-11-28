@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowLeftRight,
   Cpu,
@@ -227,7 +228,7 @@ export function AccountDrawer({
   const stale = isSnapshotStale(account.latestQuota?.fetchedAt);
   const busy = Boolean(batchProgress?.running);
 
-  return (
+  const content = (
     <>
       <aside
         ref={panelRef}
@@ -235,7 +236,7 @@ export function AccountDrawer({
         aria-modal="false"
         aria-label={`${account.label} 详情`}
         tabIndex={-1}
-        className="fixed top-0 right-0 z-40 flex h-full w-[380px] max-w-[92vw] flex-col border-l border-zinc-200/80 bg-white shadow-[-16px_0_40px_-24px_rgba(15,23,42,0.28)] outline-none dark:border-white/[0.08] dark:bg-[#111216]"
+        className="fixed top-0 right-0 z-[50] flex h-full w-[380px] max-w-[92vw] flex-col border-l border-zinc-200/80 bg-white shadow-[-16px_0_40px_-24px_rgba(15,23,42,0.28)] outline-none dark:border-white/[0.08] dark:bg-[#111216]"
       >
         <header className="flex shrink-0 items-start gap-2.5 border-b border-zinc-200/70 px-4 py-3.5 dark:border-white/[0.07]">
           <ToolBrandIcon toolId={account.toolId} size="sm" decorative />
@@ -543,4 +544,6 @@ export function AccountDrawer({
       />
     </>
   );
+
+  return typeof document !== "undefined" ? createPortal(content, document.body) : content;
 }

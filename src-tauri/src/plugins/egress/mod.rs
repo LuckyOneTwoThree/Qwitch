@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::domain::{CredentialEnvelope, PoolMember};
+use crate::domain::{ApiAuthScheme, CredentialEnvelope, PoolMember, WireProtocolKind};
 use crate::gateway::ir::IrRequest;
 
 #[async_trait]
@@ -30,6 +30,10 @@ pub struct StandardHttpEgress {
     id: String,
     default_base_url: String,
     extra_headers: Vec<(String, String)>,
+    wire_protocol: Option<WireProtocolKind>,
+    auth_scheme: ApiAuthScheme,
+    auth_header_name: Option<String>,
+    allow_lan_http: bool,
 }
 
 impl StandardHttpEgress {
@@ -38,11 +42,31 @@ impl StandardHttpEgress {
             id: id.into(),
             default_base_url: default_base_url.into(),
             extra_headers: Vec::new(),
+            wire_protocol: None,
+            auth_scheme: ApiAuthScheme::Bearer,
+            auth_header_name: None,
+            allow_lan_http: false,
         }
     }
 
     pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
+        self
+    }
+
+    pub fn with_protocol(mut self, protocol: WireProtocolKind) -> Self {
+        self.wire_protocol = Some(protocol);
+        self
+    }
+
+    pub fn with_auth(mut self, scheme: ApiAuthScheme, header_name: Option<String>) -> Self {
+        self.auth_scheme = scheme;
+        self.auth_header_name = header_name;
+        self
+    }
+
+    pub fn with_allow_lan_http(mut self, allow: bool) -> Self {
+        self.allow_lan_http = allow;
         self
     }
 }
@@ -65,8 +89,14 @@ impl EgressTransport for StandardHttpEgress {
             cred,
             ir_req,
             upstream_model,
-            &self.default_base_url,
-            &self.extra_headers,
+            crate::gateway::StandardHttpOptions {
+                default_base: &self.default_base_url,
+                plugin_headers: &self.extra_headers,
+                explicit_protocol: self.wire_protocol,
+                auth_scheme: self.auth_scheme,
+                auth_header_name: self.auth_header_name.as_deref(),
+                allow_lan_http: self.allow_lan_http,
+            },
         )
         .await
     }
@@ -83,8 +113,14 @@ impl EgressTransport for StandardHttpEgress {
             cred,
             ir_req,
             upstream_model,
-            &self.default_base_url,
-            &self.extra_headers,
+            crate::gateway::StandardHttpOptions {
+                default_base: &self.default_base_url,
+                plugin_headers: &self.extra_headers,
+                explicit_protocol: self.wire_protocol,
+                auth_scheme: self.auth_scheme,
+                auth_header_name: self.auth_header_name.as_deref(),
+                allow_lan_http: self.allow_lan_http,
+            },
         )
         .await
     }
@@ -255,8 +291,7 @@ impl EgressTransport for WorkBuddyEgress {
             cred,
             ir_req,
             upstream_model,
-            "https://copilot.tencent.com",
-            &[],
+            crate::gateway::StandardHttpOptions::default_with_base("https://copilot.tencent.com"),
         )
         .await
     }
@@ -311,10 +346,6 @@ pub fn create_builtin_egress_transports() -> HashMap<String, Arc<dyn EgressTrans
             "lobsterai",
             "https://lobsterai-server.youdao.com/api/proxy",
         )),
-        Arc::new(StandardHttpEgress::new(
-            "custom_api_key",
-            "https://api.openai.com",
-        )),
     ];
     list.into_iter().map(|t| (t.id().to_string(), t)).collect()
 }
@@ -324,7 +355,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registers_all_eight_builtin_egress_transports() {
+    fn registers_all_builtin_egress_transports() {
         let map = create_builtin_egress_transports();
         for id in [
             "trae_cn",
@@ -334,7 +365,6 @@ mod tests {
             "lobsterai",
             "doubaowork",
             "codearts",
-            "custom_api_key",
         ] {
             assert!(
                 map.contains_key(id),

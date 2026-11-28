@@ -153,7 +153,7 @@ describe("Dashboard navigation", () => {
     };
 
     render(<Dashboard />);
-    // 默认视图是台账，本用例断言的是分组视图里的「补位卡」，先显式切换
+    // 本用例断言的是分组视图里的「补位卡」，显式选择而不依赖默认视图
     fireEvent.click(screen.getByRole("button", { name: "分组" }));
     const toolNav = within(screen.getByRole("navigation", { name: "账号视图导航" }));
     fireEvent.click(toolNav.getByRole("button", { name: /豆包工作/ }));
@@ -261,6 +261,8 @@ describe("Dashboard 指标口径自洽", () => {
   const firstNumber = (s: string) => s.match(/\d+/)?.[0];
   it("指标条数字即点击后台账里真实可见的账号数量", () => {
     render(<Dashboard />);
+    // 断言基于台账行，显式切换而非依赖默认视图
+    fireEvent.click(screen.getByRole("button", { name: "台账" }));
 
     const titles = [
       "显示全部账号",

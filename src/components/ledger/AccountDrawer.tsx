@@ -43,6 +43,13 @@ const ACTION_LABEL: Record<string, string> = {
   keepalive: "凭据保活",
 };
 
+/** 分钟数 → 人话：45 → 45 分钟，300 → 5 小时，4320 → 3 天 */
+function humanizeMinutes(min: number): string {
+  if (min < 60) return `${min} 分钟`;
+  if (min < 60 * 24) return `${Math.round(min / 60)} 小时`;
+  return `${Math.round(min / (60 * 24))} 天`;
+}
+
 const TONE_TEXT: Record<string, string> = {
   ok: "text-emerald-700 dark:text-emerald-300",
   warn: "text-amber-700 dark:text-amber-300",
@@ -166,6 +173,8 @@ export function AccountDrawer({
   } = useQwitch();
 
   const [refreshing, setRefreshing] = React.useState(false);
+  // 渲染期不能调 Date.now()（不纯，会在每次重渲染时产生不同结果）
+  const [nowMs, setNowMs] = React.useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
   const panelRef = useRef<HTMLElement | null>(null);
   const open = Boolean(account);
@@ -190,6 +199,15 @@ export function AccountDrawer({
     if (open) return;
     returnFocusTo?.focus?.();
   }, [open, returnFocusTo]);
+
+  // 时间基准放在 effect 里取，渲染期保持纯函数（eslint react-hooks 要求）
+  useEffect(() => {
+    if (!open) {
+      setNowMs(null);
+      return;
+    }
+    setNowMs(Date.now());
+  }, [open, account?.id]);
 
   const recentLogs = useMemo(() => {
     if (!account) return [];
@@ -363,6 +381,31 @@ export function AccountDrawer({
                   </dd>
                 </div>
               )}
+              {(() => {
+                // 凭据有效期直接暴露在详情里：用户不需要等到「突然过期」才发现
+                const raw = account.credentialExpiresAt;
+                const ms = raw ? Date.parse(raw) : NaN;
+                if (!Number.isFinite(ms)) return null;
+                if (nowMs === null) return null;
+                const leftMin = Math.round((ms - nowMs) / 60000);
+                const tone =
+                  leftMin <= 30
+                    ? "text-rose-700 dark:text-rose-300"
+                    : leftMin <= 120
+                      ? "text-amber-700 dark:text-amber-300"
+                      : "text-zinc-800 dark:text-zinc-200";
+                return (
+                  <div className="flex items-baseline justify-between gap-3">
+                    <dt className="shrink-0 text-zinc-500 dark:text-zinc-400">凭据</dt>
+                    <dd
+                      className={`truncate ${tone}`}
+                      title={new Date(ms).toLocaleString("zh-CN")}
+                    >
+                      {leftMin <= 0 ? "已过期" : `剩余 ${humanizeMinutes(leftMin)}`}
+                    </dd>
+                  </div>
+                );
+              })()}
               <div className="flex items-baseline justify-between gap-3">
                 <dt className="shrink-0 text-zinc-500 dark:text-zinc-400">本机</dt>
                 <dd className="truncate text-zinc-800 dark:text-zinc-200">

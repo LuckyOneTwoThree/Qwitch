@@ -23,7 +23,8 @@ function account(over: Partial<AccountSummary> = {}): AccountSummary {
     hasLocalSnapshot: true,
     latestQuota: {
       claimStatus: "available",
-      fetchedAt: "2026-11-27T08:00:00.000Z",
+      // 用当下时间：签到状态按「今天」判定，写死日期会让用例跨日失败
+      fetchedAt: new Date().toISOString(),
       buckets: [
         {
           key: "daily",
@@ -175,7 +176,8 @@ describe("sortLedgerAccounts", () => {
     label: "危急号",
     latestQuota: {
       claimStatus: "available",
-      fetchedAt: "2026-11-27T08:00:00.000Z",
+      // 用当下时间：签到状态按「今天」判定，写死日期会让用例跨日失败
+      fetchedAt: new Date().toISOString(),
       buckets: [bucket({ total: 100, remaining: 5 })],
     },
   });
@@ -184,7 +186,8 @@ describe("sortLedgerAccounts", () => {
     label: "健康号",
     latestQuota: {
       claimStatus: "available",
-      fetchedAt: "2026-11-27T08:00:00.000Z",
+      // 用当下时间：签到状态按「今天」判定，写死日期会让用例跨日失败
+      fetchedAt: new Date().toISOString(),
       buckets: [bucket({ total: 100, remaining: 90 })],
     },
   });

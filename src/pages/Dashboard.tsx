@@ -85,9 +85,13 @@ import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import type { TargetAgentId, TrayNavigateTarget } from "../types/pool";
 
+/** 客户端启停探测间隔：足够快以贴合「我刚关掉客户端」的心理预期，
+ *  又不至于让 pgrep/ps 变成常驻 CPU 占用。 */
+const CLIENT_STATUS_POLL_MS = 12_000;
+
 const VIEW_PREF_KEY = "qwitch.accounts.view";
 
-/** 读取持久化的账号视图偏好；未知值一律回落到台账。 */
+/** 读取持久化的账号视图偏好；未知值回落到「分组」——按平台模块化展示是主视角。 */
 export function readStoredAccountView(): AllViewMode {
   try {
     const raw = localStorage.getItem(VIEW_PREF_KEY);
@@ -95,7 +99,7 @@ export function readStoredAccountView(): AllViewMode {
   } catch {
     /* 隐私模式或存储被禁用时静默回落 */
   }
-  return "ledger";
+  return "grouped";
 }
 
 export function writeStoredAccountView(view: AllViewMode): void {
@@ -385,6 +389,26 @@ export function Dashboard({
       void refreshClientStatuses();
     }
   }, [nav, refreshClientStatuses]);
+
+  // 客户端启停轮询：此前只在挂载 / 窗口重新聚焦 / 进入设置页时探测，
+  // 用户在 Qwitch 里关掉某个客户端（或客户端自己退出）后，界面会一直停在
+  // 「桌面端运行中」。这里补一条低频轮询，仅在页面可见时执行。
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void refreshClientStatuses();
+    };
+    const timer = window.setInterval(tick, CLIENT_STATUS_POLL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [isTauriRuntime, refreshClientStatuses]);
 
   const isAccountSection =
     nav !== "pools" &&
@@ -1521,13 +1545,13 @@ export function Dashboard({
                       {(
                         nav === "all"
                           ? ([
+                              { id: "grouped", label: "分组", icon: LayoutList, title: "按平台分组的卡片墙（默认）" },
                               { id: "ledger", label: "台账", icon: Table2, title: "水位台账：一屏看完全部账号" },
-                              { id: "grouped", label: "分组", icon: LayoutList, title: "按平台分组的卡片墙" },
                               { id: "flat", label: "平铺", icon: LayoutGrid, title: "不分组的卡片平铺" },
                             ] as const)
                           : ([
+                              { id: "flat", label: "卡片", icon: LayoutGrid, title: "卡片视图（默认）" },
                               { id: "ledger", label: "台账", icon: Table2, title: "水位台账：一屏看完全部账号" },
-                              { id: "flat", label: "卡片", icon: LayoutGrid, title: "卡片视图" },
                             ] as const)
                       ).map((v) => {
                         // 工具作用域下 grouped 会回落成 flat，这里按真实渲染结果标注选中态

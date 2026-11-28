@@ -463,6 +463,10 @@ export function AgentBindingsView({
         : [],
     [activeBinding, activeToolId, getAgentToolAccounts]
   );
+  // 标准 API（custom_api_key）是「通用 API Key」兜底工具：未配置该账号时，
+  // 模型勾选 / 调度编排不会产生任何路由效果——必须明示，而不是摆出完整交互
+  const standardApiUnconfigured =
+    activeToolId === "custom_api_key" && (toolAccounts?.length ?? 0) === 0;
 
   const [customModelWire, setCustomModelWire] = useState<string>("");
 
@@ -1365,6 +1369,13 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
           {/* 分区 1：模型配置（全宽订阅模型列表 + 底部实时预览） */}
           {subTab === "models" && (
             <div className="space-y-2.5">
+              {standardApiUnconfigured && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] p-3 text-xs text-amber-800 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200">
+                  标准 API 是「通用 API Key」兜底工具，当前尚未配置该账号：请先到
+                  「账号资产 → 添加账号 → 通用 API Key」填写 Base URL 与 Key。未配置
+                  账号时，此处的模型勾选与调度编排不会产生任何路由效果。
+                </div>
+              )}
               <section
                 aria-label={`${activeToolName} 订阅模型选择`}
                 className="flex flex-col justify-between gap-2.5"
@@ -1785,6 +1796,12 @@ export ANTHROPIC_AUTH_TOKEN=${resolvedGatewayToken}`;
           {/* 分区 2：账号调度（紧凑策略分段 + 主备顺位队列） */}
           {subTab === "scheduling" && (
             <div className="space-y-3">
+              {standardApiUnconfigured && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/[0.08] p-3 text-xs text-amber-800 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200">
+                  标准 API 尚未配置「通用 API Key」账号：请先到「账号资产 → 添加账号 →
+                  通用 API Key」完成配置；此处的调度编排与主备顺位在配置账号前不会生效。
+                </div>
+              )}
               <section
                 aria-label={`${activeToolName} 同工具账号调度方案`}
                 className="flex flex-col gap-3.5"

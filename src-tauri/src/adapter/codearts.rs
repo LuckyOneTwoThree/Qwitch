@@ -101,6 +101,8 @@ const EXTRA_DOMAIN_ID: &str = "domain_id";
 const EXTRA_CODEARTS_MODE: &str = "codearts_mode";
 const EXTRA_CODE_VERIFIER: &str = "code_verifier";
 const EXTRA_DPOP_PKCS8_B64: &str = "dpop_pkcs8_b64";
+/// 最近一次成功续期 STS 的时刻（毫秒）：expires_at 未知时的续期节流依据
+const EXTRA_LAST_STS_REFRESH_MS: &str = "last_sts_refresh_ms";
 /// 本机导入时保存的完整客户端 session 快照（base64 JSON），切号时原样写回
 const EXTRA_SESSION_SNAPSHOT: &str = "session_snapshot_b64";
 
@@ -1447,6 +1449,17 @@ impl CodeArtsAdapter {
                 if exp - now_ms >= CODEARTS_REFRESH_LEAD_MS {
                     return Ok(None);
                 }
+            } else if let Some(last) = extra
+                .get(EXTRA_LAST_STS_REFRESH_MS)
+                .and_then(|v| v.parse::<i64>().ok())
+            {
+                // expires_at 未知（服务器响应未携带）时按「上次成功续期时间」节流：
+                // 30 分钟内刚续过就跳过，避免 20 分钟保活循环把一次性 refreshToken
+                // 每 20 分钟轮换一次。真实有效性若短于该窗口，查额 401 会走 force
+                // 刷新路径即时恢复。
+                if now_ms - last < 30 * 60 * 1000 {
+                    return Ok(None);
+                }
             }
             // expires_at 未知时必须照常尝试续期：旧行为直接跳过，导致 STS 过期后
             // 保活循环永远「无事可做」，账号永久停在「凭据过期」只能手动重新授权。
@@ -1465,7 +1478,7 @@ impl CodeArtsAdapter {
             )
             .await?;
 
-        let updated = Self::envelope_from_sts_response(
+        let mut updated = Self::envelope_from_sts_response(
             &body,
             code_verifier,
             dpop_b64,
@@ -1474,6 +1487,10 @@ impl CodeArtsAdapter {
             cred.display_name.as_deref(),
             extra.get(EXTRA_DOMAIN_ID).map(String::as_str),
         )?;
+        // 记录本次成功续期时刻：expires_at 未知时的节流依据（见上方跳过逻辑）
+        if let crate::domain::CredentialPayload::Token { extra, .. } = &mut updated.payload {
+            extra.insert(EXTRA_LAST_STS_REFRESH_MS.to_string(), now_ms.to_string());
+        }
         Ok(Some(updated))
     }
 }

@@ -17,7 +17,7 @@ const MAX_HASH_FILES: usize = 500;
 const MAX_HASH_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_HASH_DEPTH: usize = 4;
 
-const ALLOWED_PLUGIN_ENV_VARS: &[&str] = &[
+pub(crate) const ALLOWED_PLUGIN_ENV_VARS: &[&str] = &[
     "PATH",
     "HOME",
     "USERPROFILE",
@@ -543,7 +543,7 @@ fn is_path_within_adapter_dir(adapter_dir: &Path, candidate: &Path) -> bool {
     canon_cmd.starts_with(&canon_dir) && canon_cmd.is_file()
 }
 
-fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
+pub(crate) fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() || trimmed.chars().any(|c| c.is_control()) {
         return false;
@@ -564,7 +564,7 @@ fn is_valid_entry_command(adapter_dir: &Path, command: &str) -> bool {
     ALLOWED_BARE_INTERPRETERS.contains(&trimmed.to_ascii_lowercase().as_str())
 }
 
-fn is_valid_entry_args(adapter_dir: &Path, command: &str, args: &[String]) -> bool {
+pub(crate) fn is_valid_entry_args(adapter_dir: &Path, command: &str, args: &[String]) -> bool {
     let cmd_trimmed = command.trim();
     let is_bare_interpreter =
         !Path::new(cmd_trimmed).is_absolute() && !looks_like_adapter_file(cmd_trimmed);
@@ -617,7 +617,7 @@ fn is_valid_entry(adapter_dir: &Path, entry: &ExternalEntry) -> bool {
         && is_valid_entry_args(adapter_dir, &entry.command, &entry.args)
 }
 
-fn resolve_exec_command(adapter_dir: &Path, command: &str) -> PathBuf {
+pub(crate) fn resolve_exec_command(adapter_dir: &Path, command: &str) -> PathBuf {
     let trimmed = command.trim();
     let p = Path::new(trimmed);
     if p.is_absolute() {

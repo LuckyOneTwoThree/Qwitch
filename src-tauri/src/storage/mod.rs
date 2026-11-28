@@ -1,6 +1,7 @@
 pub mod crypto;
 mod logs;
 pub mod model_discovery;
+pub mod plugins;
 pub mod pools;
 mod settings;
 
@@ -337,6 +338,26 @@ impl QwitchDatabase {
                 tool_id      TEXT NOT NULL,
                 models_json  TEXT NOT NULL,
                 updated_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS plugin_states (
+                plugin_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                source TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                pinned_hash TEXT,
+                overrides_builtin INTEGER NOT NULL DEFAULT 0,
+                installed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS plugin_capability_probes (
+                egress_plugin_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                probe_json TEXT NOT NULL,
+                verified_at TEXT NOT NULL,
+                error_summary TEXT,
+                PRIMARY KEY (egress_plugin_id, model_id)
             );
 
             CREATE INDEX IF NOT EXISTS idx_pool_members_pool ON pool_members(pool_id, priority ASC);
@@ -1592,7 +1613,13 @@ fn normalize_daily_claim_status_on_date(
     // Qoder 活动按周期而非自然日，不适用"今日已领即 Claimed"覆盖
     let daily_reset_tool = matches!(
         tool_id,
-        "trae" | "trae_cn" | "workbuddy" | "minimax_code_cn" | "lobsterai" | "doubaowork"
+        "trae"
+            | "trae_cn"
+            | "workbuddy"
+            | "minimax_code_cn"
+            | "lobsterai"
+            | "doubaowork"
+            | "codearts"
     );
     let claimed_today = last_claimed_at
         .map(|ts| is_same_cst_day(ts, today_cst))

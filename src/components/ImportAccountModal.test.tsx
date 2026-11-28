@@ -38,4 +38,19 @@ describe("ImportAccountModal", () => {
     fireEvent.click(screen.getByLabelText("关闭导入弹窗"));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("点击目标 AI 工具区的「插件管理」模块按钮会关闭弹窗并跳转插件设置", () => {
+    const onClose = vi.fn();
+    const onOpenPluginSettings = vi.fn();
+    render(
+      <ImportAccountModal
+        open
+        onClose={onClose}
+        onOpenPluginSettings={onOpenPluginSettings}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: /插件管理/ }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onOpenPluginSettings).toHaveBeenCalledTimes(1);
+  });
 });

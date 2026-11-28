@@ -305,7 +305,7 @@ pub(crate) fn build_doubao_prompt(ir_req: &IrRequest) -> String {
         for part in &msg.parts {
             match part {
                 IrPart::Text(s) => text.push_str(s),
-                IrPart::Thinking { .. } => {}
+                IrPart::Thinking { .. } | IrPart::Image { .. } => {}
                 IrPart::ToolCall {
                     id,
                     name,

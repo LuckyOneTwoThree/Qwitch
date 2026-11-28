@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 2,
+  "id": "codex_sub",
+  "name": "Codex 订阅",
+  "version": "1.0.0",
+  "kind": "egress",
+  "transport": "subprocess",
+  "platforms": ["macos", "windows"],
+  "brand": {
+    "shortTagline": "OpenAI Codex 订阅",
+    "tagline": "通过 ChatGPT / Codex 订阅凭据转发 Responses API",
+    "accentColor": "#10a37f"
+  },
+  "entry": {
+    "command": "node",
+    "args": ["plugin.mjs"],
+    "mode": "oneshot",
+    "timeoutMs": 60000
+  },
+  "egressProfile": {
+    "wireProtocols": ["openai_responses"],
+    "authMethods": ["local_import", "token_paste"],
+    "accountCapabilities": {
+      "supportsQuotaQuery": true,
+      "supportsDailyClaim": false,
+      "supportsClientSwitch": false,
+      "claimRequiresClientSwitch": false,
+      "supportsMultiInstance": false,
+      "concurrentWithDesktopClient": true
+    },
+    "provides": {
+      "streaming": true,
+      "tools": true,
+      "toolChoice": true,
+      "vision": true,
+      "thinking": true,
+      "encryptedReasoning": true,
+      "jsonSchema": true,
+      "countTokens": false,
+      "compact": true
+    },
+    "constraints": {
+      "mustStream": true,
+      "requiresInstructions": true,
+      "disallowStore": true,
+      "stripTemperatureOnReasoning": true,
+      "systemPromptPolicy": "standard"
+    },
+    "defaultModels": ["gpt-5.4", "gpt-5.3-codex"]
+  }
+}

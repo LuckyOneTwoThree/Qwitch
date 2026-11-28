@@ -40,6 +40,7 @@ function makeAdapter(id: string, supportsDailyClaim = true): AdapterManifest {
       supportsQuotaQuery: true,
       supportsDailyClaim,
       supportsClientSwitch: true,
+      claimRequiresClientSwitch: id === "doubaowork",
       supportsMultiInstance: false,
     },
   };
@@ -52,6 +53,7 @@ describe("getEffectiveClaimStatus", () => {
       "minimax_code_cn",
       "lobsterai",
       "doubaowork",
+      "codearts",
     ] as const) {
       const acc = makeAcc({
         toolId,
@@ -213,15 +215,17 @@ describe("selectClaimCandidates", () => {
     expect(candidates.map((c) => c.id)).toEqual(["b"]);
   });
 
-  it("缺本机快照的冷切账号不计入候选（避免批量切换失败）", () => {
+  it("缺本机快照的冷切账号不计入候选，但纯网络签到账号缺快照仍可正常领取", () => {
     const accounts = [
-      makeAcc({ id: "a", latestQuota: available }),
-      makeAcc({ id: "b", hasLocalSnapshot: false, latestQuota: available }),
+      makeAcc({ id: "a", toolId: "doubaowork", latestQuota: available }),
+      makeAcc({ id: "b", toolId: "doubaowork", hasLocalSnapshot: false, latestQuota: available }),
+      makeAcc({ id: "c", toolId: "trae_cn", hasLocalSnapshot: false, latestQuota: available }),
     ];
-    const candidates = selectClaimCandidates(accounts, adapters);
-    expect(candidates.map((c) => c.id)).toEqual(["a"]);
-    // 定向点击也不应把缺快照账号放进批量队列
-    const targeted = selectClaimCandidates(accounts, adapters, { targetIds: ["b"] });
+    const testAdapters = [...adapters, makeAdapter("doubaowork")];
+    const candidates = selectClaimCandidates(accounts, testAdapters);
+    expect(candidates.map((c) => c.id)).toEqual(["a", "c"]);
+    // 定向点击也不应把缺快照的冷切账号放进批量队列
+    const targeted = selectClaimCandidates(accounts, testAdapters, { targetIds: ["b"] });
     expect(targeted.map((c) => c.id)).toEqual([]);
   });
 });

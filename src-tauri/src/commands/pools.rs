@@ -95,20 +95,26 @@ fn build_workspace_state(
     let cooldowns = gateway.cooldown_snapshot();
     // 候选账号只构建一次：`list_pools` 内部同样需要它，历史实现会重复构建两遍
     // （每遍都要逐账号解密凭据），是工作区快照的主要成本之一。
-    let candidates = db
+    let candidates: Vec<_> = db
         .list_upstream_candidates(master_key)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|c| crate::plugins::registry::global_is_plugin_enabled(&c.tool_id))
+        .collect();
     let pools = db
         .list_pools_with_candidates(&candidates, &cooldowns)
         .map_err(|e| e.to_string())?;
-    let agent_bindings = inspect_all_agent_bindings(
+    let agent_bindings: Vec<_> = inspect_all_agent_bindings(
         db,
         &pools,
         &gw_state.host,
         gw_state.port,
         gw_state.global_proxy_detected,
         None,
-    )?;
+    )?
+    .into_iter()
+    .filter(|b| crate::plugins::registry::global_is_plugin_enabled(b.agent_id.as_str()))
+    .collect();
     let traces = db.list_routing_traces(200).map_err(|e| e.to_string())?;
 
     Ok(PoolWorkspaceState {
@@ -145,8 +151,10 @@ pub async fn detect_agent_running_cmd(
         .await
         .map_err(|e| e.to_string())?;
     let cleared = reconcile_pending_restarts_with_snapshot(&state.db, &snapshot);
+    let reg = state.plugins.read().ok();
     Ok(TargetAgentId::all()
         .into_iter()
+        .filter(|agent_id| reg.as_ref().is_none_or(|r| r.is_enabled(agent_id.as_str())))
         .map(|agent_id| AgentRunningState {
             agent_id,
             running: agent_running_in_snapshot(agent_id, &snapshot),

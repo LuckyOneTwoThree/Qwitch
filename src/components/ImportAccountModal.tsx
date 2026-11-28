@@ -9,6 +9,7 @@ import {
   HardDriveDownload,
   KeyRound,
   Loader2,
+  Puzzle,
   X,
 } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
@@ -27,17 +28,20 @@ function detectImportPlatform(): DevicePlatform {
   return "mac";
 }
 
-export function ImportAccountModal({  open,
+export function ImportAccountModal({
+  open,
   onClose,
   targetAccount,
   defaultToolId,
   defaultMethod,
+  onOpenPluginSettings,
 }: {
   open: boolean;
   onClose: () => void;
   targetAccount?: AccountSummary | null;
   defaultToolId?: ToolId;
   defaultMethod?: AuthMethod;
+  onOpenPluginSettings?: () => void;
 }) {
   const { adapters, importAccount, pickFolder, pickFile, inspectProfileDir, showToast } =
     useQwitch();
@@ -368,6 +372,28 @@ export function ImportAccountModal({  open,
                   </button>
                 );
               })}
+              {!targetAccount && onOpenPluginSettings && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenPluginSettings();
+                  }}
+                  className="flex items-center gap-2.5 rounded-xl border border-dashed border-zinc-300 bg-zinc-50/70 p-2.5 text-left text-zinc-700 transition hover:border-brand-500/70 hover:bg-brand-50/50 hover:text-brand-900 dark:border-zinc-700 dark:bg-zinc-900/40 dark:text-zinc-200 dark:hover:border-brand-400/60 dark:hover:bg-brand-500/10 dark:hover:text-brand-100"
+                >
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-dashed border-zinc-300 bg-white text-zinc-600 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-300">
+                    <Puzzle className="h-4 w-4" aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="truncate text-xs font-semibold leading-tight">
+                      插件管理
+                    </div>
+                    <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                      安装或配置更多工具
+                    </div>
+                  </div>
+                </button>
+              )}
             </div>
           </div>
 

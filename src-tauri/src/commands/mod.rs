@@ -1,6 +1,7 @@
 mod accounts;
 mod logs;
 mod oauth;
+mod plugins;
 mod pools;
 mod profile;
 mod settings;
@@ -9,6 +10,7 @@ mod switch;
 pub use accounts::*;
 pub use logs::*;
 pub use oauth::*;
+pub use plugins::*;
 pub use pools::*;
 pub use profile::*;
 pub use settings::*;
@@ -118,6 +120,7 @@ pub struct AppState {
     pub master_key: [u8; 32],
     pub host: Arc<dyn PlatformHost>,
     pub adapters: Arc<HashMap<String, Arc<dyn ToolAdapter>>>,
+    pub plugins: Arc<std::sync::RwLock<crate::plugins::PluginRegistry>>,
     pub scheduler: Arc<AntiRiskScheduler>,
     pub gateway: Arc<GatewayRuntime>,
     pub oauth_flow_seq: Arc<AtomicU64>,

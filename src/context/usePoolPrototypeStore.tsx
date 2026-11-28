@@ -424,6 +424,8 @@ function getAgentIncomingProtocol(agentId: TargetAgentId): WireProtocolKind {
       return "openai_chat";
     case "zcode":
       return "anthropic_messages";
+    default:
+      return "openai_chat";
   }
 }
 

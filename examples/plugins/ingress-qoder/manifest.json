@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 2,
+  "id": "qoder_ingress",
+  "name": "Qoder IDE",
+  "version": "1.0.0",
+  "kind": "ingress",
+  "transport": "declarative",
+  "platforms": ["macos", "windows"],
+  "brand": {
+    "shortTagline": "Qoder 智能编程助手",
+    "tagline": "声明式接入 Qoder 本地网关配置",
+    "accentColor": "#f59e0b"
+  },
+  "ingressProfile": {
+    "wireProtocols": ["openai_chat"],
+    "requires": {
+      "streaming": true,
+      "tools": true,
+      "vision": false,
+      "thinking": false
+    },
+    "optional": {
+      "vision": true,
+      "thinking": true,
+      "toolChoice": true,
+      "countTokens": false,
+      "compact": false
+    },
+    "quirks": {
+      "supportsCustomBaseUrl": true,
+      "modelIdPolicy": "scoped",
+      "requiresWs426Fallback": false,
+      "supportsOwnAuthPassthrough": false
+    },
+    "declarativeWiring": {
+      "detect": {
+        "macosConfigPaths": ["~/.qoder/config.jsonc"],
+        "windowsConfigPaths": ["%USERPROFILE%\\.qoder\\config.jsonc"],
+        "macosProcessPatterns": ["/Applications/Qoder.app/"],
+        "windowsExeNames": ["Qoder.exe"]
+      },
+      "patch": {
+        "format": "jsonc",
+        "targetFileIndex": 0,
+        "setKeys": {
+          "providers.qwitch.name": "Qwitch 号池网关",
+          "providers.qwitch.baseURL": "{{baseUrl}}/v1",
+          "providers.qwitch.apiKey": "{{gatewayToken}}",
+          "providers.qwitch.models": "{{modelsMap}}"
+        },
+        "driftAssertContains": ["qwitch", ":{{port}}"]
+      }
+    }
+  }
+}

@@ -14,7 +14,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getMockAccounts, getMockAdapters } from "../data/mockStoreLoader";
-import { getEffectiveClaimStatus, isAccountMissingLocalSnapshot, selectClaimCandidates, toCstDayKey } from "../domain/selectors";
+import {
+  getEffectiveClaimStatus,
+  isAccountClaimBlockedByMissingSnapshot,
+  selectClaimCandidates,
+  toCstDayKey,
+} from "../domain/selectors";
 import type {
   AccountSummary,
   ActionLogItem,
@@ -665,7 +670,7 @@ export function useAccountStore({
             acc.status === "active" &&
             acc.hasApiToken !== false &&
             Boolean(adapter?.capabilities.supportsDailyClaim) &&
-            isAccountMissingLocalSnapshot(acc, adapters)
+            isAccountClaimBlockedByMissingSnapshot(acc, adapters)
           );
         }).length;
         if (alreadyClaimedCount > 0 && missingTokenCount === 0 && unknownCount === 0 && missingSnapshotCount === 0) {

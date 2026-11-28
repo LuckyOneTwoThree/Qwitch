@@ -1,5 +1,9 @@
 import type { AccountSummary, AdapterManifest, ToolId } from "../../types/qwitch";
-import { getEffectiveClaimStatus, isAccountMissingLocalSnapshot } from "../../domain/selectors";
+import {
+  getEffectiveClaimStatus,
+  isAccountClaimBlockedByMissingSnapshot,
+  isAccountMissingLocalSnapshot,
+} from "../../domain/selectors";
 import { getToolBrandMeta } from "../../domain/toolRegistry";
 
 /**
@@ -249,7 +253,7 @@ export function claimAvailability(
   if (account.status !== "active" || account.hasApiToken === false) return "off";
   const adapter = adapters?.find((a) => a.id === account.toolId);
   if (!adapter?.capabilities.supportsDailyClaim) return "off";
-  if (adapter.capabilities.supportsClientSwitch && account.hasLocalSnapshot === false) {
+  if (isAccountClaimBlockedByMissingSnapshot(account, adapters)) {
     return "off";
   }
   const claim = getEffectiveClaimStatus(account);

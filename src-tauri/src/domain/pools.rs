@@ -134,7 +134,7 @@ pub enum AgentBindingStatus {
     NeedsRestart,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum WireProtocolKind {
     OpenaiChat,
@@ -311,6 +311,8 @@ pub enum RoutingAttemptOutcome {
     AuthExpired,
     #[serde(rename = "skipped_active")]
     SkippedActive,
+    #[serde(rename = "skipped_incompatible")]
+    SkippedIncompatible,
     /// 上游返回了既非 429、也非鉴权失效的真实错误（HTTP 4xx/5xx）或请求未到达。
     /// 此前这类失败被错误地贴上 `Cooldown429` 标签，掩盖了诸如「端点 404 / 协议不匹配」
     /// 的真实原因，排查时被误导为限流。现单独成类，detail 里保留真实状态码与响应片段。
@@ -500,19 +502,7 @@ pub struct PoolWorkspaceState {
 
 pub fn split_scoped_model_id(raw: &str) -> (Option<&str>, &str) {
     if let Some((prefix, rest)) = raw.trim().split_once('/') {
-        if matches!(
-            prefix,
-            "workbuddy"
-                | "minimax_code_cn"
-                | "qoder_cn"
-                | "qoder"
-                | "trae_cn"
-                | "lobsterai"
-                | "doubaowork"
-                | "codearts"
-                | "custom_api_key"
-        ) && !rest.trim().is_empty()
-        {
+        if crate::plugins::registry::is_registered_egress_id(prefix) && !rest.trim().is_empty() {
             return (Some(prefix), rest.trim());
         }
     }

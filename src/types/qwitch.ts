@@ -33,6 +33,7 @@ export interface AdapterCapabilities {
   supportsQuotaQuery: boolean;
   supportsDailyClaim: boolean;
   supportsClientSwitch: boolean;
+  claimRequiresClientSwitch?: boolean;
   supportsMultiInstance: boolean;
 }
 

@@ -30,7 +30,8 @@ export function getEffectiveClaimStatus(acc: AccountSummary): ClaimStatus {
     acc.toolId === "workbuddy" ||
     acc.toolId === "minimax_code_cn" ||
     acc.toolId === "lobsterai" ||
-    acc.toolId === "doubaowork";
+    acc.toolId === "doubaowork" ||
+    acc.toolId === "codearts";
   if (dailyResetTool && acc.lastClaimedAt && isSameCstDay(acc.lastClaimedAt)) {
     return "claimed";
   }
@@ -60,6 +61,18 @@ export function isAccountMissingLocalSnapshot(
   const adapter = adapters?.find((a) => a.id === acc.toolId);
   if (adapter) return adapter.capabilities.supportsClientSwitch === true;
   return acc.toolId !== "codearts";
+}
+
+export function isAccountClaimBlockedByMissingSnapshot(
+  acc: AccountSummary,
+  adapters?: AdapterManifest[]
+): boolean {
+  if (acc.hasLocalSnapshot !== false) return false;
+  const adapter = adapters?.find((a) => a.id === acc.toolId);
+  if (adapter?.capabilities.claimRequiresClientSwitch !== undefined) {
+    return adapter.capabilities.claimRequiresClientSwitch;
+  }
+  return acc.toolId === "doubaowork";
 }
 
 export function isAccountNeedingAttention(
@@ -97,7 +110,7 @@ export function isAccountClaimable(
     supportsClaim &&
     acc.status === "active" &&
     acc.hasApiToken !== false &&
-    !(adapter?.capabilities.supportsClientSwitch === true && acc.hasLocalSnapshot === false) &&
+    !isAccountClaimBlockedByMissingSnapshot(acc, adapters) &&
     getEffectiveClaimStatus(acc) === "available"
   );
 }
@@ -136,7 +149,7 @@ export function selectClaimCandidates(
     }
     // 冷切型工具（如豆包工作）如果没有本机快照，冷切必失败——不应纳入批量候选，
     // 否则只会被隔离成「切换失败」。这类账号由 UI 汇总成「需先补快照」引导。
-    if (isAccountMissingLocalSnapshot(acc, adapters)) {
+    if (isAccountClaimBlockedByMissingSnapshot(acc, adapters)) {
       return false;
     }
     if (opts.targetIds) return true;
@@ -212,7 +225,7 @@ export function selectScopedStats(
     if (supportsClaim && acc.status === "active") {
       if (acc.hasApiToken === false) {
         unclaimedAuthMissingCount += 1;
-      } else if (isAccountMissingLocalSnapshot(acc, adapters)) {
+      } else if (isAccountClaimBlockedByMissingSnapshot(acc, adapters)) {
         // 冷切型工具缺快照：虽已授权，但无法冷切领取，归入「需补快照」而非「待领」，
         // 避免徽标显示「N 待领」却批量领取时全部失败。
         unclaimedSnapshotMissingCount += 1;
@@ -336,11 +349,13 @@ function isAccountClaimableWithAdapter(
   adapter: AdapterManifest | undefined
 ): boolean {
   const supportsClaim = adapter ? adapter.capabilities.supportsDailyClaim : false;
+  const claimRequiresSwitch =
+    adapter?.capabilities.claimRequiresClientSwitch ?? acc.toolId === "doubaowork";
   return (
     supportsClaim &&
     acc.status === "active" &&
     acc.hasApiToken !== false &&
-    !(adapter?.capabilities.supportsClientSwitch === true && acc.hasLocalSnapshot === false) &&
+    !(claimRequiresSwitch && acc.hasLocalSnapshot === false) &&
     getEffectiveClaimStatus(acc) === "available"
   );
 }

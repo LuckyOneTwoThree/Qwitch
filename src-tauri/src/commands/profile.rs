@@ -335,11 +335,24 @@ pub async fn pick_folder(app: AppHandle, default_path: Option<String>) -> Option
 
 /// 原生“选择文件”对话框（用于选择导出的 zip 包）。
 #[tauri::command]
-pub async fn pick_file(app: AppHandle, default_path: Option<String>) -> Option<String> {
+pub async fn pick_file(
+    app: AppHandle,
+    default_path: Option<String>,
+    extensions: Option<Vec<String>>,
+) -> Option<String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let def = default_path.filter(|p| !p.trim().is_empty());
+    let exts: Vec<String> = extensions
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| vec!["zip".to_string()]);
     let spawn = app.run_on_main_thread(move || {
-        let mut dialog = rfd::FileDialog::new().add_filter("Trae CN 导出包", &["zip"]);
+        let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+        let filter_label = if ext_refs.contains(&"json") {
+            "插件包或文件"
+        } else {
+            "Trae CN 导出包"
+        };
+        let mut dialog = rfd::FileDialog::new().add_filter(filter_label, &ext_refs);
         if let Some(p) = def.as_deref() {
             let path = std::path::Path::new(p);
             if path.is_dir() {

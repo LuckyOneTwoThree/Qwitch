@@ -89,11 +89,12 @@ export const AccountCard = React.memo(function AccountCard({
   const clientManagedCredential =
     account.toolId === "codearts" && account.renewalMode !== "auto_refresh";
   const missingApiToken = account.hasApiToken === false;
-  // 豆包工作：签到发放校验绑定「设备 + 桌面端当前登录账号」。网页登录导入的
-  // 其他账号点领取只会拿到 710010702 系统错误，这里直接禁用并说明要先切号。
-  const claimNeedsDesktopSession =
-    account.toolId === "doubaowork" && !account.isActiveOnClient;
   const missingLocalSnapshot = canSwitch && account.hasLocalSnapshot === false;
+  // 豆包工作后端已支持「自动冷切 → 领取 → 切回」；仅缺少本机快照且非当前在登时禁用领取。
+  const claimNeedsDesktopSession =
+    account.toolId === "doubaowork" && !account.isActiveOnClient && missingLocalSnapshot;
+  const claimWillAutoSwitch =
+    account.toolId === "doubaowork" && !account.isActiveOnClient && !missingLocalSnapshot;
   const isBatchRunning = Boolean(batchProgress?.running);
   const effectiveClaimStatus = getEffectiveClaimStatus(account);
 
@@ -746,12 +747,14 @@ export const AccountCard = React.memo(function AccountCard({
                       disabled={isBatchRunning || claimNeedsDesktopSession}
                       title={
                         claimNeedsDesktopSession
-                          ? "豆包工作签到绑定桌面端登录账号：先「切至桌面端」再领取"
+                          ? "豆包工作签到需本机快照自动冷切：请先在菜单「补快照」或重新导入本机后再领取"
                           : isBatchRunning
                             ? "批量任务进行中"
-                            : effectiveClaimStatus === "unknown"
-                              ? "先核实今日签到状态，未领取则自动领取"
-                              : "领取今日签到福利"
+                            : claimWillAutoSwitch
+                              ? "将自动切换桌面端到该账号领取，完成后切回原账号"
+                              : effectiveClaimStatus === "unknown"
+                                ? "先核实今日签到状态，未领取则自动领取"
+                                : "领取今日签到福利"
                       }
                       onClick={() => void claimDailyBatch([account.id])}
                       className="btn btn-sm btn-sky-soft gap-1 whitespace-nowrap disabled:opacity-45"

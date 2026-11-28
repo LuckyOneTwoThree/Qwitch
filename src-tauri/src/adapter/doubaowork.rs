@@ -37,8 +37,8 @@ const DOUBAO_BASE_QUERY_PARAMS: &[(&str, &str)] = &[
     ("web_platform", "desktop"),
     ("pkg_type", "release_version"),
     ("version_code", "20800"),
-    ("pc_version", "2.37.19"),
-    ("doubao_pc_version", "2.37.19"),
+    ("pc_version", "2.38.11"),
+    ("doubao_pc_version", "2.38.11"),
     // 与官方 `DoubaoWork.app` 2.37.19 的 `UniParamsInit` 对齐：main.js 里
     // `runtime: () => uh.web` / `runtime_version: () => "3.46.7"`，并非 local_web。
     ("runtime", "web"),

@@ -256,4 +256,36 @@ describe("AccountCard", () => {
     expect(queryBtn.disabled).toBe(true);
     expect(queryBtn.title).toContain("已停用");
   });
+
+  it("非桌面在登的豆包账号只要具备本机快照即可直接点击「领取」触发自动冷切", () => {
+    const dwAcc: AccountSummary = {
+      ...account,
+      id: "acc-dw-snap",
+      toolId: "doubaowork",
+      label: "豆包非在登有快照",
+      isActiveOnClient: false,
+      hasLocalSnapshot: true,
+    };
+    render(<AccountCard account={dwAcc} />);
+    const claimBtn = screen.getByRole("button", { name: /领取/ }) as HTMLButtonElement;
+    expect(claimBtn.disabled).toBe(false);
+    expect(claimBtn.title).toContain("自动切换桌面端");
+    fireEvent.click(claimBtn);
+    expect(ctx.claimDailyBatch).toHaveBeenCalledWith(["acc-dw-snap"]);
+  });
+
+  it("非桌面在登的豆包账号若缺少本机快照则禁用「领取」并提示补快照", () => {
+    const dwNoSnap: AccountSummary = {
+      ...account,
+      id: "acc-dw-nosnap",
+      toolId: "doubaowork",
+      label: "豆包缺快照",
+      isActiveOnClient: false,
+      hasLocalSnapshot: false,
+    };
+    render(<AccountCard account={dwNoSnap} />);
+    const claimBtn = screen.getByRole("button", { name: /领取/ }) as HTMLButtonElement;
+    expect(claimBtn.disabled).toBe(true);
+    expect(claimBtn.title).toContain("补快照");
+  });
 });

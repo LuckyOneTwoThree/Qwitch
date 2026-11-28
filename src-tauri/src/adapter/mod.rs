@@ -344,6 +344,22 @@ pub fn create_all_adapters(
     trusted_adapter_hashes: &HashMap<String, String>,
     host: Arc<dyn PlatformHost>,
 ) -> HashMap<String, Arc<dyn ToolAdapter>> {
+    create_all_adapters_with_overrides(
+        data_dir,
+        trusted_adapters,
+        trusted_adapter_hashes,
+        &[],
+        host,
+    )
+}
+
+pub fn create_all_adapters_with_overrides(
+    data_dir: &Path,
+    trusted_adapters: &[String],
+    trusted_adapter_hashes: &HashMap<String, String>,
+    override_approved_ids: &[String],
+    host: Arc<dyn PlatformHost>,
+) -> HashMap<String, Arc<dyn ToolAdapter>> {
     let mut map: HashMap<String, Arc<dyn ToolAdapter>> = HashMap::new();
     // 优先注册国内版内置适配器（Trae 国际版无每日积分签到，暂不纳入）
     let builtins: Vec<Arc<dyn ToolAdapter>> = vec![
@@ -363,9 +379,14 @@ pub fn create_all_adapters(
         map.insert(adapter.manifest().id.clone(), adapter);
     }
 
-    // 外部适配器必须经用户显式信任且目录内容哈希与已固定值一致后才注册；内置及保留 ID 一律不允许冒名
+    // 外部适配器必须经用户显式信任且目录内容哈希与已固定值一致后才注册；
+    // 内置及保留 ID 默认不允许冒名，仅当用户在 `override_approved_ids` 中显式确认覆盖时才允许替换。
     for (id, (ext, dir)) in external::discover_external_adapters(data_dir) {
-        if !is_valid_adapter_id(&id) || RESERVED_ADAPTER_IDS.contains(&id.as_str()) {
+        if !is_valid_adapter_id(&id) {
+            continue;
+        }
+        let is_reserved = RESERVED_ADAPTER_IDS.contains(&id.as_str());
+        if is_reserved && !override_approved_ids.iter().any(|o| o == &id) {
             continue;
         }
         if !trusted_adapters.iter().any(|t| t == &id) {
@@ -380,8 +401,7 @@ pub fn create_all_adapters(
         if &actual_hash != expected_hash {
             continue;
         }
-        map.entry(id)
-            .or_insert_with(|| Arc::new(ext.with_pinned_hash(actual_hash)));
+        map.insert(id, Arc::new(ext.with_pinned_hash(actual_hash)));
     }
 
     map
@@ -501,6 +521,41 @@ mod tests {
         assert!(!is_valid_adapter_id("."));
         assert!(!is_valid_adapter_id(".hidden"));
         assert!(!is_valid_adapter_id("plugin."));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_adapter_can_override_builtin_when_explicitly_approved() {
+        let root =
+            std::env::temp_dir().join(format!("qwitch_override_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        write_manifest(&root, "trae_cn");
+
+        let host: Arc<dyn PlatformHost> = Arc::new(crate::platform::NativePlatformHost);
+        let trae_cn_hash =
+            external::adapter_content_hash(&root.join("adapters").join("trae_cn")).expect("hash");
+        let valid_hashes = HashMap::from([("trae_cn".to_string(), trae_cn_hash)]);
+
+        // 未显式批准覆盖时，仍保留内置适配器
+        let without_override = create_all_adapters_with_overrides(
+            &root,
+            &["trae_cn".to_string()],
+            &valid_hashes,
+            &[],
+            Arc::clone(&host),
+        );
+        assert!(without_override["trae_cn"].manifest().is_builtin);
+
+        // 显式批准覆盖后，外部插件替换内置实现
+        let with_override = create_all_adapters_with_overrides(
+            &root,
+            &["trae_cn".to_string()],
+            &valid_hashes,
+            &["trae_cn".to_string()],
+            host,
+        );
+        assert!(!with_override["trae_cn"].manifest().is_builtin);
 
         let _ = std::fs::remove_dir_all(&root);
     }

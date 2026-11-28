@@ -4,7 +4,8 @@ export type AffinityMode = "auto_cache" | "session" | "turn" | "off";
 
 export type UpstreamChannel = "rust_native" | "opencode_bridge" | "api_key";
 
-export type TargetAgentId = "codex_desktop" | "claude_desktop" | "dsh" | "opencode" | "mimo" | "zcode";
+export type BuiltinAgentId = "codex_desktop" | "claude_desktop" | "dsh" | "opencode" | "mimo" | "zcode";
+export type TargetAgentId = BuiltinAgentId | (string & {});
 
 export type AgentBindingStatus = "bound" | "drifted" | "unbound" | "needs_restart";
 
@@ -119,7 +120,7 @@ export interface RoutingAttempt {
   toolId: string;
   model: string;
   tier?: MemberTier;
-  outcome: "ok" | "429_cooldown" | "401_refreshed" | "auth_expired" | "skipped_active" | "http_error";
+  outcome: "ok" | "429_cooldown" | "401_refreshed" | "auth_expired" | "skipped_active" | "skipped_incompatible" | "http_error";
   latencyMs: number;
   detail: string;
 }

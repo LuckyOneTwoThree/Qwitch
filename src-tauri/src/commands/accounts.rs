@@ -831,17 +831,52 @@ pub async fn claim_daily_batch(
             (switch_ids, network_ids)
         };
 
+        struct ChainedClaimSink<'a>(&'a AppHandle);
+        impl crate::scheduler::SchedulerEventSink for ChainedClaimSink<'_> {
+            fn emit_batch_progress(&self, mut event: crate::scheduler::BatchProgressEvent) {
+                if event.phase == "done" && !event.running {
+                    event.running = true;
+                    event.phase = "checking".into();
+                    event.summary_text = Some("纯网络账号领取完成，正在进入桌面冷切领取…".into());
+                }
+                let _ = self.0.emit("qwitch://batch-progress", event);
+            }
+
+            fn emit_account_updated(&self, account_id: &str) {
+                let _ = self.0.emit("qwitch://account-updated", account_id);
+            }
+
+            fn emit_logs_updated(&self) {
+                let _ = self.0.emit("qwitch://logs-updated", ());
+            }
+        }
+
         if !network_ids.is_empty() {
-            let _ = scheduler
-                .run_daily_claim_batch(
-                    &app,
-                    &db,
-                    &master_key,
-                    &adapters,
-                    network_ids,
-                    jitter.clone(),
-                )
-                .await;
+            if !switch_ids.is_empty() {
+                let sink = ChainedClaimSink(&app);
+                let _ = scheduler
+                    .run_daily_claim_batch_with_sink(
+                        &sink,
+                        &db,
+                        &master_key,
+                        &adapters,
+                        network_ids,
+                        jitter.clone(),
+                        (1200, 2600),
+                    )
+                    .await;
+            } else {
+                let _ = scheduler
+                    .run_daily_claim_batch(
+                        &app,
+                        &db,
+                        &master_key,
+                        &adapters,
+                        network_ids,
+                        jitter.clone(),
+                    )
+                    .await;
+            }
         }
 
         if !switch_ids.is_empty() {

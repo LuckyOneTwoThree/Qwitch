@@ -78,7 +78,7 @@ import type {
   NavSection,
 } from "./dashboard/types";
 import { LogsPanel, LogsToolbar } from "./dashboard/LogsView";
-import { SettingsView } from "./dashboard/SettingsView";
+import { SettingsView, type SettingsTabId } from "./dashboard/SettingsView";
 import { AgentBindingsView } from "./dashboard/AgentBindingsView";
 import { RoutingTraceView } from "./dashboard/RoutingTraceView";
 import { PoolSimulationModal } from "../components/pool/PoolSimulationModal";
@@ -230,6 +230,7 @@ export function Dashboard({
   const [simDefaultModelId, setSimDefaultModelId] = useState<string | undefined>(undefined);
   const [highlightAgentId, setHighlightAgentId] = useState<TargetAgentId | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTabId | undefined>(undefined);
   const [importDefaultMethod, setImportDefaultMethod] = useState<AuthMethod | undefined>(undefined);
   const [importPresetTool, setImportPresetTool] = useState<ToolId | undefined>(undefined);
   const [bindTargetAccount, setBindTargetAccount] = useState<AccountSummary | null>(null);
@@ -1246,19 +1247,20 @@ export function Dashboard({
         <header
           onMouseDown={usesCustomTitleBar ? onTitleBarMouseDown : undefined}
           onDoubleClick={usesCustomTitleBar ? onTitleBarDoubleClick : undefined}
-          className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-zinc-200/60 bg-white/80 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-white/[0.06] dark:bg-[#111216]/80"
+          className="z-20 flex shrink-0 items-start justify-between gap-x-2 border-b border-zinc-200/60 bg-white/80 px-5 pt-2 pb-3 backdrop-blur-xl dark:border-white/[0.06] dark:bg-[#111216]/80"
         >
-          <div className="flex min-w-[160px] flex-1 items-center gap-2.5">
-            {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
-            <div className="min-w-0">
-              <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>
-              <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
-                {headerSubtitle}
-              </p>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <div className="flex min-w-[160px] flex-1 items-center gap-2.5">
+              {activeToolFilter && <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />}
+              <div className="min-w-0">
+                <h1 className="truncate text-lg font-semibold tracking-tight">{headerTitle}</h1>
+                <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                  {headerSubtitle}
+                </p>
+              </div>
             </div>
-          </div>
 
-          <div className="flex flex-wrap items-center justify-end gap-1.5">
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
             <BatchClaimBanner inline />
             {isAccountSection && (
               <>
@@ -1423,9 +1425,14 @@ export function Dashboard({
                 <Moon className="h-3.5 w-3.5" aria-hidden="true" />
               )}
             </button>
-
-            {isWindows && <WindowsWindowControls />}
+            </div>
           </div>
+
+          {isWindows && (
+            <div className="flex shrink-0 items-center self-start pt-0.5">
+              <WindowsWindowControls />
+            </div>
+          )}
         </header>
 
         {nav === "logs" && (
@@ -1450,8 +1457,8 @@ export function Dashboard({
           className={`min-h-0 flex-1 ${
             isAccountSection
               ? "overflow-y-auto"
-              : nav === "pools"
-                ? "overflow-y-auto px-5 py-3.5 @3xl:overflow-hidden"
+              : nav === "pools" || nav === "agents" || nav === "routing"
+                ? "overflow-y-auto px-4 py-3 @3xl:flex @3xl:flex-col @3xl:overflow-hidden"
                 : "overflow-y-auto px-5 py-3.5"
           }`}
         >
@@ -2053,7 +2060,13 @@ export function Dashboard({
           )}
 
           {(nav === "agents" || nav === "pools") && (
-            <AgentBindingsView highlightAgentId={highlightAgentId} />
+            <AgentBindingsView
+              highlightAgentId={highlightAgentId}
+              onOpenPluginSettings={() => {
+                setSettingsInitialTab("plugins");
+                setNav("settings");
+              }}
+            />
           )}
 
           {nav === "routing" && (
@@ -2088,6 +2101,8 @@ export function Dashboard({
               setPathDraftsDirty={setPathDraftsDirty}
               reloadExternalPlugins={reloadExternalPlugins}
               setConfirmLogAction={setConfirmLogAction}
+              initialTab={settingsInitialTab}
+              onInitialTabConsumed={() => setSettingsInitialTab(undefined)}
             />
           )}
         </main>
@@ -2106,6 +2121,14 @@ export function Dashboard({
         defaultToolId={bindTargetAccount?.toolId ?? importPresetTool ?? activeToolFilter}
         defaultMethod={importDefaultMethod}
         targetAccount={bindTargetAccount}
+        onOpenPluginSettings={() => {
+          setImportOpen(false);
+          setBindTargetAccount(null);
+          setImportDefaultMethod(undefined);
+          setImportPresetTool(undefined);
+          setSettingsInitialTab("plugins");
+          setNav("settings");
+        }}
         onClose={() => {
           setImportOpen(false);
           setBindTargetAccount(null);

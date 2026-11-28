@@ -4,6 +4,7 @@ pub mod commands;
 pub mod domain;
 pub mod gateway;
 pub mod platform;
+pub mod plugins;
 pub mod scheduler;
 pub mod storage;
 pub mod update;
@@ -126,7 +127,7 @@ pub fn run() {
                 migration_warnings.push(format!("历史数据脱敏未完成：{e}"));
             }
             let _ = db.backfill_account_names(&master_key);
-            // 启动时清理已解绑 Agent 的休眠专属池残留模型，并移除不可路由工具 doubaowork 的残留策略。
+            // 启动时清理已解绑 Agent 的休眠专属池残留模型与策略。
             if let Err(e) = db.cleanup_unbound_dedicated_pools() {
                 eprintln!("Qwitch 休眠专属池清理失败: {e}");
             }
@@ -167,6 +168,32 @@ pub fn run() {
                 &startup_settings.trusted_adapter_hashes,
                 Arc::clone(&host),
             ));
+            let mut plugin_registry = plugins::PluginRegistry::new_with_builtins();
+            let stored_states = db.list_plugin_states().unwrap_or_default();
+            for (dir, manifest, actual_hash) in plugins::scan_external_plugins_v2(&data_dir) {
+                let matched_state = stored_states.iter().find(|s| {
+                    s.plugin_id == manifest.id
+                        && s.source == "external"
+                        && s.pinned_hash
+                            .as_deref()
+                            .is_some_and(|h| h.eq_ignore_ascii_case(&actual_hash))
+                });
+                if let Some(st) = matched_state {
+                    let transport =
+                        commands::build_external_egress_transport(&manifest, &dir, &actual_hash);
+                    if plugin_registry
+                        .register_external(manifest, actual_hash, dir, st.enabled)
+                        .is_ok()
+                    {
+                        if let Some(tr) = transport {
+                            plugin_registry.register_egress_transport(tr);
+                        }
+                    }
+                }
+            }
+            plugin_registry.apply_stored_states(&stored_states);
+            plugins::sync_global_registry_snapshot(&plugin_registry);
+            let plugins = Arc::new(std::sync::RwLock::new(plugin_registry));
             let gateway_runtime = GatewayRuntime::new();
             let effective_gateway_port = startup_settings.gateway_port.max(1024);
             let _ = gateway_runtime.set_port(effective_gateway_port);
@@ -213,6 +240,7 @@ pub fn run() {
                 master_key,
                 host,
                 adapters,
+                plugins,
                 scheduler: Arc::new(AntiRiskScheduler::new()),
                 gateway: Arc::new(gateway_runtime),
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
@@ -654,6 +682,12 @@ pub fn run() {
             commands::list_adapters,
             commands::list_external_adapters,
             commands::request_plugin_trust,
+            commands::list_plugins_cmd,
+            commands::toggle_plugin_cmd,
+            commands::install_external_plugin_cmd,
+            commands::remove_external_plugin_cmd,
+            commands::check_agent_egress_compatibility_cmd,
+            commands::probe_egress_capabilities_cmd,
             commands::detect_client_status,
             commands::reconcile_active_accounts,
             commands::list_accounts,

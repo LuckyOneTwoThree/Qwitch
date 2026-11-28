@@ -13,8 +13,9 @@ import {
   CheckCircle2,
   XCircle,
 } from "lucide-react";
+import { PluginCenterCard } from "../../components/plugins/PluginCenterCard";
 
-type SettingsTabId = "general" | "automation" | "clients" | "plugins";
+export type SettingsTabId = "general" | "automation" | "clients" | "plugins";
 type SavingSectionKey = "jitter" | "logs" | "paths" | "plugins" | null;
 
 function parsePortInput(raw: string): number | null {
@@ -100,6 +101,8 @@ export interface SettingsViewProps {
   setPathDraftsDirty: Dispatch<SetStateAction<boolean>>;
   reloadExternalPlugins: () => Promise<void>;
   setConfirmLogAction: Dispatch<SetStateAction<ConfirmLogAction | null>>;
+  initialTab?: SettingsTabId;
+  onInitialTabConsumed?: () => void;
 }
 
 export function SettingsView({
@@ -112,6 +115,8 @@ export function SettingsView({
   setPathDraftsDirty,
   reloadExternalPlugins,
   setConfirmLogAction,
+  initialTab,
+  onInitialTabConsumed,
 }: SettingsViewProps) {
   const {
     adapters,
@@ -126,7 +131,14 @@ export function SettingsView({
     saveAppSettings,
     showToast,
   } = useQwitch();
-  const [activeTab, setActiveTab] = useState<SettingsTabId>("general");
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab ?? "general");
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+      onInitialTabConsumed?.();
+    }
+  }, [initialTab, onInitialTabConsumed]);
   const {
     gateway,
     agentBindings,
@@ -841,6 +853,13 @@ export function SettingsView({
 
       {activeTab === "plugins" && (
         <div className="grid grid-cols-1 gap-4 @lg:grid-cols-2">
+          <PluginCenterCard
+            isTauriRuntime={isTauriRuntime}
+            onToast={showToast}
+            onPluginsChanged={() => {
+              void reloadExternalPlugins();
+            }}
+          />
           <div className="surface-card p-5 @lg:col-span-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Puzzle className="h-4 w-4 text-sky-500" aria-hidden="true" />

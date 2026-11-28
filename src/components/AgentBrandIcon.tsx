@@ -21,7 +21,7 @@ const AGENT_ICON_SRC: Partial<Record<AgentIconKind, string>> = {
   zcode: "/icons/agent-zcode.png",
 };
 
-const AGENT_SURFACE_STYLE: Record<AgentIconKind, string> = {
+const AGENT_SURFACE_STYLE: Partial<Record<string, string>> = {
   codex_desktop: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
   claude_desktop: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
   dsh: "bg-transparent ring-1 ring-black/10 shadow-2xs dark:ring-white/12",
@@ -31,6 +31,8 @@ const AGENT_SURFACE_STYLE: Record<AgentIconKind, string> = {
   custom_endpoint:
     "bg-zinc-100 text-zinc-700 ring-1 ring-black/8 shadow-2xs dark:bg-zinc-800 dark:text-zinc-300 dark:ring-white/12",
 };
+const DEFAULT_AGENT_SURFACE_STYLE =
+  "bg-zinc-100 text-zinc-700 ring-1 ring-black/8 shadow-2xs dark:bg-zinc-800 dark:text-zinc-300 dark:ring-white/12";
 
 export const AgentBrandIcon = React.memo(function AgentBrandIcon({
   agentId,
@@ -44,7 +46,7 @@ export const AgentBrandIcon = React.memo(function AgentBrandIcon({
   decorative?: boolean;
 }) {
   const boxClass = SIZE_CLASSES[size];
-  const surfaceClass = AGENT_SURFACE_STYLE[agentId];
+  const surfaceClass = AGENT_SURFACE_STYLE[agentId] ?? DEFAULT_AGENT_SURFACE_STYLE;
 
   const renderMark = () => {
     const src = AGENT_ICON_SRC[agentId];

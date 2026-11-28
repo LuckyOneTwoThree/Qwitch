@@ -2,8 +2,27 @@ use std::collections::HashMap;
 
 use crate::domain::{
     AccountPool, AffinityMode, MemberTier, PoolMember, PoolStrategy, RoutingAttempt,
-    RoutingAttemptOutcome,
+    RoutingAttemptOutcome, WireProtocolKind,
 };
+
+#[derive(Debug, Clone)]
+pub struct RequestFeatures {
+    pub has_tools: bool,
+    pub has_images: bool,
+    pub stream: bool,
+    pub incoming_protocol: WireProtocolKind,
+}
+
+impl Default for RequestFeatures {
+    fn default() -> Self {
+        Self {
+            has_tools: false,
+            has_images: false,
+            stream: false,
+            incoming_protocol: WireProtocolKind::OpenaiChat,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SchedulePlan {
@@ -67,6 +86,7 @@ fn collect_for_model(
     target_model: &str,
     cooldowns: &HashMap<String, i64>,
     now_ms: i64,
+    features: Option<&RequestFeatures>,
     skipped_attempts: &mut Vec<RoutingAttempt>,
 ) -> Vec<PoolMember> {
     let mut t1 = Vec::new();
@@ -106,14 +126,10 @@ fn collect_for_model(
             continue;
         }
         // 「跳过桌面端活跃账号」是为切号流程准备的：切号会重启客户端、和网关抢同一份凭据。
-        // 码道（STS 签名）、有道龙虾（OAuth Bearer /api/proxy）、Qoder CN（COSY 签名 API）
-        // 均支持与桌面端并行请求而不互踢，不能因此把它们唯一的可用账号排掉。
+        // 具备 `concurrent_with_desktop_client` 能力的出口支持与桌面端并行请求而不互踢。
         if pool.skip_active_client_account
             && m.is_active_on_client.unwrap_or(false)
-            && !matches!(
-                m.tool_id.as_str(),
-                "codearts" | "lobsterai" | "qoder_cn" | "doubaowork"
-            )
+            && !crate::plugins::registry::global_egress_concurrent_with_desktop_client(&m.tool_id)
         {
             skipped_attempts.push(RoutingAttempt {
                 account_label: m.label.clone(),
@@ -125,6 +141,27 @@ fn collect_for_model(
                 detail: "开启了「跳过桌面端活跃账号」护栏，自动避让以免与官方客户端互踢".into(),
             });
             continue;
+        }
+        if let Some(req_feat) = features {
+            if req_feat.has_tools {
+                if let Some(profile) = crate::plugins::registry::global_egress_profile(&m.tool_id) {
+                    if !profile.provides.tools {
+                        skipped_attempts.push(RoutingAttempt {
+                            account_label: m.label.clone(),
+                            tool_id: m.tool_id.clone(),
+                            model: target_model.to_string(),
+                            tier: Some(m.tier),
+                            outcome: RoutingAttemptOutcome::SkippedIncompatible,
+                            latency_ms: 0,
+                            detail: format!(
+                                "当前请求包含 tools 工具调用，出口插件 {} 声明不支持 tools，已自动跳过",
+                                m.tool_id
+                            ),
+                        });
+                        continue;
+                    }
+                }
+            }
         }
         match m.tier {
             MemberTier::T1Primary => t1.push(m.clone()),
@@ -147,6 +184,26 @@ pub fn select_candidates_for_request(
     affinity_map: &HashMap<String, String>,
     now_ms: i64,
 ) -> SchedulePlan {
+    select_candidates_for_request_with_features(
+        pool,
+        requested_model,
+        session_key,
+        cooldowns,
+        affinity_map,
+        now_ms,
+        None,
+    )
+}
+
+pub fn select_candidates_for_request_with_features(
+    pool: &AccountPool,
+    requested_model: &str,
+    session_key: Option<&str>,
+    cooldowns: &HashMap<String, i64>,
+    affinity_map: &HashMap<String, String>,
+    now_ms: i64,
+    features: Option<&RequestFeatures>,
+) -> SchedulePlan {
     let mut skipped_attempts = Vec::new();
     let policy = pool
         .model_policies
@@ -168,6 +225,7 @@ pub fn select_candidates_for_request(
         &effective_model,
         cooldowns,
         now_ms,
+        features,
         &mut skipped_attempts,
     );
     let mut used_explicit_fallback = false;
@@ -175,7 +233,8 @@ pub fn select_candidates_for_request(
     if candidates.is_empty() {
         if let Some(fb) = policy.and_then(|p| p.fallback_model_id.as_deref()) {
             let mut fb_skipped = Vec::new();
-            let fb_candidates = collect_for_model(pool, fb, cooldowns, now_ms, &mut fb_skipped);
+            let fb_candidates =
+                collect_for_model(pool, fb, cooldowns, now_ms, features, &mut fb_skipped);
             if !fb_candidates.is_empty() {
                 used_explicit_fallback = true;
                 effective_model = fb.to_string();
@@ -217,6 +276,14 @@ pub fn select_candidates_for_request(
                 {
                     format!(
                         "严格锁模「{requested_model}」：可用账号均被「跳过桌面端活跃账号」护栏避让（请在 Agent 调度页关闭该开关或导入第二个账号）"
+                    )
+                } else if !skipped_attempts.is_empty()
+                    && skipped_attempts
+                        .iter()
+                        .all(|a| a.outcome == RoutingAttemptOutcome::SkippedIncompatible)
+                {
+                    format!(
+                        "严格锁模「{requested_model}」：所有候选账号均不支持本次请求所需的能力（如 tools），已被兼容性护栏跳过"
                     )
                 } else {
                     format!(
@@ -695,5 +762,71 @@ mod tests {
             .map(|c| c.account_id.as_str())
             .collect();
         assert_eq!(ids, vec!["q1", "t2", "t1"]);
+    }
+
+    #[test]
+    fn skips_incompatible_member_when_request_requires_tools() {
+        let pool = AccountPool {
+            id: "pool-compat".into(),
+            slug: "compat".into(),
+            name: "Compat".into(),
+            description: String::new(),
+            scene_tag: "Coding".into(),
+            enabled: true,
+            strategy: PoolStrategy::Order,
+            affinity_mode: AffinityMode::Off,
+            skip_active_client_account: false,
+            cooldown_seconds: 60,
+            auto_refresh_on_401: true,
+            fallback_api_key_enabled: true,
+            model_policies: Vec::new(),
+            members: vec![
+                // 测试用无 tools 出口
+                make_member(
+                    "db-1",
+                    "no_tools_test_egress",
+                    MemberTier::T1Primary,
+                    0,
+                    90,
+                    &["deepseek-v4-pro"],
+                ),
+                // workbuddy 支持 tools
+                make_member(
+                    "wb-2",
+                    "workbuddy",
+                    MemberTier::T2Backup,
+                    1,
+                    80,
+                    &["deepseek-v4-pro"],
+                ),
+            ],
+            today_requests: 0,
+            today_failovers: 0,
+            cache_hit_rate: 0,
+            created_at: String::new(),
+        };
+
+        let feat = RequestFeatures {
+            has_tools: true,
+            has_images: false,
+            stream: true,
+            incoming_protocol: WireProtocolKind::OpenaiChat,
+        };
+        let plan = select_candidates_for_request_with_features(
+            &pool,
+            "deepseek-v4-pro",
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            1_000,
+            Some(&feat),
+        );
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].account_id, "wb-2");
+        assert_eq!(plan.skipped_attempts.len(), 1);
+        assert_eq!(
+            plan.skipped_attempts[0].outcome,
+            RoutingAttemptOutcome::SkippedIncompatible
+        );
     }
 }

@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::domain::WireProtocolKind;
+use crate::plugins::manifest::EgressConstraints;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrRole {
@@ -13,6 +14,11 @@ pub enum IrRole {
 #[derive(Debug, Clone)]
 pub enum IrPart {
     Text(String),
+    Image {
+        media_type: String,
+        data_base64: Option<String>,
+        url: Option<String>,
+    },
     Thinking {
         text: String,
         signature: Option<String>,
@@ -48,6 +54,14 @@ pub struct IrRequest {
     pub tool_choice: Option<Value>,
     pub max_tokens: Option<u64>,
     pub temperature: Option<f64>,
+}
+
+impl IrRequest {
+    pub fn has_images(&self) -> bool {
+        self.messages
+            .iter()
+            .any(|m| m.parts.iter().any(|p| matches!(p, IrPart::Image { .. })))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -182,9 +196,31 @@ pub fn parse_openai_chat_request(body: &Value) -> Result<IrRequest, String> {
                     });
                 }
                 _ => {
+                    let mut parts = Vec::new();
+                    if let Some(Value::Array(blocks)) = msg.get("content") {
+                        for b in blocks {
+                            match b.get("type").and_then(|v| v.as_str()) {
+                                Some("text") => {
+                                    if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                                        if !t.is_empty() {
+                                            parts.push(IrPart::Text(t.to_string()));
+                                        }
+                                    }
+                                }
+                                Some("image_url") => {
+                                    if let Some(img) = parse_image_url_part(b.get("image_url")) {
+                                        parts.push(img);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else {
+                        parts.push(IrPart::Text(text));
+                    }
                     messages.push(IrMessage {
                         role: IrRole::User,
-                        parts: vec![IrPart::Text(text)],
+                        parts,
                     });
                 }
             }
@@ -241,6 +277,35 @@ pub fn parse_anthropic_messages_request(body: &Value) -> Result<IrRequest, Strin
                             "text" => {
                                 if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
                                     parts.push(IrPart::Text(t.to_string()));
+                                }
+                            }
+                            "image" => {
+                                if let Some(src) = b.get("source") {
+                                    let stype =
+                                        src.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                    let media_type = src
+                                        .get("media_type")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("image/png")
+                                        .to_string();
+                                    if stype == "base64" {
+                                        if let Some(data) = src.get("data").and_then(|v| v.as_str())
+                                        {
+                                            parts.push(IrPart::Image {
+                                                media_type,
+                                                data_base64: Some(data.to_string()),
+                                                url: None,
+                                            });
+                                        }
+                                    } else if stype == "url" {
+                                        if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                                            parts.push(IrPart::Image {
+                                                media_type,
+                                                data_base64: None,
+                                                url: Some(url.to_string()),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             "thinking" => {
@@ -431,9 +496,36 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
                                     }
                                 }
                                 _ => {
+                                    let mut parts = Vec::new();
+                                    if let Some(Value::Array(blocks)) = item.get("content") {
+                                        for b in blocks {
+                                            match b.get("type").and_then(|v| v.as_str()) {
+                                                Some("input_text") | Some("text") => {
+                                                    if let Some(t) =
+                                                        b.get("text").and_then(|v| v.as_str())
+                                                    {
+                                                        if !t.is_empty() {
+                                                            parts.push(IrPart::Text(t.to_string()));
+                                                        }
+                                                    }
+                                                }
+                                                Some("input_image") => {
+                                                    if let Some(img) = parse_image_url_part(
+                                                        b.get("image_url").or(Some(b)),
+                                                    ) {
+                                                        parts.push(img);
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    if parts.is_empty() {
+                                        parts.push(IrPart::Text(text));
+                                    }
                                     messages.push(IrMessage {
                                         role: IrRole::User,
-                                        parts: vec![IrPart::Text(text)],
+                                        parts,
                                     });
                                 }
                             }
@@ -455,6 +547,41 @@ pub fn parse_openai_responses_request(body: &Value) -> Result<IrRequest, String>
         tool_choice,
         max_tokens,
         temperature,
+    })
+}
+
+fn parse_image_url_part(val: Option<&Value>) -> Option<IrPart> {
+    let v = val?;
+    let raw_url = match v {
+        Value::String(s) => s.as_str(),
+        Value::Object(obj) => obj
+            .get("url")
+            .or_else(|| obj.get("image_url"))
+            .and_then(Value::as_str)?,
+        _ => return None,
+    };
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("data:") {
+        if let Some((meta, b64)) = rest.split_once(";base64,") {
+            let media_type = if meta.is_empty() {
+                "image/png".to_string()
+            } else {
+                meta.to_string()
+            };
+            return Some(IrPart::Image {
+                media_type,
+                data_base64: Some(b64.to_string()),
+                url: None,
+            });
+        }
+    }
+    Some(IrPart::Image {
+        media_type: "image/png".to_string(),
+        data_base64: None,
+        url: Some(trimmed.to_string()),
     })
 }
 
@@ -613,7 +740,38 @@ pub fn to_upstream_openai_chat_body(ir: &IrRequest, upstream_model: &str, stream
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                if !text.is_empty() {
+                let images: Vec<Value> = msg
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        IrPart::Image {
+                            media_type,
+                            data_base64,
+                            url,
+                        } => {
+                            let target_url = if let Some(b64) = data_base64 {
+                                format!("data:{media_type};base64,{b64}")
+                            } else if let Some(u) = url {
+                                u.clone()
+                            } else {
+                                return None;
+                            };
+                            Some(json!({
+                                "type": "image_url",
+                                "image_url": { "url": target_url }
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !images.is_empty() {
+                    let mut content_arr = Vec::new();
+                    if !text.is_empty() {
+                        content_arr.push(json!({ "type": "text", "text": text }));
+                    }
+                    content_arr.extend(images);
+                    msgs.push(json!({ "role": "user", "content": content_arr }));
+                } else if !text.is_empty() {
                     msgs.push(json!({ "role": "user", "content": text }));
                 }
             }
@@ -706,6 +864,30 @@ pub fn to_upstream_anthropic_body(ir: &IrRequest, upstream_model: &str, stream: 
                 IrPart::Text(t) if !t.is_empty() => {
                     blocks.push(json!({ "type": "text", "text": t }));
                 }
+                IrPart::Image {
+                    media_type,
+                    data_base64,
+                    url,
+                } => {
+                    if let Some(b64) = data_base64 {
+                        blocks.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": b64
+                            }
+                        }));
+                    } else if let Some(u) = url {
+                        blocks.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": u
+                            }
+                        }));
+                    }
+                }
                 IrPart::Thinking {
                     text,
                     signature,
@@ -788,6 +970,452 @@ pub fn to_upstream_anthropic_body(ir: &IrRequest, upstream_model: &str, stream: 
         }
     }
     body
+}
+
+fn tools_to_openai_responses(tools: &[Value]) -> Vec<Value> {
+    canonical_tools(tools)
+        .into_iter()
+        .map(|(name, description, parameters)| {
+            json!({
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": parameters
+            })
+        })
+        .collect()
+}
+
+fn tool_choice_to_openai_responses(choice: &Value) -> Option<Value> {
+    if let Some(s) = choice.as_str() {
+        return match s {
+            "auto" | "required" | "none" => Some(json!(s)),
+            _ => None,
+        };
+    }
+    match choice.get("type").and_then(|v| v.as_str()) {
+        Some("auto") => Some(json!("auto")),
+        Some("any") | Some("required") => Some(json!("required")),
+        Some("none") => Some(json!("none")),
+        Some("tool") => choice
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| json!({ "type": "function", "name": n })),
+        Some("function") => choice
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .or_else(|| choice.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|n| json!({ "type": "function", "name": n })),
+        _ => Some(choice.clone()),
+    }
+}
+
+pub fn apply_egress_constraints(
+    body: &mut Value,
+    protocol: WireProtocolKind,
+    constraints: &EgressConstraints,
+) {
+    if constraints.must_stream {
+        body["stream"] = json!(true);
+    }
+    if protocol == WireProtocolKind::OpenaiResponses {
+        if constraints.disallow_store {
+            body["store"] = json!(false);
+        }
+        if constraints.requires_instructions
+            && body
+                .get("instructions")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            body["instructions"] = json!("You are a helpful coding assistant.");
+        }
+    }
+    if constraints.strip_temperature_on_reasoning {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("temperature");
+        }
+    }
+}
+
+pub fn to_upstream_openai_responses_body(
+    ir: &IrRequest,
+    upstream_model: &str,
+    stream: bool,
+    constraints: Option<&EgressConstraints>,
+) -> Value {
+    let mut input: Vec<Value> = Vec::new();
+    for msg in &ir.messages {
+        match msg.role {
+            IrRole::User => {
+                for p in &msg.parts {
+                    if let IrPart::ToolResult {
+                        call_id, content, ..
+                    } = p
+                    {
+                        input.push(json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": content
+                        }));
+                    }
+                }
+                let mut content_blocks: Vec<Value> = Vec::new();
+                for p in &msg.parts {
+                    match p {
+                        IrPart::Text(t) if !t.is_empty() => {
+                            content_blocks.push(json!({ "type": "input_text", "text": t }));
+                        }
+                        IrPart::Image {
+                            media_type,
+                            data_base64,
+                            url,
+                        } => {
+                            let target_url = if let Some(b64) = data_base64 {
+                                Some(format!("data:{media_type};base64,{b64}"))
+                            } else {
+                                url.clone()
+                            };
+                            if let Some(u) = target_url {
+                                content_blocks.push(json!({
+                                    "type": "input_image",
+                                    "image_url": u
+                                }));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !content_blocks.is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": content_blocks
+                    }));
+                }
+            }
+            IrRole::Tool => {
+                for p in &msg.parts {
+                    if let IrPart::ToolResult {
+                        call_id, content, ..
+                    } = p
+                    {
+                        input.push(json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": content
+                        }));
+                    }
+                }
+            }
+            IrRole::Assistant => {
+                let mut text_blocks: Vec<Value> = Vec::new();
+                let mut fc_items: Vec<Value> = Vec::new();
+                for p in &msg.parts {
+                    match p {
+                        IrPart::Text(t) if !t.is_empty() => {
+                            text_blocks.push(json!({ "type": "output_text", "text": t }));
+                        }
+                        IrPart::ToolCall {
+                            id,
+                            name,
+                            args_json,
+                        } => {
+                            fc_items.push(json!({
+                                "type": "function_call",
+                                "call_id": id,
+                                "name": name,
+                                "arguments": args_json
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+                if !text_blocks.is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": text_blocks
+                    }));
+                }
+                input.extend(fc_items);
+            }
+            IrRole::System => {}
+        }
+    }
+
+    let mut body = json!({
+        "model": upstream_model,
+        "input": input,
+        "stream": stream
+    });
+    if let Some(sys) = &ir.system_prompt {
+        if !sys.trim().is_empty() {
+            body["instructions"] = json!(sys);
+        }
+    }
+    if let Some(mt) = ir.max_tokens {
+        body["max_output_tokens"] = json!(mt);
+    }
+    if let Some(temp) = ir.temperature {
+        body["temperature"] = json!(temp);
+    }
+    let tools = tools_to_openai_responses(&ir.tools);
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+        if let Some(tc) = ir
+            .tool_choice
+            .as_ref()
+            .and_then(tool_choice_to_openai_responses)
+        {
+            body["tool_choice"] = tc;
+        }
+    }
+    if let Some(c) = constraints {
+        apply_egress_constraints(&mut body, WireProtocolKind::OpenaiResponses, c);
+    }
+    body
+}
+
+pub fn parse_openai_responses_json(parsed: &Value, model: &str) -> Option<IrResponse> {
+    let is_responses = parsed.get("object").and_then(Value::as_str) == Some("response")
+        || parsed.get("output").and_then(Value::as_array).is_some();
+    if !is_responses {
+        return None;
+    }
+
+    let mut text = String::new();
+    let mut thinking = String::new();
+    let mut tool_calls: Vec<(String, String, String)> = Vec::new();
+
+    if let Some(output) = parsed.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    if let Some(content) = item.get("content").and_then(Value::as_array) {
+                        for block in content {
+                            if matches!(
+                                block.get("type").and_then(Value::as_str),
+                                Some("output_text") | Some("text")
+                            ) {
+                                if let Some(s) = block.get("text").and_then(Value::as_str) {
+                                    text.push_str(s);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("reasoning") => {
+                    if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+                        for s in summary {
+                            if let Some(t) = s.get("text").and_then(Value::as_str) {
+                                thinking.push_str(t);
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    if let Some(name) = item.get("name").and_then(Value::as_str) {
+                        let call_id = item
+                            .get("call_id")
+                            .or_else(|| item.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("call_0")
+                            .to_string();
+                        let args = item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}")
+                            .to_string();
+                        tool_calls.push((call_id, name.to_string(), args));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let status = parsed
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let finish_reason = if !tool_calls.is_empty() {
+        "tool_calls".to_string()
+    } else if status == "incomplete" {
+        "max_tokens".to_string()
+    } else {
+        "stop".to_string()
+    };
+
+    let usage = IrUsage {
+        input_tokens: parsed
+            .pointer("/usage/input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        output_tokens: parsed
+            .pointer("/usage/output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    };
+
+    Some(IrResponse {
+        id: parsed
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|s| s.trim_start_matches("resp_").to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()[..12].to_string()),
+        model: model.to_string(),
+        text,
+        thinking: if thinking.is_empty() {
+            None
+        } else {
+            Some(thinking)
+        },
+        tool_calls,
+        finish_reason,
+        usage,
+    })
+}
+
+pub fn parse_openai_responses_sse(raw: &str, model: &str) -> Option<IrResponse> {
+    if !raw.contains("response.output_text")
+        && !raw.contains("response.completed")
+        && !raw.contains("response.output_item.")
+        && !raw.contains("response.created")
+    {
+        return None;
+    }
+
+    let mut text = String::new();
+    let mut thinking = String::new();
+    let mut tool_calls_map: std::collections::BTreeMap<usize, (String, String, String)> =
+        std::collections::BTreeMap::new();
+    let mut completed_resp: Option<IrResponse> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let Some(raw_data) = trimmed.strip_prefix("data:") else {
+            continue;
+        };
+        let data = raw_data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(ev) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        match ev.get("type").and_then(Value::as_str) {
+            Some("response.output_text.delta") => {
+                if let Some(d) = ev.get("delta").and_then(Value::as_str) {
+                    text.push_str(d);
+                }
+            }
+            Some("response.reasoning_summary_text.delta") => {
+                if let Some(d) = ev.get("delta").and_then(Value::as_str) {
+                    thinking.push_str(d);
+                }
+            }
+            Some("response.output_item.added") => {
+                let idx = ev.get("output_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if ev.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
+                    let call_id = ev
+                        .pointer("/item/call_id")
+                        .or_else(|| ev.pointer("/item/id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_0")
+                        .to_string();
+                    let name = ev
+                        .pointer("/item/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    tool_calls_map.insert(idx, (call_id, name, String::new()));
+                }
+            }
+            Some("response.function_call_arguments.delta") => {
+                let idx = ev.get("output_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if let Some(d) = ev.get("delta").and_then(Value::as_str) {
+                    let entry = tool_calls_map
+                        .entry(idx)
+                        .or_insert_with(|| (format!("call_{idx}"), String::new(), String::new()));
+                    entry.2.push_str(d);
+                }
+            }
+            Some("response.output_item.done") => {
+                let idx = ev.get("output_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if ev.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
+                    let call_id = ev
+                        .pointer("/item/call_id")
+                        .or_else(|| ev.pointer("/item/id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_0")
+                        .to_string();
+                    let name = ev
+                        .pointer("/item/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let args = ev
+                        .pointer("/item/arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}")
+                        .to_string();
+                    tool_calls_map.insert(idx, (call_id, name, args));
+                }
+            }
+            Some("response.completed") => {
+                if let Some(resp_obj) = ev.get("response") {
+                    completed_resp = parse_openai_responses_json(resp_obj, model);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(mut comp) = completed_resp {
+        if comp.text.is_empty() && !text.is_empty() {
+            comp.text = text;
+        }
+        if comp.thinking.is_none() && !thinking.is_empty() {
+            comp.thinking = Some(thinking);
+        }
+        if comp.tool_calls.is_empty() && !tool_calls_map.is_empty() {
+            comp.tool_calls = tool_calls_map
+                .into_values()
+                .filter(|(_, n, _)| !n.is_empty())
+                .collect();
+            if !comp.tool_calls.is_empty() {
+                comp.finish_reason = "tool_calls".to_string();
+            }
+        }
+        return Some(comp);
+    }
+
+    let tool_calls: Vec<(String, String, String)> = tool_calls_map
+        .into_values()
+        .filter(|(_, n, _)| !n.is_empty())
+        .collect();
+    let finish_reason = if tool_calls.is_empty() {
+        "stop".to_string()
+    } else {
+        "tool_calls".to_string()
+    };
+
+    Some(IrResponse {
+        id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
+        model: model.to_string(),
+        text,
+        thinking: if thinking.is_empty() {
+            None
+        } else {
+            Some(thinking)
+        },
+        tool_calls,
+        finish_reason,
+        usage: IrUsage::default(),
+    })
 }
 
 pub fn to_openai_chat_response(resp: &IrResponse) -> Value {
@@ -1625,5 +2253,92 @@ mod tests {
         let openai = to_upstream_openai_chat_body(&ir, "gpt-5", false);
         assert_eq!(openai["tool_choice"]["type"], "function");
         assert_eq!(openai["tool_choice"]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn openai_chat_with_tools_and_image_encodes_to_responses_with_constraints() {
+        let chat = parse_openai_chat_request(&json!({
+            "model": "gpt-5.4",
+            "temperature": 0.7,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Inspect this screenshot" },
+                        { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                    ]
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "read file",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            }],
+            "tool_choice": "required"
+        }))
+        .unwrap();
+        assert!(chat.has_images());
+
+        let constraints = EgressConstraints {
+            must_stream: true,
+            requires_instructions: true,
+            disallow_store: true,
+            strip_temperature_on_reasoning: true,
+            ..Default::default()
+        };
+        let body = to_upstream_openai_responses_body(&chat, "gpt-5.4", false, Some(&constraints));
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        assert!(body["instructions"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(body.get("temperature").is_none());
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            body["input"][0]["content"][1]["image_url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
+
+    #[test]
+    fn parses_responses_json_and_sse_back_into_chat_and_anthropic() {
+        let resp_json = json!({
+            "id": "resp_abc123",
+            "object": "response",
+            "status": "completed",
+            "output": [
+                { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "thinking..." }] },
+                { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "Done." }] },
+                { "type": "function_call", "call_id": "call_99", "name": "bash", "arguments": "{\"cmd\":\"pwd\"}" }
+            ],
+            "usage": { "input_tokens": 15, "output_tokens": 9 }
+        });
+        let ir = parse_openai_responses_json(&resp_json, "gpt-5.4").expect("responses json");
+        assert_eq!(ir.text, "Done.");
+        assert_eq!(ir.thinking.as_deref(), Some("thinking..."));
+        assert_eq!(ir.tool_calls.len(), 1);
+        assert_eq!(ir.tool_calls[0].0, "call_99");
+
+        let chat = to_openai_chat_response(&ir);
+        assert_eq!(chat["choices"][0]["message"]["content"], "Done.");
+        assert_eq!(
+            chat["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_99"
+        );
+
+        let anth = to_anthropic_messages_response(&ir);
+        assert_eq!(anth["stop_reason"], "tool_use");
+
+        let sse_raw = to_openai_responses_sse(&ir);
+        let ir_from_sse = parse_openai_responses_sse(&sse_raw, "gpt-5.4").expect("responses sse");
+        assert_eq!(ir_from_sse.text, "Done.");
+        assert_eq!(ir_from_sse.tool_calls.len(), 1);
+        assert_eq!(ir_from_sse.tool_calls[0].1, "bash");
     }
 }

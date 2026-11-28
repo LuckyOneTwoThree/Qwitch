@@ -22,7 +22,11 @@ import { useQwitch } from "../context/QwitchContext";
 import { usePoolPrototype } from "../context/usePoolPrototypeStore";
 import { useUpdateActions } from "../context/useUpdateActions";
 import { getToolBrandMeta, getVisibleTools } from "../domain/toolRegistry";
-import { getEffectiveClaimStatus, selectScopedStats } from "../domain/selectors";
+import {
+  getEffectiveClaimStatus,
+  isAccountClaimBlockedByMissingSnapshot,
+  selectScopedStats,
+} from "../domain/selectors";
 import { isSnapshotStale } from "../domain/time";
 import { computeAgentExposedModels } from "../data/mockPoolData";
 import { BatchClaimBanner } from "../components/BatchClaimBanner";
@@ -696,7 +700,7 @@ export function TrayPopover({
                             setAgentDefaultModel(b.agentId, val);
                           }
                         }}
-                        className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-800 focus:border-brand-500 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                        className="field-input h-7 min-w-0 flex-1 bg-zinc-50 py-0 pl-2 text-[11px] font-medium disabled:opacity-60 dark:bg-zinc-800"
                       >
                         {exposed.length === 0 ? (
                           <option value="">-- 暂无可用模型，点右侧配置 --</option>
@@ -859,14 +863,11 @@ export function TrayPopover({
                         effectiveClaim !== "available";
                       const pct = isQoderClaimed ? 100 : isQoderPendingVerify ? 0 : quotaView.pct;
 
-                      const claimNeedsDesktopSession =
-                        acc.toolId === "doubaowork" && !acc.isActiveOnClient;
                       const canInlineClaim =
                         supportsClaim &&
                         acc.status === "active" &&
                         !missingApiToken &&
-                        !missingLocal &&
-                        !claimNeedsDesktopSession &&
+                        !isAccountClaimBlockedByMissingSnapshot(acc, adapters) &&
                         effectiveClaim === "available";
 
                       // 托盘是「快速判断」入口：额度数字必须自带新鲜度信号，
@@ -1009,6 +1010,11 @@ export function TrayPopover({
                                 <button
                                   type="button"
                                   disabled={isBusy}
+                                  title={
+                                    acc.toolId === "doubaowork" && !acc.isActiveOnClient
+                                      ? "自动冷切桌面端领取今日福利，完成后切回原账号"
+                                      : undefined
+                                  }
                                   onClick={() => void claimDailyBatch([acc.id])}
                                   className="btn btn-xs btn-sky-soft shrink-0 gap-1 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-45"
                                 >

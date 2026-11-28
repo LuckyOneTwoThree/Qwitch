@@ -26,9 +26,11 @@ pub struct ClientHostStatus {
 
 #[tauri::command]
 pub fn list_adapters(state: State<'_, AppState>) -> Vec<AdapterManifest> {
+    let reg = state.plugins.read().ok();
     let mut list: Vec<AdapterManifest> = state
         .adapters
         .values()
+        .filter(|a| reg.as_ref().is_none_or(|r| r.is_enabled(&a.manifest().id)))
         .map(|a| a.manifest().clone())
         .collect();
     list.sort_by(|a, b| b.is_builtin.cmp(&a.is_builtin).then(a.id.cmp(&b.id)));

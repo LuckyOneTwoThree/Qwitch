@@ -69,7 +69,7 @@ export function WindowsWindowControls() {
   };
 
   return (
-    <div className="ml-1 flex shrink-0 items-center gap-0.5 pl-2">
+    <div className="ml-0 flex shrink-0 items-center gap-0.5 pl-1.5">
       <span
         aria-hidden="true"
         className="mr-1.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700/80"

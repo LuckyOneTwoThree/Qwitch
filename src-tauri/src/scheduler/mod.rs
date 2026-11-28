@@ -772,7 +772,22 @@ impl AntiRiskScheduler {
                 summary_text: None,
             });
 
-            match adapter.claim_daily(&cred, None).await {
+            let mut claim_res = adapter.claim_daily(&cred, None).await;
+            if !already_active
+                && matches!(
+                    &claim_res,
+                    Err(crate::adapter::AdapterError::Unified {
+                        code: UnifiedErrorCode::UnsupportedCapability,
+                        ..
+                    })
+                )
+            {
+                if jitter.max_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(2000)).await;
+                }
+                claim_res = adapter.claim_daily(&cred, None).await;
+            }
+            match claim_res {
                 Ok(result) => {
                     if result.claimed {
                         claimed_count += 1;

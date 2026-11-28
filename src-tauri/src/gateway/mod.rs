@@ -1,4 +1,4 @@
-mod doubao;
+pub(crate) mod doubao;
 pub mod ir;
 pub mod scheduler;
 
@@ -24,12 +24,16 @@ use crate::domain::{
 use crate::storage::QwitchDatabase;
 
 use ir::{
-    parse_anthropic_messages_request, parse_openai_chat_request, parse_openai_responses_request,
-    to_anthropic_messages_response, to_anthropic_messages_sse, to_openai_chat_response,
-    to_openai_chat_sse, to_openai_responses_response, to_openai_responses_sse,
-    to_upstream_anthropic_body, to_upstream_openai_chat_body, IrRequest, IrResponse, IrUsage,
+    parse_anthropic_messages_request, parse_openai_chat_request, parse_openai_responses_json,
+    parse_openai_responses_request, parse_openai_responses_sse, to_anthropic_messages_response,
+    to_anthropic_messages_sse, to_openai_chat_response, to_openai_chat_sse,
+    to_openai_responses_response, to_openai_responses_sse, to_upstream_anthropic_body,
+    to_upstream_openai_chat_body, to_upstream_openai_responses_body, IrRequest, IrResponse,
+    IrUsage,
 };
-use scheduler::select_candidates_for_request;
+use scheduler::{
+    select_candidates_for_request, select_candidates_for_request_with_features, RequestFeatures,
+};
 
 struct GatewayInner {
     running: bool,
@@ -1495,22 +1499,14 @@ pub(super) async fn read_bounded_response_text(
 
 type UpstreamAuthResult = (String, String, Vec<(&'static str, String)>);
 
-fn resolve_upstream_auth(
+fn resolve_upstream_auth_with_default(
     member: &PoolMember,
     cred: &CredentialEnvelope,
+    default_base: &str,
 ) -> Result<UpstreamAuthResult, String> {
     let (token_opt, custom_base, extra_headers) = extract_bearer_and_base_url(cred);
     let token = token_opt.ok_or_else(|| format!("账号 {} 缺少有效 API Token", member.label))?;
-    let default_base = match member.tool_id.as_str() {
-        "minimax_code_cn" => "https://agent.minimax.cn/mavis/api/v1/llm".to_string(),
-        "workbuddy" => "https://copilot.tencent.com".to_string(),
-        "qoder_cn" => "https://gateway.qoder.com.cn".to_string(),
-        "trae_cn" => "https://trae-api-cn.mchost.guru".to_string(),
-        // 有道龙虾：桌面端经本地 token 代理把 /v1 前缀映射到 /api/proxy/v1，这里直接对齐真实上游
-        "lobsterai" => "https://lobsterai-server.youdao.com/api/proxy".to_string(),
-        _ => "https://api.openai.com".to_string(),
-    };
-    let base_url = validate_custom_base_url(&member.label, custom_base, default_base)?;
+    let base_url = validate_custom_base_url(&member.label, custom_base, default_base.to_string())?;
     Ok((base_url, token, extra_headers))
 }
 
@@ -1522,33 +1518,49 @@ async fn send_upstream_stream(
     ir_req: &IrRequest,
     upstream_model: &str,
 ) -> Result<reqwest::Response, String> {
+    if let Some(transport) = crate::plugins::registry::global_egress_transport(&member.tool_id) {
+        return transport
+            .send_stream(member, cred, ir_req, upstream_model)
+            .await;
+    }
+    send_standard_http_stream(
+        member,
+        cred,
+        ir_req,
+        upstream_model,
+        "https://api.openai.com",
+        &[],
+    )
+    .await
+}
+
+pub(crate) async fn send_standard_http_stream(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    upstream_model: &str,
+    default_base: &str,
+    plugin_headers: &[(String, String)],
+) -> Result<reqwest::Response, String> {
     let client = long_running_http_client();
     let (_, bare) = crate::domain::split_scoped_model_id(upstream_model);
     let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare);
-    // 码道不接受 bearer：它用华为云 AK/SK 签名，只能在拿到 body 之后再签，因此单独走一条路
-    if member.tool_id == "codearts" {
-        return send_codearts_stream(client, member, cred, ir_req, &wire_model).await;
-    }
-    // Trae CN 走 IDE agent 私有协议 `/api/agent/v3/llm_utils_chat`，原生 SSE 需转成 OpenAI SSE
-    if member.tool_id == "trae_cn" {
-        return send_trae_stream(client, member, cred, ir_req, &wire_model).await;
-    }
-    // Qoder CN 走 COSY 签名私有协议 `/algo/api/v2/service/pro/sse/agent_chat_generation`
-    if member.tool_id == "qoder_cn" {
-        return send_qoder_stream(client, member, cred, ir_req, &wire_model).await;
-    }
-    // 豆包工作走网页/桌面端 Cookie 会话协议 `POST https://www.doubao.com/chat/completion`
-    if member.tool_id == "doubaowork" {
-        return doubao::send_doubao_stream(client, member, cred, ir_req, &wire_model).await;
-    }
-    let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
+    let (base_url, token, extra_headers) =
+        resolve_upstream_auth_with_default(member, cred, default_base)?;
     let base = base_url.trim_end_matches('/');
     let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
+    let constraints =
+        crate::plugins::registry::global_egress_profile(&member.tool_id).map(|p| p.constraints);
     let (url, body, auth_x_api_key) = match protocol {
         WireProtocolKind::AnthropicMessages => (
             format!("{base}/v1/messages"),
             to_upstream_anthropic_body(ir_req, &wire_model, true),
             true,
+        ),
+        WireProtocolKind::OpenaiResponses => (
+            format!("{base}/v1/responses"),
+            to_upstream_openai_responses_body(ir_req, &wire_model, true, constraints.as_ref()),
+            false,
         ),
         _ => (
             format!("{base}/v1/chat/completions"),
@@ -1560,19 +1572,47 @@ async fn send_upstream_stream(
         .post(&url)
         .json(&body)
         .header("Accept", "text/event-stream");
-    if member.tool_id == "minimax_code_cn" {
-        req = req
-            .bearer_auth(&token)
-            .header("x-api-key", "minimax-agent")
-            .header("anthropic-version", "2023-06-01")
-            .header("X-Mavis-Session-Id", Uuid::new_v4().to_string());
-    } else if auth_x_api_key {
+    if auth_x_api_key {
         req = req
             .header("x-api-key", &token)
             .header("anthropic-version", "2023-06-01");
     } else {
         req = req.bearer_auth(&token);
     }
+    for (k, v) in plugin_headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    for (k, v) in &extra_headers {
+        req = req.header(*k, v);
+    }
+    req.send().await.map_err(|e| format!("上游请求失败: {e}"))
+}
+
+pub(crate) async fn send_minimax_stream(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    upstream_model: &str,
+) -> Result<reqwest::Response, String> {
+    let client = long_running_http_client();
+    let (_, bare) = crate::domain::split_scoped_model_id(upstream_model);
+    let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare);
+    let (base_url, token, extra_headers) = resolve_upstream_auth_with_default(
+        member,
+        cred,
+        "https://agent.minimax.cn/mavis/api/v1/llm",
+    )?;
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/v1/messages");
+    let body = to_upstream_anthropic_body(ir_req, &wire_model, true);
+    let mut req = client
+        .post(&url)
+        .json(&body)
+        .header("Accept", "text/event-stream")
+        .bearer_auth(&token)
+        .header("x-api-key", "minimax-agent")
+        .header("anthropic-version", "2023-06-01")
+        .header("X-Mavis-Session-Id", Uuid::new_v4().to_string());
     for (k, v) in &extra_headers {
         req = req.header(*k, v);
     }
@@ -1584,7 +1624,7 @@ async fn send_upstream_stream(
 /// 协议依据 magpie 的 `opencode-codearts-auth`：`POST {snap-access}/api/v2/chat/completions`，
 /// OpenAI 兼容，**上游始终流式**（码道只对流式计费），鉴权用 SDK-HMAC-SHA256
 /// 对「含请求体哈希」的规范请求签名。会话用 `x-ot-session-id` 区分，每账号 3 个并发。
-async fn send_codearts_stream(
+pub(crate) async fn send_codearts_stream(
     client: &reqwest::Client,
     member: &PoolMember,
     cred: &CredentialEnvelope,
@@ -1645,7 +1685,7 @@ async fn send_codearts_stream(
 ///   HTTP 200 + `event:error`**，因此这里读全量后：遇错误事件即合成一个非 2xx 响应交给上层
 ///   的 429/鉴权/HttpError 分支处理；正常则把原生 SSE 转成 OpenAI `chat.completion.chunk`
 ///   SSE 再合成 200 响应交给下游（下游按 OpenAI passthrough 消费）。
-async fn send_trae_stream(
+pub(crate) async fn send_trae_stream(
     client: &reqwest::Client,
     member: &PoolMember,
     cred: &CredentialEnvelope,
@@ -1791,7 +1831,7 @@ async fn send_trae_stream(
 ///
 /// 这里读全量后：`statusCodeValue != 200` 或帧内 error 即合成非 2xx 交给上层失败分支；
 /// 正常则把内层 chunk 还原成 OpenAI SSE 再合成 200 响应。
-async fn send_qoder_stream(
+pub(crate) async fn send_qoder_stream(
     client: &reqwest::Client,
     member: &PoolMember,
     cred: &CredentialEnvelope,
@@ -2093,7 +2133,7 @@ fn qoder_sse_to_openai(raw: &str, model: &str) -> String {
 }
 
 /// 用 `http::Response<reqwest::Body>` 合成一个 `reqwest::Response`，供下游统一消费。
-fn synthetic_response(
+pub(crate) fn synthetic_response(
     status: reqwest::StatusCode,
     content_type: &str,
     body: Vec<u8>,
@@ -2479,6 +2519,7 @@ impl Utf8SseDecoder {
 #[derive(Default)]
 struct OpenAiToAnthropicState {
     next_block: usize,
+    thinking_idx: Option<usize>,
     text_idx: Option<usize>,
     stop_reason: String,
     out_tokens: u64,
@@ -2504,11 +2545,45 @@ async fn drain_openai_events_to_anthropic(
             let Ok(v) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            if let Some(r) = v
+                .pointer("/choices/0/delta/reasoning_content")
+                .or_else(|| v.pointer("/choices/0/delta/reasoning"))
+                .and_then(Value::as_str)
+            {
+                if !r.is_empty() {
+                    if st.thinking_idx.is_none() {
+                        let bi = st.next_block;
+                        st.next_block += 1;
+                        st.thinking_idx = Some(bi);
+                        write_sse_frame(
+                            stream,
+                            Some("content_block_start"),
+                            &json!({"type":"content_block_start","index":bi,"content_block":{"type":"thinking","thinking":""}}).to_string(),
+                        )
+                        .await?;
+                    }
+                    let bi = st.thinking_idx.unwrap_or(0);
+                    write_sse_frame(
+                        stream,
+                        Some("content_block_delta"),
+                        &json!({"type":"content_block_delta","index":bi,"delta":{"type":"thinking_delta","thinking":r}}).to_string(),
+                    )
+                    .await?;
+                }
+            }
             if let Some(t) = v
                 .pointer("/choices/0/delta/content")
                 .and_then(Value::as_str)
             {
                 if !t.is_empty() {
+                    if let Some(thi) = st.thinking_idx.take() {
+                        write_sse_frame(
+                            stream,
+                            Some("content_block_stop"),
+                            &json!({"type":"content_block_stop","index":thi}).to_string(),
+                        )
+                        .await?;
+                    }
                     if st.text_idx.is_none() {
                         let bi = st.next_block;
                         st.next_block += 1;
@@ -2608,6 +2683,14 @@ async fn relay_openai_chat_to_anthropic(
     }
     decoder.finish(&mut buf);
     drain_openai_events_to_anthropic(&mut buf, stream, &mut st).await?;
+    if let Some(thi) = st.thinking_idx.take() {
+        write_sse_frame(
+            stream,
+            Some("content_block_stop"),
+            &json!({"type":"content_block_stop","index":thi}).to_string(),
+        )
+        .await?;
+    }
     if let Some(ti) = st.text_idx {
         write_sse_frame(
             stream,
@@ -2710,6 +2793,12 @@ async fn drain_anthropic_events_to_openai(
                     }
                 }
                 "content_block_delta" => {
+                    if let Some(t) = v.pointer("/delta/thinking").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            let chunk = json!({"id":id,"object":"chat.completion.chunk","created":chrono::Utc::now().timestamp(),"model":model,"choices":[{"index":0,"delta":{"reasoning_content":t},"finish_reason":null}]});
+                            write_sse_frame(stream, None, &chunk.to_string()).await?;
+                        }
+                    }
                     if let Some(t) = v.pointer("/delta/text").and_then(Value::as_str) {
                         if !t.is_empty() {
                             let chunk = json!({"id":id,"object":"chat.completion.chunk","created":chrono::Utc::now().timestamp(),"model":model,"choices":[{"index":0,"delta":{"content":t},"finish_reason":null}]});
@@ -3176,35 +3265,48 @@ async fn call_upstream_member(
     ir_req: &IrRequest,
     upstream_model: &str,
 ) -> Result<(u16, String), String> {
-    // 码道 / Trae CN / Qoder CN 统一走各自专用协议通道（返回标准 OpenAI SSE 或 JSON 错误），
-    // 非流式调用方由 parse_upstream_response_body 自动聚合 SSE 为完整 IrResponse。
-    if matches!(
-        member.tool_id.as_str(),
-        "codearts" | "trae_cn" | "qoder_cn" | "doubaowork"
-    ) {
-        let resp = send_upstream_stream(member, cred, ir_req, upstream_model).await?;
-        let code = resp.status().as_u16();
-        let text = read_bounded_response_text(resp, &member.tool_id).await?;
-        return Ok((code, text));
+    if let Some(transport) = crate::plugins::registry::global_egress_transport(&member.tool_id) {
+        return transport
+            .call_buffered(member, cred, ir_req, upstream_model)
+            .await;
     }
+    call_standard_http_buffered(
+        member,
+        cred,
+        ir_req,
+        upstream_model,
+        "https://api.openai.com",
+        &[],
+    )
+    .await
+}
 
+pub(crate) async fn call_standard_http_buffered(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    upstream_model: &str,
+    default_base: &str,
+    plugin_headers: &[(String, String)],
+) -> Result<(u16, String), String> {
     let client = long_running_http_client();
-    let (base_url, token, extra_headers) = resolve_upstream_auth(member, cred)?;
-
+    let (base_url, token, extra_headers) =
+        resolve_upstream_auth_with_default(member, cred, default_base)?;
     let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
     let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
     let protocol = upstream_model_protocol(&member.tool_id, &wire_model);
     let base = base_url.trim_end_matches('/');
-
-    let (url, mut body, auth_is_x_api_key) = match protocol {
+    let constraints =
+        crate::plugins::registry::global_egress_profile(&member.tool_id).map(|p| p.constraints);
+    let (url, body, auth_is_x_api_key) = match protocol {
         WireProtocolKind::AnthropicMessages => (
             format!("{base}/v1/messages"),
             to_upstream_anthropic_body(ir_req, &wire_model, false),
             true,
         ),
-        _ if member.tool_id == "workbuddy" => (
-            format!("{base}/v2/chat/completions"),
-            to_upstream_openai_chat_body(ir_req, &wire_model, true),
+        WireProtocolKind::OpenaiResponses => (
+            format!("{base}/v1/responses"),
+            to_upstream_openai_responses_body(ir_req, &wire_model, false, constraints.as_ref()),
             false,
         ),
         _ => (
@@ -3213,51 +3315,107 @@ async fn call_upstream_member(
             false,
         ),
     };
-
-    let is_workbuddy_chat =
-        member.tool_id == "workbuddy" && protocol != WireProtocolKind::AnthropicMessages;
-    if is_workbuddy_chat {
-        sanitize_workbuddy_chat_body(&mut body);
+    let mut req = client.post(&url).json(&body);
+    if auth_is_x_api_key {
+        req = req
+            .header("x-api-key", &token)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.bearer_auth(&token);
     }
+    for (k, v) in plugin_headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    for (k, v) in &extra_headers {
+        req = req.header(*k, v);
+    }
+    let resp = req.send().await.map_err(|e| format!("上游请求失败: {e}"))?;
+    let code = resp.status().as_u16();
+    const MAX_UPSTREAM_BODY: u64 = 64 * 1024 * 1024;
+    if resp
+        .content_length()
+        .is_some_and(|len| len > MAX_UPSTREAM_BODY)
+    {
+        return Err(format!(
+            "上游响应体过大（>{} MB）已拒绝",
+            MAX_UPSTREAM_BODY / (1024 * 1024)
+        ));
+    }
+    let text = resp.text().await.unwrap_or_default();
+    Ok((code, text))
+}
+
+pub(crate) async fn call_minimax_buffered(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    upstream_model: &str,
+) -> Result<(u16, String), String> {
+    let client = long_running_http_client();
+    let (base_url, token, extra_headers) = resolve_upstream_auth_with_default(
+        member,
+        cred,
+        "https://agent.minimax.cn/mavis/api/v1/llm",
+    )?;
+    let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
+    let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/v1/messages");
+    let body = to_upstream_anthropic_body(ir_req, &wire_model, false);
+    let mut req = client
+        .post(&url)
+        .json(&body)
+        .bearer_auth(&token)
+        .header("x-api-key", "minimax-agent")
+        .header("anthropic-version", "2023-06-01")
+        .header("X-Mavis-Session-Id", Uuid::new_v4().to_string());
+    for (k, v) in &extra_headers {
+        req = req.header(*k, v);
+    }
+    let resp = req.send().await.map_err(|e| format!("上游请求失败: {e}"))?;
+    let code = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    Ok((code, text))
+}
+
+pub(crate) async fn call_workbuddy_buffered(
+    member: &PoolMember,
+    cred: &CredentialEnvelope,
+    ir_req: &IrRequest,
+    upstream_model: &str,
+) -> Result<(u16, String), String> {
+    let client = long_running_http_client();
+    let (base_url, token, extra_headers) =
+        resolve_upstream_auth_with_default(member, cred, "https://copilot.tencent.com")?;
+    let (_, bare_upstream_model) = crate::domain::split_scoped_model_id(upstream_model);
+    let wire_model = resolve_vendor_wire_model_id(&member.tool_id, bare_upstream_model);
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/v2/chat/completions");
+    let mut body = to_upstream_openai_chat_body(ir_req, &wire_model, true);
+    sanitize_workbuddy_chat_body(&mut body);
 
     for attempt in 0..2 {
-        let mut req = client.post(&url).json(&body);
-        if member.tool_id == "minimax_code_cn" {
-            req = req
-                .bearer_auth(&token)
-                .header("x-api-key", "minimax-agent")
-                .header("anthropic-version", "2023-06-01")
-                .header("X-Mavis-Session-Id", Uuid::new_v4().to_string());
-        } else if auth_is_x_api_key {
-            req = req
-                .header("x-api-key", &token)
-                .header("anthropic-version", "2023-06-01");
-        } else if member.tool_id == "trae_cn" {
-            req = req.header("Authorization", format!("Cloud-IDE-JWT {token}"));
-        } else {
-            req = req.bearer_auth(&token);
-        }
-        if is_workbuddy_chat {
-            req = req
-                .header("X-Conversation-ID", Uuid::new_v4().simple().to_string())
-                .header(
-                    "X-Conversation-Request-ID",
-                    Uuid::new_v4().simple().to_string(),
-                )
-                .header(
-                    "X-Conversation-Message-ID",
-                    Uuid::new_v4().simple().to_string(),
-                )
-                .header("X-Request-ID", Uuid::new_v4().simple().to_string())
-                .header("Accept", "text/event-stream");
-        }
+        let mut req = client
+            .post(&url)
+            .json(&body)
+            .bearer_auth(&token)
+            .header("X-Conversation-ID", Uuid::new_v4().simple().to_string())
+            .header(
+                "X-Conversation-Request-ID",
+                Uuid::new_v4().simple().to_string(),
+            )
+            .header(
+                "X-Conversation-Message-ID",
+                Uuid::new_v4().simple().to_string(),
+            )
+            .header("X-Request-ID", Uuid::new_v4().simple().to_string())
+            .header("Accept", "text/event-stream");
         for (k, v) in &extra_headers {
             req = req.header(*k, v);
         }
 
         let resp = req.send().await.map_err(|e| format!("上游请求失败: {e}"))?;
         let code = resp.status().as_u16();
-        // 防内存耗尽：声明体积过大的上游响应直接拒绝（流式为逐块转发，不受此限）
         const MAX_UPSTREAM_BODY: u64 = 64 * 1024 * 1024;
         if resp
             .content_length()
@@ -3270,7 +3428,6 @@ async fn call_upstream_member(
         }
         let text = resp.text().await.unwrap_or_default();
         if attempt == 0
-            && is_workbuddy_chat
             && is_workbuddy_channel_blocked(code, &text)
             && move_system_to_user_for_workbuddy(&mut body)
         {
@@ -3285,6 +3442,9 @@ fn parse_upstream_response_body(body_txt: &str, model: &str) -> IrResponse {
     let trimmed_body = body_txt.trim();
     if let Ok(parsed) = serde_json::from_str::<Value>(trimmed_body) {
         if parsed.is_object() {
+            if let Some(ir_resp) = parse_openai_responses_json(&parsed, model) {
+                return ir_resp;
+            }
             let mut text = parsed
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
@@ -3391,6 +3551,10 @@ fn parse_upstream_response_body(body_txt: &str, model: &str) -> IrResponse {
                 usage,
             };
         }
+    }
+
+    if let Some(ir_resp) = parse_openai_responses_sse(body_txt, model) {
+        return ir_resp;
     }
 
     let mut text = String::new();
@@ -4133,13 +4297,20 @@ async fn handle_http_connection(
         .session_affinity
         .clone();
     let now = chrono::Utc::now().timestamp_millis();
-    let plan = select_candidates_for_request(
+    let req_features = RequestFeatures {
+        has_tools: !ir_req.tools.is_empty(),
+        has_images: ir_req.has_images(),
+        stream: ir_req.stream,
+        incoming_protocol: ir_req.incoming_protocol,
+    };
+    let plan = select_candidates_for_request_with_features(
         &pool,
         &requested_model,
         session_key.as_deref(),
         &cooldowns,
         &affinity_snap,
         now,
+        Some(&req_features),
     );
 
     if plan.candidates.is_empty() {
@@ -4203,8 +4374,8 @@ async fn handle_http_connection(
         };
         let t_hop = std::time::Instant::now();
         let upstream_proto = upstream_model_protocol(&cand.tool_id, &plan.effective_model);
-        // 流式策略：同协议直接透传；跨协议仅当无 tools（纯文本）时做增量翻译，
-        // 携带工具（编码 Agent 常态）仍走缓冲，保证 tool_calls/thinking 语义正确。
+        // 流式策略：同协议直接透传；OpenAI Chat <-> Anthropic Messages 支持带 tools 增量翻译
+        // （文本/思考实时下发，tool_calls 在流尾整块发出）；Responses 跨协议携带 tools 仍走缓冲。
         enum StreamKind {
             Passthrough,
             OpenAiClientAnthropicUpstream,
@@ -4215,8 +4386,6 @@ async fn handle_http_connection(
         let stream_kind = if ir_req.stream && cand.tool_id != "workbuddy" {
             if ir_req.incoming_protocol == upstream_proto {
                 Some(StreamKind::Passthrough)
-            } else if !ir_req.tools.is_empty() {
-                None
             } else if ir_req.incoming_protocol == WireProtocolKind::OpenaiChat
                 && upstream_proto == WireProtocolKind::AnthropicMessages
             {
@@ -4225,7 +4394,8 @@ async fn handle_http_connection(
                 && upstream_proto == WireProtocolKind::OpenaiChat
             {
                 Some(StreamKind::AnthropicClientOpenAiUpstream)
-            } else if runtime.responses_streaming()
+            } else if ir_req.tools.is_empty()
+                && runtime.responses_streaming()
                 && ir_req.incoming_protocol == WireProtocolKind::OpenaiResponses
             {
                 match upstream_proto {

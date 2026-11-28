@@ -465,8 +465,28 @@ impl crate::scheduler::ClientSwitcher for AppStateClientSwitcher {
             account_id,
             self.force_kill,
         )
-        .await
-        .map(|_| ())
+        .await?;
+
+        // 豆包工作冷切后需要等客户端写回新账号活跃状态并完成网络会话预热，
+        // 避免刚拉起进程就 0ms 打签到写接口触发 710010702。
+        if let Ok((summary, cred)) = self.db.get_account_credential(&self.master_key, account_id) {
+            if summary.tool_id == "doubaowork" {
+                if let Some(adapter) = self.adapters.get(&summary.tool_id) {
+                    for _ in 0..10 {
+                        if adapter
+                            .detect_local_active_uid(self.host.as_ref())
+                            .as_deref()
+                            == Some(cred.uid.as_str())
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            }
+        }
+        Ok(())
     }
 
     fn current_active_account_id(&self, tool_id: &str) -> Option<String> {

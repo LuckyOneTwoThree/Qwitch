@@ -1417,6 +1417,12 @@ export function buildAgentConfigSnippets(
         )}`,
       };
     }
+    default: {
+      return {
+        beforeSnippet: `// ${agentId} 原始配置`,
+        afterSnippet: `// ${agentId} Qwitch 网关注入 (${baseUrl}/v1, default=${fallbackWireModel})`,
+      };
+    }
   }
 }
 

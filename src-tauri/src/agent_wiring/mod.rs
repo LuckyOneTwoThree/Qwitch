@@ -44,6 +44,30 @@ pub fn agent_token(agent_id: TargetAgentId) -> String {
     format!("qwitch-bind-{}-{}", agent_slug(agent_id), token_suffix())
 }
 
+/// 返回任意入口插件 ID 的网关绑定令牌（内置 ID 与 `agent_token` 完全一致）。
+pub fn agent_token_for_id(agent_id: &str) -> String {
+    if let Some(builtin) = TargetAgentId::from_id(agent_id) {
+        return agent_token(builtin);
+    }
+    let slug = agent_id.replace('_', "-");
+    format!("qwitch-bind-{slug}-{}", token_suffix())
+}
+
+/// 在任意候选入口插件 ID 集合中以常量时间比对匹配网关绑定令牌。
+pub fn agent_id_str_from_token(token: &str, candidate_ids: &[String]) -> Option<String> {
+    if let Some(builtin) = agent_id_from_token(token) {
+        return Some(builtin.as_str().to_string());
+    }
+    let trimmed = token.trim();
+    for id in candidate_ids {
+        let expected = agent_token_for_id(id);
+        if ct_eq(trimmed, &expected) {
+            return Some(id.clone());
+        }
+    }
+    None
+}
+
 fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {

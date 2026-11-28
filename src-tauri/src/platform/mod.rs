@@ -705,11 +705,20 @@ impl NativePlatformHost {
                 .output()
             {
                 Ok(out) => out,
-                // `ps` 本身不可用（受限环境/沙箱）时无法做辅助进程甄别。
-                // 此时**不能**把「能 pgrep 到」误判成「未运行」——否则切号会
-                // 跳过优雅关闭、并在启动后 45s 判死回滚。pgrep 已经确认进程
-                // 存在，这里按运行中处理。
-                Err(_) => return true,
+                // `ps` 不可用（沙箱 / TCC 拒绝执行）时，旧实现直接按「运行中」处理，
+                // 客户端退出后残留的 native-messaging-host 会让界面永远显示运行中。
+                // 先退回 `pgrep -fl` 读该 pid 的完整命令行再判定，
+                // 只有连命令行都读不到时才保守按运行中处理。
+                Err(_) => match Self::command_line_for_pid(pid, proc_name) {
+                    Some(command) => {
+                        let rest = Self::strip_macos_argv0(&command, proc_name);
+                        if rest.is_empty() || !Self::is_macos_helper_argv(rest) {
+                            return true;
+                        }
+                        continue;
+                    }
+                    None => return true,
+                },
             };
             let command = String::from_utf8_lossy(&ps_out.stdout);
             let command = command.trim();
@@ -722,6 +731,31 @@ impl NativePlatformHost {
             }
         }
         false
+    }
+
+    /// 用 `pgrep -fl` 取指定 pid 的完整命令行。
+    ///
+    /// 仅在 `ps` 不可用时使用：`pgrep -fl` 的输出是「pid + 完整 argv」，
+    /// 且不经过 `ps`，因此在沙箱 / TCC 受限环境里仍可读。
+    #[cfg(target_os = "macos")]
+    fn command_line_for_pid(pid: &str, pattern: &str) -> Option<String> {
+        let output = Command::new("pgrep")
+            .args(["-fl", &escape_pgrep_regex(pattern)])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let line = line.trim();
+            let Some((candidate, cmd)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            if candidate.trim() == pid.trim() {
+                return Some(cmd.trim().to_string());
+            }
+        }
+        None
     }
 
     /// 解析 `ps -axo pid=,command=` 的输出，判断指定 `.app` bundle 是否存在非辅助主进程。
@@ -824,10 +858,22 @@ impl NativePlatformHost {
             .output()
         {
             Ok(out) => out,
-            // 受限环境（沙箱 / 无 ps 权限）下无法做辅助进程甄别。pgrep 已经
-            // 确认 `<App>.app/Contents/MacOS/` 下有活进程，这里按运行中处理：
-            // 误报「未运行」会让切号跳过优雅关闭、并在重启后空等超时回滚。
-            Err(_) => return true,
+            // 受限环境（沙箱 / TCC 拒绝执行 ps）下 `ps` 会直接失败。
+            // 旧实现在这里假定「运行中」，于是客户端退出后残留的
+            // native-messaging-host 会让界面永远显示「桌面端运行中」。
+            // `pgrep -fl` 输出的「pid + 完整命令行」与 `ps -axo pid=,command=`
+            // 同构，可直接复用同一套主/辅助进程判定，无需降级为猜测。
+            Err(_) => {
+                return match Command::new("pgrep").args(["-fl", &bundle_needle]).output() {
+                    Ok(pg) if !pg.stdout.is_empty() => Self::parse_macos_ps_has_main_process(
+                        &String::from_utf8_lossy(&pg.stdout),
+                        app_name,
+                    ),
+                    // 连命令行都读不到时才保守按运行中处理：
+                    // 误报「未运行」会让切号跳过优雅关闭、并在重启后空等超时回滚。
+                    _ => true,
+                };
+            }
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2534,6 +2580,24 @@ mod macos_process_detection_tests {
         assert!(!NativePlatformHost::is_macos_helper_argv(
             "--no-sandbox /Users/me/my-workspace"
         ));
+    }
+
+    /// `ps` 不可用时退回复用 `pgrep -fl` 的输出。它的格式是
+    /// 「pid + 完整命令行」，与 `ps -axo pid=,command=` 同构，
+    /// 因此必须走同一套判定：残留的 native-messaging-host 不能被当成主进程。
+    #[test]
+    fn pgrep_fl_output_is_judged_like_ps_output() {
+        let pgrep_fl = "22324 /Applications/Qoder CN.app/Contents/MacOS/Qoder CN /Applications/Qoder CN.app/Contents/Resources/native-messaging-host/qoder-app-host.cjs";
+        assert!(
+            !NativePlatformHost::parse_macos_ps_has_main_process(pgrep_fl, "Qoder CN.app"),
+            "仅剩 Native Messaging Host 时必须判定为未运行"
+        );
+
+        let pgrep_main = "22325 /Applications/Qoder CN.app/Contents/MacOS/Qoder CN";
+        assert!(
+            NativePlatformHost::parse_macos_ps_has_main_process(pgrep_main, "Qoder CN.app"),
+            "主进程存在时应判定为运行中"
+        );
     }
 
     #[test]

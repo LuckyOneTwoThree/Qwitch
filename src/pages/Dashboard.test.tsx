@@ -261,8 +261,8 @@ describe("Dashboard 指标口径自洽", () => {
   const firstNumber = (s: string) => s.match(/\d+/)?.[0];
   it("指标条数字即点击后台账里真实可见的账号数量", () => {
     render(<Dashboard />);
-    // 断言基于台账行，显式切换而非依赖默认视图
-    fireEvent.click(screen.getByRole("button", { name: "台账" }));
+    // 断言基于列表行，显式切换而非依赖默认视图
+    fireEvent.click(screen.getByRole("button", { name: "列表" }));
 
     const titles = [
       "显示全部账号",

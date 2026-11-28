@@ -1336,40 +1336,16 @@ export function Dashboard({
                   </>
                 )}
 
-                {activeToolFilter && activeToolMeta && (
+                {!activeToolFilter && (
                   <button
                     type="button"
-                    onClick={() => void handleLaunchToolClient(activeToolFilter)}
-                    disabled={launchingToolId === activeToolFilter}
-                    title={
-                      clientStatuses[activeToolFilter]?.isRunning
-                        ? `唤起 ${activeToolMeta.name} 客户端`
-                        : `快捷启动 ${activeToolMeta.name} 客户端`
-                    }
-                    aria-label={
-                      clientStatuses[activeToolFilter]?.isRunning
-                        ? `唤起 ${activeToolMeta.name} 客户端`
-                        : `快捷启动 ${activeToolMeta.name} 客户端`
-                    }
+                    onClick={() => openImportModal()}
                     className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
                   >
-                    {launchingToolId === activeToolFilter ? (
-                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <Play className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                    )}
-                    {clientStatuses[activeToolFilter]?.isRunning ? "打开客户端" : "快捷启动"}
+                    <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    导入账号
                   </button>
                 )}
-
-                <button
-                  type="button"
-                  onClick={() => openImportModal()}
-                  className="btn btn-sm btn-secondary gap-1.5 whitespace-nowrap"
-                >
-                  <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  导入账号
-                </button>
               </>
             )}
 
@@ -1527,7 +1503,7 @@ export function Dashboard({
                             return order[(order.indexOf(prev) + 1) % order.length];
                           })
                         }
-                        title="切换台账排序方式"
+                        title="切换列表排序方式"
                         className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-zinc-600 transition hover:bg-zinc-900/[0.05] hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50"
                       >
                         <ArrowUpDown className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -1546,12 +1522,12 @@ export function Dashboard({
                         nav === "all"
                           ? ([
                               { id: "grouped", label: "分组", icon: LayoutList, title: "按平台分组的卡片墙（默认）" },
-                              { id: "ledger", label: "台账", icon: Table2, title: "水位台账：一屏看完全部账号" },
+                              { id: "ledger", label: "列表", icon: Table2, title: "账号列表：一屏看完全部账号与水位" },
                               { id: "flat", label: "平铺", icon: LayoutGrid, title: "不分组的卡片平铺" },
                             ] as const)
                           : ([
                               { id: "flat", label: "卡片", icon: LayoutGrid, title: "卡片视图（默认）" },
-                              { id: "ledger", label: "台账", icon: Table2, title: "水位台账：一屏看完全部账号" },
+                              { id: "ledger", label: "列表", icon: Table2, title: "账号列表：一屏看完全部账号与水位" },
                             ] as const)
                       ).map((v) => {
                         // 工具作用域下 grouped 会回落成 flat，这里按真实渲染结果标注选中态
@@ -1760,6 +1736,93 @@ export function Dashboard({
                   dismissed={updateBannerDismissed}
                   onDismiss={() => setUpdateBannerDismissed(true)}
                 />
+
+                {/* 单个工具的模块条：进入某个工具后，分组头就没了，
+                    「快捷启动 / 添加账号」也就跟着消失。把模块级操作留在
+                    列表上方，和分组视图里的模块头保持一致的位置与语义。 */}
+                {activeToolFilter && activeToolMeta && scopeAccounts.length > 0 && (
+                  <section
+                    aria-label={`${activeToolMeta.name} 模块操作`}
+                    className="flex flex-wrap items-center justify-between gap-2 px-0.5"
+                  >
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span
+                        aria-hidden="true"
+                        className={`h-3.5 w-[3px] shrink-0 rounded-full ${
+                          clientStatuses[activeToolFilter]?.isRunning
+                            ? "bg-emerald-500"
+                            : "bg-zinc-300 dark:bg-zinc-700"
+                        }`}
+                      />
+                      <ToolBrandIcon toolId={activeToolFilter} size="sm" decorative />
+                      <h2 className="text-[13px] font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+                        {activeToolMeta.name}
+                      </h2>
+                      <span className="text-[11px] font-medium tabular-nums text-zinc-500 dark:text-zinc-400">
+                        {scopeAccounts.length} 个账号
+                      </span>
+                      <span className="text-zinc-300 dark:text-zinc-700" aria-hidden="true">
+                        ·
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${
+                          clientStatuses[activeToolFilter]?.isRunning
+                            ? "text-emerald-700 dark:text-emerald-400"
+                            : "text-zinc-500 dark:text-zinc-400"
+                        }`}
+                      >
+                        {clientStatuses[activeToolFilter]?.isRunning && (
+                          <span
+                            className="h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.2)]"
+                            aria-hidden="true"
+                          />
+                        )}
+                        {clientStatuses[activeToolFilter]?.isRunning
+                          ? "桌面端运行中"
+                          : "桌面端未运行"}
+                      </span>
+                      {scopeAccounts.find((a) => a.isActiveOnClient) && (
+                        <span className="hidden text-[11px] text-zinc-500 sm:inline dark:text-zinc-400">
+                          · 当前挂载：{scopeAccounts.find((a) => a.isActiveOnClient)!.label}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void handleLaunchToolClient(activeToolFilter)}
+                        disabled={launchingToolId === activeToolFilter}
+                        title={
+                          clientStatuses[activeToolFilter]?.isRunning
+                            ? `唤起 ${activeToolMeta.name} 客户端`
+                            : `快捷启动 ${activeToolMeta.name} 客户端`
+                        }
+                        aria-label={
+                          clientStatuses[activeToolFilter]?.isRunning
+                            ? `唤起 ${activeToolMeta.name} 客户端`
+                            : `快捷启动 ${activeToolMeta.name} 客户端`
+                        }
+                        className="btn btn-xs btn-ghost shrink-0 gap-1 whitespace-nowrap"
+                      >
+                        {launchingToolId === activeToolFilter ? (
+                          <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Play className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        )}
+                        {clientStatuses[activeToolFilter]?.isRunning ? "打开客户端" : "快捷启动"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openImportModal(undefined, activeToolFilter)}
+                        className="btn btn-xs btn-ghost shrink-0 gap-1 whitespace-nowrap"
+                      >
+                        <Plus className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        添加账号
+                      </button>
+                    </div>
+                  </section>
+                )}
 
                 {isInitializing && scopeAccounts.length === 0 ? (
                 <div

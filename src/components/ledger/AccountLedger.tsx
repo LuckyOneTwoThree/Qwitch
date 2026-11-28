@@ -232,7 +232,7 @@ export function AccountLedger({
       <div className="overflow-hidden rounded-xl border border-zinc-200/70 bg-white dark:border-white/[0.07] dark:bg-white/[0.015]">
       <div
         role="grid"
-        aria-label="账号台账"
+        aria-label="账号列表"
         aria-rowcount={rows.length}
         aria-colcount={8}
         className="max-h-full"

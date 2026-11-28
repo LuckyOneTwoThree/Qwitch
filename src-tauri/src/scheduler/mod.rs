@@ -84,6 +84,10 @@ const CONSECUTIVE_NETWORK_ERROR_BREAKER: u32 = 3;
 
 pub struct AntiRiskScheduler {
     queue_lock: Arc<Mutex<()>>,
+    /// 与网关共享的按账号凭据刷新单飞锁（lib.rs 启动时注入；测试构造保持 None）。
+    /// 批量签到/查额在刷新凭据前必须持有它：轮换型 refreshToken（如 MiniMax/码道）
+    /// 被两个路径并发消费时，后到者收 invalid_grant，账号会被误标为过期并冻结。
+    refresh_gate: std::sync::OnceLock<Arc<crate::gateway::GatewayRuntime>>,
 }
 
 fn device_claim_marker_key(tool_id: &str, device_key: &str) -> String {
@@ -105,19 +109,15 @@ fn remember_device_claim_limit(db: &QwitchDatabase, marker_key: &str) {
 }
 
 /// 冷切批量领取的「不可领取」前置判定：返回 Some(原因) 表示该账号应跳过。
+///
+/// 缺本机快照的拦截不在此处：它只对「需要冷切」的账号有意义，而是否需要冷切
+/// 由调用方结合 already_active 判断（在登账号无需快照即可领取）。
 fn claim_switch_skip_reason(summary: &crate::domain::AccountSummary) -> Option<String> {
     if summary.status != AccountStatus::Active {
         return Some("状态非激活，已跳过签到".to_string());
     }
     if !summary.has_api_token {
         return Some("尚未完成在线授权，已自动跳过签到".to_string());
-    }
-    // 冷切型（如豆包工作）缺本机快照：冷切必失败，提前跳过并给出「补快照」指引，
-    // 而不是切到一半报 switch_failed 造成误导。前端已在候选阶段过滤，此处兜底。
-    if !summary.has_local_snapshot {
-        return Some(
-            "缺少本机快照，无法冷切领取，请先在账号卡片「补快照」或重新导入本机".to_string(),
-        );
     }
     None
 }
@@ -134,7 +134,13 @@ impl AntiRiskScheduler {
     pub fn new() -> Self {
         Self {
             queue_lock: Arc::new(Mutex::new(())),
+            refresh_gate: std::sync::OnceLock::new(),
         }
+    }
+
+    /// 注入与网关共享的凭据刷新单飞锁（生产启动时调用；测试可不注入）。
+    pub fn set_refresh_gate(&self, gate: Arc<crate::gateway::GatewayRuntime>) {
+        let _ = self.refresh_gate.set(gate);
     }
 
     /// 单队列串行锁。批量调用方必须先 try_lock_owned 成功（重入即拒绝），
@@ -274,45 +280,57 @@ impl AntiRiskScheduler {
                 continue;
             }
 
-            // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），避免过期后整批 401
-            let cred = match adapter.refresh_credential(&cred).await {
-                Ok(Some(updated)) => {
-                    if let Err(e) =
-                        db.bind_account_credential(master_key, &summary.id, None, &updated)
-                    {
-                        let _ = db.append_action_log(
-                            Some(&summary.id),
-                            &summary.tool_id,
-                            "claim",
-                            "failed",
-                            Some(&UnifiedErrorCode::InternalError),
-                            &format!(
-                                "{} 刷新后的凭据落盘失败（后续操作仍将继续）：{e}",
-                                summary.label
-                            ),
-                        );
+            // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken），避免过期后整批 401。
+            // 必须与网关 401 刷新、20 分钟保活共用同一把按账号单飞锁（refresh_gate）：
+            // 轮换型 refreshToken 被并发消费时后到者收 invalid_grant，账号会被误标过期。
+            let cred = {
+                let refresh_gate_lock = self
+                    .refresh_gate
+                    .get()
+                    .map(|gate| gate.refresh_lock_for(&summary.id));
+                let _refresh_gate_guard = match &refresh_gate_lock {
+                    Some(lock) => Some(lock.lock().await),
+                    None => None,
+                };
+                match adapter.refresh_credential(&cred).await {
+                    Ok(Some(updated)) => {
+                        if let Err(e) =
+                            db.bind_account_credential(master_key, &summary.id, None, &updated)
+                        {
+                            let _ = db.append_action_log(
+                                Some(&summary.id),
+                                &summary.tool_id,
+                                "claim",
+                                "failed",
+                                Some(&UnifiedErrorCode::InternalError),
+                                &format!(
+                                    "{} 刷新后的凭据落盘失败（后续操作仍将继续）：{e}",
+                                    summary.label
+                                ),
+                            );
+                        }
+                        updated
                     }
-                    updated
-                }
-                Ok(None) => cred,
-                Err(err) => {
-                    failed_count += 1;
-                    let code = handle_adapter_failure(
-                        db,
-                        &summary.id,
-                        &summary.tool_id,
-                        &summary.label,
-                        "claim",
-                        err,
-                    );
-                    update_tool_breaker(
-                        code,
-                        &summary.tool_id,
-                        &mut risk_broken_tools,
-                        &mut consecutive_network_errors,
-                    );
-                    sink.emit_account_updated(&summary.id);
-                    continue;
+                    Ok(None) => cred,
+                    Err(err) => {
+                        failed_count += 1;
+                        let code = handle_adapter_failure(
+                            db,
+                            &summary.id,
+                            &summary.tool_id,
+                            &summary.label,
+                            "claim",
+                            err,
+                        );
+                        update_tool_breaker(
+                            code,
+                            &summary.tool_id,
+                            &mut risk_broken_tools,
+                            &mut consecutive_network_errors,
+                        );
+                        sink.emit_account_updated(&summary.id);
+                        continue;
+                    }
                 }
             };
 
@@ -687,7 +705,24 @@ impl AntiRiskScheduler {
                 }
             };
 
-            let skip = claim_switch_skip_reason(&summary);
+            // 若本机在登账号已是目标账号，跳过冷切，直接领取。
+            // （必须在跳过判定之前计算：缺快照只拦「需要冷切」的账号，
+            //   在登账号无需快照即可领取——旧顺序会把这种账号误跳过）
+            let already_active = switcher
+                .current_active_account_id(&summary.tool_id)
+                .as_deref()
+                == Some(summary.id.as_str());
+
+            let skip = claim_switch_skip_reason(&summary).or_else(|| {
+                if !already_active && !summary.has_local_snapshot {
+                    Some(
+                        "缺少本机快照，无法冷切领取，请先在账号卡片「补快照」或重新导入本机"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            });
             let adapter = adapters.get(&summary.tool_id);
             let (skip, adapter) = match (skip, adapter) {
                 (Some(r), _) => (Some(r), adapter),
@@ -728,12 +763,6 @@ impl AntiRiskScheduler {
                 continue;
             }
 
-            // 若本机在登账号已是目标账号，跳过冷切，直接领取。
-            let already_active = switcher
-                .current_active_account_id(&summary.tool_id)
-                .as_deref()
-                == Some(summary.id.as_str());
-
             if !already_active {
                 sink.emit_batch_progress(BatchProgressEvent {
                     action: "claim".into(),
@@ -773,19 +802,30 @@ impl AntiRiskScheduler {
             });
 
             let mut claim_res = adapter.claim_daily(&cred, None).await;
-            if !already_active
-                && matches!(
-                    &claim_res,
-                    Err(crate::adapter::AdapterError::Unified {
-                        code: UnifiedErrorCode::UnsupportedCapability,
-                        ..
-                    })
-                )
-            {
-                if jitter.max_ms > 0 {
-                    tokio::time::sleep(Duration::from_millis(2000)).await;
+            // 刚冷切拉起的客户端，登录会话与活动数据就绪有滞后：
+            // - Err(UnsupportedCapability)（写接口 710010702）：客户端尚未完成
+            //   「设备-账号」绑定切换就收到领取请求，带退避重试。旧实现仅重试
+            //   1 次且 sleep 被 jitter 配置 gate（时序补偿不该依赖风控抖动设置）。
+            // - Ok(claimed=false) 且提示「暂不支持每日签到」：可能是切号后 v3
+            //   活动数据未就绪的瞬时态，同样重查；「已签过」「试用上限」不重查。
+            if !already_active {
+                for wait_ms in [2000u64, 4000u64] {
+                    let needs_retry = match &claim_res {
+                        Err(crate::adapter::AdapterError::Unified {
+                            code: UnifiedErrorCode::UnsupportedCapability,
+                            ..
+                        }) => true,
+                        Ok(result) if !result.claimed => {
+                            result.reward_summary.contains("暂不支持每日签到")
+                        }
+                        _ => false,
+                    };
+                    if !needs_retry {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                    claim_res = adapter.claim_daily(&cred, None).await;
                 }
-                claim_res = adapter.claim_daily(&cred, None).await;
             }
             match claim_res {
                 Ok(result) => {
@@ -794,6 +834,20 @@ impl AntiRiskScheduler {
                         let _ = db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
                     } else {
                         skipped_count += 1;
+                        // 与网络批量对齐：上游幂等确认「今日已签」时补写签到标记，
+                        // 否则卡片次日之前会一直显示「可领」。
+                        let confirmed = result
+                            .updated_quota
+                            .as_ref()
+                            .is_some_and(|q| q.claim_status == ClaimStatus::Claimed);
+                        if confirmed
+                            && !summary
+                                .last_claimed_at
+                                .as_deref()
+                                .is_some_and(crate::storage::is_today_cst)
+                        {
+                            let _ = db.mark_account_claimed(&summary.id, &Utc::now().to_rfc3339());
+                        }
                     }
                     let _ = db.append_action_log(
                         Some(&summary.id),
@@ -993,45 +1047,57 @@ impl AntiRiskScheduler {
                 continue;
             }
 
-            // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken）
-            let cred = match adapter.refresh_credential(&cred).await {
-                Ok(Some(updated)) => {
-                    if let Err(e) =
-                        db.bind_account_credential(master_key, &summary.id, None, &updated)
-                    {
-                        let _ = db.append_action_log(
-                            Some(&summary.id),
-                            &summary.tool_id,
-                            "query",
-                            "failed",
-                            Some(&UnifiedErrorCode::InternalError),
-                            &format!(
-                                "{} 刷新后的凭据落盘失败（后续操作仍将继续）：{e}",
-                                summary.label
-                            ),
-                        );
+            // 请求前按需刷新 OAuth 凭据（如 MiniMax accessToken）。
+            // 同 claim 批量：与网关 401 刷新、保活循环共用按账号单飞锁（refresh_gate），
+            // 防止轮换型 refreshToken 被并发双消费导致账号误标过期。
+            let cred = {
+                let refresh_gate_lock = self
+                    .refresh_gate
+                    .get()
+                    .map(|gate| gate.refresh_lock_for(&summary.id));
+                let _refresh_gate_guard = match &refresh_gate_lock {
+                    Some(lock) => Some(lock.lock().await),
+                    None => None,
+                };
+                match adapter.refresh_credential(&cred).await {
+                    Ok(Some(updated)) => {
+                        if let Err(e) =
+                            db.bind_account_credential(master_key, &summary.id, None, &updated)
+                        {
+                            let _ = db.append_action_log(
+                                Some(&summary.id),
+                                &summary.tool_id,
+                                "query",
+                                "failed",
+                                Some(&UnifiedErrorCode::InternalError),
+                                &format!(
+                                    "{} 刷新后的凭据落盘失败（后续操作仍将继续）：{e}",
+                                    summary.label
+                                ),
+                            );
+                        }
+                        updated
                     }
-                    updated
-                }
-                Ok(None) => cred,
-                Err(err) => {
-                    failed_count += 1;
-                    let code = handle_adapter_failure(
-                        db,
-                        &summary.id,
-                        &summary.tool_id,
-                        &summary.label,
-                        "query",
-                        err,
-                    );
-                    update_tool_breaker(
-                        code,
-                        &summary.tool_id,
-                        &mut risk_broken_tools,
-                        &mut consecutive_network_errors,
-                    );
-                    sink.emit_account_updated(&summary.id);
-                    continue;
+                    Ok(None) => cred,
+                    Err(err) => {
+                        failed_count += 1;
+                        let code = handle_adapter_failure(
+                            db,
+                            &summary.id,
+                            &summary.tool_id,
+                            &summary.label,
+                            "query",
+                            err,
+                        );
+                        update_tool_breaker(
+                            code,
+                            &summary.tool_id,
+                            &mut risk_broken_tools,
+                            &mut consecutive_network_errors,
+                        );
+                        sink.emit_account_updated(&summary.id);
+                        continue;
+                    }
                 }
             };
 
@@ -2004,9 +2070,11 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
     }
 
-    /// P0：缺本机快照的冷切账号必须被前置跳并给出补快照指引，而不是切到一半失败。
+    /// 缺本机快照的拦截改由调用方结合 already_active 门控（在登账号无需快照即可
+    /// 领取，见 run_daily_claim_switch_batch_with_sink），skip_reason 只负责
+    /// 状态/授权判定。
     #[test]
-    fn claim_switch_skip_reason_flags_missing_snapshot() {
+    fn claim_switch_skip_reason_flags_status_and_auth_only() {
         let base = || crate::domain::AccountSummary {
             id: "a".into(),
             tool_id: "doubao".into(),
@@ -2030,13 +2098,12 @@ mod tests {
         // 正常账号不跳过
         assert!(claim_switch_skip_reason(&base()).is_none());
 
-        // 缺快照 → 跳过并提示补快照
+        // 缺快照不再由 skip_reason 拦截（调用方按 already_active 门控）
         let mut no_snap = base();
         no_snap.has_local_snapshot = false;
-        let reason = claim_switch_skip_reason(&no_snap).expect("缺快照应跳过");
-        assert!(reason.contains("快照"), "reason: {reason}");
+        assert!(claim_switch_skip_reason(&no_snap).is_none());
 
-        // 未授权优先于缺快照
+        // 未授权仍跳过
         let mut unauth = base();
         unauth.has_api_token = false;
         unauth.has_local_snapshot = false;

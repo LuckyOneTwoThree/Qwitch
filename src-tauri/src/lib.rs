@@ -235,14 +235,19 @@ pub fn run() {
                 }
             }
 
+            let gateway = Arc::new(gateway_runtime);
+            let scheduler = Arc::new(AntiRiskScheduler::new());
+            // 批量签到/查额的凭据刷新与网关 401 刷新、保活循环共用按账号单飞锁，
+            // 防止轮换型 refreshToken 被并发双消费（scheduler/mod.rs refresh_gate）。
+            scheduler.set_refresh_gate(gateway.clone());
             let state = AppState {
                 db,
                 master_key,
                 host,
                 adapters,
                 plugins,
-                scheduler: Arc::new(AntiRiskScheduler::new()),
-                gateway: Arc::new(gateway_runtime),
+                scheduler,
+                gateway,
                 oauth_flow_seq: Arc::new(AtomicU64::new(0)),
                 consumed_oauth_nonces: Arc::new(std::sync::Mutex::new(
                     std::collections::HashSet::new(),

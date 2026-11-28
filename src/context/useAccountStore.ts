@@ -1368,6 +1368,9 @@ export function useAccountStore({
           return (
             acc.status === "active" &&
             acc.hasApiToken !== false &&
+            // 与 selectClaimCandidates 同口径：冷切型工具缺本机快照的账号会被
+            // 后端静默跳过（如豆包写接口绑定桌面在登账号），自动领取不应选它们。
+            !isAccountClaimBlockedByMissingSnapshot(acc, adaptersRef.current) &&
             Boolean(adapter?.capabilities.supportsDailyClaim) &&
             getEffectiveClaimStatus(acc) === "available"
           );

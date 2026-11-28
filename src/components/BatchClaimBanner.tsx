@@ -1,5 +1,22 @@
-import { AlertTriangle, CheckCircle2, Loader2, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Info, Loader2, X } from "lucide-react";
 import { useQwitch } from "../context/QwitchContext";
+
+/** 批量完成的视觉归类：失败（异常/失败字样）、全部跳过（无一成功）、成功。
+ *  旧的实现只认「异常/失败」，冷切批次全部被跳过时（如豆包缺快照、已签过）
+ *  也会显示绿色成功样式，用户会误以为「打开了客户端但什么都没发生」是成功。 */
+function batchOutcome(statusLine: string, isRefresh: boolean): "failure" | "all-skipped" | "success" {
+  if (!isRefresh) {
+    if (/异常\s+[1-9]/.test(statusLine) || statusLine.includes("失败")) {
+      return "failure";
+    }
+    const claimed = Number(statusLine.match(/成功\s+(\d+)/)?.[1] ?? 1);
+    const skipped = Number(statusLine.match(/跳过\s+(\d+)/)?.[1] ?? 0);
+    if (claimed === 0 && skipped > 0) {
+      return "all-skipped";
+    }
+  }
+  return "success";
+}
 
 export function BatchClaimBanner({
   compact = false,
@@ -49,8 +66,9 @@ export function BatchClaimBanner({
 
   if (inline) {
     if (!batchProgress.running) {
-      const hasFailure =
-        /异常\s+[1-9]/.test(statusLine) || statusLine.includes("失败");
+      const outcome = batchOutcome(statusLine, isRefresh);
+      const hasFailure = outcome === "failure";
+      const allSkipped = outcome === "all-skipped";
       return (
         <div
           role="status"
@@ -59,12 +77,19 @@ export function BatchClaimBanner({
           className={`inline-flex h-[34px] max-w-[240px] items-center gap-1.5 rounded-[var(--radius-control)] border px-2.5 text-xs leading-5 ${
             hasFailure
               ? "border-amber-500/30 bg-amber-50/80 text-amber-900 dark:border-amber-400/25 dark:bg-amber-500/12 dark:text-amber-200"
-              : "border-brand-500/25 bg-brand-50/80 text-brand-800 dark:border-brand-400/25 dark:bg-brand-500/12 dark:text-brand-200"
+              : allSkipped
+                ? "border-zinc-300/80 bg-zinc-100/80 text-zinc-700 dark:border-zinc-600/40 dark:bg-zinc-800/70 dark:text-zinc-300"
+                : "border-brand-500/25 bg-brand-50/80 text-brand-800 dark:border-brand-400/25 dark:bg-brand-500/12 dark:text-brand-200"
           }`}
         >
           {hasFailure ? (
             <AlertTriangle
               className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+              aria-hidden="true"
+            />
+          ) : allSkipped ? (
+            <Info
+              className="h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400"
               aria-hidden="true"
             />
           ) : (
@@ -119,8 +144,9 @@ export function BatchClaimBanner({
   }
 
   if (!batchProgress.running) {
-    const hasFailure =
-      /异常\s+[1-9]/.test(statusLine) || statusLine.includes("失败");
+    const outcome = batchOutcome(statusLine, isRefresh);
+    const hasFailure = outcome === "failure";
+    const allSkipped = outcome === "all-skipped";
 
     return (
       <div
@@ -131,13 +157,20 @@ export function BatchClaimBanner({
         } ${
           hasFailure
             ? "border-amber-500/25 bg-amber-500/[0.08] text-amber-900 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200"
-            : "border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-200"
+            : allSkipped
+              ? "border-zinc-300/70 bg-zinc-500/[0.05] text-zinc-700 dark:border-zinc-600/40 dark:bg-zinc-700/25 dark:text-zinc-300"
+              : "border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-900 dark:border-emerald-400/25 dark:bg-emerald-500/10 dark:text-emerald-200"
         }`}
       >
         <div className="flex min-w-0 items-center gap-1.5 text-xs">
           {hasFailure ? (
             <AlertTriangle
               className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+              aria-hidden="true"
+            />
+          ) : allSkipped ? (
+            <Info
+              className="h-3.5 w-3.5 shrink-0 text-zinc-500 dark:text-zinc-400"
               aria-hidden="true"
             />
           ) : (
